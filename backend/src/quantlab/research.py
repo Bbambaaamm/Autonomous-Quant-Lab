@@ -327,6 +327,21 @@ class EligibilityDecision(StrEnum):
     PAPER_CANDIDATE = "PAPER_CANDIDATE"
 
 
+class EligibilityCheckStatus(StrEnum):
+    PASSED = "passed"
+    FAILED = "failed"
+    NOT_EVALUATED = "not_evaluated"
+
+
+@dataclass(frozen=True)
+class EligibilityCheck:
+    name: str
+    status: EligibilityCheckStatus
+    observed_value: int | float | bool | None
+    threshold: int | float | bool | None
+    reason: str | None = None
+
+
 @dataclass(frozen=True)
 class EligibilityConfig:
     minimum_trades: int = 20
@@ -339,8 +354,13 @@ class EligibilityConfig:
 @dataclass(frozen=True)
 class StrategyEligibilityResult:
     decision: EligibilityDecision
-    passed: dict[str, bool]
+    checks: tuple[EligibilityCheck, ...]
     reasons: tuple[str, ...]
+
+    @property
+    def passed(self) -> dict[str, bool]:
+        """Zpětně kompatibilní odvozený pohled; autoritativní jsou typované kontroly."""
+        return {check.name: check.status is EligibilityCheckStatus.PASSED for check in self.checks}
 
 
 def evaluate_eligibility(
@@ -353,25 +373,77 @@ def evaluate_eligibility(
     config: EligibilityConfig | None = None,
 ) -> StrategyEligibilityResult:
     config = config or EligibilityConfig()
-    checks = {
-        "minimum_trades": number_of_trades >= config.minimum_trades,
-        "positive_oos": oos_return >= config.minimum_oos_return,
-        "drawdown": abs(maximum_drawdown) <= config.maximum_drawdown,
-        "cost_stress": all(value > 0 for value in stressed_returns.values()),
-        "walk_forward": profitable_folds >= config.minimum_profitable_folds,
-        "parameter_stability": stability.profitable_fraction is not None
-        and stability.profitable_fraction >= config.minimum_profitable_neighbors,
-    }
-    passed_count = sum(checks.values())
+    stability_status = (
+        EligibilityCheckStatus.NOT_EVALUATED
+        if stability.profitable_fraction is None
+        else EligibilityCheckStatus.PASSED
+        if stability.profitable_fraction >= config.minimum_profitable_neighbors
+        else EligibilityCheckStatus.FAILED
+    )
+    checks = (
+        EligibilityCheck(
+            "minimum_trades",
+            EligibilityCheckStatus.PASSED
+            if number_of_trades >= config.minimum_trades
+            else EligibilityCheckStatus.FAILED,
+            number_of_trades,
+            config.minimum_trades,
+        ),
+        EligibilityCheck(
+            "positive_oos",
+            EligibilityCheckStatus.PASSED
+            if oos_return >= config.minimum_oos_return
+            else EligibilityCheckStatus.FAILED,
+            oos_return,
+            config.minimum_oos_return,
+        ),
+        EligibilityCheck(
+            "drawdown",
+            EligibilityCheckStatus.PASSED
+            if abs(maximum_drawdown) <= config.maximum_drawdown
+            else EligibilityCheckStatus.FAILED,
+            abs(maximum_drawdown),
+            config.maximum_drawdown,
+        ),
+        EligibilityCheck(
+            "cost_stress",
+            EligibilityCheckStatus.PASSED
+            if stressed_returns and all(value > 0 for value in stressed_returns.values())
+            else EligibilityCheckStatus.FAILED,
+            min(stressed_returns.values()) if stressed_returns else None,
+            0.0,
+            None if stressed_returns else "missing_cost_stress_scenarios",
+        ),
+        EligibilityCheck(
+            "walk_forward",
+            EligibilityCheckStatus.PASSED
+            if profitable_folds >= config.minimum_profitable_folds
+            else EligibilityCheckStatus.FAILED,
+            profitable_folds,
+            config.minimum_profitable_folds,
+        ),
+        EligibilityCheck(
+            "parameter_stability",
+            stability_status,
+            stability.profitable_fraction,
+            config.minimum_profitable_neighbors,
+            "no_parameter_neighbors" if stability.profitable_fraction is None else None,
+        ),
+    )
+    check_by_name = {check.name: check for check in checks}
+    passed_count = sum(check.status is EligibilityCheckStatus.PASSED for check in checks)
     decision = (
         EligibilityDecision.PAPER_CANDIDATE
         if passed_count == len(checks)
         else EligibilityDecision.RESEARCH_ONLY
-        if checks["minimum_trades"] and checks["positive_oos"]
+        if check_by_name["minimum_trades"].status is EligibilityCheckStatus.PASSED
+        and check_by_name["positive_oos"].status is EligibilityCheckStatus.PASSED
         else EligibilityDecision.REJECTED
     )
     return StrategyEligibilityResult(
-        decision, checks, tuple(name for name, passed in checks.items() if not passed)
+        decision,
+        checks,
+        tuple(check.name for check in checks if check.status is not EligibilityCheckStatus.PASSED),
     )
 
 

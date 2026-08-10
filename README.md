@@ -52,3 +52,12 @@ a report. Raw invalidní kombinace se neztrácejí. OOS foldy se nesmějí přek
 Research trade metriky a Monte Carlo používají autoritativní FIFO closed-trade ledger. Cost
 stress znovu přehrává každý vybraný OOS fold s jeho zamčenou konfigurací; nejde o aritmetický
 odhad nákladů.
+
+## Phase 2.8: closure
+
+**Phase 2 je COMPLETE v definovaném research-foundation scope.** Experiment má vedle úplného
+neměnného reprodukčního snapshotu strukturované, dotazovatelné záznamy identity, OOS foldů a
+jejich train/validation ParameterRunů i typovaných eligibility kontrol. Každá kontrola ukládá
+status, pozorovanou hodnotu, práh a případný důvod; chybějící stabilitní sousedství se netváří jako
+běžné selhání, ale jako `not_evaluated`. Konzistenční test porovnává celý persisted snapshot s JSON
+reprezentací in-memory experimentu a ověřuje idempotenci i transakční rollback celé projekce.

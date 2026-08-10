@@ -48,3 +48,8 @@ Cost stress je nový backtest každého OOS foldu s jeho selected configem.
 Experiment identity zahrnuje dataset content hash, strategy name/version, celý parameter space,
 walk-forward/objective/top-k konfiguraci, cost a stress modely, seed, Monte Carlo, eligibility
 a engine version. Identické vstupy reprodukují foldy, runy, fills, agregaci i robustness výstupy.
+
+Každá eligibility podmínka je samostatný typovaný záznam se statusem, observed hodnotou, prahem
+a volitelným důvodem. `not_evaluated` je odlišné od `failed` a nikdy se nepočítá jako průchod.
+Snapshot experimentu je neměnný; strukturované tabulky identity, foldů a kontrol jsou jeho
+dotazovatelnou projekcí, nikoli druhým zdrojem research pravdy.
