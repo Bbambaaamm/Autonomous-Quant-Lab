@@ -9,6 +9,7 @@ from quantlab.demo import run_demo
 from quantlab.metrics import benchmark_metrics, calculate_metrics
 from quantlab.persistence import RunRepository
 from quantlab.research import (
+    AnalysisStatus,
     EligibilityDecision,
     ExperimentIdentity,
     ParameterStability,
@@ -51,13 +52,22 @@ class ResearchService:
             float(backtest.initial_cash),
         )
         stability = ParameterStability(0, None, None, None)
+        walk_forward_status: dict[str, object] = {
+            "status": AnalysisStatus.NOT_EVALUATED,
+            "reason": "insufficient_fixture_bars",
+            "folds": [],
+        }
         result: dict[str, object] = {
             "metrics": asdict(metrics),
             "benchmark": benchmark_metrics(bars),
             "excess_return": metrics.total_return - (benchmark_metrics(bars)["total_return"] or 0),
             "cost_stress": stress,
-            "walk_forward": [],
-            "monte_carlo": None,
+            "walk_forward": walk_forward_status,
+            "monte_carlo": {
+                "status": AnalysisStatus.NOT_EVALUATED,
+                "reason": "insufficient_closed_trades",
+                "result": None,
+            },
             "parameter_stability": asdict(stability),
             "eligibility": {"decision": "RESEARCH_ONLY", "reasons": ["insufficient_fixture"]},
         }
@@ -74,7 +84,7 @@ class ResearchService:
                 {},
                 ("insufficient_fixture",),
             ),
-            [],
+            walk_forward_status,
         )
         self.repository.save_experiment(
             identity.experiment_id, asdict(identity), result, datetime.now(UTC)

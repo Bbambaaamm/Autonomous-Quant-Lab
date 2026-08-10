@@ -32,3 +32,12 @@ max drawdown a jeho délku, Calmar, win rate, profit factor, průměrný zisk/zt
 exposure, turnover, počet uzavřených obchodů, holding period, komise a slippage. Nedefinované
 poměry vracejí `None`. Buy-and-hold benchmark je zarovnán na stejné bary. Parquet používá
 `pyarrow`. Žádný internetový data provider ani live broker nebyl přidán.
+
+Phase 2.6 doplňuje FIFO lot ledger pro scale-in/scale-out, splitovou úpravu množství i jednotkové
+báze a idempotentní dividendy. Equity snapshot vždy ukládá cash, market value a jejich součet.
+Cost stress se ověřuje plným opakovaným backtestem, protože vyšší náklady mohou změnit pozdější
+whole-share sizing; slippage je ekonomicky obsažena ve fill ceně a samostatná hodnota slouží jen
+pro audit.
+
+Vývojová skupina obsahuje `httpx2`, který Starlette 1.6 používá pro `TestClient`; nejde o import
+aplikace ani o náhradu HTTP klienta. Synchronizace vyžaduje dostupný Python package index.

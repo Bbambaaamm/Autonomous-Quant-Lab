@@ -1,9 +1,10 @@
 import hashlib
 from dataclasses import asdict, dataclass, replace
+from datetime import datetime
 from decimal import Decimal
 
 from quantlab.data import validate_bars
-from quantlab.domain import Bar, CorporateAction, Fill
+from quantlab.domain import Bar, CorporateAction, CorporateActionType, Fill
 from quantlab.strategy import Strategy
 from quantlab.trading import ExecutionEngine, Portfolio, PortfolioConstructor
 
@@ -29,11 +30,16 @@ def run_backtest(
     initial_cash = portfolio.cash
     fills: list[Fill] = []
     curve: list[dict[str, object]] = []
-    actions = {action.effective_at: action for action in corporate_actions or []}
+    actions: dict[datetime, list[CorporateAction]] = {}
+    for action in corporate_actions or []:
+        actions.setdefault(action.effective_at, []).append(action)
     # Rozhodnutí na close i se všemi příznaky z T se plní výhradně na open T+1.
     for index in range(strategy.required_lookback - 1, len(bars) - 1):
-        action = actions.get(bars[index + 1].timestamp)
-        if action is not None:
+        effective_actions = sorted(
+            actions.get(bars[index + 1].timestamp, []),
+            key=lambda item: item.action_type is CorporateActionType.DIVIDEND,
+        )
+        for action in effective_actions:
             portfolio.apply_corporate_action(action)
         target = strategy.generate_target(bars[: index + 1])
         order = constructor.create_order(
@@ -47,11 +53,18 @@ def run_backtest(
             fill = execution.execute(order, bars[index + 1])
             portfolio.apply(fill)
             fills.append(fill)
-        value = (
-            portfolio.cash
-            + portfolio.positions.get(bars[index + 1].symbol, Decimal("0")) * bars[index + 1].close
+        market_value = (
+            portfolio.positions.get(bars[index + 1].symbol, Decimal("0")) * bars[index + 1].close
         )
-        curve.append({"timestamp": bars[index + 1].timestamp, "portfolio_value": value})
+        value = portfolio.cash + market_value
+        curve.append(
+            {
+                "timestamp": bars[index + 1].timestamp,
+                "cash": portfolio.cash,
+                "market_value": market_value,
+                "portfolio_value": value,
+            }
+        )
     final_value = curve[-1]["portfolio_value"] if curve else initial_cash
     assert isinstance(final_value, Decimal)
     return BacktestResult(initial_cash, final_value, final_value / initial_cash - 1, fills, curve)
