@@ -30,3 +30,30 @@ neexistuje. Allowlist, notional limit a kill switch selhávají uzavřeně.
 
 Run se ukládá jako neměnný JSON snapshot s časem a verzí strategie. Worker, Redis, PostgreSQL,
 autentizace, migrace Alembic a plný Next.js frontend patří do dalších fází.
+
+## Research tok a časové invarianty
+
+Tok je `provider → quality events → dataset hash → chronological split → strategy → backtest
+→ metrics/benchmark → robustness → eligibility → persistence/report`. Denní timestamp označuje
+close v UTC. Strategie obdrží jen prefix končící T; raw open T+1 je nejčasnější fill. Adjusted
+close slouží indikátorům a total-return benchmarku. Raw OHLC slouží fillům a raw close ocenění.
+Komise i nepříznivá slippage jsou odděleně auditovatelné.
+
+Kritické quality events (duplicita, pořadí, OHLC, nekladné/nečíselné ceny, záporný volume)
+zastaví běh. Missing session a cenový skok nad 30 % jsou warningy a nikdy se tiše nemažou.
+`USExchangeCalendar` vylučuje víkendy a přijímá explicitní sadu svátků; nejde o tvrzení o úplném
+historickém NYSE kalendáři.
+
+Split a walk-forward používají jen pořadí barů. Fold obsahuje disjunktní train, validation a test
+hranice; selection smí používat train/validation, nikoli test. Monte Carlo bootstrapuje s
+opakováním trade returns a explicitním seedem. Parameter stability přímo reportuje medián,
+populační varianci a podíl profitabilních sousedů. Cost stress obsahuje nenulový base model.
+
+Split násobí počet akcií a cash dividend připíše držené množství krát dividend na ex-date.
+Adjusted signalová řada se znovu účetně nepřipisuje. Corporate actions musí být dodány explicitně.
+
+## Známá omezení research vrstvy
+
+Fixture nedokládá point-in-time universe ani absenci survivorship bias. Kalendář potřebuje pro
+produkční historii úplný seznam mimořádných uzavírek. Bootstrap s malým počtem obchodů je
+nestabilní. SQLite je vývojový adapter a research záznamy jsou jednoduché JSON snapshots.
