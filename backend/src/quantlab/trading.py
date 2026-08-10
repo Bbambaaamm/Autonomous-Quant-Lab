@@ -1,7 +1,15 @@
 from dataclasses import dataclass, field
-from decimal import Decimal, ROUND_DOWN
+from decimal import ROUND_DOWN, Decimal
 
-from quantlab.domain import Bar, Fill, OrderIntent, Side, TargetPosition
+from quantlab.domain import (
+    Bar,
+    CorporateAction,
+    CorporateActionType,
+    Fill,
+    OrderIntent,
+    Side,
+    TargetPosition,
+)
 
 
 @dataclass(frozen=True)
@@ -35,6 +43,13 @@ class Portfolio:
         self.positions[fill.symbol] = self.positions.get(fill.symbol, Decimal("0")) + signed
         self.cash -= signed * fill.price + fill.commission
 
+    def apply_corporate_action(self, action: CorporateAction) -> None:
+        quantity = self.positions.get(action.symbol, Decimal("0"))
+        if action.action_type is CorporateActionType.SPLIT:
+            self.positions[action.symbol] = quantity * action.value
+        else:
+            self.cash += quantity * action.value
+
 
 class PortfolioConstructor:
     def create_order(
@@ -51,7 +66,9 @@ class PortfolioConstructor:
 
         if not isinstance(when, datetime):
             raise TypeError("Čas rozhodnutí musí být datetime")
-        return OrderIntent(target.symbol, Side.BUY if delta > 0 else Side.SELL, abs(delta), when, target.reason)
+        return OrderIntent(
+            target.symbol, Side.BUY if delta > 0 else Side.SELL, abs(delta), when, target.reason
+        )
 
 
 @dataclass(frozen=True)
@@ -83,7 +100,16 @@ class PaperBroker:
             raise ValueError("Fill musí nastat po čase rozhodnutí")
         price = self.slippage.apply(next_bar.open, order.side)
         fee = self.costs.commission(price * order.quantity)
-        return Fill(order.id, order.symbol, order.side, order.quantity, price, fee, next_bar.timestamp)
+        return Fill(
+            order.id,
+            order.symbol,
+            order.side,
+            order.quantity,
+            price,
+            fee,
+            next_bar.timestamp,
+            next_bar.open,
+        )
 
 
 class ExecutionEngine:
