@@ -39,6 +39,7 @@ def create_research_experiment() -> dict[str, object]:
 
 
 @app.get("/api/research/experiments")
+@app.get("/research/experiments")
 def research_experiments() -> list[dict[str, object]]:
     return research_service.list()
 

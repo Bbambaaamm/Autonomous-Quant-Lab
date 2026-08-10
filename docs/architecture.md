@@ -57,3 +57,12 @@ Adjusted signalová řada se znovu účetně nepřipisuje. Corporate actions mus
 Fixture nedokládá point-in-time universe ani absenci survivorship bias. Kalendář potřebuje pro
 produkční historii úplný seznam mimořádných uzavírek. Bootstrap s malým počtem obchodů je
 nestabilní. SQLite je vývojový adapter a research záznamy jsou jednoduché JSON snapshots.
+
+## Phase 2.7 research orchestrace
+
+Autoritativní tok je `provider → quality validation → dataset identity → StrategyFactory →
+ParameterSpace → train sweep → validation selection → locked config → exactly-once OOS →
+aggregate OOS → FIFO metrics/OOS benchmark → fold-level cost re-backtests → Monte Carlo a
+stabilita → eligibility → immutable persistence snapshot/report`. Business tok vlastní
+`ResearchExperimentRunner`; FastAPI pouze deleguje aplikační službě. Překryv OOS oken selže.
+Train ani validation equity se do agregované research equity nikdy nevkládá.

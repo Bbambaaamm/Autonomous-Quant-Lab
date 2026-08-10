@@ -7,6 +7,22 @@ from quantlab.domain import Bar, Fill, Side
 
 
 @dataclass(frozen=True)
+class ClosedTrade:
+    symbol: str
+    quantity: Decimal
+    opened_at: datetime
+    closed_at: datetime
+    entry_price: Decimal
+    exit_price: Decimal
+    net_pnl: Decimal
+
+    @property
+    def net_return(self) -> float:
+        basis = self.entry_price * self.quantity
+        return float(self.net_pnl / basis) if basis else 0.0
+
+
+@dataclass(frozen=True)
 class PerformanceMetrics:
     total_return: float
     cagr: float | None
@@ -29,18 +45,43 @@ class PerformanceMetrics:
     total_slippage_cost: float
 
 
-def _trade_pnls(fills: list[Fill]) -> tuple[list[float], list[float]]:
-    entries: dict[str, tuple[Decimal, datetime]] = {}
-    pnls: list[float] = []
-    holding: list[float] = []
+def fifo_closed_trades(fills: list[Fill]) -> list[ClosedTrade]:
+    """Autoritativní FIFO ledger uzavřených částí lotů včetně alokovaných komisí."""
+    entries: dict[str, list[tuple[Decimal, Decimal, datetime, Decimal]]] = {}
+    trades: list[ClosedTrade] = []
     for fill in fills:
         if fill.side is Side.BUY:
-            entries[fill.symbol] = (fill.price, fill.timestamp)
-        elif fill.symbol in entries:
-            price, entered = entries.pop(fill.symbol)
-            pnls.append(float((fill.price - price) * fill.quantity - fill.commission))
-            holding.append((fill.timestamp - entered).total_seconds() / 86400)
-    return pnls, holding
+            entries.setdefault(fill.symbol, []).append(
+                (fill.quantity, fill.price, fill.timestamp, fill.commission)
+            )
+            continue
+        remaining = fill.quantity
+        lots = entries.get(fill.symbol, [])
+        if remaining > sum((lot[0] for lot in lots), Decimal("0")):
+            raise ValueError("FIFO ledger zjistil prodej bez dostatečného otevřeného lotu")
+        while remaining:
+            quantity, price, opened_at, entry_commission = lots[0]
+            allocated = min(remaining, quantity)
+            entry_fee = entry_commission * allocated / quantity
+            exit_fee = fill.commission * allocated / fill.quantity
+            trades.append(
+                ClosedTrade(
+                    fill.symbol,
+                    allocated,
+                    opened_at,
+                    fill.timestamp,
+                    price,
+                    fill.price,
+                    allocated * (fill.price - price) - entry_fee - exit_fee,
+                )
+            )
+            remaining -= allocated
+            quantity -= allocated
+            if quantity:
+                lots[0] = (quantity, price, opened_at, entry_commission - entry_fee)
+            else:
+                lots.pop(0)
+    return trades
 
 
 def calculate_metrics(
@@ -94,7 +135,11 @@ def calculate_metrics(
     for fill in fills:
         position += fill.quantity if fill.side is Side.BUY else -fill.quantity
         exposed += int(position != 0)
-    pnls, holding = _trade_pnls(fills)
+    closed_trades = fifo_closed_trades(fills)
+    pnls = [float(trade.net_pnl) for trade in closed_trades]
+    holding = [
+        (trade.closed_at - trade.opened_at).total_seconds() / 86400 for trade in closed_trades
+    ]
     wins = [pnl for pnl in pnls if pnl > 0]
     losses = [pnl for pnl in pnls if pnl < 0]
     gross_profit, gross_loss = sum(wins), -sum(losses)

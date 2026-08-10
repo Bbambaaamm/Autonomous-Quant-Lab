@@ -7,8 +7,8 @@
 | 2 Market data | probíhá | CSV/Parquet provider, hash, quality events, kalendář | úplný US kalendář a DB quality persistence |
 | 3 Strategy | probíhá | MA, buy-and-hold a Donchian s lookbackem | multi-asset strategie |
 | 4 Backtest | dokončeno pro Phase 2 | next-open, deterministická ID, FIFO lot accounting, scale-in/out, idempotentní corporate actions, účetní invarianty, metriky/benchmark | multi-symbol engine je mimo Phase 2 |
-| 5 Validation | probíhá | leakage, chronologický split, walk-forward hranice | výběr uvnitř foldů a embargo |
-| 6 Research automation | probíhá | grid, identity, path-dependent stress re-backtest, Monte Carlo guardrail, stabilita, eligibility a report se stavem NOT_EVALUATED | obecný konfigurovatelný service use-case nad demo experimentem |
+| 5 Validation | dokončeno pro Phase 2 | chronologické neoverlapující foldy, train sweep, validation selection, zamčený one-shot OOS a mutation izolace | embargo mimo scope |
+| 6 Research automation | dokončeno pro Phase 2 | StrategyFactory, typed ParameterSpace/ParameterRun, ResearchExperimentRunner, OOS agregace, FIFO metriky, skutečný stress, Monte Carlo, stabilita, eligibility, snapshot a report | distribuované běhy patří do Phase 3 |
 | 7 Portfolio & risk | probíhá | long-only konstrukce, allowlist/notional/kill switch | exposure/loss/drawdown limity |
 | 8 Paper broker | probíhá | market fills a účetní aktualizace | limit/cancel/partial fills, P&L |
 | 9 Trading cycle | čeká | audit přes uložený run | idempotence, reconciliation, locks |
