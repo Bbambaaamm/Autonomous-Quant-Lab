@@ -1,4 +1,7 @@
-from dataclasses import replace
+import hashlib
+import json
+from copy import deepcopy
+from dataclasses import asdict, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
@@ -6,6 +9,7 @@ import pytest
 
 from quantlab.domain import Bar, Fill, Side
 from quantlab.metrics import fifo_closed_trades
+from quantlab.persistence import RunRepository
 from quantlab.research import ObjectiveConfig, WalkForwardConfig
 from quantlab.research_engine import (
     ParameterRunStatus,
@@ -116,6 +120,134 @@ def test_overlapping_oos_fails_fast() -> None:
         ResearchExperimentRunner().run(
             market_bars(), MovingAverageStrategyFactory(), space, overlapping
         )
+
+
+def test_structured_persistence_is_complete_idempotent_and_immutable() -> None:
+    space, config = setup()
+    runner = ResearchExperimentRunner()
+    result = runner.run(market_bars(), MovingAverageStrategyFactory(), space, config)
+    repository = RunRepository()
+    snapshot = asdict(result)
+    persisted_config = {"research_config": asdict(config), "parameter_space": space.to_dict()}
+
+    repository.save_experiment(result.experiment_id, persisted_config, snapshot, datetime.now(UTC))
+    expected_counts = {
+        "experiments": 1,
+        "folds": 3,
+        "parameter_runs": 18,
+        "eligibility_checks": 6,
+    }
+    assert repository.persistence_counts() == expected_counts
+
+    structure = repository.get_experiment_structure(result.experiment_id)
+    assert structure is not None
+    assert structure["experiment"] == {
+        "id": result.experiment_id,
+        "dataset_id": result.dataset_id,
+        "strategy_name": result.strategy_name,
+        "strategy_version": result.strategy_version,
+        "parameter_space_id": result.parameter_space_id,
+        "decision": result.eligibility.decision,
+    }
+    assert len(structure["folds"]) == len(result.folds)
+    source_runs = {
+        (fold.fold_id, stage, run.run_id): run
+        for fold in result.folds
+        for stage, runs in (("TRAIN", fold.train_runs), ("VALIDATION", fold.validation_runs))
+        for run in runs
+    }
+    assert len(structure["parameter_runs"]) == len(source_runs)
+    for persisted_run in structure["parameter_runs"]:
+        source = source_runs[
+            (persisted_run["fold_id"], persisted_run["stage"], persisted_run["run_id"])
+        ]
+        assert persisted_run["experiment_id"] == result.experiment_id
+        assert persisted_run["parameter_config"] == json.loads(json.dumps(source.parameter_config))
+        canonical_config = json.dumps(
+            source.parameter_config, sort_keys=True, separators=(",", ":")
+        )
+        assert (
+            persisted_run["parameter_config_id"]
+            == hashlib.sha256(canonical_config.encode()).hexdigest()
+        )
+        assert persisted_run["status"] == source.status
+        assert persisted_run["objective_score"] == source.objective_score
+        assert persisted_run["metrics"] == (
+            json.loads(json.dumps(asdict(source.metrics), default=str)) if source.metrics else None
+        )
+        assert persisted_run["closed_trade_count"] == source.closed_trades
+        assert persisted_run["failure_reason"] == source.failure_reason
+    for persisted_fold, source_fold in zip(structure["folds"], result.folds, strict=True):
+        assert persisted_fold["selected_config"] == json.loads(
+            json.dumps(source_fold.selected_config)
+        )
+    assert structure["eligibility_checks"] == [
+        {
+            "name": check.name,
+            "status": check.status,
+            "observed_value": float(check.observed_value)
+            if check.observed_value is not None
+            else None,
+            "threshold": float(check.threshold) if check.threshold is not None else None,
+            "reason": check.reason,
+        }
+        for check in result.eligibility.checks
+    ]
+    assert repository.get_experiment(result.experiment_id)["result"] == json.loads(
+        json.dumps(snapshot, default=str)
+    )
+
+    repository.save_experiment(result.experiment_id, persisted_config, snapshot, datetime.now(UTC))
+    assert repository.persistence_counts() == expected_counts
+
+    conflicting = deepcopy(snapshot)
+    conflicting["dataset_id"] = "conflicting-content"
+    with pytest.raises(ValueError, match="koliduje"):
+        repository.save_experiment(
+            result.experiment_id, persisted_config, conflicting, datetime.now(UTC)
+        )
+    assert repository.persistence_counts() == expected_counts
+
+    other_config = replace(config, random_seed=config.random_seed + 1)
+    other = runner.run(market_bars(), MovingAverageStrategyFactory(), space, other_config)
+    assert other.experiment_id != result.experiment_id
+    repository.save_experiment(
+        other.experiment_id,
+        {"research_config": asdict(other_config), "parameter_space": space.to_dict()},
+        asdict(other),
+        datetime.now(UTC),
+    )
+    assert repository.persistence_counts() == {
+        "experiments": 2,
+        "folds": 6,
+        "parameter_runs": 36,
+        "eligibility_checks": 12,
+    }
+
+
+def test_structured_experiment_materialization_is_transactional() -> None:
+    space, config = setup()
+    result = ResearchExperimentRunner().run(
+        market_bars(), MovingAverageStrategyFactory(), space, config
+    )
+    malformed = asdict(result)
+    malformed["eligibility"]["checks"] = "invalid"
+    repository = RunRepository()
+
+    with pytest.raises(TypeError, match="Eligibility checks"):
+        repository.save_experiment(
+            result.experiment_id,
+            {"research_config": asdict(config), "parameter_space": space.to_dict()},
+            malformed,
+            datetime.now(UTC),
+        )
+
+    assert repository.persistence_counts() == {
+        "experiments": 0,
+        "folds": 0,
+        "parameter_runs": 0,
+        "eligibility_checks": 0,
+    }
 
 
 def test_fifo_ledger_handles_scale_in_and_partial_scale_out() -> None:

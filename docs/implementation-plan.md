@@ -20,6 +20,16 @@
 | 15 Dokumentace | probíhá | README, architektura, tento plán | doména/risk/operations |
 | 16 E2E verification | probíhá | fixture→API/dashboard integrační test | úplný master demo scénář |
 
+## Phase 2 closure
+
+**Stav: COMPLETE (Phase 2 research-foundation scope).** Phase 2.8 uzavřela strukturovanou
+persistence experiment identity/foldů/eligibility checks, nahradila autoritativní mapu eligibility
+typovaným doménovým modelem a přidala úplné persisted-versus-in-memory porovnání snapshotu.
+Finální verification doplnila chybějící strukturované train/validation ParameterRuny. Testovací
+experiment dokládá 1 experiment, 3 foldy, 18 ParameterRunů a 6 eligibility checks před i po
+idempotentním opakovaném zápisu, immutable konflikt i transakční rollback.
+Omezení uvedená v tabulce patří do pozdějších fází master plánu a nemění tento closure verdikt.
+
 Každá fáze je „dokončeno“ až po implementaci acceptance scope, unit/integration testech,
 lintu, formátu a typechecku. Aktuální ověřitelný milník je první funkční vertical slice.
 

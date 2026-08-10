@@ -66,3 +66,16 @@ aggregate OOS → FIFO metrics/OOS benchmark → fold-level cost re-backtests �
 stabilita → eligibility → immutable persistence snapshot/report`. Business tok vlastní
 `ResearchExperimentRunner`; FastAPI pouze deleguje aplikační službě. Překryv OOS oken selže.
 Train ani validation equity se do agregované research equity nikdy nevkládá.
+
+## Phase 2.8 strukturovaná persistence
+
+SQLite ukládá úplný neměnný JSON snapshot kvůli přesné reprodukci a současně normalizované
+hlavičky experimentu, OOS foldy, jejich train/validation ParameterRuny a jednotlivé eligibility
+kontroly pro auditní dotazy. ParameterRun ukládá config i jeho hash, stage, status, objective,
+metriky, počet uzavřených obchodů a failure reason. OOS evaluace zůstává ve fold/backtest snapshotu,
+protože není během výběru parametrů ParameterRunem. Opakovaný zápis stejné identity s odlišným
+configem nebo výsledkem selže; nemůže tiše přepsat experiment.
+Eligibility check je doménový typ se stavem `passed`, `failed` nebo `not_evaluated`, observed
+hodnotou, prahem a důvodem. Odvozená boolean mapa zůstává pouze kompatibilním read-only pohledem.
+Experiment, foldy, ParameterRuny a kontroly se materializují v jedné SQLAlchemy session a jednom
+commitu; výjimka před commitem ukončí session s rollbackem celé projekce.

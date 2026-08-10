@@ -13,6 +13,7 @@ from quantlab.persistence import RunRepository
 from quantlab.research import (
     AnalysisStatus,
     CostScenario,
+    EligibilityCheckStatus,
     EligibilityDecision,
     ExperimentIdentity,
     ParameterStability,
@@ -113,6 +114,7 @@ def test_monte_carlo_cost_stress_and_eligibility_are_deterministic() -> None:
         25, 0.1, -0.1, stressed, 0.8, ParameterStability(2, 0.1, 0.01, 1.0)
     )
     assert result.decision is EligibilityDecision.PAPER_CANDIDATE
+    assert all(check.status is EligibilityCheckStatus.PASSED for check in result.checks)
 
 
 def test_metrics_edge_cases_and_benchmark_alignment() -> None:
@@ -396,7 +398,8 @@ def test_baselines_and_reproducible_backtest() -> None:
 
 
 def test_research_report_is_complete_and_experiment_is_deterministic() -> None:
-    service = ResearchService(RunRepository())
+    repository = RunRepository()
+    service = ResearchService(repository)
     first = service.create_demo_experiment(FIXTURE)
     second = service.create_demo_experiment(FIXTURE)
     assert first == second
@@ -421,3 +424,18 @@ def test_research_report_is_complete_and_experiment_is_deterministic() -> None:
     assert payload["monte_carlo"]["reason"] == "insufficient_closed_trades"
     assert len(payload["walk_forward"]) == 1
     assert payload["walk_forward"][0]["validation_runs"] == 2
+
+    # Úplný uložený snapshot musí být shodný s JSON reprezentací in-memory výsledku.
+    persisted = service.get(str(first["id"]))
+    assert persisted is not None
+    expected = json.loads(json.dumps(first["result"], default=str, sort_keys=True))
+    assert persisted["result"] == expected
+
+    structure = repository.get_experiment_structure(str(first["id"]))
+    assert structure is not None
+    assert structure["experiment"]["dataset_id"] == first["result"]["dataset_id"]
+    assert len(structure["folds"]) == len(first["result"]["folds"])
+    assert structure["folds"][0]["oos_evaluations"] == 1
+    assert [check["name"] for check in structure["eligibility_checks"]] == [
+        check["name"] for check in first["result"]["eligibility"]["checks"]
+    ]
