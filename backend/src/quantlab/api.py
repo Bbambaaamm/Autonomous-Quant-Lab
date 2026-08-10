@@ -32,6 +32,7 @@ def backtests() -> list[dict[str, object]]:
     return repository.list()
 
 
+@app.post("/research/experiments")
 @app.post("/api/research/experiments")
 def create_research_experiment() -> dict[str, object]:
     return research_service.create_demo_experiment(fixture)
@@ -42,12 +43,25 @@ def research_experiments() -> list[dict[str, object]]:
     return research_service.list()
 
 
+@app.get("/research/experiments/{experiment_id}")
 @app.get("/api/research/experiments/{experiment_id}")
 def research_experiment(experiment_id: str) -> dict[str, object]:
     result = research_service.get(experiment_id)
     if result is None:
         raise HTTPException(status_code=404, detail="Experiment nebyl nalezen")
     return result
+
+
+@app.get("/research/experiments/{experiment_id}/report")
+@app.get("/api/research/experiments/{experiment_id}/report")
+def research_report(experiment_id: str) -> dict[str, str]:
+    experiment = research_service.get(experiment_id)
+    if experiment is None:
+        raise HTTPException(status_code=404, detail="Experiment nebyl nalezen")
+    result = experiment["result"]
+    if not isinstance(result, dict) or not isinstance(result.get("report"), str):
+        raise HTTPException(status_code=404, detail="Report nebyl nalezen")
+    return {"id": experiment_id, "report": result["report"]}
 
 
 @app.get("/", response_class=HTMLResponse)

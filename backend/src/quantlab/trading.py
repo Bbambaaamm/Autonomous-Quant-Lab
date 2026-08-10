@@ -1,4 +1,5 @@
 from dataclasses import dataclass, field
+from datetime import datetime
 from decimal import ROUND_DOWN, Decimal
 
 from quantlab.domain import (
@@ -37,18 +38,65 @@ class RiskEngine:
 class Portfolio:
     cash: Decimal
     positions: dict[str, Decimal] = field(default_factory=dict)
+    lots: dict[str, list["Lot"]] = field(default_factory=dict)
+    realized_pnl: Decimal = Decimal("0")
+    dividend_income: Decimal = Decimal("0")
+    total_commissions: Decimal = Decimal("0")
+    total_slippage: Decimal = Decimal("0")
+    _applied_actions: set[tuple[str, datetime, CorporateActionType, Decimal]] = field(
+        default_factory=set, repr=False
+    )
 
     def apply(self, fill: Fill) -> None:
         signed = fill.quantity if fill.side is Side.BUY else -fill.quantity
-        self.positions[fill.symbol] = self.positions.get(fill.symbol, Decimal("0")) + signed
+        current = self.positions.get(fill.symbol, Decimal("0"))
+        if fill.side is Side.SELL and fill.quantity > current:
+            raise ValueError("Nelze prodat více akcií, než portfolio drží")
+        self.positions[fill.symbol] = current + signed
         self.cash -= signed * fill.price + fill.commission
+        self.total_commissions += fill.commission
+        self.total_slippage += fill.slippage_cost
+        symbol_lots = self.lots.setdefault(fill.symbol, [])
+        if fill.side is Side.BUY:
+            symbol_lots.append(Lot(fill.quantity, fill.price, fill.timestamp))
+            return
+        remaining = fill.quantity
+        while remaining:
+            lot = symbol_lots[0]
+            allocated = min(remaining, lot.quantity)
+            self.realized_pnl += allocated * (fill.price - lot.unit_basis)
+            lot.quantity -= allocated
+            remaining -= allocated
+            if lot.quantity == 0:
+                symbol_lots.pop(0)
 
     def apply_corporate_action(self, action: CorporateAction) -> None:
+        key = (action.symbol, action.effective_at, action.action_type, action.value)
+        if key in self._applied_actions:
+            return
         quantity = self.positions.get(action.symbol, Decimal("0"))
         if action.action_type is CorporateActionType.SPLIT:
             self.positions[action.symbol] = quantity * action.value
+            for lot in self.lots.get(action.symbol, []):
+                lot.quantity *= action.value
+                lot.unit_basis /= action.value
         else:
-            self.cash += quantity * action.value
+            income = quantity * action.value
+            self.cash += income
+            self.dividend_income += income
+        self._applied_actions.add(key)
+
+    def equity(self, prices: dict[str, Decimal]) -> Decimal:
+        return self.cash + sum(
+            quantity * prices[symbol] for symbol, quantity in self.positions.items()
+        )
+
+
+@dataclass
+class Lot:
+    quantity: Decimal
+    unit_basis: Decimal
+    opened_at: datetime
 
 
 class PortfolioConstructor:
@@ -62,8 +110,6 @@ class PortfolioConstructor:
         delta = desired - current
         if delta == 0:
             return None
-        from datetime import datetime
-
         if not isinstance(when, datetime):
             raise TypeError("Čas rozhodnutí musí být datetime")
         return OrderIntent(

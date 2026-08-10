@@ -73,3 +73,17 @@ def test_api_and_dashboard() -> None:
     response = client.post("/api/backtests/demo")
     assert response.status_code == 200
     assert response.json()["fills"]
+
+
+def test_research_api_persists_experiment_and_exposes_report() -> None:
+    client = TestClient(app)
+    created = client.post("/research/experiments")
+    assert created.status_code == 200
+    experiment_id = created.json()["id"]
+    fetched = client.get(f"/research/experiments/{experiment_id}")
+    assert fetched.status_code == 200
+    assert fetched.json()["id"] == experiment_id
+    report = client.get(f"/research/experiments/{experiment_id}/report")
+    assert report.status_code == 200
+    assert report.json()["id"] == experiment_id
+    assert "Research report" in report.json()["report"]
