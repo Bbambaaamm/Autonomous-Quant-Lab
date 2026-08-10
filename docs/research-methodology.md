@@ -37,3 +37,14 @@ Monte Carlo se pod konfigurovaným minimem uzavřených FIFO obchodů vrací jak
 Metriky používají 252 období pro anualizaci denních returns a 365,25 dne pro CAGR. Sharpe má
 risk-free předpoklad nula, Sortino downside deviation vůči nule. Nulový jmenovatel, chybějící
 uzavřené obchody nebo nedostatečný vzorek vrací `None`.
+
+## Walk-forward selection v Phase 2.7
+
+V train se auditovatelně vyhodnotí všechny raw kombinace, včetně explicitního `INVALID_CONFIG`.
+Konfigurované top-k se znovu vyhodnotí ve validation. Vítěz validation se zamkne a OOS se spustí
+právě jednou. OOS intervaly se nesmějí překrývat a benchmark používá tutéž množinu OOS barů.
+Cost stress je nový backtest každého OOS foldu s jeho selected configem.
+
+Experiment identity zahrnuje dataset content hash, strategy name/version, celý parameter space,
+walk-forward/objective/top-k konfiguraci, cost a stress modely, seed, Monte Carlo, eligibility
+a engine version. Identické vstupy reprodukují foldy, runy, fills, agregaci i robustness výstupy.

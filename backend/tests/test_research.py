@@ -419,5 +419,5 @@ def test_research_report_is_complete_and_experiment_is_deterministic() -> None:
     } <= payload.keys()
     assert payload["monte_carlo"]["status"] == "NOT_EVALUATED"
     assert payload["monte_carlo"]["reason"] == "insufficient_closed_trades"
-    assert payload["walk_forward"]["status"] == "NOT_EVALUATED"
-    assert payload["walk_forward"]["reason"] == "insufficient_fixture_bars"
+    assert len(payload["walk_forward"]) == 1
+    assert payload["walk_forward"][0]["validation_runs"] == 2

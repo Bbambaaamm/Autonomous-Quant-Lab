@@ -41,3 +41,14 @@ pro audit.
 
 Vývojová skupina obsahuje `httpx2`, který Starlette 1.6 používá pro `TestClient`; nejde o import
 aplikace ani o náhradu HTTP klienta. Synchronizace vyžaduje dostupný Python package index.
+
+## Phase 2.7: kompletní research use-case
+
+`ResearchExperimentRunner` je jediný aplikační tok od validace a dataset hash přes obecný
+`StrategyFactory`, neměnný `ParameterSpace`, train sweep, validation výběr a právě jednu OOS
+evaluaci až po agregované OOS metriky, OOS benchmark, robustness, eligibility, SQLite snapshot
+a report. Raw invalidní kombinace se neztrácejí. OOS foldy se nesmějí překrývat.
+
+Research trade metriky a Monte Carlo používají autoritativní FIFO closed-trade ledger. Cost
+stress znovu přehrává každý vybraný OOS fold s jeho zamčenou konfigurací; nejde o aritmetický
+odhad nákladů.

@@ -2,94 +2,44 @@ from dataclasses import asdict
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
-from typing import cast
 
-from quantlab.data import CSVMarketDataProvider, dataset_identity
-from quantlab.demo import run_demo
-from quantlab.metrics import benchmark_metrics, calculate_metrics
+from quantlab.data import CSVMarketDataProvider
 from quantlab.persistence import RunRepository
-from quantlab.research import (
-    AnalysisStatus,
-    EligibilityDecision,
-    ExperimentIdentity,
-    ParameterStability,
-    StrategyEligibilityResult,
-    cost_stress,
-    markdown_report,
-)
+from quantlab.research import EligibilityConfig, ObjectiveConfig, WalkForwardConfig
+from quantlab.research_engine import ParameterSpace, ResearchConfig, ResearchExperimentRunner
+from quantlab.strategy import MovingAverageStrategyFactory
 
 
 class ResearchService:
+    """Aplikační adaptér; veškerou research business logiku deleguje runneru."""
+
     def __init__(self, repository: RunRepository) -> None:
         self.repository = repository
 
     def create_demo_experiment(self, fixture: Path) -> dict[str, object]:
         bars = CSVMarketDataProvider(fixture).load("SPY")
-        backtest = run_demo(fixture)
-        identity = ExperimentIdentity(
-            "moving_average",
-            "1.0.0",
-            {"fast_window": 3, "slow_window": 5},
-            dataset_identity(bars),
-            bars[0].timestamp.isoformat(),
-            bars[-1].timestamp.isoformat(),
-            {"fixed": "1", "rate": "0.001", "minimum": "1"},
-            {"basis_points": "5"},
-            42,
+        space = ParameterSpace(
+            {"fast_window": (2, 3), "slow_window": (3, 5)},
+            lambda item: int(item["fast_window"]) < int(item["slow_window"]),
         )
-        values = [
-            (cast(datetime, item["timestamp"]), cast(Decimal, item["portfolio_value"]))
-            for item in backtest.equity_curve
-        ]
-        metrics = calculate_metrics(backtest.initial_cash, values, backtest.fills)
-        gross_return = metrics.total_return + (
-            metrics.total_commissions + metrics.total_slippage_cost
-        ) / float(backtest.initial_cash)
-        stress = cost_stress(
-            gross_return,
-            metrics.total_commissions,
-            metrics.total_slippage_cost,
-            float(backtest.initial_cash),
+        config = ResearchConfig(
+            WalkForwardConfig(4, 3, 3, 3),
+            ObjectiveConfig(minimum_trades=0),
+            validation_candidate_count=2,
+            initial_cash=Decimal("100000"),
+            monte_carlo_min_trades=20,
+            monte_carlo_simulations=100,
+            eligibility=EligibilityConfig(minimum_trades=20),
         )
-        stability = ParameterStability(0, None, None, None)
-        walk_forward_status: dict[str, object] = {
-            "status": AnalysisStatus.NOT_EVALUATED,
-            "reason": "insufficient_fixture_bars",
-            "folds": [],
-        }
-        result: dict[str, object] = {
-            "metrics": asdict(metrics),
-            "benchmark": benchmark_metrics(bars),
-            "excess_return": metrics.total_return - (benchmark_metrics(bars)["total_return"] or 0),
-            "cost_stress": stress,
-            "walk_forward": walk_forward_status,
-            "monte_carlo": {
-                "status": AnalysisStatus.NOT_EVALUATED,
-                "reason": "insufficient_closed_trades",
-                "result": None,
-            },
-            "parameter_stability": asdict(stability),
-            "eligibility": {"decision": "RESEARCH_ONLY", "reasons": ["insufficient_fixture"]},
-        }
-        result["report"] = markdown_report(
-            identity,
-            asdict(metrics),
-            benchmark_metrics(bars),
-            stress,
-            None,
-            stability,
-            # Demo fixture je záměrně příliš malá pro způsobilost.
-            StrategyEligibilityResult(
-                EligibilityDecision.RESEARCH_ONLY,
-                {},
-                ("insufficient_fixture",),
-            ),
-            walk_forward_status,
-        )
+        result = ResearchExperimentRunner().run(bars, MovingAverageStrategyFactory(), space, config)
+        snapshot = asdict(result)
         self.repository.save_experiment(
-            identity.experiment_id, asdict(identity), result, datetime.now(UTC)
+            result.experiment_id,
+            {"research_config": asdict(config), "parameter_space": space.to_dict()},
+            snapshot,
+            datetime.now(UTC),
         )
-        return {"id": identity.experiment_id, "config": asdict(identity), "result": result}
+        return {"id": result.experiment_id, "config": asdict(config), "result": snapshot}
 
     def get(self, experiment_id: str) -> dict[str, object] | None:
         return self.repository.get_experiment(experiment_id)

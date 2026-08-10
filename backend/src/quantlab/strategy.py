@@ -1,3 +1,4 @@
+from collections.abc import Mapping
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Protocol
@@ -16,6 +17,40 @@ class Strategy(Protocol):
     def required_lookback(self) -> int: ...
 
     def generate_target(self, available_bars: list[Bar]) -> TargetPosition: ...
+
+
+class StrategyFactory(Protocol):
+    @property
+    def strategy_name(self) -> str: ...
+
+    @property
+    def strategy_version(self) -> str: ...
+
+    def create(self, config: Mapping[str, object]) -> Strategy: ...
+
+
+@dataclass(frozen=True)
+class MovingAverageStrategyFactory:
+    strategy_name: str = "moving_average"
+    strategy_version: str = "1.0.0"
+
+    def create(self, config: Mapping[str, object]) -> Strategy:
+        fast, slow = config["fast_window"], config["slow_window"]
+        if not isinstance(fast, int) or not isinstance(slow, int):
+            raise TypeError("MA okna musí být celá čísla")
+        return MovingAverageStrategy(fast, slow)
+
+
+@dataclass(frozen=True)
+class DonchianBreakoutStrategyFactory:
+    strategy_name: str = "donchian_breakout"
+    strategy_version: str = "1.0.0"
+
+    def create(self, config: Mapping[str, object]) -> Strategy:
+        entry, exit_ = config["entry_lookback"], config["exit_lookback"]
+        if not isinstance(entry, int) or not isinstance(exit_, int):
+            raise TypeError("Donchian okna musí být celá čísla")
+        return DonchianBreakoutStrategy(entry, exit_)
 
 
 @dataclass(frozen=True)
