@@ -113,3 +113,6 @@ Sharpe a deterministické ID; není predikcí budoucí ziskovosti.
 ## Phase 4: production paper foundation
 
 Persistentní účet, MARKET/LIMIT orders, partial fills, FIFO pozice, portfolio risk, idempotentní cycle, kill switch, reconciliation a audit jsou dostupné přes `/paper/account`, `/portfolio`, `/positions`, `/orders`, `/risk/*`, `/trading/cycles/*`, `/audit` a `/reconciliation/*`. Vše je pouze paper; live broker ani live order path neexistují.
+
+## Phase 6 — market data a multi-asset research
+Phase 6 přidává canonical instruments, XNYS sessions, immutable observation revisions, corporate actions, PIT universes a content-addressed dataset snapshots. Multi-asset strategie vracejí target weights do společného long-only USD portfolia; close T se plní nejdříve na raw open další session. Podrobnosti: [market data](docs/market-data.md) a [strategy research](docs/strategy-research.md). Runtime zůstává výhradně paper-only.
