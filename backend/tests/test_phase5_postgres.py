@@ -127,6 +127,47 @@ def test_postgres_two_workers_claim_exactly_one_execution_owner() -> None:
         assert attempts[0].status == AttemptStatus.RUNNING
         assert attempts[0].worker_id == run.lease_owner
         assert attempts[0].fencing_token == run.fencing_token == 1
+        # Claim race nesmí zanechat expirovatelný RUNNING run ve sdílené acceptance DB.
+        run.status = RunStatus.CANCELLED
+        run.finished_at = now
+        run.lease_owner = None
+        run.lease_expires_at = None
+        attempts[0].status = AttemptStatus.LEASE_LOST
+        attempts[0].finished_at = now
+        session.commit()
+
+
+def test_postgres_concurrent_manual_run_recovers_unique_conflict() -> None:
+    repo, _, account_id = repository()
+    now = datetime.now(UTC)
+    job = repo.create_job(
+        job_type=JobType.RUN_RECONCILIATION,
+        account_id=account_id,
+        schedule_type=ScheduleType.INTERVAL,
+        interval_seconds=60,
+        next_run_at=now,
+    )
+    key = str(uuid4())
+    results = concurrent_calls(
+        lambda: SchedulerService(AutomationRepository(str(repo.engine.url))).run_now(
+            job.id, key, now
+        ),
+        lambda: SchedulerService(AutomationRepository(str(repo.engine.url))).run_now(
+            job.id, key, now
+        ),
+    )
+    assert results[0] == results[1]
+    with Session(repo.engine) as session:
+        run = session.get(JobRun, results[0])
+        assert run is not None
+        assert (
+            session.scalar(select(func.count()).select_from(JobRun).where(JobRun.id == run.id)) == 1
+        )
+        # Acceptance databáze je sdílená napříč testy. Tento test ověřuje pouze
+        # materializaci a nesmí ponechat claimable run pro následující recovery scénář.
+        run.status = RunStatus.CANCELLED
+        run.finished_at = now
+        session.commit()
 
 
 def market_data(path: Path, decision_time: datetime) -> None:
