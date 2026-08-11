@@ -131,10 +131,22 @@ def calculate_metrics(
         max_dd = min(max_dd, drawdown)
         duration = duration + 1 if drawdown < 0 else 0
         longest = max(longest, duration)
-    position = Decimal("0")
-    for fill in fills:
-        position += fill.quantity if fill.side is Side.BUY else -fill.quantity
-        exposed += int(position != 0)
+    # Expozice je podíl oceňovacích období s otevřenou pozicí, nikoli podíl fillů.
+    # Původní výpočet dával například buy-and-hold bez výstupu vždy 100 %, i kdyby
+    # vstup nastal až na posledním baru, a scale-in jej dále zkresloval.
+    positions: dict[str, Decimal] = {}
+    fill_index = 0
+    chronological_fills = sorted(fills, key=lambda fill: fill.timestamp)
+    for timestamp, _ in values:
+        while (
+            fill_index < len(chronological_fills)
+            and chronological_fills[fill_index].timestamp <= timestamp
+        ):
+            fill = chronological_fills[fill_index]
+            signed = fill.quantity if fill.side is Side.BUY else -fill.quantity
+            positions[fill.symbol] = positions.get(fill.symbol, Decimal("0")) + signed
+            fill_index += 1
+        exposed += int(any(quantity != 0 for quantity in positions.values()))
     closed_trades = fifo_closed_trades(fills)
     pnls = [float(trade.net_pnl) for trade in closed_trades]
     holding = [
@@ -157,7 +169,7 @@ def calculate_metrics(
         sum(wins) / len(wins) if wins else None,
         sum(losses) / len(losses) if losses else None,
         sum(pnls) / len(pnls) if pnls else None,
-        exposed / len(fills) if fills else 0.0,
+        exposed / len(values) if values else 0.0,
         sum(float(fill.price * fill.quantity) for fill in fills) / float(initial),
         len(pnls),
         sum(holding) / len(holding) if holding else None,

@@ -1,51 +1,67 @@
-# Implementační plán
+# Implementační plán po verification gate Phase 3
 
-| Fáze | Stav | Implementováno a testy | Zbývá / omezení |
+Stavy níže popisují skutečný stav vůči celému `CODEX_MASTER_PROMPT.md`, nikoli jen vůči
+dílčímu scope dosavadního milníku. Audit Phase 3 skončil **PASS WITH FIXES**: opravil metriku
+expozice, která používala počet fillů místo počtu oceňovacích období, a odstranil zastaralá
+tvrzení o CI, Dockeru, PostgreSQL a Alembicu.
+
+| Fáze / oblast | Stav | Implementováno | Konkrétní remaining scope |
 |---|---|---|---|
-| 0 Bootstrap | dokončeno | packaging, AGENTS, konfigurace; lint/type/test | lockfile, CI |
-| 1 Domain model | probíhá | Bar, order, fill, target, UTC validace | úplný model |
-| 2 Market data | probíhá | CSV/Parquet provider, hash, quality events, kalendář | úplný US kalendář a DB quality persistence |
-| 3 Strategy | probíhá | MA, buy-and-hold a Donchian s lookbackem | multi-asset strategie |
-| 4 Backtest | dokončeno pro Phase 2 | next-open, deterministická ID, FIFO lot accounting, scale-in/out, idempotentní corporate actions, účetní invarianty, metriky/benchmark | multi-symbol engine je mimo Phase 2 |
-| 5 Validation | dokončeno pro Phase 2 | chronologické neoverlapující foldy, train sweep, validation selection, zamčený one-shot OOS a mutation izolace | embargo mimo scope |
-| 6 Research automation | dokončeno pro Phase 2 | StrategyFactory, typed ParameterSpace/ParameterRun, ResearchExperimentRunner, OOS agregace, FIFO metriky, skutečný stress, Monte Carlo, stabilita, eligibility, snapshot a report | distribuované běhy patří do Phase 3 |
-| 7 Portfolio & risk | probíhá | long-only konstrukce, allowlist/notional/kill switch | exposure/loss/drawdown limity |
-| 8 Paper broker | probíhá | market fills a účetní aktualizace | limit/cancel/partial fills, P&L |
-| 9 Trading cycle | čeká | audit přes uložený run | idempotence, reconciliation, locks |
-| 10 REST API | probíhá | health, demo run, seznam běhů | CRUD, auth, OpenAPI rozšíření |
-| 11 Dashboard | probíhá | spustitelný základní dashboard | Next.js a grafy |
-| 12 Observability | čeká | — | structured logging, metrics |
-| 13 Security | probíhá | žádný live adaptér, secret ignore | auth, dependency scan |
-| 14 CI/CD | čeká | — | GitHub Actions, Docker |
-| 15 Dokumentace | probíhá | README, architektura, tento plán | doména/risk/operations |
-| 16 E2E verification | probíhá | fixture→API/dashboard integrační test | úplný master demo scénář |
+| 0 Repository bootstrap | PARTIAL | Python package, AGENTS, Makefile, základní konfigurace | commitnout `uv.lock`, doplnit licence a úplnou cílovou monorepo strukturu |
+| 1 Domain model | PARTIAL | UTC Bar, target, order, fill a corporate action | úplné modely instrumentu, portfolia, risk rozhodnutí, účtu, cycle a audit eventu |
+| 2 Market data | PARTIAL | CSV/Parquet, content hash, quality kontroly, jednoduchý kalendář | reálný provider, quote/metadata API, úplný exchange kalendář, DB quality events a point-in-time universe |
+| 3 Strategy framework | PARTIAL | společný interface/factory, MA, buy-and-hold, Donchian | TSMOM, cross-sectional momentum, mean reversion, pairs, multi-asset context a deklarace podpor |
+| 4 Backtesting | PARTIAL | next-open, raw fill/adjusted signal, FIFO, náklady, slippage, split/dividenda | multi-symbol portfolio, spread, limit/partial fill, další sizing a úplná sada metrik/benchmark statistik |
+| 5 Validation | PARTIAL | chronologický split, walk-forward train/validation/OOS, one-shot OOS | embargo/purge dle potřeby, richer OOS reporty a statistické testy |
+| 6 Research automation | PARTIAL | grid, runner, cost stress, seedované Monte Carlo, stabilita, eligibility | distribuované/background běhy, experiment queue, report artefakty a více strategií/universe |
+| 7 Portfolio & Risk | PARTIAL | long-only konstrukce, symbol allowlist, per-order notional a kill switch | portfolio/exposure/leverage, concentration, drawdown/loss, order-count a denní notional limity; risk audit decisions |
+| 8 Paper Broker | PARTIAL | deterministické market next-open fills, komise/slippage, portfolio accounting | order lifecycle, limit/cancel/partial fills, account P&L, persistence a reconciliation |
+| 9 Automated trading cycle | NOT STARTED | žádný runtime trading cycle | scheduler/worker, idempotency keys, DB locks, stale-data guard, reconciliation a audit trail |
+| 10 REST API | PARTIAL | health, demo, stránkované experimenty, leaderboard, comparison, lineage | doménové CRUD, paper account/cycle endpoints, auth, stabilní schemas a rozšířená OpenAPI |
+| 11 Web dashboard | PARTIAL | minimální server-rendered demo stránka | Next.js/React/Tailwind aplikace, grafy a research/paper/risk obrazovky |
+| 12 Observability | NOT STARTED | pouze několik standardních log záznamů | structured logging, correlation IDs, metrics, alerting a job/cycle health |
+| 13 Security | PARTIAL | žádný live broker, paper-only cesta, bezpečné env defaults, loopback DB | auth/RBAC, secret management, dependency/SAST scan, rate limits a produkční hardening |
+| 14 CI/CD & infrastructure | PARTIAL | GitHub Actions quality/unit/API/PostgreSQL job, PostgreSQL Compose healthcheck a Alembic upgrade | lockfile/reproducible install, aplikační image/service/healthcheck, Redis/worker a deploy pipeline |
+| 15 Dokumentace | PARTIAL | README, architecture, database, registry, methodology a reproducibility | domain/backtest/strategy/risk/paper/live-safety/operations/troubleshooting dokumenty |
+| 16 End-to-end verification | PARTIAL | fixture→research/API testy a PostgreSQL integrační job | úplný master demo scénář, paper-cycle/restart/reconciliation E2E a provozní acceptance |
 
-## Phase 2 closure
+## Uzavření Phase 3
 
-**Stav: COMPLETE (Phase 2 research-foundation scope).** Phase 2.8 uzavřela strukturovanou
-persistence experiment identity/foldů/eligibility checks, nahradila autoritativní mapu eligibility
-typovaným doménovým modelem a přidala úplné persisted-versus-in-memory porovnání snapshotu.
-Finální verification doplnila chybějící strukturované train/validation ParameterRuny. Testovací
-experiment dokládá 1 experiment, 3 foldy, 18 ParameterRunů a 6 eligibility checks před i po
-idempotentním opakovaném zápisu, immutable konflikt i transakční rollback.
-Omezení uvedená v tabulce patří do pozdějších fází master plánu a nemění tento closure verdikt.
+**Phase 3 research data platform: COMPLETE v deklarovaném scope.** Registry obsahuje neměnnou
+dataset/strategy/experiment identitu, normalizované foldy, parameter runy a eligibility checks,
+lineage, comparison a deterministic leaderboard. Alembic initial migration vytváří schema na
+prázdné PostgreSQL DB a CI má samostatný PostgreSQL job. SQLite je pouze testovací adapter.
 
-Každá fáze je „dokončeno“ až po implementaci acceptance scope, unit/integration testech,
-lintu, formátu a typechecku. Aktuální ověřitelný milník je první funkční vertical slice.
+Phase 3 neznamená dokončení celého master plánu. Registry neukládá bary a repository nemá
+worker, Redis, trading scheduler, aplikační Docker image ani lockfile. Lokální Compose vystavuje
+PostgreSQL pouze na loopback a používá trust autentizaci výhradně pro development.
 
-## Audit Phase 2
+## Verification audit po Phase 3
 
-Audit odhalil náhodné UUID příkazů, které rušilo reprodukovatelnost; ID je nyní odvozeno z verze strategie, času a příkazu. Původní engine správně posílal jen datový prefix a plnil na následujícím baru. Portfolio správně účtovalo signed notional a komisi a ExecutionEngine vždy volal RiskEngine. Fill ale neuchovával raw reference cenu pro audit slippage; nyní ji uchovává. SQLite při čtení obnovuje UTC. Doplněny jsou regresní testy determinismu, accountingu, quality events, splitů, robustness a corporate actions.
+Audit znovu potvrdil next-open invariant: strategie dostane pouze prefix končící close T a fill
+použije raw open T+1; signály používají adjusted close. Train, validation a OOS jsou chronologické
+a OOS konfigurace se vybírá bez OOS dat. FIFO alokuje vstupní i výstupní komise a split upravuje
+množství i jednotkovou bázi bez vytvoření P&L.
 
-Closure audit Phase 2.6 navíc našel chybějící lot ledger a přepis více corporate actions se
-stejným timestampem. Portfolio nyní alokuje výstupy FIFO, split upraví lot quantity/unit basis,
-akce jsou idempotentní a každý equity bod dokládá `equity = cash + market_value`. Objective
-zůstává konfigurovatelnou ranking heuristikou, nikoli tvrzením o statistické optimalitě; všechny
-eligibility hranice jsou inkluzivní. Demo guardraily se v reportu označují `NOT_EVALUATED`
-s důvodem místo prázdného výsledku.
+Opravená regrese metrik počítá exposure jako podíl oceňovacích timestampů, ve kterých existuje
+otevřená pozice. Dříve jej odvozovala z počtu fillů, takže pozdní jediný vstup nesprávně vykázal
+100% exposure a scale-in/out měnil jmenovatel bez vztahu k času.
 
-## Phase 3 data platform
+## Doporučená Phase 4 – Production Paper Trading & Risk Foundation
 
-Implementována je PostgreSQL-kompatibilní registry, Alembic initial migration, dataset/strategy
-identity, query API, leaderboard, comparison, lineage, reprodukční verifikace, CI a PostgreSQL
-Docker Compose. Trading worker a scheduler zůstávají mimo scope.
+Další etapa nemá rozšiřovat research strategie. Přesný doporučený scope je:
+
+1. zavést typované `RiskDecision`, `Order`, `PaperAccount`, `TradingCycle` a `AuditEvent`;
+2. rozšířit RiskEngine o portfolio exposure/leverage, concentration, denní loss/drawdown,
+   order-count a daily-notional limity, vždy fail-closed;
+3. odstranit hardcoded portfolio weight a propojit konstrukci s explicitními risk limity;
+4. persistovat paper orders/fills/positions/cash/cycles s FK, immutable identitou a transakcemi;
+5. implementovat idempotency keys, DB/advisory lock jednoho cycle a retry-safe submission;
+6. doplnit PaperBroker lifecycle minimálně pro market order, reject/cancel a deterministický
+   partial-fill model bez jakéhokoli live adapteru;
+7. implementovat trading cycle výhradně v toku Strategy → Portfolio → RiskEngine →
+   ExecutionEngine → PaperBroker, včetně stale-data guardu a restart reconciliation;
+8. přidat unit, SQLite integration, PostgreSQL integration a crash/retry/concurrency E2E testy;
+9. zdokumentovat risk pravidla, paper trading, provoz a live-safety boundary.
+
+Mimo Phase 4 zůstávají live broker, live credentials, Next.js dashboard a nové strategie.

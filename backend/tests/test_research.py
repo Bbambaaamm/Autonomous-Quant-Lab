@@ -127,6 +127,25 @@ def test_metrics_edge_cases_and_benchmark_alignment() -> None:
     assert benchmark_metrics(source)["total_return"] == pytest.approx(2 / 101)
 
 
+def test_exposure_uses_valuation_periods_instead_of_fill_count() -> None:
+    source = bars(4)
+    values = [(bar.timestamp, bar.close) for bar in source]
+    late_entry = Fill(
+        "late-entry",
+        "SPY",
+        Side.BUY,
+        Decimal("1"),
+        source[2].open,
+        Decimal("0"),
+        source[2].timestamp,
+        source[2].open,
+    )
+
+    metrics = calculate_metrics(values[0][1], values, [late_entry])
+
+    assert metrics.exposure == pytest.approx(0.5)
+
+
 def test_aggregate_benchmark_uses_only_oos_bars() -> None:
     source = bars(15)
     split = chronological_split(source, 0.4, 0.2)
