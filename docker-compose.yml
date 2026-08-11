@@ -1,0 +1,18 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: quantlab
+      POSTGRES_USER: quantlab
+      POSTGRES_HOST_AUTH_METHOD: trust
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - quantlab-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U quantlab -d quantlab"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+volumes:
+  quantlab-postgres:

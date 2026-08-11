@@ -61,3 +61,21 @@ jejich train/validation ParameterRunů i typovaných eligibility kontrol. Každ�
 status, pozorovanou hodnotu, práh a případný důvod; chybějící stabilitní sousedství se netváří jako
 běžné selhání, ale jako `not_evaluated`. Konzistenční test porovnává celý persisted snapshot s JSON
 reprezentací in-memory experimentu a ověřuje idempotenci i transakční rollback celé projekce.
+
+## Phase 3: production research data platform
+
+`DATABASE_URL` volí SQLite development adapter nebo PostgreSQL production adapter. Produkční
+bootstrap probíhá výhradně přes Alembic; `create_all` je izolován v testovacím helperu.
+
+```bash
+docker compose up -d postgres
+cd backend
+uv sync --all-groups
+uv run alembic -c ../alembic.ini upgrade head
+uv run pytest
+```
+
+Registry uchovává neměnnou identitu datasetu, verzi strategie, experiment, foldy, parameter runy,
+eligibility a leaderboard metriky. API nabízí stránkované/filtrované experimenty, leaderboard a
+comparison. Ranking je lexikografický: eligibility, kladné OOS, cost stress, stabilita, drawdown,
+Sharpe a deterministické ID; není predikcí budoucí ziskovosti.
