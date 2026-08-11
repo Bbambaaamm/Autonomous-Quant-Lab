@@ -1,4 +1,5 @@
 import hashlib
+import json
 from datetime import UTC, datetime, timedelta
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
@@ -15,6 +16,7 @@ from quantlab.automation import (
     JobType,
     LeaseLost,
     MisfirePolicy,
+    PermanentJobError,
     RunStatus,
     SchedulerService,
     ScheduleType,
@@ -44,6 +46,59 @@ def test_migration_revisions_own_only_their_tables() -> None:
     assert initial.INITIAL_TABLES.isdisjoint(phase5.TABLES)
     assert "scheduled_jobs" not in initial.INITIAL_TABLES
     assert "paper_accounts" not in initial.INITIAL_TABLES
+
+
+def test_legacy_snapshot_migration_separates_config_from_execution_identity() -> None:
+    root = Path(__file__).parents[2]
+    spec = spec_from_file_location(
+        "version_snapshot_migration",
+        root / "alembic/versions/20260811_04_version_job_run_snapshots.py",
+    )
+    assert spec is not None and spec.loader is not None
+    migration = module_from_spec(spec)
+    spec.loader.exec_module(migration)
+
+    legacy = json.dumps(
+        {
+            "dataset_path": "bars.csv",
+            "__automation_account_id": "user-config-value",
+            "snapshot_version": 1,
+            "identity": {"job_type": "user-config-value"},
+        }
+    )
+    migrated = json.loads(
+        migration.version_snapshot(
+            legacy,
+            account_id="paper-main",
+            job_type=JobType.RUN_PAPER_CYCLE,
+            strategy_id="moving_average:1.0.0",
+        )
+    )
+
+    assert migrated["snapshot_version"] == 1
+    assert migrated["identity"] == {
+        "account_id": "paper-main",
+        "job_type": JobType.RUN_PAPER_CYCLE,
+        "strategy_id": "moving_average:1.0.0",
+    }
+    assert migrated["config"] == json.loads(legacy)
+    assert json.loads(migration.legacy_snapshot(json.dumps(migrated))) == json.loads(legacy)
+
+
+def test_executor_rejects_unmigrated_legacy_snapshot(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    repository, _ = setup(tmp_path)
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+    job = repository.create_job(
+        job_type=JobType.RUN_RECONCILIATION,
+        account_id="paper-main",
+        schedule_type=ScheduleType.INTERVAL,
+        interval_seconds=60,
+        next_run_at=now,
+    )
+    legacy_run = JobRun(config_snapshot_json=json.dumps({"dataset_path": "legacy.csv"}))
+
+    with pytest.raises(PermanentJobError, match="legacy snapshot"):
+        JobExecutor(repository)(job, legacy_run)
 
 
 def setup(tmp_path):  # type: ignore[no-untyped-def]

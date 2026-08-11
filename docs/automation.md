@@ -4,6 +4,9 @@
 Occurrence `(job, scheduled_for)` nebo `(job, manual idempotency key)` je unikátní. Run drží
 neměnný config snapshot včetně accountu, typu jobu a strategie, scheduled decision time a
 correlation ID. Pozdější edit schedule proto nemění význam retry. Scheduler pouze zapisuje work.
+Snapshot má verzovanou obálku, která striktně odděluje `identity` od uživatelského `config`.
+Migrace `20260811_04` převede legacy runy podle jejich referencovaného ScheduledJob; runtime
+neznámý nebo neversionovaný formát odmítne a nikdy nepoužije mutable fallback.
 
 Worker claimuje deterministicky seřazený run, používá PostgreSQL `SKIP LOCKED`, lease a fencing.
 Heartbeat prodlužuje pouze dosud neexpirovaný lease současného tokenu; dokončení i failure

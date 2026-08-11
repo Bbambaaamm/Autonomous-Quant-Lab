@@ -7,6 +7,8 @@ lease nebo zapsat terminal state (CRITICAL). Materializovaný run nesnapshotoval
 strategy, takže edit schedule mohl změnit význam retry (HIGH). Souběžné stejné `run-now` se
 spoléhalo na constraint bez aplikačního rollback/recovery (MEDIUM). Všechny byly opraveny a dostaly
 regresní testy; manual run navíc nyní fail-closed odmítá deaktivovaný job.
+Následný review doplnil verzovanou snapshot obálku a datovou migraci legacy runů, aby dříve
+povolené konfigurační klíče nemohly být omylem interpretovány jako execution identita.
 
 ## Ověřené invarianty
 

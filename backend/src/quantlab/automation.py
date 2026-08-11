@@ -192,9 +192,7 @@ def validate_payload(payload: dict[str, Any]) -> None:
         value = stack.pop()
         if isinstance(value, dict):
             normalized_keys = {str(key).lower() for key in value}
-            if forbidden.intersection(normalized_keys) or any(
-                key.startswith("__automation_") for key in normalized_keys
-            ):
+            if forbidden.intersection(normalized_keys):
                 raise ValueError("Automation konfigurace nesmí obsahovat execution mode ani broker")
             stack.extend(value.values())
         elif isinstance(value, list):
@@ -406,15 +404,18 @@ class SchedulerService:
 
     @staticmethod
     def _snapshot(job: ScheduledJob) -> str:
-        payload = json.loads(job.config_json)
-        payload.update(
+        return json.dumps(
             {
-                "__automation_account_id": job.account_id,
-                "__automation_job_type": job.job_type,
-                "__automation_strategy_id": job.strategy_id,
-            }
+                "snapshot_version": 1,
+                "identity": {
+                    "account_id": job.account_id,
+                    "job_type": job.job_type,
+                    "strategy_id": job.strategy_id,
+                },
+                "config": json.loads(job.config_json),
+            },
+            sort_keys=True,
         )
-        return json.dumps(payload, sort_keys=True)
 
 
 class LeaseLost(RuntimeError):
@@ -438,10 +439,22 @@ class JobExecutor:
         self.reconciliation = ReconciliationService(phase4)
 
     def __call__(self, job: ScheduledJob, run: JobRun) -> dict[str, str | None]:
-        payload = json.loads(run.config_snapshot_json)
-        account_id = str(payload.pop("__automation_account_id", job.account_id))
-        job_type = str(payload.pop("__automation_job_type", job.job_type))
-        strategy_id = payload.pop("__automation_strategy_id", job.strategy_id)
+        snapshot = json.loads(run.config_snapshot_json)
+        if not isinstance(snapshot, dict) or snapshot.get("snapshot_version") != 1:
+            raise PermanentJobError("JobRun používá nepodporovaný legacy snapshot")
+        identity = snapshot.get("identity")
+        payload = snapshot.get("config")
+        if not isinstance(identity, dict) or not isinstance(payload, dict):
+            raise PermanentJobError("JobRun obsahuje neplatný immutable snapshot")
+        account_id = identity.get("account_id")
+        job_type = identity.get("job_type")
+        strategy_id = identity.get("strategy_id")
+        if (
+            not isinstance(account_id, str)
+            or not isinstance(job_type, str)
+            or (strategy_id is not None and not isinstance(strategy_id, str))
+        ):
+            raise PermanentJobError("JobRun obsahuje neplatnou execution identitu")
         validate_payload(payload)
         connection = self.trading.repository.engine.connect()
         advisory_lock_acquired = False
