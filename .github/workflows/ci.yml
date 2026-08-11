@@ -9,8 +9,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
-      # Repository zatím nemá lockfile; --locked proto ukončoval každý CI job kódem 2.
-      - run: uv sync --all-groups
+      - run: uv lock --check
+      - run: uv sync --locked --all-groups
       - run: uv run ruff format --check .
       - run: uv run ruff check .
       - run: uv run mypy src/quantlab
@@ -20,7 +20,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
-      - run: uv sync --all-groups
+      - run: uv sync --locked --all-groups
       - run: uv run pytest -q tests/test_research.py tests/test_research_engine.py
   api:
     runs-on: ubuntu-latest
@@ -28,7 +28,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
-      - run: uv sync --all-groups
+      - run: uv sync --locked --all-groups
       - run: uv run pytest -q tests/test_vertical_slice.py
   integration-postgres:
     runs-on: ubuntu-latest
@@ -46,7 +46,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
-      - run: uv sync --all-groups
+      - run: uv sync --locked --all-groups
         working-directory: backend
       - run: uv run alembic -c ../alembic.ini upgrade head
         working-directory: backend
