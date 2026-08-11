@@ -100,10 +100,15 @@ class Lot:
 
 
 class PortfolioConstructor:
+    def __init__(self, max_target_weight: Decimal = Decimal("0.25")) -> None:
+        if not Decimal("0") <= max_target_weight <= Decimal("1"):
+            raise ValueError("Maximální target weight musí být v intervalu 0 až 1")
+        self.max_target_weight = max_target_weight
+
     def create_order(
         self, target: TargetPosition, portfolio: Portfolio, price: Decimal, when: object
     ) -> OrderIntent | None:
-        capped_weight = min(target.weight, Decimal("0.25"))
+        capped_weight = min(target.weight, self.max_target_weight)
         equity = portfolio.cash + portfolio.positions.get(target.symbol, Decimal("0")) * price
         desired = (equity * capped_weight / price).to_integral_value(rounding=ROUND_DOWN)
         current = portfolio.positions.get(target.symbol, Decimal("0"))

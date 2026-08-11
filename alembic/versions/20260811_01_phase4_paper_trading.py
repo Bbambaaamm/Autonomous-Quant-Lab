@@ -1,19 +1,20 @@
-"""Zavedení produkční research registry.
+"""Persistentní paper trading a risk základ Phase 4.
 
-Revision ID: 20260810_01
-Revises:
+Revision ID: 20260811_01
+Revises: 20260810_01
 """
 
 from alembic import op
 
 from quantlab.persistence import Base
+import quantlab.phase4  # noqa: F401, E402
 
-revision = "20260810_01"
-down_revision = None
+revision = "20260811_01"
+down_revision = "20260810_01"
 branch_labels = None
 depends_on = None
 
-PHASE4_TABLES = {
+TABLES = {
     "paper_accounts",
     "paper_positions",
     "trading_cycles",
@@ -29,14 +30,12 @@ PHASE4_TABLES = {
 def upgrade() -> None:
     bind = op.get_bind()
     for table in Base.metadata.sorted_tables:
-        if table.name in PHASE4_TABLES:
-            continue
-        table.create(bind, checkfirst=False)
+        if table.name in TABLES:
+            table.create(bind, checkfirst=False)
 
 
 def downgrade() -> None:
     bind = op.get_bind()
     for table in reversed(Base.metadata.sorted_tables):
-        if table.name in PHASE4_TABLES:
-            continue
-        table.drop(bind, checkfirst=False)
+        if table.name in TABLES:
+            table.drop(bind, checkfirst=False)
