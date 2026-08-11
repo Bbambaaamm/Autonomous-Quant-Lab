@@ -24,3 +24,27 @@ run unit and relevant integration tests, and update documentation.
 - Add regression tests for defects and explicit future-data leakage tests.
 - CI and development use only `PaperBroker`.
 - Live trading requires independent mode, enablement, and confirmation gates and fails closed.
+
+## Dependency and uv.lock policy
+- `backend/uv.lock` must be committed and is the authoritative dependency lockfile.
+- Never manually edit URLs, hashes, or package entries in `backend/uv.lock`; only `uv` may
+  generate the lockfile.
+- Every dependency change in `backend/pyproject.toml` must be followed by the commands below
+  and the relevant tests:
+
+  ```bash
+  cd backend
+  uv lock
+  uv lock --check
+  uv sync --locked --all-groups
+  ```
+
+- A changed `backend/uv.lock` may be committed only after
+  `uv sync --locked --all-groups` succeeds in the same environment.
+- If package registry or PyPI access is unavailable, do not generate or commit a new lockfile
+  from partial or fallback metadata. Report dependency verification as
+  `BLOCKED BY ENVIRONMENT`.
+- A dependency task is not `COMPLETE` until both `uv lock --check` and
+  `uv sync --locked --all-groups` succeed.
+- Do not add a dependency when the existing stack can reasonably solve the problem. Every new
+  dependency requires a concrete justification.

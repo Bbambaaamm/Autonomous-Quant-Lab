@@ -2,36 +2,76 @@ name: CI
 on: [push, pull_request]
 permissions:
   contents: read
+
+env:
+  PYTHON_VERSION: "3.12"
+  UV_VERSION: "0.12.3"
+
 jobs:
   quality:
     runs-on: ubuntu-latest
     defaults: {run: {working-directory: backend}}
     steps:
       - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: ${{ env.UV_VERSION }}
+          working-directory: backend
+          cache-dependency-glob: |
+            backend/pyproject.toml
+            backend/uv.lock
+      - run: uv --version
       - run: uv lock --check
       - run: uv sync --locked --all-groups
       - run: uv run ruff format --check .
       - run: uv run ruff check .
       - run: uv run mypy src/quantlab
+
   unit-research:
     runs-on: ubuntu-latest
     defaults: {run: {working-directory: backend}}
     steps:
       - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: ${{ env.UV_VERSION }}
+          working-directory: backend
+          cache-dependency-glob: |
+            backend/pyproject.toml
+            backend/uv.lock
       - run: uv sync --locked --all-groups
       - run: uv run pytest -q tests/test_research.py tests/test_research_engine.py
+
   api:
     runs-on: ubuntu-latest
     defaults: {run: {working-directory: backend}}
     steps:
       - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: ${{ env.UV_VERSION }}
+          working-directory: backend
+          cache-dependency-glob: |
+            backend/pyproject.toml
+            backend/uv.lock
       - run: uv sync --locked --all-groups
       - run: uv run pytest -q tests/test_vertical_slice.py
+
   integration-postgres:
     runs-on: ubuntu-latest
+    defaults: {run: {working-directory: backend}}
     services:
       postgres:
         image: postgres:17-alpine
@@ -45,10 +85,17 @@ jobs:
       RUN_POSTGRES_TESTS: "1"
     steps:
       - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: ${{ env.UV_VERSION }}
+          working-directory: backend
+          cache-dependency-glob: |
+            backend/pyproject.toml
+            backend/uv.lock
       - run: uv sync --locked --all-groups
-        working-directory: backend
       - run: uv run alembic -c ../alembic.ini upgrade head
-        working-directory: backend
       - run: uv run pytest -q tests/test_phase3_platform.py
-        working-directory: backend

@@ -14,6 +14,27 @@ uv run uvicorn quantlab.api:app --reload
 
 Otevřete <http://127.0.0.1:8000>. Testy a kontroly: `make test`.
 
+## Závislosti a lockfile
+
+Projekt vyžaduje `uv 0.12.3`; verze je vynucena konfigurací backendu a stejně připnuta v CI.
+Commitnutý `backend/uv.lock` je autoritativní. Pro běžnou instalaci bez změny závislostí použijte
+pouze uzamčenou synchronizaci:
+
+```bash
+cd backend
+uv sync --locked --all-groups
+```
+
+Při záměrné změně závislostí v `backend/pyproject.toml` regenerujte lockfile výhradně pomocí `uv`
+a před commitem ověřte jeho konzistenci i úplnou instalaci:
+
+```bash
+cd backend
+uv lock
+uv lock --check
+uv sync --locked --all-groups
+```
+
 ## Bezpečnost
 
 Projekt implementuje výhradně `PaperBroker`. Výchozí a demo režim je paper, bez možnosti
