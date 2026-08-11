@@ -288,6 +288,10 @@ def test_retry_uses_materialized_account_strategy_and_job_type_snapshot(tmp_path
         stored_job.job_type = JobType.RUN_PAPER_CYCLE
         stored_job.strategy_id = "changed-strategy"
         session.commit()
+        # Commit standardně expiruje ORM atributy; před detach je explicitně znovu načteme,
+        # aby test předával executorovi stejný plně materializovaný objekt jako worker.
+        session.refresh(stored_job)
+        session.refresh(run)
         session.expunge(stored_job)
         session.expunge(run)
     executor = JobExecutor(repository)
