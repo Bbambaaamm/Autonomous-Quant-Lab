@@ -439,11 +439,22 @@ class JobExecutor:
                 raise PermanentJobError("Neplatná konfigurace paper cycle") from exc
             symbol = str(payload.get("symbol", "SPY"))
             decision_time = utc(run.scheduled_for)
-            bars = CSVMarketDataProvider(Path(path)).load(symbol, end=decision_time)
-            if not bars:
+            available_bars = CSVMarketDataProvider(Path(path)).load(symbol)
+            execution_index = next(
+                (
+                    index
+                    for index, bar in enumerate(available_bars)
+                    if bar.timestamp > decision_time
+                ),
+                None,
+            )
+            if execution_index == 0:
                 raise PermanentJobError("K decision time nejsou dostupná žádná market data")
-            if any(bar.timestamp > decision_time for bar in bars):
-                raise PermanentJobError("Market data obsahují hodnotu po decision time")
+            if execution_index is None:
+                raise PermanentJobError("Po decision time chybí následující executable bar")
+            # Close-derived rozhodnutí smí použít pouze historii k decision time a první
+            # následující bar pro fill; pozdější bary do cycle vstupů nepatří.
+            bars = available_bars[: execution_index + 1]
             cycle_id = self.trading.run(
                 job.account_id,
                 job.strategy_id or "",

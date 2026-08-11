@@ -2,7 +2,7 @@ import os
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from threading import Barrier
+from threading import Barrier, Event
 from uuid import uuid4
 
 import pytest
@@ -96,6 +96,9 @@ def test_postgres_concurrent_schedulers_materialize_one_occurrence() -> None:
         assert stored_job.next_run_at == due + timedelta(seconds=60)
         # Neověřujeme jen constraint: session je po konkurenčním ticku dále použitelná.
         assert session.scalar(select(func.count()).select_from(ScheduledJob)) >= 1
+        runs[0].status = RunStatus.CANCELLED
+        runs[0].finished_at = datetime.now(UTC)
+        session.commit()
 
 
 def test_postgres_two_workers_claim_exactly_one_execution_owner() -> None:
@@ -129,8 +132,8 @@ def test_postgres_two_workers_claim_exactly_one_execution_owner() -> None:
 def market_data(path: Path, decision_time: datetime) -> None:
     path.write_text(
         "symbol,timestamp,open,high,low,close,volume,adjusted_close,source,timeframe\n"
-        f"SPY,{(decision_time - timedelta(days=1)).isoformat()},100,102,99,101,10000,101,test,1d\n"
-        f"SPY,{decision_time.isoformat()},100,102,99,101,10000,101,test,1d\n",
+        f"SPY,{decision_time.isoformat()},100,102,99,101,10000,101,test,1d\n"
+        f"SPY,{(decision_time + timedelta(days=1)).isoformat()},100,102,99,101,10000,101,test,1d\n",
         encoding="utf-8",
     )
 
@@ -240,7 +243,7 @@ def test_postgres_recovers_crash_after_economic_commit(tmp_path: Path) -> None:
                     ReconciliationRecord.status == "SUCCEEDED",
                 )
             )
-            >= 2
+            == 1
         )
 
 
@@ -264,10 +267,32 @@ def test_postgres_account_lock_serializes_cycle_and_reconciliation(tmp_path: Pat
         session.expunge(reconciliation_run)
     executor_a = JobExecutor(AutomationRepository(str(repo.engine.url)))
     executor_b = JobExecutor(AutomationRepository(str(repo.engine.url)))
-    results = concurrent_calls(
-        lambda: executor_a(paper, paper_run),
-        lambda: executor_b(reconciliation, reconciliation_run),
-    )
+    cycle_entered = Event()
+    release_cycle = Event()
+    reconciliation_entered = Event()
+    original_cycle_run = executor_a.trading.run
+    original_reconcile = executor_b.reconciliation.reconcile
+
+    def held_cycle(*args, **kwargs):  # type: ignore[no-untyped-def]
+        cycle_entered.set()
+        assert release_cycle.wait(timeout=5)
+        return original_cycle_run(*args, **kwargs)
+
+    def observed_reconciliation(*args, **kwargs):  # type: ignore[no-untyped-def]
+        reconciliation_entered.set()
+        return original_reconcile(*args, **kwargs)
+
+    executor_a.trading.run = held_cycle  # type: ignore[method-assign]
+    executor_b.reconciliation.reconcile = observed_reconciliation  # type: ignore[method-assign]
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        cycle_future = pool.submit(executor_a, paper, paper_run)
+        assert cycle_entered.wait(timeout=5)
+        reconciliation_future = pool.submit(executor_b, reconciliation, reconciliation_run)
+        # Druhý executor nesmí vstoupit do reconciliation, dokud první drží account lock.
+        assert not reconciliation_entered.wait(timeout=0.5)
+        release_cycle.set()
+        results = [cycle_future.result(timeout=15), reconciliation_future.result(timeout=15)]
+    assert reconciliation_entered.is_set()
     assert {result["outcome"] for result in results} == {"PROCESSED", "SUCCEEDED"}
     with Session(repo.engine) as session:
         assert (

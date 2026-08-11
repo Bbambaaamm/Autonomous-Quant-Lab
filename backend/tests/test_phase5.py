@@ -249,13 +249,14 @@ def test_reclaim_closes_superseded_attempt(tmp_path) -> None:  # type: ignore[no
         assert old_attempt.retryable is True
 
 
-def test_executor_bounds_bars_and_rejects_incomplete_cycle(tmp_path) -> None:  # type: ignore[no-untyped-def]
+def test_executor_uses_only_first_bar_after_decision_and_rejects_incomplete_cycle(tmp_path) -> None:  # type: ignore[no-untyped-def]
     repository, _ = setup(tmp_path)
     csv_path = tmp_path / "bars.csv"
     csv_path.write_text(
         "symbol,timestamp,open,high,low,close,volume,adjusted_close,source,timeframe\n"
         "SPY,2026-01-01T20:00:00+00:00,100,101,99,100,1000,100,test,1d\n"
-        "SPY,2026-01-02T20:00:00+00:00,200,201,199,200,1000,200,test,1d\n",
+        "SPY,2026-01-02T20:00:00+00:00,200,201,199,200,1000,200,test,1d\n"
+        "SPY,2026-01-03T20:00:00+00:00,300,301,299,300,1000,300,test,1d\n",
         encoding="utf-8",
     )
     decision_time = datetime(2026, 1, 1, 20, tzinfo=UTC)
@@ -303,4 +304,4 @@ def test_executor_bounds_bars_and_rejects_incomplete_cycle(tmp_path) -> None:  #
     executor.trading.run = incomplete_run  # type: ignore[method-assign]
     with pytest.raises(TransientJobError, match="stále RUNNING"):
         executor(job, run)
-    assert observed_timestamps == [decision_time]
+    assert observed_timestamps == [decision_time, decision_time + timedelta(days=1)]
