@@ -1,4 +1,5 @@
 from datetime import UTC, datetime
+from decimal import Decimal
 from pathlib import Path
 from typing import Annotated
 
@@ -7,8 +8,19 @@ from fastapi.responses import HTMLResponse
 
 from quantlab.backtest import serialize_result
 from quantlab.config import get_settings
-from quantlab.demo import run_demo
+from quantlab.demo import load_fixture, run_demo
 from quantlab.persistence import RunRepository
+from quantlab.phase4 import (
+    AuditEventRecord,
+    PaperOrderRecord,
+    Phase4Repository,
+    ReconciliationRecord,
+    ReconciliationService,
+    RiskDecisionRecord,
+    RiskEventRecord,
+    TradingCycleRecord,
+    TradingCycleService,
+)
 from quantlab.research_service import ResearchService
 
 app = FastAPI(title="Autonomous Quant Lab", version="0.1.0")
@@ -18,11 +30,129 @@ repository = RunRepository(
 )
 fixture = Path(__file__).parents[2] / "tests" / "fixtures" / "sample_market_data.csv"
 research_service = ResearchService(repository)
+paper_repository = Phase4Repository(settings.database_url, bootstrap_test_schema=False)
+paper_repository.seed_account()
+trading_service = TradingCycleService(paper_repository)
+reconciliation_service = ReconciliationService(paper_repository)
+
+
+def _row(row: object) -> dict[str, object]:
+    return {key: value for key, value in vars(row).items() if not key.startswith("_")}
 
 
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok", "trading_mode": "paper", "live_trading_enabled": "false"}
+
+
+@app.get("/paper/account")
+@app.get("/portfolio")
+def paper_account() -> dict[str, object]:
+    return vars(paper_repository.account("paper-main"))
+
+
+@app.get("/positions")
+def paper_positions() -> list[dict[str, object]]:
+    return [vars(position) for position in paper_repository.positions("paper-main")]
+
+
+@app.get("/orders")
+def paper_orders(
+    limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=0)
+) -> list[dict[str, object]]:
+    return [_row(row) for row in paper_repository.page(PaperOrderRecord, limit, offset)]
+
+
+@app.get("/orders/{order_id}")
+def paper_order(order_id: str) -> dict[str, object]:
+    order = trading_service.broker.get_order(order_id)
+    if order is None:
+        raise HTTPException(status_code=404, detail="Příkaz nebyl nalezen")
+    return _row(order)
+
+
+@app.get("/risk/status")
+def risk_status() -> dict[str, object]:
+    account = paper_repository.account("paper-main")
+    return {"account_id": account.id, "trading_state": account.trading_state}
+
+
+@app.get("/risk/events")
+def risk_events(
+    limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=0)
+) -> list[dict[str, object]]:
+    return [_row(row) for row in paper_repository.page(RiskEventRecord, limit, offset)]
+
+
+@app.get("/risk/decisions")
+def risk_decisions(
+    limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=0)
+) -> list[dict[str, object]]:
+    return [_row(row) for row in paper_repository.page(RiskDecisionRecord, limit, offset)]
+
+
+@app.post("/risk/halt")
+def risk_halt() -> dict[str, str]:
+    paper_repository.halt("paper-main", "manual API halt", str(datetime.now(UTC).timestamp()))
+    return {"trading_state": "HALTED"}
+
+
+@app.post("/risk/resume")
+def risk_resume() -> dict[str, str]:
+    try:
+        paper_repository.resume("paper-main", str(datetime.now(UTC).timestamp()))
+    except PermissionError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {"trading_state": "NORMAL"}
+
+
+@app.get("/trading/cycles")
+def trading_cycles(
+    limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=0)
+) -> list[dict[str, object]]:
+    return [_row(row) for row in paper_repository.page(TradingCycleRecord, limit, offset)]
+
+
+@app.get("/trading/cycles/{cycle_id}")
+def trading_cycle(cycle_id: str) -> dict[str, object]:
+    rows = paper_repository.page(TradingCycleRecord, 200, 0)
+    row = next((item for item in rows if _row(item).get("id") == cycle_id), None)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Cycle nebyl nalezen")
+    return _row(row)
+
+
+@app.post("/trading/cycles/run-paper")
+def run_paper_cycle() -> dict[str, str]:
+    bars = load_fixture(fixture)
+    cycle_id = trading_service.run(
+        "paper-main",
+        "moving_average:1.0.0",
+        bars[-2:],
+        {"SPY": Decimal("0.10")},
+        bars[-1].timestamp.date(),
+        bars[-2].timestamp,
+    )
+    return {"id": cycle_id, "mode": "paper"}
+
+
+@app.get("/audit")
+def audit(
+    limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=0)
+) -> list[dict[str, object]]:
+    return [_row(row) for row in paper_repository.page(AuditEventRecord, limit, offset)]
+
+
+@app.get("/reconciliation/status")
+def reconciliation_status(
+    limit: int = Query(1, ge=1, le=200), offset: int = Query(0, ge=0)
+) -> list[dict[str, object]]:
+    return [_row(row) for row in paper_repository.page(ReconciliationRecord, limit, offset)]
+
+
+@app.post("/reconciliation/run")
+def reconciliation_run() -> dict[str, object]:
+    return vars(reconciliation_service.reconcile("paper-main"))
 
 
 @app.post("/api/backtests/demo")

@@ -101,3 +101,8 @@ Registry uchovává neměnnou identitu datasetu, verzi strategie, experiment, fo
 eligibility a leaderboard metriky. API nabízí stránkované/filtrované experimenty, leaderboard a
 comparison. Ranking je lexikografický: eligibility, kladné OOS, cost stress, stabilita, drawdown,
 Sharpe a deterministické ID; není predikcí budoucí ziskovosti.
+
+
+## Phase 4: production paper foundation
+
+Persistentní účet, MARKET/LIMIT orders, partial fills, FIFO pozice, portfolio risk, idempotentní cycle, kill switch, reconciliation a audit jsou dostupné přes `/paper/account`, `/portfolio`, `/positions`, `/orders`, `/risk/*`, `/trading/cycles/*`, `/audit` a `/reconciliation/*`. Vše je pouze paper; live broker ani live order path neexistují.

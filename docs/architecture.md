@@ -89,3 +89,7 @@ restrict FK; fold, ParameterRun a eligibility check mají explicitní FK a unik�
 Aggregate OOS metriky jsou explicitní sloupce, úplný snapshot zůstává autoritativní. Registry
 neukládá market bary, pouze identitu, rozsah, metadata a storage referenci. Redis a worker nejsou
 součástí Phase 3.
+
+## Phase 4 paper runtime
+
+`TradingCycleService` vlastní tok validation → target-vs-actual → `ProductionRiskEngine` → `PersistentPaperBroker` → reconciliation. Broker vyžaduje APPROVED/MODIFIED decision stejného intentu. Cycle, client-order, decision a fill identity chrání DB constraints. Fill, cash, FIFO position, order a audit jsou jedna transakce; divergence persistuje `HALTED`.

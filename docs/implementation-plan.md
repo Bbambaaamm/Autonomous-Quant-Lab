@@ -1,4 +1,6 @@
-# Implementační plán po verification gate Phase 3
+# Implementační plán po Phase 4
+
+Phase 4 Production Paper Trading & Risk Foundation je dokončena: persistentní risk, paper broker, idempotentní cycle, reconciliation, audit a API.
 
 Stavy níže popisují skutečný stav vůči celému `CODEX_MASTER_PROMPT.md`, nikoli jen vůči
 dílčímu scope dosavadního milníku. Audit Phase 3 skončil **PASS WITH FIXES**: opravil metriku
@@ -8,22 +10,22 @@ tvrzení o CI, Dockeru, PostgreSQL a Alembicu.
 | Fáze / oblast | Stav | Implementováno | Konkrétní remaining scope |
 |---|---|---|---|
 | 0 Repository bootstrap | PARTIAL | Python package, AGENTS, Makefile, základní konfigurace a commitnutý `uv.lock` | doplnit licence a úplnou cílovou monorepo strukturu |
-| 1 Domain model | PARTIAL | UTC Bar, target, order, fill a corporate action | úplné modely instrumentu, portfolia, risk rozhodnutí, účtu, cycle a audit eventu |
+| 1 Domain model | PARTIAL | UTC Bar, target, order/fill, risk decision, paper account, cycle, reconciliation a audit | úplné modely quote, market calendar a multi-asset portfolio |
 | 2 Market data | PARTIAL | CSV/Parquet, content hash, quality kontroly, jednoduchý kalendář | reálný provider, quote/metadata API, úplný exchange kalendář, DB quality events a point-in-time universe |
 | 3 Strategy framework | PARTIAL | společný interface/factory, MA, buy-and-hold, Donchian | TSMOM, cross-sectional momentum, mean reversion, pairs, multi-asset context a deklarace podpor |
 | 4 Backtesting | PARTIAL | next-open, raw fill/adjusted signal, FIFO, náklady, slippage, split/dividenda | multi-symbol portfolio, spread, limit/partial fill, další sizing a úplná sada metrik/benchmark statistik |
 | 5 Validation | PARTIAL | chronologický split, walk-forward train/validation/OOS, one-shot OOS | embargo/purge dle potřeby, richer OOS reporty a statistické testy |
 | 6 Research automation | PARTIAL | grid, runner, cost stress, seedované Monte Carlo, stabilita, eligibility | distribuované/background běhy, experiment queue, report artefakty a více strategií/universe |
-| 7 Portfolio & Risk | PARTIAL | long-only konstrukce, symbol allowlist, per-order notional a kill switch | portfolio/exposure/leverage, concentration, drawdown/loss, order-count a denní notional limity; risk audit decisions |
-| 8 Paper Broker | PARTIAL | deterministické market next-open fills, komise/slippage, portfolio accounting | order lifecycle, limit/cancel/partial fills, account P&L, persistence a reconciliation |
-| 9 Automated trading cycle | NOT STARTED | žádný runtime trading cycle | scheduler/worker, idempotency keys, DB locks, stale-data guard, reconciliation a audit trail |
-| 10 REST API | PARTIAL | health, demo, stránkované experimenty, leaderboard, comparison, lineage | doménové CRUD, paper account/cycle endpoints, auth, stabilní schemas a rozšířená OpenAPI |
+| 7 Portfolio & Risk | COMPLETE | konfigurovatelné portfolio a denní limity, decisions, halt | short/multi-asset rozšíření je budoucí scope |
+| 8 Paper Broker | COMPLETE | persistentní MARKET/LIMIT, partial fill, cancel, FIFO, costs a reconciliation | pokročilá mikrostruktura není cílem EOD modelu |
+| 9 Automated trading cycle | COMPLETE | target-vs-actual, DB uniqueness, recovery-safe submission, reconciliation a audit | komplexní scheduler/worker je mimo Phase 4 |
+| 10 REST API | PARTIAL | research plus paper account/portfolio/orders/risk/cycle/audit/reconciliation endpointy | auth, stabilní schemas a rozšířená OpenAPI |
 | 11 Web dashboard | PARTIAL | minimální server-rendered demo stránka | Next.js/React/Tailwind aplikace, grafy a research/paper/risk obrazovky |
-| 12 Observability | NOT STARTED | pouze několik standardních log záznamů | structured logging, correlation IDs, metrics, alerting a job/cycle health |
+| 12 Observability | PARTIAL | persistentní audit s correlation/cycle/account/order identitou | metrics, alerting a centralizované logování |
 | 13 Security | PARTIAL | žádný live broker, paper-only cesta, bezpečné env defaults, loopback DB | auth/RBAC, secret management, dependency/SAST scan, rate limits a produkční hardening |
 | 14 CI/CD & infrastructure | PARTIAL | GitHub Actions quality/unit/API/PostgreSQL job, locked dependency sync, PostgreSQL Compose healthcheck a Alembic upgrade | aplikační image/service/healthcheck, Redis/worker a deploy pipeline |
-| 15 Dokumentace | PARTIAL | README, architecture, database, registry, methodology a reproducibility | domain/backtest/strategy/risk/paper/live-safety/operations/troubleshooting dokumenty |
-| 16 End-to-end verification | PARTIAL | fixture→research/API testy a PostgreSQL integrační job | úplný master demo scénář, paper-cycle/restart/reconciliation E2E a provozní acceptance |
+| 15 Dokumentace | PARTIAL | README, architecture, database, risk, paper, live-safety, operations a reproducibility | domain/backtest/strategy/troubleshooting dokumenty |
+| 16 End-to-end verification | PARTIAL | fixture→research, paper-cycle idempotence/concurrency/reconciliation a PostgreSQL CI | dashboard a distribuovaný provozní acceptance |
 
 ## Uzavření Phase 3
 
