@@ -1,0 +1,54 @@
+name: CI
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    defaults: {run: {working-directory: backend}}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      # Repository zatím nemá lockfile; --locked proto ukončoval každý CI job kódem 2.
+      - run: uv sync --all-groups
+      - run: uv run ruff format --check .
+      - run: uv run ruff check .
+      - run: uv run mypy src/quantlab
+  unit-research:
+    runs-on: ubuntu-latest
+    defaults: {run: {working-directory: backend}}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --all-groups
+      - run: uv run pytest -q tests/test_research.py tests/test_research_engine.py
+  api:
+    runs-on: ubuntu-latest
+    defaults: {run: {working-directory: backend}}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --all-groups
+      - run: uv run pytest -q tests/test_vertical_slice.py
+  integration-postgres:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env: {POSTGRES_DB: quantlab, POSTGRES_USER: quantlab, POSTGRES_HOST_AUTH_METHOD: trust}
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U quantlab -d quantlab"
+          --health-interval 5s --health-timeout 3s --health-retries 12
+    env:
+      DATABASE_URL: postgresql+psycopg://quantlab@localhost:5432/quantlab
+      RUN_POSTGRES_TESTS: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --all-groups
+        working-directory: backend
+      - run: uv run alembic -c ../alembic.ini upgrade head
+        working-directory: backend
+      - run: uv run pytest -q tests/test_phase3_platform.py
+        working-directory: backend

@@ -43,3 +43,9 @@ akce jsou idempotentní a každý equity bod dokládá `equity = cash + market_v
 zůstává konfigurovatelnou ranking heuristikou, nikoli tvrzením o statistické optimalitě; všechny
 eligibility hranice jsou inkluzivní. Demo guardraily se v reportu označují `NOT_EVALUATED`
 s důvodem místo prázdného výsledku.
+
+## Phase 3 data platform
+
+Implementována je PostgreSQL-kompatibilní registry, Alembic initial migration, dataset/strategy
+identity, query API, leaderboard, comparison, lineage, reprodukční verifikace, CI a PostgreSQL
+Docker Compose. Trading worker a scheduler zůstávají mimo scope.

@@ -79,3 +79,12 @@ Eligibility check je doménový typ se stavem `passed`, `failed` nebo `not_evalu
 hodnotou, prahem a důvodem. Odvozená boolean mapa zůstává pouze kompatibilním read-only pohledem.
 Experiment, foldy, ParameterRuny a kontroly se materializují v jedné SQLAlchemy session a jednom
 commitu; výjimka před commitem ukončí session s rollbackem celé projekce.
+
+## Phase 3 registry a lineage
+
+`DatasetRecord ← ResearchExperiment → StrategyRecord` tvoří kořen lineage. PostgreSQL je produkční
+cíl, SQLite testovací adapter a Alembic jediná produkční bootstrap cesta. Experiment chrání
+restrict FK; fold, ParameterRun a eligibility check mají explicitní FK a unikátní constraints.
+Aggregate OOS metriky jsou explicitní sloupce, úplný snapshot zůstává autoritativní. Registry
+neukládá market bary, pouze identitu, rozsah, metadata a storage referenci. Redis a worker nejsou
+součástí Phase 3.
