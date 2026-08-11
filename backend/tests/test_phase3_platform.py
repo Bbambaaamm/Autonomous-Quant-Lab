@@ -1,6 +1,8 @@
+import importlib.util
 import json
 import os
 from datetime import UTC, datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 from sqlalchemy import inspect
@@ -120,3 +122,35 @@ def test_leaderboard_ranks_all_experiments_and_preserves_zero_metrics() -> None:
         session.commit()
     leaderboard = repository.leaderboard(limit=1)
     assert leaderboard[0]["id"] == f"{0:064d}"
+
+
+def test_phase4_audit_migration_skips_constraints_created_by_current_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = (
+        Path(__file__).parents[2]
+        / "alembic"
+        / "versions"
+        / "20260811_02_phase4_audit_constraints.py"
+    )
+    spec = importlib.util.spec_from_file_location("phase4_audit_constraints", path)
+    assert spec is not None and spec.loader is not None
+    migration = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(migration)
+    existing = {
+        "paper_orders": set(migration.ORDER_CONSTRAINTS),
+        "paper_fills": set(migration.FILL_CONSTRAINTS),
+    }
+
+    class FakeInspector:
+        def get_check_constraints(self, table_name: str) -> list[dict[str, str]]:
+            return [{"name": name} for name in existing[table_name]]
+
+    monkeypatch.setattr(migration, "inspect", lambda _: FakeInspector())
+    monkeypatch.setattr(migration.op, "get_bind", lambda: object())
+
+    def unexpected_batch(*_: object, **__: object) -> None:
+        raise AssertionError("Existující constraint se nesmí vytvářet znovu")
+
+    monkeypatch.setattr(migration.op, "batch_alter_table", unexpected_batch)
+    migration.upgrade()

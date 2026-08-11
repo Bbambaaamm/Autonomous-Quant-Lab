@@ -1,13 +1,15 @@
+import json
 import os
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
 import pytest
-from sqlalchemy import func, inspect, select
+from sqlalchemy import func, inspect, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from quantlab.data import dataset_identity
 from quantlab.domain import (
     Bar,
     OrderIntent,
@@ -23,6 +25,7 @@ from quantlab.phase4 import (
     AuditEventRecord,
     PaperFillRecord,
     PaperOrderRecord,
+    PersistentPaperBroker,
     Phase4Repository,
     PortfolioRiskSnapshot,
     ProductionRiskConfig,
@@ -31,8 +34,11 @@ from quantlab.phase4 import (
     RiskDecisionRecord,
     TradingCycleRecord,
     TradingCycleService,
+    cycle_input_fingerprint,
     deterministic_cycle_key,
+    order_intent_fingerprint,
 )
+from quantlab.trading import CostModel, FixedBpsSlippage
 
 NOW = datetime(2026, 8, 11, 20, tzinfo=UTC)
 
@@ -71,6 +77,12 @@ def intent(quantity: str = "10", side: Side = Side.BUY, symbol: str = "SPY") -> 
     return OrderIntent(symbol, side, Decimal(quantity), NOW, "test", "intent-1")
 
 
+@pytest.mark.parametrize("quantity", ["NaN", "Infinity", "-Infinity"])
+def test_order_intent_rejects_non_finite_quantity(quantity: str) -> None:
+    with pytest.raises(ValueError, match="Množství"):
+        intent(quantity)
+
+
 @pytest.mark.parametrize(
     ("changed", "reason"),
     [
@@ -92,6 +104,35 @@ def test_risk_rejects_invalid_and_limit_violations(
     )
     assert decision.status is RiskDecisionStatus.REJECTED
     assert reason in decision.reasons
+
+
+@pytest.mark.parametrize("equity", ["0", "-1", "NaN", "Infinity"])
+def test_risk_fails_closed_for_invalid_equity(equity: str) -> None:
+    decision = ProductionRiskEngine(ProductionRiskConfig()).evaluate(
+        intent(),
+        Decimal("100"),
+        snapshot(equity=Decimal(equity)),
+        "cycle",
+        "correlation",
+        NOW,
+        NOW,
+    )
+    assert decision.status is RiskDecisionStatus.REJECTED
+
+
+@pytest.mark.parametrize("field", ["positions", "pending"])
+def test_risk_rejects_non_finite_position_state_before_arithmetic(field: str) -> None:
+    decision = ProductionRiskEngine(ProductionRiskConfig()).evaluate(
+        intent(),
+        Decimal("100"),
+        snapshot(**{field: {"SPY": Decimal("NaN")}}),
+        "cycle",
+        "correlation",
+        NOW,
+        NOW,
+    )
+    assert decision.status is RiskDecisionStatus.REJECTED
+    assert decision.reasons == (RiskReason.INVALID_PRICE,)
 
 
 def test_halt_allows_only_risk_reducing_exit() -> None:
@@ -277,11 +318,29 @@ def test_limit_order_not_reached_then_filled_and_risk_cannot_be_bypassed() -> No
                 approved_quantity=decision.approved_quantity,
                 reasons_json="[]",
                 limits_json="{}",
-                portfolio_json="{}",
+                portfolio_json=json.dumps(
+                    {
+                        **decision.portfolio_snapshot,
+                        "order_intent_fingerprint": order_intent_fingerprint(order_intent),
+                    }
+                ),
                 correlation_id="correlation",
             )
         )
         session.commit()
+    forged = replace(decision, decision_id="forged-in-memory-approval")
+    with pytest.raises(PermissionError, match="persisted risk"):
+        service.broker.submit_order("paper-main", "fixture", order_intent, forged)
+    forged_intents = [
+        replace(order_intent, symbol="QQQ"),
+        replace(order_intent, side=Side.SELL),
+        replace(order_intent, order_type=OrderType.MARKET, limit_price=None),
+        replace(order_intent, limit_price=Decimal("97")),
+        replace(order_intent, decision_time=NOW + timedelta(microseconds=1)),
+    ]
+    for forged_intent in forged_intents:
+        with pytest.raises(PermissionError, match="persisted risk"):
+            service.broker.submit_order("paper-main", "fixture", forged_intent, decision)
     order = service.broker.submit_order("paper-main", "fixture", order_intent, decision)
     assert service.broker.process(order.id, bar(low="99")).filled_quantity == 0
     assert service.broker.process(order.id, bar(low="97")).status == OrderStatus.FILLED
@@ -339,7 +398,12 @@ def test_limit_order_not_reached_then_filled_and_risk_cannot_be_bypassed() -> No
                 approved_quantity=sell_decision.approved_quantity,
                 reasons_json="[]",
                 limits_json="{}",
-                portfolio_json="{}",
+                portfolio_json=json.dumps(
+                    {
+                        **sell_decision.portfolio_snapshot,
+                        "order_intent_fingerprint": order_intent_fingerprint(sell_intent),
+                    }
+                ),
                 correlation_id="correlation",
             )
         )
@@ -351,6 +415,57 @@ def test_limit_order_not_reached_then_filled_and_risk_cannot_be_bypassed() -> No
             select(PaperFillRecord.price).where(PaperFillRecord.order_id == sell_order.id)
         )
     assert sell_price == Decimal("100")
+
+
+def test_direct_broker_submission_cannot_bypass_persistent_halt() -> None:
+    repository = Phase4Repository()
+    repository.seed_account()
+    service = TradingCycleService(repository)
+    cycle_id = "halt-bypass-cycle"
+    order_intent = OrderIntent("SPY", Side.BUY, Decimal("1"), NOW, "test", "halt-intent")
+    decision = service.risk.evaluate(
+        order_intent, Decimal("100"), snapshot(), cycle_id, "halt-correlation", NOW, NOW
+    )
+    with Session(repository.engine) as session:
+        session.add(
+            TradingCycleRecord(
+                id=cycle_id,
+                cycle_key=cycle_id,
+                account_id="paper-main",
+                strategy_id="fixture",
+                session_date=date(2026, 8, 12),
+                started_at=NOW,
+                status=TradingCycleStatus.RUNNING,
+                correlation_id="halt-correlation",
+                data_fingerprint="x",
+            )
+        )
+        session.flush()
+        session.add(
+            RiskDecisionRecord(
+                id=decision.decision_id,
+                timestamp=NOW,
+                account_id="paper-main",
+                order_intent_id=order_intent.id,
+                trading_cycle_id=cycle_id,
+                status=decision.status,
+                original_quantity=decision.original_quantity,
+                approved_quantity=decision.approved_quantity,
+                reasons_json="[]",
+                limits_json="{}",
+                portfolio_json=json.dumps(
+                    {
+                        **decision.portfolio_snapshot,
+                        "order_intent_fingerprint": order_intent_fingerprint(order_intent),
+                    }
+                ),
+                correlation_id="halt-correlation",
+            )
+        )
+        session.commit()
+    repository.halt("paper-main", "audit", "halt-correlation")
+    with pytest.raises(PermissionError, match="HALTED"):
+        service.broker.submit_order("paper-main", "fixture", order_intent, decision)
 
 
 def test_reconciliation_mismatch_halts_and_blocks_resume() -> None:
@@ -379,6 +494,116 @@ def test_postgres_phase4_constraints_and_persistence() -> None:
         "risk_decisions",
         "trading_cycles",
     } <= names
+
+
+@pytest.mark.skipif(os.getenv("RUN_POSTGRES_TESTS") != "1", reason="vyžaduje PostgreSQL CI")
+def test_postgres_concurrent_cycle_has_one_economic_action() -> None:
+    url = os.environ["DATABASE_URL"]
+    account_id = f"phase4-concurrent-{os.getpid()}"
+    strategy_id = f"postgres-concurrent:{os.getpid()}"
+    repository = Phase4Repository(url, bootstrap_test_schema=False)
+    repository.seed_account(account_id)
+    bars = [
+        Bar(
+            "SPY",
+            NOW,
+            Decimal("100"),
+            Decimal("101"),
+            Decimal("99"),
+            Decimal("100"),
+            Decimal("10000"),
+            Decimal("100"),
+        ),
+        bar(volume="10000"),
+    ]
+
+    def run() -> str:
+        local = Phase4Repository(url, bootstrap_test_schema=False)
+        return TradingCycleService(
+            local, ProductionRiskConfig(max_single_order_pct=Decimal("0.20"))
+        ).run(account_id, strategy_id, bars, {"SPY": Decimal("0.10")}, date(2026, 8, 12), NOW)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        cycle_ids = list(executor.map(lambda _: run(), range(2)))
+    assert len(set(cycle_ids)) == 1
+    with Session(repository.engine) as session:
+        orders = session.scalars(
+            select(PaperOrderRecord).where(PaperOrderRecord.account_id == account_id)
+        ).all()
+        assert len(orders) == 1
+        assert (
+            session.scalar(
+                select(func.count(PaperFillRecord.id)).where(
+                    PaperFillRecord.order_id == orders[0].id
+                )
+            )
+            == 1
+        )
+
+
+def test_database_rejects_overfill_and_session_recovers() -> None:
+    repository = Phase4Repository()
+    repository.seed_account()
+    service = TradingCycleService(
+        repository, ProductionRiskConfig(max_single_order_pct=Decimal("0.20"))
+    )
+    bars = [
+        Bar(
+            "SPY",
+            NOW,
+            Decimal("100"),
+            Decimal("101"),
+            Decimal("99"),
+            Decimal("100"),
+            Decimal("10000"),
+            Decimal("100"),
+        ),
+        bar(volume="10000"),
+    ]
+    service.run("paper-main", "overfill:1", bars, {"SPY": Decimal("0.10")}, date(2026, 8, 12), NOW)
+    with Session(repository.engine) as session:
+        order_id = session.scalar(select(PaperOrderRecord.id))
+        assert order_id is not None
+        with pytest.raises(IntegrityError):
+            session.execute(
+                update(PaperOrderRecord)
+                .where(PaperOrderRecord.id == order_id)
+                .values(filled_quantity=Decimal("101"), remaining_quantity=Decimal("-1"))
+            )
+            session.commit()
+        session.rollback()
+        assert session.get(PaperOrderRecord, order_id) is not None
+
+
+def test_reconciliation_detects_order_status_corruption() -> None:
+    repository = Phase4Repository()
+    repository.seed_account()
+    service = TradingCycleService(
+        repository, ProductionRiskConfig(max_single_order_pct=Decimal("0.20"))
+    )
+    bars = [
+        Bar(
+            "SPY",
+            NOW,
+            Decimal("100"),
+            Decimal("101"),
+            Decimal("99"),
+            Decimal("100"),
+            Decimal("10000"),
+            Decimal("100"),
+        ),
+        bar(volume="10000"),
+    ]
+    service.run(
+        "paper-main", "status-corruption:1", bars, {"SPY": Decimal("0.10")}, date(2026, 8, 12), NOW
+    )
+    with Session(repository.engine) as session:
+        session.execute(update(PaperOrderRecord).values(status=OrderStatus.PARTIALLY_FILLED))
+        session.commit()
+    result = ReconciliationService(repository).reconcile("paper-main")
+    assert result.status.value == "FAILED"
+    assert "orders" in result.differences
+    assert repository.account("paper-main").trading_state is SystemTradingState.HALTED
 
 
 def test_concurrent_cycle_start_creates_one_cycle_and_order(tmp_path: object) -> None:
@@ -413,6 +638,49 @@ def test_concurrent_cycle_start_creates_one_cycle_and_order(tmp_path: object) ->
         assert session.scalar(select(func.count(PaperOrderRecord.id))) == 1
 
 
+def test_concurrent_cycle_rejects_worker_with_different_targets(tmp_path: object) -> None:
+    database = str(tmp_path) + "/phase4-different-inputs.db"
+    repository = Phase4Repository(f"sqlite:///{database}")
+    repository.seed_account()
+    bars = [
+        Bar(
+            "SPY",
+            NOW,
+            Decimal("100"),
+            Decimal("101"),
+            Decimal("99"),
+            Decimal("100"),
+            Decimal("10000"),
+            Decimal("100"),
+        ),
+        bar(volume="10000"),
+    ]
+
+    def run(weight: Decimal) -> str | ValueError:
+        local = Phase4Repository(f"sqlite:///{database}", bootstrap_test_schema=False)
+        try:
+            return TradingCycleService(
+                local, ProductionRiskConfig(max_single_order_pct=Decimal("0.20"))
+            ).run(
+                "paper-main",
+                "concurrent-inputs:1",
+                bars,
+                {"SPY": weight},
+                date(2026, 8, 12),
+                NOW,
+            )
+        except ValueError as error:
+            return error
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(run, [Decimal("0.10"), Decimal("0.11")]))
+    assert sum(isinstance(result, ValueError) for result in results) == 1
+    assert sum(isinstance(result, str) for result in results) == 1
+    with Session(repository.engine) as session:
+        assert session.scalar(select(func.count(TradingCycleRecord.id))) == 1
+        assert session.scalar(select(func.count(PaperOrderRecord.id))) == 1
+
+
 def test_expired_cycle_lease_is_recovered_after_crash() -> None:
     repository = Phase4Repository()
     repository.seed_account()
@@ -442,7 +710,7 @@ def test_expired_cycle_lease_is_recovered_after_crash() -> None:
                 started_at=NOW,
                 status=TradingCycleStatus.RUNNING,
                 correlation_id=cycle_key,
-                data_fingerprint=dataset_identity(bars),
+                data_fingerprint=cycle_input_fingerprint(bars, NOW, {"SPY": Decimal("0.10")}),
                 lease_owner="crashed-worker",
                 lease_expires_at=datetime.now(UTC) - timedelta(minutes=1),
             )
@@ -492,3 +760,153 @@ def test_daily_limits_use_execution_session_instead_of_decision_date() -> None:
             )
         ).one()
     assert RiskReason.DAILY_ORDER_LIMIT.value in rejected.reasons_json
+
+
+def test_cycle_retry_rejects_changed_market_snapshot_or_decision_time() -> None:
+    repository = Phase4Repository()
+    repository.seed_account()
+    service = TradingCycleService(
+        repository, ProductionRiskConfig(max_single_order_pct=Decimal("0.20"))
+    )
+    bars = [
+        Bar(
+            "SPY",
+            NOW,
+            Decimal("100"),
+            Decimal("101"),
+            Decimal("99"),
+            Decimal("100"),
+            Decimal("10000"),
+            Decimal("100"),
+        ),
+        bar(volume="10000"),
+    ]
+    service.run("paper-main", "inputs:1", bars, {"SPY": Decimal("0.10")}, date(2026, 8, 12), NOW)
+    changed = [bars[0], replace(bars[1], close=Decimal("100.5"), adjusted_close=Decimal("100.5"))]
+    with pytest.raises(ValueError, match="odlišná vstupní data"):
+        service.run(
+            "paper-main", "inputs:1", changed, {"SPY": Decimal("0.10")}, date(2026, 8, 12), NOW
+        )
+    with pytest.raises(ValueError, match="decision time"):
+        service.run(
+            "paper-main",
+            "inputs:1",
+            bars,
+            {"SPY": Decimal("0.10")},
+            date(2026, 8, 12),
+            NOW + timedelta(microseconds=1),
+        )
+    with pytest.raises(ValueError, match="odlišná vstupní data"):
+        service.run(
+            "paper-main",
+            "inputs:1",
+            bars,
+            {"SPY": Decimal("0.11")},
+            date(2026, 8, 12),
+            NOW,
+        )
+
+
+def test_persistent_fifo_accounting_matches_hand_calculation() -> None:
+    repository = Phase4Repository()
+    repository.seed_account(cash=Decimal("10000"))
+    broker = PersistentPaperBroker(
+        repository,
+        costs=CostModel(fixed=Decimal("1"), rate=Decimal("0"), minimum=Decimal("1")),
+        slippage=FixedBpsSlippage(Decimal("0")),
+        volume_fraction=Decimal("1"),
+    )
+    risk = ProductionRiskEngine(
+        ProductionRiskConfig(
+            max_single_order_pct=Decimal("1"),
+            max_position_pct=Decimal("1"),
+            max_single_order_notional=Decimal("10000"),
+        )
+    )
+
+    def execute(sequence: int, side: Side, quantity: str, price: str) -> None:
+        cycle_id = f"fifo-cycle-{sequence}"
+        order_intent = OrderIntent(
+            "SPY", side, Decimal(quantity), NOW, "fifo", f"fifo-intent-{sequence}"
+        )
+        account = repository.account("paper-main")
+        positions = {p.instrument_id: p.quantity for p in repository.positions("paper-main")}
+        decision = risk.evaluate(
+            order_intent,
+            Decimal(price),
+            snapshot(
+                cash=account.cash,
+                equity=account.equity,
+                high_water_mark=account.high_water_mark,
+                session_start_equity=account.equity,
+                positions=positions,
+            ),
+            cycle_id,
+            "fifo-correlation",
+            NOW,
+            NOW,
+        )
+        assert decision.status is RiskDecisionStatus.APPROVED
+        with Session(repository.engine) as session:
+            session.add(
+                TradingCycleRecord(
+                    id=cycle_id,
+                    cycle_key=cycle_id,
+                    account_id="paper-main",
+                    strategy_id="fifo",
+                    session_date=date(2026, 8, 12),
+                    started_at=NOW,
+                    status=TradingCycleStatus.RUNNING,
+                    correlation_id="fifo-correlation",
+                    data_fingerprint="fifo",
+                )
+            )
+            session.flush()
+            session.add(
+                RiskDecisionRecord(
+                    id=decision.decision_id,
+                    timestamp=NOW,
+                    account_id="paper-main",
+                    order_intent_id=order_intent.id,
+                    trading_cycle_id=cycle_id,
+                    status=decision.status,
+                    original_quantity=decision.original_quantity,
+                    approved_quantity=decision.approved_quantity,
+                    reasons_json="[]",
+                    limits_json="{}",
+                    portfolio_json=json.dumps(
+                        {
+                            **decision.portfolio_snapshot,
+                            "order_intent_fingerprint": order_intent_fingerprint(order_intent),
+                        }
+                    ),
+                    correlation_id="fifo-correlation",
+                )
+            )
+            session.commit()
+        order = broker.submit_order("paper-main", "fifo", order_intent, decision)
+        execution_price = Decimal(price)
+        broker.process(
+            order.id,
+            Bar(
+                "SPY",
+                NOW + timedelta(days=sequence),
+                execution_price,
+                execution_price,
+                execution_price,
+                execution_price,
+                Decimal("1000"),
+                execution_price,
+            ),
+        )
+
+    execute(1, Side.BUY, "10", "100")
+    execute(2, Side.BUY, "10", "120")
+    execute(3, Side.SELL, "15", "130")
+    account = repository.account("paper-main")
+    position = repository.positions("paper-main")[0]
+    assert account.cash == Decimal("9747")
+    assert account.realized_pnl == Decimal("347.5")
+    assert position.quantity == Decimal("5")
+    assert position.average_cost == Decimal("120.1")
+    assert account.equity == Decimal("10397")

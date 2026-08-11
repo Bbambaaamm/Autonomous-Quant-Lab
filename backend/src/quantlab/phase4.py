@@ -9,6 +9,7 @@ from typing import Any, cast
 from uuid import uuid4
 
 from sqlalchemy import (
+    CheckConstraint,
     Date,
     DateTime,
     ForeignKey,
@@ -122,6 +123,16 @@ class RiskDecisionRecord(Base):
 
 class PaperOrderRecord(Base):
     __tablename__ = "paper_orders"
+    __table_args__ = (
+        CheckConstraint("quantity > 0", name="ck_paper_orders_quantity_positive"),
+        CheckConstraint("filled_quantity >= 0", name="ck_paper_orders_filled_nonnegative"),
+        CheckConstraint("remaining_quantity >= 0", name="ck_paper_orders_remaining_nonnegative"),
+        CheckConstraint("filled_quantity <= quantity", name="ck_paper_orders_not_overfilled"),
+        CheckConstraint(
+            "remaining_quantity = quantity - filled_quantity",
+            name="ck_paper_orders_quantity_balance",
+        ),
+    )
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     client_order_id: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
     account_id: Mapped[str] = mapped_column(
@@ -153,7 +164,14 @@ class PaperOrderRecord(Base):
 
 class PaperFillRecord(Base):
     __tablename__ = "paper_fills"
-    __table_args__ = (UniqueConstraint("order_id", "sequence"),)
+    __table_args__ = (
+        UniqueConstraint("order_id", "sequence"),
+        CheckConstraint("sequence > 0", name="ck_paper_fills_sequence_positive"),
+        CheckConstraint("quantity > 0", name="ck_paper_fills_quantity_positive"),
+        CheckConstraint("price > 0", name="ck_paper_fills_price_positive"),
+        CheckConstraint("reference_price > 0", name="ck_paper_fills_reference_price_positive"),
+        CheckConstraint("commission >= 0", name="ck_paper_fills_commission_nonnegative"),
+    )
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     order_id: Mapped[str] = mapped_column(
         ForeignKey("paper_orders.id", ondelete="RESTRICT"), nullable=False, index=True
@@ -403,13 +421,42 @@ class ProductionRiskEngine:
         latest_market_timestamp: datetime,
     ) -> RiskDecision:
         reasons: list[RiskReason] = []
+        invalid_portfolio = any(
+            not value.is_finite()
+            for value in (
+                snapshot.cash,
+                snapshot.equity,
+                snapshot.high_water_mark,
+                snapshot.session_start_equity,
+                snapshot.daily_notional,
+                *snapshot.positions.values(),
+                *snapshot.prices.values(),
+                *snapshot.pending.values(),
+            )
+        )
+        if invalid_portfolio or not price.is_finite() or price <= 0:
+            return RiskDecision(
+                hashlib.sha256(f"{cycle_id}|{intent.id}".encode()).hexdigest(),
+                now,
+                intent.id,
+                RiskDecisionStatus.REJECTED,
+                intent.quantity,
+                Decimal(0),
+                (RiskReason.INVALID_PRICE,),
+                {key: str(value) for key, value in vars(self.config).items()},
+                {
+                    "cash": str(snapshot.cash),
+                    "equity": str(snapshot.equity),
+                    "reference_price": str(price),
+                },
+                correlation_id,
+                cycle_id,
+            )
         current = snapshot.positions.get(intent.symbol, Decimal(0))
         pending = snapshot.pending.get(intent.symbol, Decimal(0))
         signed = intent.quantity if intent.side is Side.BUY else -intent.quantity
         resulting = current + pending + signed
         reducing = abs(resulting) < abs(current + pending) and resulting >= 0
-        if not price.is_finite() or price <= 0:
-            reasons.append(RiskReason.INVALID_PRICE)
         if intent.symbol not in self.config.instrument_allowlist:
             reasons.append(RiskReason.INSTRUMENT_NOT_ALLOWED)
         if now - latest_market_timestamp > self.config.stale_data_threshold:
@@ -418,7 +465,10 @@ class ProductionRiskEngine:
             reasons.append(RiskReason.TRADING_HALTED)
         if self.config.long_only and resulting < 0:
             reasons.append(RiskReason.LONG_ONLY)
-        if RiskReason.INVALID_PRICE in reasons:
+        nonpositive_equity = snapshot.equity.is_finite() and snapshot.equity <= 0
+        if nonpositive_equity:
+            reasons.append(RiskReason.SINGLE_ORDER_LIMIT)
+        if nonpositive_equity:
             return RiskDecision(
                 hashlib.sha256(f"{cycle_id}|{intent.id}".encode()).hexdigest(),
                 now,
@@ -503,6 +553,35 @@ def deterministic_cycle_key(account_id: str, strategy_id: str, session_date: dat
     ).hexdigest()
 
 
+def cycle_input_fingerprint(
+    bars: list[Bar], decision_time: datetime, target_weights: dict[str, Decimal]
+) -> str:
+    payload = {
+        "dataset": dataset_identity(bars),
+        "decision_time": decision_time.astimezone(UTC).isoformat(),
+        "target_weights": {
+            symbol: str(weight) for symbol, weight in sorted(target_weights.items())
+        },
+    }
+    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+
+
+def order_intent_fingerprint(intent: OrderIntent) -> str:
+    payload = {
+        "correlation_id": intent.correlation_id,
+        "decision_time": intent.decision_time.astimezone(UTC).isoformat(),
+        "id": intent.id,
+        "limit_price": str(intent.limit_price) if intent.limit_price is not None else None,
+        "order_type": intent.order_type.value,
+        "quantity": str(intent.quantity),
+        "reason": intent.reason,
+        "side": intent.side.value,
+        "symbol": intent.symbol,
+        "trading_cycle_id": intent.trading_cycle_id,
+    }
+    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+
+
 def deterministic_client_order_id(
     account_id: str, cycle_id: str, strategy_id: str, intent: OrderIntent
 ) -> str:
@@ -569,6 +648,34 @@ class PersistentPaperBroker:
             account_id, decision.trading_cycle_id, strategy_id, intent
         )
         with Session(self.repository.engine) as session:
+            account = session.scalar(
+                select(PaperAccountRecord)
+                .where(PaperAccountRecord.id == account_id)
+                .with_for_update()
+            )
+            persisted = session.get(RiskDecisionRecord, decision.decision_id)
+            cycle = session.get(TradingCycleRecord, decision.trading_cycle_id)
+            persisted_snapshot = json.loads(persisted.portfolio_json) if persisted else {}
+            if (
+                account is None
+                or persisted is None
+                or cycle is None
+                or persisted.account_id != account_id
+                or cycle.account_id != account_id
+                or persisted.trading_cycle_id != decision.trading_cycle_id
+                or persisted.order_intent_id != intent.id
+                or persisted.status != decision.status
+                or persisted.approved_quantity != decision.approved_quantity
+                or persisted.correlation_id != decision.correlation_id
+                or persisted_snapshot.get("order_intent_fingerprint")
+                != order_intent_fingerprint(intent)
+            ):
+                raise PermissionError("Broker vyžaduje autoritativní persisted risk rozhodnutí")
+            if account.trading_state == SystemTradingState.HALTED:
+                position = session.get(PositionRecord, (account_id, intent.symbol))
+                held = position.quantity if position is not None else Decimal(0)
+                if intent.side is not Side.SELL or decision.approved_quantity > held:
+                    raise PermissionError("HALTED účet dovoluje pouze risk-reducing prodej")
             existing = session.scalar(
                 select(PaperOrderRecord).where(PaperOrderRecord.client_order_id == client_id)
             )
@@ -586,8 +693,7 @@ class PersistentPaperBroker:
                 order_type=intent.order_type,
                 quantity=decision.approved_quantity,
                 submitted_notional=(
-                    decision.approved_quantity
-                    * Decimal(decision.portfolio_snapshot["reference_price"])
+                    decision.approved_quantity * Decimal(persisted_snapshot["reference_price"])
                 ),
                 filled_quantity=Decimal(0),
                 remaining_quantity=decision.approved_quantity,
@@ -621,8 +727,11 @@ class PersistentPaperBroker:
             return row
 
     def process(self, order_id: str, bar: Bar) -> PaperOrderRecord:
+        validate_bars([bar])
         with Session(self.repository.engine) as session:
-            order = session.get(PaperOrderRecord, order_id)
+            order = session.scalar(
+                select(PaperOrderRecord).where(PaperOrderRecord.id == order_id).with_for_update()
+            )
             if order is None:
                 raise KeyError(order_id)
             if order.status in (OrderStatus.FILLED, OrderStatus.CANCELLED):
@@ -664,7 +773,11 @@ class PersistentPaperBroker:
                     else max(price, order.limit_price)
                 )
             commission = self.costs.commission(price * quantity)
-            account = session.get(PaperAccountRecord, order.account_id)
+            account = session.scalar(
+                select(PaperAccountRecord)
+                .where(PaperAccountRecord.id == order.account_id)
+                .with_for_update()
+            )
             if account is None:
                 raise KeyError(order.account_id)
             cash_delta = (
@@ -912,6 +1025,11 @@ class ReconciliationService:
                     filled != order.filled_quantity
                     or order.remaining_quantity != order.quantity - filled
                     or filled > order.quantity
+                    or (order.status == OrderStatus.FILLED and order.remaining_quantity != 0)
+                    or (
+                        order.status == OrderStatus.PARTIALLY_FILLED
+                        and not 0 < order.filled_quantity < order.quantity
+                    )
                 ):
                     differences.setdefault("orders", {})[order.id] = "quantity invariant"  # type: ignore[index]
             status = ReconciliationStatus.FAILED if differences else ReconciliationStatus.SUCCEEDED
@@ -974,6 +1092,7 @@ class TradingCycleService:
         if not bars:
             raise ValueError("Chybí market data")
         cycle_key = deterministic_cycle_key(account_id, strategy_id, session_date)
+        input_fingerprint = cycle_input_fingerprint(bars, decision_time, target_weights)
         cycle_id = cycle_key
         correlation_id = cycle_key
         lease_owner = str(uuid4())
@@ -983,6 +1102,8 @@ class TradingCycleService:
             existing = session.scalar(
                 select(TradingCycleRecord).where(TradingCycleRecord.cycle_key == cycle_key)
             )
+            if existing and existing.data_fingerprint != input_fingerprint:
+                raise ValueError("Retry trading cycle má odlišná vstupní data nebo decision time")
             if existing and existing.status == TradingCycleStatus.COMPLETED:
                 return existing.id
             if existing and existing.status == TradingCycleStatus.RUNNING:
@@ -1021,7 +1142,7 @@ class TradingCycleService:
                         started_at=datetime.now(UTC),
                         status=TradingCycleStatus.RUNNING,
                         correlation_id=correlation_id,
-                        data_fingerprint=dataset_identity(bars),
+                        data_fingerprint=input_fingerprint,
                         lease_owner=lease_owner,
                         lease_expires_at=lease_expires_at,
                     )
@@ -1037,19 +1158,53 @@ class TradingCycleService:
                         correlation_id,
                     )
                     session.commit()
-                except IntegrityError:
+                except IntegrityError as error:
                     session.rollback()
                     recovered = session.scalar(
                         select(TradingCycleRecord).where(TradingCycleRecord.cycle_key == cycle_key)
                     )
                     if recovered is None:
                         raise
+                    if recovered.data_fingerprint != input_fingerprint:
+                        raise ValueError(
+                            "Concurrent trading cycle má odlišná vstupní data, "
+                            "targety nebo decision time"
+                        ) from error
                     return recovered.id
             else:
                 existing.status = TradingCycleStatus.RUNNING
                 existing.lease_owner = lease_owner
                 existing.lease_expires_at = lease_expires_at
                 session.commit()
+        with Session(self.repository.engine) as session:
+            event_types = set(
+                session.scalars(
+                    select(AuditEventRecord.event_type).where(
+                        AuditEventRecord.trading_cycle_id == cycle_id
+                    )
+                ).all()
+            )
+            if AuditEventType.DATA_VALIDATED not in event_types:
+                self.repository.audit(
+                    session,
+                    AuditEventType.DATA_VALIDATED,
+                    "cycle",
+                    cycle_id,
+                    cycle_id,
+                    correlation_id,
+                    {"data_fingerprint": input_fingerprint},
+                )
+            if AuditEventType.TARGET_GENERATED not in event_types:
+                self.repository.audit(
+                    session,
+                    AuditEventType.TARGET_GENERATED,
+                    "cycle",
+                    cycle_id,
+                    cycle_id,
+                    correlation_id,
+                    {"symbols": sorted(target_weights)},
+                )
+            session.commit()
         bar = bars[-1]
         with Session(self.repository.engine) as session:
             account_row = session.get(PaperAccountRecord, account_id)
@@ -1142,6 +1297,14 @@ class TradingCycleService:
             )
             with Session(self.repository.engine) as session:
                 if session.get(RiskDecisionRecord, decision.decision_id) is None:
+                    self.repository.audit(
+                        session,
+                        AuditEventType.ORDER_INTENT_CREATED,
+                        "order_intent",
+                        intent.id,
+                        cycle_id,
+                        correlation_id,
+                    )
                     session.add(
                         RiskDecisionRecord(
                             id=decision.decision_id,
@@ -1154,7 +1317,13 @@ class TradingCycleService:
                             approved_quantity=decision.approved_quantity,
                             reasons_json=json.dumps([r.value for r in decision.reasons]),
                             limits_json=json.dumps(decision.evaluated_limits, sort_keys=True),
-                            portfolio_json=json.dumps(decision.portfolio_snapshot, sort_keys=True),
+                            portfolio_json=json.dumps(
+                                {
+                                    **decision.portfolio_snapshot,
+                                    "order_intent_fingerprint": order_intent_fingerprint(intent),
+                                },
+                                sort_keys=True,
+                            ),
                             correlation_id=correlation_id,
                         )
                     )
