@@ -18,9 +18,7 @@ def upgrade() -> None:
     bind = op.get_bind()
     for table in Base.metadata.sorted_tables:
         if table.name in TABLES:
-            # Initial historická revize iteruje dynamická metadata; checkfirst zachová
-            # kompatibilitu fresh upgradu bez přepisování staré migrace.
-            table.create(bind, checkfirst=True)
+            table.create(bind, checkfirst=False)
 
 
 def downgrade() -> None:

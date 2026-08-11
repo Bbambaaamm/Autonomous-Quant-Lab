@@ -1,4 +1,6 @@
 from datetime import UTC, datetime, timedelta
+from importlib.util import module_from_spec, spec_from_file_location
+from pathlib import Path
 
 import pytest
 from sqlalchemy import func, select
@@ -19,6 +21,25 @@ from quantlab.automation import (
 )
 from quantlab.config import Settings
 from quantlab.phase4 import Phase4Repository
+
+
+def test_migration_revisions_own_only_their_tables() -> None:
+    root = Path(__file__).parents[2]
+
+    def load(name: str, path: Path):  # type: ignore[no-untyped-def]
+        spec = spec_from_file_location(name, path)
+        assert spec is not None and spec.loader is not None
+        module = module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    initial = load(
+        "initial_migration", root / "alembic/versions/20260810_01_production_registry.py"
+    )
+    phase5 = load("phase5_migration", root / "alembic/versions/20260811_03_phase5_automation.py")
+    assert initial.INITIAL_TABLES.isdisjoint(phase5.TABLES)
+    assert "scheduled_jobs" not in initial.INITIAL_TABLES
+    assert "paper_accounts" not in initial.INITIAL_TABLES
 
 
 def setup(tmp_path):  # type: ignore[no-untyped-def]
