@@ -434,13 +434,29 @@ class ProductionRiskEngine:
                 *snapshot.pending.values(),
             )
         )
+        if invalid_portfolio or not price.is_finite() or price <= 0:
+            return RiskDecision(
+                hashlib.sha256(f"{cycle_id}|{intent.id}".encode()).hexdigest(),
+                now,
+                intent.id,
+                RiskDecisionStatus.REJECTED,
+                intent.quantity,
+                Decimal(0),
+                (RiskReason.INVALID_PRICE,),
+                {key: str(value) for key, value in vars(self.config).items()},
+                {
+                    "cash": str(snapshot.cash),
+                    "equity": str(snapshot.equity),
+                    "reference_price": str(price),
+                },
+                correlation_id,
+                cycle_id,
+            )
         current = snapshot.positions.get(intent.symbol, Decimal(0))
         pending = snapshot.pending.get(intent.symbol, Decimal(0))
         signed = intent.quantity if intent.side is Side.BUY else -intent.quantity
         resulting = current + pending + signed
         reducing = abs(resulting) < abs(current + pending) and resulting >= 0
-        if not price.is_finite() or price <= 0 or invalid_portfolio:
-            reasons.append(RiskReason.INVALID_PRICE)
         if intent.symbol not in self.config.instrument_allowlist:
             reasons.append(RiskReason.INSTRUMENT_NOT_ALLOWED)
         if now - latest_market_timestamp > self.config.stale_data_threshold:
@@ -452,7 +468,7 @@ class ProductionRiskEngine:
         nonpositive_equity = snapshot.equity.is_finite() and snapshot.equity <= 0
         if nonpositive_equity:
             reasons.append(RiskReason.SINGLE_ORDER_LIMIT)
-        if RiskReason.INVALID_PRICE in reasons or nonpositive_equity:
+        if nonpositive_equity:
             return RiskDecision(
                 hashlib.sha256(f"{cycle_id}|{intent.id}".encode()).hexdigest(),
                 now,
@@ -537,9 +553,33 @@ def deterministic_cycle_key(account_id: str, strategy_id: str, session_date: dat
     ).hexdigest()
 
 
-def cycle_input_fingerprint(bars: list[Bar], decision_time: datetime) -> str:
-    canonical_time = decision_time.astimezone(UTC).isoformat()
-    return hashlib.sha256(f"{dataset_identity(bars)}|{canonical_time}".encode()).hexdigest()
+def cycle_input_fingerprint(
+    bars: list[Bar], decision_time: datetime, target_weights: dict[str, Decimal]
+) -> str:
+    payload = {
+        "dataset": dataset_identity(bars),
+        "decision_time": decision_time.astimezone(UTC).isoformat(),
+        "target_weights": {
+            symbol: str(weight) for symbol, weight in sorted(target_weights.items())
+        },
+    }
+    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+
+
+def order_intent_fingerprint(intent: OrderIntent) -> str:
+    payload = {
+        "correlation_id": intent.correlation_id,
+        "decision_time": intent.decision_time.astimezone(UTC).isoformat(),
+        "id": intent.id,
+        "limit_price": str(intent.limit_price) if intent.limit_price is not None else None,
+        "order_type": intent.order_type.value,
+        "quantity": str(intent.quantity),
+        "reason": intent.reason,
+        "side": intent.side.value,
+        "symbol": intent.symbol,
+        "trading_cycle_id": intent.trading_cycle_id,
+    }
+    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
 
 
 def deterministic_client_order_id(
@@ -615,6 +655,7 @@ class PersistentPaperBroker:
             )
             persisted = session.get(RiskDecisionRecord, decision.decision_id)
             cycle = session.get(TradingCycleRecord, decision.trading_cycle_id)
+            persisted_snapshot = json.loads(persisted.portfolio_json) if persisted else {}
             if (
                 account is None
                 or persisted is None
@@ -626,6 +667,8 @@ class PersistentPaperBroker:
                 or persisted.status != decision.status
                 or persisted.approved_quantity != decision.approved_quantity
                 or persisted.correlation_id != decision.correlation_id
+                or persisted_snapshot.get("order_intent_fingerprint")
+                != order_intent_fingerprint(intent)
             ):
                 raise PermissionError("Broker vyžaduje autoritativní persisted risk rozhodnutí")
             if account.trading_state == SystemTradingState.HALTED:
@@ -650,8 +693,7 @@ class PersistentPaperBroker:
                 order_type=intent.order_type,
                 quantity=decision.approved_quantity,
                 submitted_notional=(
-                    decision.approved_quantity
-                    * Decimal(decision.portfolio_snapshot["reference_price"])
+                    decision.approved_quantity * Decimal(persisted_snapshot["reference_price"])
                 ),
                 filled_quantity=Decimal(0),
                 remaining_quantity=decision.approved_quantity,
@@ -1050,7 +1092,7 @@ class TradingCycleService:
         if not bars:
             raise ValueError("Chybí market data")
         cycle_key = deterministic_cycle_key(account_id, strategy_id, session_date)
-        input_fingerprint = cycle_input_fingerprint(bars, decision_time)
+        input_fingerprint = cycle_input_fingerprint(bars, decision_time, target_weights)
         cycle_id = cycle_key
         correlation_id = cycle_key
         lease_owner = str(uuid4())
@@ -1116,13 +1158,18 @@ class TradingCycleService:
                         correlation_id,
                     )
                     session.commit()
-                except IntegrityError:
+                except IntegrityError as error:
                     session.rollback()
                     recovered = session.scalar(
                         select(TradingCycleRecord).where(TradingCycleRecord.cycle_key == cycle_key)
                     )
                     if recovered is None:
                         raise
+                    if recovered.data_fingerprint != input_fingerprint:
+                        raise ValueError(
+                            "Concurrent trading cycle má odlišná vstupní data, "
+                            "targety nebo decision time"
+                        ) from error
                     return recovered.id
             else:
                 existing.status = TradingCycleStatus.RUNNING
@@ -1270,7 +1317,13 @@ class TradingCycleService:
                             approved_quantity=decision.approved_quantity,
                             reasons_json=json.dumps([r.value for r in decision.reasons]),
                             limits_json=json.dumps(decision.evaluated_limits, sort_keys=True),
-                            portfolio_json=json.dumps(decision.portfolio_snapshot, sort_keys=True),
+                            portfolio_json=json.dumps(
+                                {
+                                    **decision.portfolio_snapshot,
+                                    "order_intent_fingerprint": order_intent_fingerprint(intent),
+                                },
+                                sort_keys=True,
+                            ),
                             correlation_id=correlation_id,
                         )
                     )

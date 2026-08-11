@@ -9,5 +9,8 @@ Audit po Phase 4 identifikoval a opravil následující bezpečnostní mezery:
 - order/fill invarianty byly pouze aplikační; migrace `20260811_02` přidává databázové check constraints;
 - retry stejného logical cycle s jinými bary nebo decision time se nyní odmítne místo tichého vrácení cizího výsledku;
 - reconciliation nyní kontroluje také konzistenci `FILLED` a `PARTIALLY_FILLED` statusů s množstvím.
+- persisted approval je kryptograficky svázán se všemi poli `OrderIntent`, takže změna symbolu, strany, typu, limitu, množství nebo času po risk kontrole selže uzavřeně;
+- cycle input fingerprint zahrnuje bary, UTC decision time i kanonicky seřazené target weights a kontroluje se také po concurrent insert race;
+- nefinite position nebo pending quantity se odmítne před první aritmetickou operací.
 
 Regresní sada pokrývá podvržený approval, HALTED bypass, neplatnou equity, DB overfill a rollback session, změněný cycle input, order-status corruption a skutečný PostgreSQL concurrent cycle. Auditní sekvence explicitně obsahuje validaci dat, vznik targetu a order intentu.

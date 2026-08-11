@@ -140,8 +140,12 @@ class OrderIntent:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "decision_time", require_utc(self.decision_time))
-        if self.quantity <= 0:
+        if not self.quantity.is_finite() or self.quantity <= 0:
             raise ValueError("Množství příkazu musí být kladné")
+        if self.limit_price is not None and (
+            not self.limit_price.is_finite() or self.limit_price <= 0
+        ):
+            raise ValueError("Limitní cena musí být konečná a kladná")
 
 
 @dataclass(frozen=True)
