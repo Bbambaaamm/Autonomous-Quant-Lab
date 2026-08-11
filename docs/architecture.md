@@ -28,8 +28,9 @@ neexistuje. Allowlist, notional limit a kill switch selhávají uzavřeně.
 
 ## Persistence a další komponenty
 
-Run se ukládá jako neměnný JSON snapshot s časem a verzí strategie. Worker, Redis, PostgreSQL,
-autentizace, migrace Alembic a plný Next.js frontend patří do dalších fází.
+Run se ukládá jako neměnný JSON snapshot s časem a verzí strategie. PostgreSQL registry a
+Alembic migrace jsou implementované v Phase 3; SQLite zůstává testovací adapter. Worker, Redis,
+autentizace a plný Next.js frontend patří do dalších fází.
 
 ## Research tok a časové invarianty
 
