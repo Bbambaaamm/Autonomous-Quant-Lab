@@ -941,16 +941,16 @@ class TradingCycleService:
                         data_fingerprint=dataset_identity(bars),
                     )
                 )
-                session.flush()
-                self.repository.audit(
-                    session,
-                    AuditEventType.TRADING_CYCLE_STARTED,
-                    "cycle",
-                    cycle_id,
-                    cycle_id,
-                    correlation_id,
-                )
                 try:
+                    session.flush()
+                    self.repository.audit(
+                        session,
+                        AuditEventType.TRADING_CYCLE_STARTED,
+                        "cycle",
+                        cycle_id,
+                        cycle_id,
+                        correlation_id,
+                    )
                     session.commit()
                 except IntegrityError:
                     session.rollback()
