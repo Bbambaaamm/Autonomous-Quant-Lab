@@ -1,5 +1,12 @@
 # Autonomous Quant Lab
 
+Phase 5 doplňuje PostgreSQL-backed plánování a worker pro bezpečnou automatizaci výhradně
+paper runtime. Worker se spouští `cd backend && uv run quantlab-worker`; výchozí
+`AUTOMATION_ENABLED=false` zabraňuje ekonomickému execution bez explicitního povolení.
+Operator API nabízí `/automation/jobs`, `/automation/runs`, `/operations/workers` a oddělené
+`/health/live` a `/health/ready`. Mutation API zatím nemá autentizaci a nesmí být vystaveno
+do internetu.
+
 Auditovatelná research a paper-trading platforma. Aktuální vertical slice načte fixture,
 validuje data, vytvoří moving-average cíle, provede next-open backtest s náklady a slippage,
 aplikuje risk limity, uloží běh a zobrazí jej ve FastAPI dashboardu.

@@ -13,30 +13,26 @@ down_revision = None
 branch_labels = None
 depends_on = None
 
-PHASE4_TABLES = {
-    "paper_accounts",
-    "paper_positions",
-    "trading_cycles",
-    "risk_decisions",
-    "paper_orders",
-    "paper_fills",
-    "audit_events",
-    "risk_events",
-    "reconciliation_results",
+INITIAL_TABLES = {
+    "backtest_runs",
+    "datasets",
+    "strategies",
+    "research_experiments",
+    "research_experiment_folds",
+    "research_eligibility_checks",
+    "research_parameter_runs",
 }
 
 
 def upgrade() -> None:
     bind = op.get_bind()
     for table in Base.metadata.sorted_tables:
-        if table.name in PHASE4_TABLES:
-            continue
-        table.create(bind, checkfirst=False)
+        if table.name in INITIAL_TABLES:
+            table.create(bind, checkfirst=False)
 
 
 def downgrade() -> None:
     bind = op.get_bind()
     for table in reversed(Base.metadata.sorted_tables):
-        if table.name in PHASE4_TABLES:
-            continue
-        table.drop(bind, checkfirst=False)
+        if table.name in INITIAL_TABLES:
+            table.drop(bind, checkfirst=False)

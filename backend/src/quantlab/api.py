@@ -1,11 +1,26 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Annotated
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, Header, HTTPException, Query
 from fastapi.responses import HTMLResponse
+from pydantic import BaseModel, Field
+from sqlalchemy import func, select, text
+from sqlalchemy.orm import Session
 
+from quantlab.automation import (
+    AutomationRepository,
+    JobAttempt,
+    JobRun,
+    JobType,
+    MisfirePolicy,
+    ScheduledJob,
+    SchedulerService,
+    ScheduleType,
+    WorkerHeartbeat,
+    WorkerService,
+)
 from quantlab.backtest import serialize_result
 from quantlab.config import get_settings
 from quantlab.demo import load_fixture, run_demo
@@ -34,6 +49,29 @@ paper_repository = Phase4Repository(settings.database_url, bootstrap_test_schema
 paper_repository.seed_account()
 trading_service = TradingCycleService(paper_repository)
 reconciliation_service = ReconciliationService(paper_repository)
+automation_repository = AutomationRepository(settings.database_url)
+automation_scheduler = SchedulerService(automation_repository)
+automation_worker = WorkerService(automation_repository, settings)
+
+
+class JobCreate(BaseModel):
+    job_type: JobType
+    account_id: str = "paper-main"
+    strategy_id: str | None = None
+    schedule_type: ScheduleType
+    next_run_at: datetime
+    interval_seconds: int | None = Field(None, gt=0)
+    daily_time: str | None = None
+    timezone: str = "UTC"
+    misfire_policy: MisfirePolicy = MisfirePolicy.RUN_ONCE_IF_MISSED
+    misfire_grace_seconds: int = Field(3600, ge=0)
+    max_attempts: int = Field(5, ge=1, le=100)
+    config: dict[str, object] = {}
+
+
+class JobPatch(BaseModel):
+    enabled: bool | None = None
+    next_run_at: datetime | None = None
 
 
 def _row(row: object) -> dict[str, object]:
@@ -41,8 +79,154 @@ def _row(row: object) -> dict[str, object]:
 
 
 @app.get("/health")
+@app.get("/health/live")
 def health() -> dict[str, str]:
     return {"status": "ok", "trading_mode": "paper", "live_trading_enabled": "false"}
+
+
+@app.get("/health/ready")
+def health_ready() -> dict[str, str]:
+    try:
+        with automation_repository.engine.connect() as connection:
+            connection.execute(text("SELECT 1"))
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="Databáze není dostupná") from exc
+    return {"status": "ready", "database": "ok"}
+
+
+@app.post("/automation/jobs")
+def create_automation_job(request: JobCreate) -> dict[str, object]:
+    try:
+        return _row(automation_repository.create_job(**request.model_dump()))
+    except (ValueError, KeyError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.get("/automation/jobs")
+def automation_jobs(
+    limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=0)
+) -> list[dict[str, object]]:
+    return [_row(row) for row in automation_repository.page(ScheduledJob, limit, offset)]
+
+
+@app.get("/automation/jobs/{job_id}")
+def automation_job(job_id: str) -> dict[str, object]:
+    with Session(automation_repository.engine) as session:
+        row = session.get(ScheduledJob, job_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="Job nebyl nalezen")
+        return _row(row)
+
+
+@app.patch("/automation/jobs/{job_id}")
+def patch_automation_job(job_id: str, request: JobPatch) -> dict[str, object]:
+    with Session(automation_repository.engine) as session:
+        row = session.get(ScheduledJob, job_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="Job nebyl nalezen")
+        if request.enabled is not None:
+            row.enabled = request.enabled
+        if request.next_run_at is not None:
+            row.next_run_at = request.next_run_at
+        row.updated_at = datetime.now(UTC)
+        session.commit()
+        session.refresh(row)
+        return _row(row)
+
+
+@app.post("/automation/jobs/{job_id}/enable")
+def enable_automation_job(job_id: str) -> dict[str, object]:
+    return patch_automation_job(job_id, JobPatch(enabled=True))
+
+
+@app.post("/automation/jobs/{job_id}/disable")
+def disable_automation_job(job_id: str) -> dict[str, object]:
+    return patch_automation_job(job_id, JobPatch(enabled=False))
+
+
+@app.post("/automation/jobs/{job_id}/run-now")
+def run_automation_job(
+    job_id: str, idempotency_key: Annotated[str, Header(alias="Idempotency-Key")]
+) -> dict[str, str]:
+    try:
+        return {"id": automation_scheduler.run_now(job_id, idempotency_key)}
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Job nebyl nalezen") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.get("/automation/runs")
+def automation_runs(
+    limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=0)
+) -> list[dict[str, object]]:
+    return [_row(row) for row in automation_repository.page(JobRun, limit, offset)]
+
+
+@app.get("/automation/runs/{run_id}")
+def automation_run(run_id: str) -> dict[str, object]:
+    with Session(automation_repository.engine) as session:
+        run = session.get(JobRun, run_id)
+        if run is None:
+            raise HTTPException(status_code=404, detail="Run nebyl nalezen")
+        result = _row(run)
+        result["attempts"] = [
+            _row(row)
+            for row in session.scalars(
+                select(JobAttempt)
+                .where(JobAttempt.job_run_id == run_id)
+                .order_by(JobAttempt.attempt_number)
+            )
+        ]
+        return result
+
+
+@app.post("/automation/runs/{run_id}/retry")
+def retry_automation_run(run_id: str) -> dict[str, str]:
+    try:
+        automation_worker.retry(run_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Run nebyl nalezen") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {"id": run_id, "status": "RETRY_SCHEDULED"}
+
+
+@app.get("/operations/workers")
+def operations_workers(
+    limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=0)
+) -> list[dict[str, object]]:
+    now = datetime.now(UTC)
+    rows = automation_repository.page(WorkerHeartbeat, limit, offset)
+    result = []
+    for row in rows:
+        item = _row(row)
+        last = (
+            row.last_heartbeat_at
+            if row.last_heartbeat_at.tzinfo
+            else row.last_heartbeat_at.replace(tzinfo=UTC)
+        )
+        item["state"] = (
+            "healthy" if now - last < timedelta(seconds=settings.worker_lease_timeout) else "stale"
+        )
+        result.append(item)
+    return result
+
+
+@app.get("/operations/summary")
+def operations_summary() -> dict[str, object]:
+    with Session(automation_repository.engine) as session:
+        return {
+            "automation_enabled": settings.automation_enabled,
+            "enabled_jobs": session.scalar(
+                select(func.count()).select_from(ScheduledJob).where(ScheduledJob.enabled.is_(True))
+            )
+            or 0,
+            "dead_letters": session.scalar(
+                select(func.count()).select_from(JobRun).where(JobRun.status == "DEAD_LETTER")
+            )
+            or 0,
+        }
 
 
 @app.get("/paper/account")

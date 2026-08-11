@@ -1,4 +1,10 @@
-# Implementační plán po Phase 4
+# Implementační plán po Phase 5
+
+**Automation & Operations Foundation Phase 5: COMPLETE v deklarovaném scope.** Persistentní
+interval/daily schedules, misfire policy, logical runs, attempts, PostgreSQL claiming,
+lease/heartbeat/fencing, bounded retry, dead-letter, recovery, operator API a health foundation
+jsou implementované. Mimo scope zůstává auth/RBAC, plný observability stack, deployment a live
+trading; tato položka neoznačuje celý master plán za dokončený.
 
 Phase 4 Production Paper Trading & Risk Foundation je dokončena: persistentní risk, paper broker, idempotentní cycle, reconciliation, audit a API.
 

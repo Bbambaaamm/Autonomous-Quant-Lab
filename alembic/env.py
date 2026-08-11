@@ -5,8 +5,9 @@ from logging.config import fileConfig
 from alembic import context
 from sqlalchemy import engine_from_config, pool
 
-from quantlab.persistence import Base
+import quantlab.automation  # noqa: F401, E402
 import quantlab.phase4  # noqa: F401, E402
+from quantlab.persistence import Base
 
 config = context.config
 if config.config_file_name:
