@@ -9,7 +9,7 @@ o development konfiguraci; produkční PostgreSQL musí vyžadovat credentials m
 ```bash
 docker compose up -d postgres
 cd backend
-uv sync --all-groups
+uv sync --locked --all-groups
 uv run alembic -c ../alembic.ini upgrade head
 ```
 
@@ -18,6 +18,6 @@ forward-first; downgrade initial revision nesmí být použit na databázi s aud
 Aplikační runtime nevolá `create_all`; dostupný je pouze pojmenovaný test helper. CI čeká na
 `pg_isready`, provede upgrade a spustí PostgreSQL testy. SQLite není důkaz PostgreSQL kompatibility.
 
-Repository zatím neobsahuje `uv.lock`. CI proto nesmí používat `uv sync --locked`, který bez
-lockfile končí ještě před instalací a nespustí žádný test. Po vygenerování a commitnutí lockfile
-v prostředí s dostupným package indexem se CI vrátí k `uv sync --all-groups --locked`.
+Závislosti jsou uzamčené v `backend/uv.lock`. Lokální instalace i všechny CI joby používají
+`uv sync --locked --all-groups`; CI navíc spouští `uv lock --check`, takže nesoulad mezi
+`pyproject.toml` a lockfilem selže bez automatické změny lockfilu.

@@ -8,7 +8,7 @@ aplikuje risk limity, uloží běh a zobrazí jej ve FastAPI dashboardu.
 
 ```bash
 cd backend
-uv sync --all-groups
+uv sync --locked --all-groups
 uv run uvicorn quantlab.api:app --reload
 ```
 
@@ -39,8 +39,9 @@ Cost stress se ověřuje plným opakovaným backtestem, protože vyšší nákla
 whole-share sizing; slippage je ekonomicky obsažena ve fill ceně a samostatná hodnota slouží jen
 pro audit.
 
-Vývojová skupina obsahuje `httpx2`, který Starlette 1.6 používá pro `TestClient`; nejde o import
-aplikace ani o náhradu HTTP klienta. Synchronizace vyžaduje dostupný Python package index.
+Vývojová skupina obsahuje `httpx2`, který Starlette 1.6 preferenčně importuje pro `TestClient`.
+Původní `httpx` byl odstraněn: aplikační ani testovací kód jej přímo nepoužívá a fallback
+Starlette je zastaralá kompatibilní cesta. Synchronizace používá commitnutý lockfile.
 
 ## Phase 2.7: kompletní research use-case
 
@@ -70,7 +71,7 @@ bootstrap probíhá výhradně přes Alembic; `create_all` je izolován v testov
 ```bash
 docker compose up -d postgres
 cd backend
-uv sync --all-groups
+uv sync --locked --all-groups
 uv run alembic -c ../alembic.ini upgrade head
 uv run pytest
 ```

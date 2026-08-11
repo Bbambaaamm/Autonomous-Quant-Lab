@@ -1,6 +1,6 @@
 .PHONY: setup test format lint typecheck dev
 setup:
-	cd backend && uv sync --all-groups
+	cd backend && uv sync --locked --all-groups
 test:
 	cd backend && uv run pytest
 format:

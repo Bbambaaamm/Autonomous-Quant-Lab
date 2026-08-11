@@ -7,7 +7,7 @@ tvrzení o CI, Dockeru, PostgreSQL a Alembicu.
 
 | Fáze / oblast | Stav | Implementováno | Konkrétní remaining scope |
 |---|---|---|---|
-| 0 Repository bootstrap | PARTIAL | Python package, AGENTS, Makefile, základní konfigurace | commitnout `uv.lock`, doplnit licence a úplnou cílovou monorepo strukturu |
+| 0 Repository bootstrap | PARTIAL | Python package, AGENTS, Makefile, základní konfigurace a commitnutý `uv.lock` | doplnit licence a úplnou cílovou monorepo strukturu |
 | 1 Domain model | PARTIAL | UTC Bar, target, order, fill a corporate action | úplné modely instrumentu, portfolia, risk rozhodnutí, účtu, cycle a audit eventu |
 | 2 Market data | PARTIAL | CSV/Parquet, content hash, quality kontroly, jednoduchý kalendář | reálný provider, quote/metadata API, úplný exchange kalendář, DB quality events a point-in-time universe |
 | 3 Strategy framework | PARTIAL | společný interface/factory, MA, buy-and-hold, Donchian | TSMOM, cross-sectional momentum, mean reversion, pairs, multi-asset context a deklarace podpor |
@@ -21,7 +21,7 @@ tvrzení o CI, Dockeru, PostgreSQL a Alembicu.
 | 11 Web dashboard | PARTIAL | minimální server-rendered demo stránka | Next.js/React/Tailwind aplikace, grafy a research/paper/risk obrazovky |
 | 12 Observability | NOT STARTED | pouze několik standardních log záznamů | structured logging, correlation IDs, metrics, alerting a job/cycle health |
 | 13 Security | PARTIAL | žádný live broker, paper-only cesta, bezpečné env defaults, loopback DB | auth/RBAC, secret management, dependency/SAST scan, rate limits a produkční hardening |
-| 14 CI/CD & infrastructure | PARTIAL | GitHub Actions quality/unit/API/PostgreSQL job, PostgreSQL Compose healthcheck a Alembic upgrade | lockfile/reproducible install, aplikační image/service/healthcheck, Redis/worker a deploy pipeline |
+| 14 CI/CD & infrastructure | PARTIAL | GitHub Actions quality/unit/API/PostgreSQL job, locked dependency sync, PostgreSQL Compose healthcheck a Alembic upgrade | aplikační image/service/healthcheck, Redis/worker a deploy pipeline |
 | 15 Dokumentace | PARTIAL | README, architecture, database, registry, methodology a reproducibility | domain/backtest/strategy/risk/paper/live-safety/operations/troubleshooting dokumenty |
 | 16 End-to-end verification | PARTIAL | fixture→research/API testy a PostgreSQL integrační job | úplný master demo scénář, paper-cycle/restart/reconciliation E2E a provozní acceptance |
 
@@ -33,7 +33,7 @@ lineage, comparison a deterministic leaderboard. Alembic initial migration vytv�
 prázdné PostgreSQL DB a CI má samostatný PostgreSQL job. SQLite je pouze testovací adapter.
 
 Phase 3 neznamená dokončení celého master plánu. Registry neukládá bary a repository nemá
-worker, Redis, trading scheduler, aplikační Docker image ani lockfile. Lokální Compose vystavuje
+worker, Redis, trading scheduler ani aplikační Docker image. Lokální Compose vystavuje
 PostgreSQL pouze na loopback a používá trust autentizaci výhradně pro development.
 
 ## Verification audit po Phase 3
