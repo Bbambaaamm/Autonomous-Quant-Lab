@@ -7,6 +7,7 @@ import pytest
 from sqlalchemy import func, inspect, select
 from sqlalchemy.orm import Session
 
+from quantlab.data import dataset_identity
 from quantlab.domain import (
     Bar,
     OrderIntent,
@@ -16,6 +17,7 @@ from quantlab.domain import (
     RiskReason,
     Side,
     SystemTradingState,
+    TradingCycleStatus,
 )
 from quantlab.phase4 import (
     AuditEventRecord,
@@ -29,6 +31,7 @@ from quantlab.phase4 import (
     RiskDecisionRecord,
     TradingCycleRecord,
     TradingCycleService,
+    deterministic_cycle_key,
 )
 
 NOW = datetime(2026, 8, 11, 20, tzinfo=UTC)
@@ -190,6 +193,16 @@ def test_partial_fill_cancel_and_invalid_transition() -> None:
     order = service.broker.get_order(order_id)
     assert order is not None and order.status == OrderStatus.PARTIALLY_FILLED
     assert order.filled_quantity == Decimal("50")
+    TradingCycleService(repository, ProductionRiskConfig(max_single_order_pct=Decimal("0.20"))).run(
+        "paper-main",
+        "partial-retry:1",
+        bars,
+        {"SPY": Decimal("0.10")},
+        date(2026, 8, 12),
+        NOW,
+    )
+    with Session(repository.engine) as session:
+        assert session.scalar(select(func.count(PaperOrderRecord.id))) == 1
     cancelled = service.broker.cancel_order(order_id)
     assert cancelled.status == OrderStatus.CANCELLED
     assert service.broker.cancel_order(order_id).status == OrderStatus.CANCELLED
@@ -272,6 +285,72 @@ def test_limit_order_not_reached_then_filled_and_risk_cannot_be_bypassed() -> No
     order = service.broker.submit_order("paper-main", "fixture", order_intent, decision)
     assert service.broker.process(order.id, bar(low="99")).filled_quantity == 0
     assert service.broker.process(order.id, bar(low="97")).status == OrderStatus.FILLED
+    with Session(repository.engine) as session:
+        fill_price = session.scalar(
+            select(PaperFillRecord.price).where(PaperFillRecord.order_id == order.id)
+        )
+    assert fill_price == Decimal("98")
+
+    sell_cycle = "sell-cycle"
+    sell_intent = OrderIntent(
+        "SPY",
+        Side.SELL,
+        Decimal("10"),
+        NOW,
+        "limit-close",
+        "sell-limit-intent",
+        OrderType.LIMIT,
+        Decimal("100"),
+        sell_cycle,
+        "correlation",
+    )
+    with Session(repository.engine) as session:
+        session.add(
+            TradingCycleRecord(
+                id=sell_cycle,
+                cycle_key=sell_cycle,
+                account_id="paper-main",
+                strategy_id="fixture",
+                session_date=date(2026, 8, 12),
+                started_at=NOW,
+                status="RUNNING",
+                correlation_id="correlation",
+                data_fingerprint="x",
+            )
+        )
+        session.commit()
+    sell_snapshot = snapshot(
+        cash=repository.account("paper-main").cash,
+        positions={"SPY": Decimal("10")},
+    )
+    sell_decision = service.risk.evaluate(
+        sell_intent, Decimal("100"), sell_snapshot, sell_cycle, "correlation", NOW, NOW
+    )
+    with Session(repository.engine) as session:
+        session.add(
+            RiskDecisionRecord(
+                id=sell_decision.decision_id,
+                timestamp=NOW,
+                account_id="paper-main",
+                order_intent_id=sell_intent.id,
+                trading_cycle_id=sell_cycle,
+                status=sell_decision.status,
+                original_quantity=sell_decision.original_quantity,
+                approved_quantity=sell_decision.approved_quantity,
+                reasons_json="[]",
+                limits_json="{}",
+                portfolio_json="{}",
+                correlation_id="correlation",
+            )
+        )
+        session.commit()
+    sell_order = service.execution.submit("paper-main", "fixture", sell_intent, sell_decision)
+    assert service.broker.process(sell_order.id, bar(high="102")).status == OrderStatus.FILLED
+    with Session(repository.engine) as session:
+        sell_price = session.scalar(
+            select(PaperFillRecord.price).where(PaperFillRecord.order_id == sell_order.id)
+        )
+    assert sell_price == Decimal("100")
 
 
 def test_reconciliation_mismatch_halts_and_blocks_resume() -> None:
@@ -332,3 +411,84 @@ def test_concurrent_cycle_start_creates_one_cycle_and_order(tmp_path: object) ->
     with Session(repository.engine) as session:
         assert session.scalar(select(func.count(TradingCycleRecord.id))) == 1
         assert session.scalar(select(func.count(PaperOrderRecord.id))) == 1
+
+
+def test_expired_cycle_lease_is_recovered_after_crash() -> None:
+    repository = Phase4Repository()
+    repository.seed_account()
+    service = TradingCycleService(repository)
+    bars = [
+        Bar(
+            "SPY",
+            NOW,
+            Decimal("100"),
+            Decimal("101"),
+            Decimal("99"),
+            Decimal("100"),
+            Decimal("10000"),
+            Decimal("100"),
+        ),
+        bar(volume="10000"),
+    ]
+    cycle_key = deterministic_cycle_key("paper-main", "recovery:1", date(2026, 8, 12))
+    with Session(repository.engine) as session:
+        session.add(
+            TradingCycleRecord(
+                id=cycle_key,
+                cycle_key=cycle_key,
+                account_id="paper-main",
+                strategy_id="recovery:1",
+                session_date=date(2026, 8, 12),
+                started_at=NOW,
+                status=TradingCycleStatus.RUNNING,
+                correlation_id=cycle_key,
+                data_fingerprint=dataset_identity(bars),
+                lease_owner="crashed-worker",
+                lease_expires_at=datetime.now(UTC) - timedelta(minutes=1),
+            )
+        )
+        session.commit()
+    assert (
+        service.run(
+            "paper-main", "recovery:1", bars, {"SPY": Decimal("0.10")}, date(2026, 8, 12), NOW
+        )
+        == cycle_key
+    )
+    with Session(repository.engine) as session:
+        recovered = session.get(TradingCycleRecord, cycle_key)
+        assert recovered is not None and recovered.status == TradingCycleStatus.COMPLETED
+        assert session.scalar(select(func.count(PaperOrderRecord.id))) == 1
+
+
+def test_daily_limits_use_execution_session_instead_of_decision_date() -> None:
+    repository = Phase4Repository()
+    repository.seed_account()
+    config = ProductionRiskConfig(max_single_order_pct=Decimal("0.20"), max_orders_per_day=1)
+    service = TradingCycleService(repository, config)
+    bars = [
+        Bar(
+            "SPY",
+            NOW,
+            Decimal("100"),
+            Decimal("101"),
+            Decimal("99"),
+            Decimal("100"),
+            Decimal("10000"),
+            Decimal("100"),
+        ),
+        bar(volume="10000"),
+    ]
+    service.run(
+        "paper-main", "daily-first:1", bars, {"SPY": Decimal("0.10")}, date(2026, 8, 12), NOW
+    )
+    service.run(
+        "paper-main", "daily-second:1", bars, {"SPY": Decimal("0.20")}, date(2026, 8, 12), NOW
+    )
+    with Session(repository.engine) as session:
+        assert session.scalar(select(func.count(PaperOrderRecord.id))) == 1
+        rejected = session.scalars(
+            select(RiskDecisionRecord).where(
+                RiskDecisionRecord.status == RiskDecisionStatus.REJECTED
+            )
+        ).one()
+    assert RiskReason.DAILY_ORDER_LIMIT.value in rejected.reasons_json

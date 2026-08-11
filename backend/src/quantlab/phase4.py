@@ -5,6 +5,7 @@ import json
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from decimal import ROUND_DOWN, Decimal
+from typing import Any, cast
 from uuid import uuid4
 
 from sqlalchemy import (
@@ -20,8 +21,11 @@ from sqlalchemy import (
     create_engine,
     event,
     func,
+    or_,
     select,
+    update,
 )
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Mapped, Session, mapped_column
 
@@ -92,6 +96,8 @@ class TradingCycleRecord(Base):
     correlation_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     data_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
     failure_reason: Mapped[str | None] = mapped_column(Text)
+    lease_owner: Mapped[str | None] = mapped_column(String(64), index=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
 
 
 class RiskDecisionRecord(Base):
@@ -132,6 +138,7 @@ class PaperOrderRecord(Base):
     side: Mapped[str] = mapped_column(String(10), nullable=False)
     order_type: Mapped[str] = mapped_column(String(10), nullable=False)
     quantity: Mapped[Decimal] = mapped_column(Numeric(24, 8), nullable=False)
+    submitted_notional: Mapped[Decimal] = mapped_column(Numeric(24, 8), nullable=False)
     filled_quantity: Mapped[Decimal] = mapped_column(Numeric(24, 8), nullable=False)
     remaining_quantity: Mapped[Decimal] = mapped_column(Numeric(24, 8), nullable=False)
     limit_price: Mapped[Decimal | None] = mapped_column(Numeric(24, 8))
@@ -421,7 +428,11 @@ class ProductionRiskEngine:
                 Decimal(0),
                 tuple(reasons),
                 {key: str(value) for key, value in vars(self.config).items()},
-                {"cash": str(snapshot.cash), "equity": str(snapshot.equity)},
+                {
+                    "cash": str(snapshot.cash),
+                    "equity": str(snapshot.equity),
+                    "reference_price": str(price),
+                },
                 correlation_id,
                 cycle_id,
             )
@@ -476,6 +487,7 @@ class ProductionRiskEngine:
             {
                 "cash": str(snapshot.cash),
                 "equity": str(snapshot.equity),
+                "reference_price": str(price),
                 "resulting_position": str(resulting),
                 "gross": str(gross),
                 "net": str(net),
@@ -573,6 +585,10 @@ class PersistentPaperBroker:
                 side=intent.side,
                 order_type=intent.order_type,
                 quantity=decision.approved_quantity,
+                submitted_notional=(
+                    decision.approved_quantity
+                    * Decimal(decision.portfolio_snapshot["reference_price"])
+                ),
                 filled_quantity=Decimal(0),
                 remaining_quantity=decision.approved_quantity,
                 limit_price=intent.limit_price,
@@ -582,16 +598,16 @@ class PersistentPaperBroker:
                 correlation_id=decision.correlation_id,
             )
             session.add(row)
-            session.flush()
-            self.repository.audit(
-                session,
-                AuditEventType.ORDER_SUBMITTED,
-                "order",
-                row.id,
-                row.trading_cycle_id,
-                row.correlation_id,
-            )
             try:
+                session.flush()
+                self.repository.audit(
+                    session,
+                    AuditEventType.ORDER_SUBMITTED,
+                    "order",
+                    row.id,
+                    row.trading_cycle_id,
+                    row.correlation_id,
+                )
                 session.commit()
             except IntegrityError:
                 session.rollback()
@@ -640,6 +656,13 @@ class PersistentPaperBroker:
             if quantity <= 0:
                 return order
             price = self.slippage.apply(reference, side)
+            if order.order_type == OrderType.LIMIT:
+                assert order.limit_price is not None
+                price = (
+                    min(price, order.limit_price)
+                    if side is Side.BUY
+                    else max(price, order.limit_price)
+                )
             commission = self.costs.commission(price * quantity)
             account = session.get(PaperAccountRecord, order.account_id)
             if account is None:
@@ -794,6 +817,29 @@ class PersistentPaperBroker:
             return order
 
 
+class PersistentExecutionEngine:
+    """Jediná aplikační hranice mezi schváleným risk rozhodnutím a brokerem."""
+
+    def __init__(self, broker: PersistentPaperBroker) -> None:
+        self.broker = broker
+
+    def submit(
+        self,
+        account_id: str,
+        strategy_id: str,
+        intent: OrderIntent,
+        decision: RiskDecision,
+    ) -> PaperOrderRecord:
+        if decision.order_intent_id != intent.id:
+            raise PermissionError("ExecutionEngine odmítl risk rozhodnutí jiného intentu")
+        if decision.status not in (
+            RiskDecisionStatus.APPROVED,
+            RiskDecisionStatus.MODIFIED,
+        ):
+            raise PermissionError("ExecutionEngine odmítl neschválený příkaz")
+        return self.broker.submit_order(account_id, strategy_id, intent, decision)
+
+
 class ReconciliationService:
     def __init__(self, repository: Phase4Repository):
         self.repository = repository
@@ -897,12 +943,23 @@ class ReconciliationService:
 
 class TradingCycleService:
     def __init__(
-        self, repository: Phase4Repository, risk_config: ProductionRiskConfig | None = None
+        self,
+        repository: Phase4Repository,
+        risk_config: ProductionRiskConfig | None = None,
+        lease_duration: timedelta = timedelta(minutes=5),
     ):
         self.repository = repository
         self.risk = ProductionRiskEngine(risk_config or ProductionRiskConfig())
         self.broker = PersistentPaperBroker(repository)
+        self.execution = PersistentExecutionEngine(self.broker)
         self.reconciliation = ReconciliationService(repository)
+        self.lease_duration = lease_duration
+
+    def _assert_cycle_lease(self, cycle_id: str, lease_owner: str) -> None:
+        with Session(self.repository.engine) as session:
+            cycle = session.get(TradingCycleRecord, cycle_id)
+            if cycle is None or cycle.lease_owner != lease_owner:
+                raise RuntimeError("Trading cycle ztratil databázový lease")
 
     def run(
         self,
@@ -919,6 +976,9 @@ class TradingCycleService:
         cycle_key = deterministic_cycle_key(account_id, strategy_id, session_date)
         cycle_id = cycle_key
         correlation_id = cycle_key
+        lease_owner = str(uuid4())
+        lease_now = datetime.now(UTC)
+        lease_expires_at = lease_now + self.lease_duration
         with Session(self.repository.engine) as session:
             existing = session.scalar(
                 select(TradingCycleRecord).where(TradingCycleRecord.cycle_key == cycle_key)
@@ -926,7 +986,30 @@ class TradingCycleService:
             if existing and existing.status == TradingCycleStatus.COMPLETED:
                 return existing.id
             if existing and existing.status == TradingCycleStatus.RUNNING:
-                return existing.id
+                expires_at = existing.lease_expires_at
+                if expires_at is not None and expires_at.tzinfo is None:
+                    expires_at = expires_at.replace(tzinfo=UTC)
+                if expires_at is not None and expires_at > lease_now:
+                    return existing.id
+                claimed = cast(
+                    CursorResult[Any],
+                    session.execute(
+                        update(TradingCycleRecord)
+                        .where(
+                            TradingCycleRecord.id == existing.id,
+                            TradingCycleRecord.status == TradingCycleStatus.RUNNING,
+                            or_(
+                                TradingCycleRecord.lease_expires_at.is_(None),
+                                TradingCycleRecord.lease_expires_at <= lease_now,
+                            ),
+                        )
+                        .values(lease_owner=lease_owner, lease_expires_at=lease_expires_at)
+                        .execution_options(synchronize_session=False)
+                    ),
+                )
+                session.commit()
+                if claimed.rowcount != 1:
+                    return existing.id
             if existing is None:
                 session.add(
                     TradingCycleRecord(
@@ -939,6 +1022,8 @@ class TradingCycleService:
                         status=TradingCycleStatus.RUNNING,
                         correlation_id=correlation_id,
                         data_fingerprint=dataset_identity(bars),
+                        lease_owner=lease_owner,
+                        lease_expires_at=lease_expires_at,
                     )
                 )
                 try:
@@ -962,6 +1047,8 @@ class TradingCycleService:
                     return recovered.id
             else:
                 existing.status = TradingCycleStatus.RUNNING
+                existing.lease_owner = lease_owner
+                existing.lease_expires_at = lease_expires_at
                 session.commit()
         bar = bars[-1]
         with Session(self.repository.engine) as session:
@@ -974,22 +1061,42 @@ class TradingCycleService:
                 session.commit()
         account = self.repository.account(account_id)
         positions = {p.instrument_id: p.quantity for p in self.repository.positions(account_id)}
+        pending: dict[str, Decimal] = {}
+        for open_order in self.broker.get_open_orders(account_id):
+            signed_remaining = (
+                open_order.remaining_quantity
+                if open_order.side == Side.BUY
+                else -open_order.remaining_quantity
+            )
+            pending[open_order.instrument_id] = (
+                pending.get(open_order.instrument_id, Decimal(0)) + signed_remaining
+            )
         prices = {bar.symbol: bar.close}
         with Session(self.repository.engine) as session:
             daily_orders = int(
                 session.scalar(
-                    select(func.count(PaperOrderRecord.id)).where(
+                    select(func.count(PaperOrderRecord.id))
+                    .join(
+                        TradingCycleRecord,
+                        TradingCycleRecord.id == PaperOrderRecord.trading_cycle_id,
+                    )
+                    .where(
                         PaperOrderRecord.account_id == account_id,
-                        func.date(PaperOrderRecord.submitted_at) == session_date,
+                        TradingCycleRecord.session_date == session_date,
                     )
                 )
                 or 0
             )
             daily_notional = Decimal(
                 session.scalar(
-                    select(func.coalesce(func.sum(PaperOrderRecord.quantity * bar.close), 0)).where(
+                    select(func.coalesce(func.sum(PaperOrderRecord.submitted_notional), 0))
+                    .join(
+                        TradingCycleRecord,
+                        TradingCycleRecord.id == PaperOrderRecord.trading_cycle_id,
+                    )
+                    .where(
                         PaperOrderRecord.account_id == account_id,
-                        func.date(PaperOrderRecord.submitted_at) == session_date,
+                        TradingCycleRecord.session_date == session_date,
                     )
                 )
                 or 0
@@ -998,7 +1105,7 @@ class TradingCycleService:
             if symbol != bar.symbol:
                 raise ValueError("Cycle vyžaduje executable bar každého target instrumentu")
             desired = (account.equity * weight / bar.open).to_integral_value(rounding=ROUND_DOWN)
-            delta = desired - positions.get(symbol, Decimal(0))
+            delta = desired - positions.get(symbol, Decimal(0)) - pending.get(symbol, Decimal(0))
             if delta == 0:
                 continue
             intent_id = hashlib.sha256(f"{cycle_id}|{symbol}|{desired}".encode()).hexdigest()
@@ -1025,7 +1132,7 @@ class TradingCycleService:
                 session_start_equity,
                 positions,
                 prices,
-                {},
+                pending,
                 daily_orders,
                 daily_notional,
                 account.trading_state,
@@ -1075,18 +1182,23 @@ class TradingCycleService:
                         account_id, ",".join(r.value for r in decision.reasons), correlation_id
                     )
                 continue
-            order = self.broker.submit_order(account_id, strategy_id, intent, decision)
+            self._assert_cycle_lease(cycle_id, lease_owner)
+            order = self.execution.submit(account_id, strategy_id, intent, decision)
             self.broker.process(order.id, bar)
         result = self.reconciliation.reconcile(account_id, correlation_id=correlation_id)
         with Session(self.repository.engine) as session:
             cycle = session.get(TradingCycleRecord, cycle_id)
             assert cycle is not None
+            if cycle.lease_owner != lease_owner:
+                raise RuntimeError("Trading cycle ztratil databázový lease před dokončením")
             cycle.completed_at = datetime.now(UTC)
             cycle.status = (
                 TradingCycleStatus.COMPLETED
                 if result.status is ReconciliationStatus.SUCCEEDED
                 else TradingCycleStatus.HALTED
             )
+            cycle.lease_owner = None
+            cycle.lease_expires_at = None
             self.repository.audit(
                 session,
                 AuditEventType.TRADING_CYCLE_COMPLETED,

@@ -93,3 +93,8 @@ součástí Phase 3.
 ## Phase 4 paper runtime
 
 `TradingCycleService` vlastní tok validation → target-vs-actual → `ProductionRiskEngine` → `PersistentPaperBroker` → reconciliation. Broker vyžaduje APPROVED/MODIFIED decision stejného intentu. Cycle, client-order, decision a fill identity chrání DB constraints. Fill, cash, FIFO position, order a audit jsou jedna transakce; divergence persistuje `HALTED`.
+
+Aktivní cycle vlastní časově omezený databázový lease. Souběžný worker vrátí existující cycle,
+zatímco restart smí atomicky převzít pouze expirovaný lease. Otevřené ordery vstupují jako pending
+množství do target delta i risk exposure. Denní limity se účtují podle execution session cycle,
+nikoli podle předchozího decision close.
