@@ -98,3 +98,13 @@ Aktivní cycle vlastní časově omezený databázový lease. Souběžný worker
 zatímco restart smí atomicky převzít pouze expirovaný lease. Otevřené ordery vstupují jako pending
 množství do target delta i risk exposure. Denní limity se účtují podle execution session cycle,
 nikoli podle předchozího decision close.
+
+## Phase 5 automation runtime
+
+API spravuje persistentní `ScheduledJob`, scheduler pouze materializuje deterministický
+`JobRun` a nikdy neobchoduje. Samostatný worker claimuje run v PostgreSQL přes
+`FOR UPDATE SKIP LOCKED`, přidělí časově omezený lease a monotónní fencing token a teprve poté
+volá autoritativní Phase 4 `TradingCycleService` nebo `ReconciliationService`. Retry zachová
+scheduled time, snapshot konfigurace a tím i identitu Phase 4 cycle. PostgreSQL unique constraints
+chrání occurrence a attempt; account a order locks z Phase 4 serializují ekonomický commit.
+SQLite je pouze rychlý test adapter a neposkytuje produkční concurrency důkaz.

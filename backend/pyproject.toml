@@ -13,6 +13,9 @@ dependencies = [
   "uvicorn>=0.35,<1",
 ]
 
+[project.scripts]
+quantlab-worker = "quantlab.worker:main"
+
 [dependency-groups]
 dev = [
   "httpx2>=2,<3",
