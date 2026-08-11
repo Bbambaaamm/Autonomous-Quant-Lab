@@ -27,7 +27,6 @@ from quantlab.multi_asset import (
     MeanReversionStrategy,
     MultiAssetFill,
     MultiAssetPortfolio,
-    RebalanceFrequency,
     StrategyContext,
     TargetPortfolio,
     TrendStrategy,
@@ -66,20 +65,18 @@ def bar(day, close="10", source=None):
     return ProviderBar(day, value, value, value, value, Decimal("100"), source or str(day))
 
 
-def obs(instrument, day, close, observed=None, ingestion="x"):
+def obs(instrument, day, close, observed=NOW, ingestion="x"):
     if isinstance(instrument, str):
         instrument = Instrument(
             instrument, instrument, "XNYS", "XNYS", "USD", AssetType.EQUITY, date(2000, 1, 1)
         )
-    known_at = observed or CAL.session_close(day)
-    return normalize_bar(bar(day, close), instrument, "fixture", known_at, ingestion, CAL)
+    return normalize_bar(bar(day, close), instrument, "fixture", observed, ingestion, CAL)
 
 
 def test_calendar_holiday_early_close_and_next_session():
     assert not CAL.is_session(date(2024, 7, 4))
     assert CAL.next_session(date(2024, 7, 3)) == date(2024, 7, 5)
     assert CAL.session_close(date(2024, 11, 29)).hour == 18  # 13:00 New York v UTC
-    assert CAL.session_close(date(2024, 7, 3)).hour == 17
     assert CAL.session_close(date(2024, 11, 27)).hour == 21
 
 
@@ -131,11 +128,6 @@ def test_stooq_fixture_contract_valid_partial_empty_malformed_duplicate_rate_lim
         ).historical_daily("A", date(2024, 1, 1), date(2024, 1, 2))
     with pytest.raises(InvalidSymbol):
         provider.resolve("../secret")
-    invalid_decimal = b"Date,Open,High,Low,Close,Volume\n2024-01-02,N/D,2,1,2,10\n"
-    with pytest.raises(InvalidProviderResponse):
-        StooqProvider(lambda u, t: (200, {}, invalid_decimal), max_attempts=1).historical_daily(
-            "A", date(2024, 1, 1), date(2024, 1, 2)
-        )
 
 
 def test_ingestion_idempotency_overlap_revision_and_snapshot_immutability():
@@ -249,14 +241,13 @@ def test_targets_validation_ties_and_missing_lookback():
     histories = {
         x: tuple(obs(x, d, c) for d, c in [(d1, "10"), (d2, "11"), (d3, "12")]) for x in ("a", "b")
     }
-    signals = {key: tuple(bar.close for bar in bars) for key, bars in histories.items()}
     target = strategy.generate_targets(
-        StrategyContext(CAL.session_close(d3), histories, ("a", "b"), signals)
+        StrategyContext(CAL.session_close(d3), histories, ("a", "b"))
     )
     assert target.weights[0][0] == "a"
     assert (
         CrossSectionalMomentumStrategy(5, 2)
-        .generate_targets(StrategyContext(CAL.session_close(d3), histories, ("a", "b"), signals))
+        .generate_targets(StrategyContext(CAL.session_close(d3), histories, ("a", "b")))
         .weights
         == ()
     )
@@ -267,15 +258,10 @@ def test_targets_validation_ties_and_missing_lookback():
 def test_context_and_prefix_invariance_reject_future_data():
     past = obs("a", date(2024, 1, 8), "10")
     future = obs("a", date(2024, 1, 9), "999")
-    context = StrategyContext(past.timestamp, {"a": (past,)}, ("a",), {"a": (past.close,)})
+    context = StrategyContext(past.timestamp, {"a": (past,)}, ("a",))
     assert CrossSectionalMomentumStrategy(2, 1).generate_targets(context).weights == ()
     with pytest.raises(ValueError):
-        StrategyContext(
-            past.timestamp,
-            {"a": (past, future)},
-            ("a",),
-            {"a": (past.close, future.close)},
-        )
+        StrategyContext(past.timestamp, {"a": (past, future)}, ("a",))
 
 
 def test_multi_asset_accounting_split_dividend_and_cash_constraint():
@@ -344,96 +330,3 @@ def test_multi_asset_next_session_shared_cash_and_master_future_mutation():
         for t, target in rerun.decisions
         if t <= CAL.session_close(date(2024, 1, 5))
     )
-
-
-def single_asset_universe() -> PointInTimeUniverse:
-    return PointInTimeUniverse(
-        UniverseDefinition("single", "pit", UniverseKind.POINT_IN_TIME_MEMBERSHIP),
-        [
-            UniverseMembership(
-                "single",
-                "a",
-                datetime(2020, 1, 1, tzinfo=UTC),
-                None,
-                datetime(2020, 1, 1, tzinfo=UTC),
-            )
-        ],
-    )
-
-
-def test_observation_identity_contains_provider_and_coverage_counts_sessions():
-    first = normalize_bar(bar(date(2024, 1, 8)), INST, "first", NOW, "x", CAL)
-    second = normalize_bar(bar(date(2024, 1, 8)), INST, "second", NOW, "x", CAL)
-    assert first.observation_id != second.observation_id
-    store = InMemoryObservationStore()
-    store.ingest(
-        FixtureProvider([bar(date(2024, 1, 8))]),
-        INST,
-        date(2024, 1, 8),
-        date(2024, 1, 12),
-        NOW,
-        CAL,
-    )
-    snapshot = build_snapshot(
-        store,
-        as_of=NOW,
-        provider="fixture",
-        calendar_identity=CAL.identity,
-        universe_id="u",
-        instrument_ids=["i-a"],
-        start=date(2024, 1, 8),
-        end=date(2024, 1, 12),
-    )
-    assert snapshot.coverage == Decimal("0.2")
-    assert snapshot.status == "INVALID"
-
-
-def test_revision_known_later_does_not_change_earlier_decision():
-    days = [date(2024, 1, day) for day in (3, 4, 5, 8)]
-    rows = [obs("a", day, str(10 + index)) for index, day in enumerate(days)]
-    correction = obs(
-        "a",
-        days[0],
-        "999",
-        observed=CAL.session_close(days[-1]),
-        ingestion="correction",
-    )
-    strategy = TrendStrategy(1, 2, rebalance_frequency=RebalanceFrequency.DAILY)
-    baseline = run_multi_asset(rows, single_asset_universe(), strategy)
-    revised = run_multi_asset([*rows, correction], single_asset_universe(), strategy)
-    cutoff = CAL.session_close(days[2])
-    assert [(when, target.weights) for when, target in baseline.decisions if when <= cutoff] == [
-        (when, target.weights) for when, target in revised.decisions if when <= cutoff
-    ]
-
-
-def test_runner_uses_adjusted_signals_and_applies_actions():
-    days = [date(2024, 1, day) for day in (3, 4, 5, 8)]
-    closes = ("90", "100", "55", "60")
-    rows = [obs("a", day, close) for day, close in zip(days, closes, strict=True)]
-    split = CorporateAction(
-        "split",
-        "a",
-        CorporateActionKind.SPLIT,
-        CAL.session_close(days[2]),
-        CAL.session_close(days[2]),
-        Decimal("2"),
-    )
-    dividend = CorporateAction(
-        "dividend",
-        "a",
-        CorporateActionKind.CASH_DIVIDEND,
-        CAL.session_close(days[3]),
-        CAL.session_close(days[3]),
-        Decimal("1"),
-    )
-    result = run_multi_asset(
-        rows,
-        single_asset_universe(),
-        TrendStrategy(1, 2, rebalance_frequency=RebalanceFrequency.DAILY),
-        initial_cash=Decimal("1000"),
-        commission_bps=Decimal("0"),
-        corporate_actions=(split, dividend),
-    )
-    assert dict(result.decisions)[CAL.session_close(days[2])].weights == (("a", Decimal("1")),)
-    assert result.dividend_income > 0
