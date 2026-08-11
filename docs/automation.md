@@ -22,3 +22,6 @@ chráněnou operator síť. Production vyžaduje PostgreSQL; SQLite tiše nenahr
 garance. Claim+attempt jsou jeden commit, ekonomický Phase 4 commit je oddělený a finální fenced
 status commit následuje po něm. Neurčitý stav se obnovuje stejnou cycle identity a reconciliation.
 Ruční `run-now` odmítá deaktivovaný job; již materializovaný run deaktivace neruší.
+
+## Phase 6
+Phase 6 je implementována jako provider → validace/immutable revisions → XNYS calendar/corporate actions → PIT universe → immutable snapshot → multi-asset target portfolio. Detailní invariants jsou v `docs/market-data.md` a `docs/strategy-research.md`. Žádná část nevytváří live execution path; automatický data refresh zatím není allowlistovaný job a refresh se provádí odděleně od trading cycle.
