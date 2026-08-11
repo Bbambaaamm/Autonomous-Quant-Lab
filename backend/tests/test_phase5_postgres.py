@@ -129,6 +129,33 @@ def test_postgres_two_workers_claim_exactly_one_execution_owner() -> None:
         assert attempts[0].fencing_token == run.fencing_token == 1
 
 
+def test_postgres_concurrent_manual_run_recovers_unique_conflict() -> None:
+    repo, _, account_id = repository()
+    now = datetime.now(UTC)
+    job = repo.create_job(
+        job_type=JobType.RUN_RECONCILIATION,
+        account_id=account_id,
+        schedule_type=ScheduleType.INTERVAL,
+        interval_seconds=60,
+        next_run_at=now,
+    )
+    key = str(uuid4())
+    results = concurrent_calls(
+        lambda: SchedulerService(AutomationRepository(str(repo.engine.url))).run_now(
+            job.id, key, now
+        ),
+        lambda: SchedulerService(AutomationRepository(str(repo.engine.url))).run_now(
+            job.id, key, now
+        ),
+    )
+    assert results[0] == results[1]
+    with Session(repo.engine) as session:
+        assert (
+            session.scalar(select(func.count()).select_from(JobRun).where(JobRun.id == results[0]))
+            == 1
+        )
+
+
 def market_data(path: Path, decision_time: datetime) -> None:
     path.write_text(
         "symbol,timestamp,open,high,low,close,volume,adjusted_close,source,timeframe\n"

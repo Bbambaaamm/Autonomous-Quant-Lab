@@ -191,7 +191,10 @@ def validate_payload(payload: dict[str, Any]) -> None:
     while stack:
         value = stack.pop()
         if isinstance(value, dict):
-            if forbidden.intersection(str(key).lower() for key in value):
+            normalized_keys = {str(key).lower() for key in value}
+            if forbidden.intersection(normalized_keys) or any(
+                key.startswith("__automation_") for key in normalized_keys
+            ):
                 raise ValueError("Automation konfigurace nesmí obsahovat execution mode ani broker")
             stack.extend(value.values())
         elif isinstance(value, list):
@@ -340,7 +343,7 @@ class SchedulerService:
                         status=RunStatus.PENDING,
                         attempt_count=0,
                         fencing_token=0,
-                        config_snapshot_json=job.config_json,
+                        config_snapshot_json=self._snapshot(job),
                         correlation_id=run_id,
                         created_at=now,
                     )
@@ -373,6 +376,8 @@ class SchedulerService:
             job = session.get(ScheduledJob, job_id)
             if job is None:
                 raise KeyError(job_id)
+            if not job.enabled:
+                raise ValueError("Zakázaný job nelze spustit ručně")
             existing = session.get(JobRun, run_id)
             if existing:
                 return existing.id
@@ -385,13 +390,31 @@ class SchedulerService:
                     status=RunStatus.PENDING,
                     attempt_count=0,
                     fencing_token=0,
-                    config_snapshot_json=job.config_json,
+                    config_snapshot_json=self._snapshot(job),
                     correlation_id=run_id,
                     created_at=now,
                 )
             )
-            session.commit()
+            try:
+                session.commit()
+            except IntegrityError:
+                # Souběžný request mohl vložit stejnou deterministickou identitu.
+                session.rollback()
+                if session.get(JobRun, run_id) is None:
+                    raise
         return run_id
+
+    @staticmethod
+    def _snapshot(job: ScheduledJob) -> str:
+        payload = json.loads(job.config_json)
+        payload.update(
+            {
+                "__automation_account_id": job.account_id,
+                "__automation_job_type": job.job_type,
+                "__automation_strategy_id": job.strategy_id,
+            }
+        )
+        return json.dumps(payload, sort_keys=True)
 
 
 class LeaseLost(RuntimeError):
@@ -416,21 +439,24 @@ class JobExecutor:
 
     def __call__(self, job: ScheduledJob, run: JobRun) -> dict[str, str | None]:
         payload = json.loads(run.config_snapshot_json)
+        account_id = str(payload.pop("__automation_account_id", job.account_id))
+        job_type = str(payload.pop("__automation_job_type", job.job_type))
+        strategy_id = payload.pop("__automation_strategy_id", job.strategy_id)
         validate_payload(payload)
         connection = self.trading.repository.engine.connect()
         advisory_lock_acquired = False
         try:
             if connection.dialect.name == "postgresql":
-                connection.execute(select(func.pg_advisory_lock(func.hashtext(job.account_id))))
+                connection.execute(select(func.pg_advisory_lock(func.hashtext(account_id))))
                 advisory_lock_acquired = True
-            if job.job_type == JobType.RUN_RECONCILIATION:
-                result = self.reconciliation.reconcile(job.account_id)
+            if job_type == JobType.RUN_RECONCILIATION:
+                result = self.reconciliation.reconcile(account_id)
                 return {
                     "reconciliation_id": result.id,
                     "outcome": result.status,
                     "trading_cycle_id": None,
                 }
-            if job.job_type != JobType.RUN_PAPER_CYCLE:
+            if job_type != JobType.RUN_PAPER_CYCLE:
                 raise PermanentJobError("Neznámý job type")
             try:
                 path = payload["dataset_path"]
@@ -456,8 +482,8 @@ class JobExecutor:
             # následující bar pro fill; pozdější bary do cycle vstupů nepatří.
             bars = available_bars[: execution_index + 1]
             cycle_id = self.trading.run(
-                job.account_id,
-                job.strategy_id or "",
+                account_id,
+                str(strategy_id or ""),
                 bars,
                 targets,
                 date.fromisoformat(payload.get("session_date", decision_time.date().isoformat())),
@@ -474,7 +500,7 @@ class JobExecutor:
             return {"trading_cycle_id": cycle_id, "reconciliation_id": None, "outcome": "PROCESSED"}
         finally:
             if advisory_lock_acquired:
-                connection.execute(select(func.pg_advisory_unlock(func.hashtext(job.account_id))))
+                connection.execute(select(func.pg_advisory_unlock(func.hashtext(account_id))))
             connection.close()
 
 
@@ -515,6 +541,7 @@ class WorkerService:
                         JobRun.lease_owner == self.worker_id,
                         JobRun.fencing_token == token,
                         JobRun.status == RunStatus.RUNNING,
+                        JobRun.lease_expires_at > now,
                     )
                     .values(lease_expires_at=expires)
                 )
@@ -597,6 +624,7 @@ class WorkerService:
                     JobRun.lease_owner == self.worker_id,
                     JobRun.fencing_token == token,
                     JobRun.status == RunStatus.RUNNING,
+                    JobRun.lease_expires_at > now,
                 )
                 .with_for_update()
             )
@@ -631,6 +659,8 @@ class WorkerService:
                     JobRun.id == run_id,
                     JobRun.lease_owner == self.worker_id,
                     JobRun.fencing_token == token,
+                    JobRun.status == RunStatus.RUNNING,
+                    JobRun.lease_expires_at > now,
                 )
                 .with_for_update()
             )
@@ -682,10 +712,17 @@ class WorkerService:
                 session.expunge(run)
                 session.expunge(job)
             heartbeat_stop = Event()
+            heartbeat_failed = Event()
 
             def renew() -> None:
                 while not heartbeat_stop.wait(self.settings.worker_heartbeat_interval):
-                    if not self.heartbeat(run_id, token):
+                    try:
+                        renewed = self.heartbeat(run_id, token)
+                    except Exception:
+                        heartbeat_failed.set()
+                        return
+                    if not renewed:
+                        heartbeat_failed.set()
                         return
 
             heartbeat_thread = Thread(target=renew, daemon=True)
@@ -695,6 +732,8 @@ class WorkerService:
             finally:
                 heartbeat_stop.set()
                 heartbeat_thread.join()
+            if heartbeat_failed.is_set():
+                raise LeaseLost("Heartbeat selhal nebo lease mezitím ztratil vlastníka")
             self.finish(run_id, token, result, now)
         except Exception as exc:
             if isinstance(exc, LeaseLost):
@@ -703,9 +742,11 @@ class WorkerService:
         return run_id
 
     def retry(self, run_id: str, now: datetime | None = None) -> None:
+        if not self.settings.automation_enabled:
+            raise ValueError("Automation je globálně vypnutá")
         now = utc(now or datetime.now(UTC))
         with Session(self.repository.engine) as session:
-            run = session.get(JobRun, run_id)
+            run = session.scalar(select(JobRun).where(JobRun.id == run_id).with_for_update())
             if run is None:
                 raise KeyError(run_id)
             if run.status == RunStatus.SUCCEEDED:

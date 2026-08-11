@@ -249,6 +249,72 @@ def test_reclaim_closes_superseded_attempt(tmp_path) -> None:  # type: ignore[no
         assert old_attempt.retryable is True
 
 
+def test_expired_owner_cannot_renew_finish_or_fail_without_takeover(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    repository, settings = setup(tmp_path)
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+    job = repository.create_job(
+        job_type=JobType.RUN_RECONCILIATION,
+        account_id="paper-main",
+        schedule_type=ScheduleType.INTERVAL,
+        interval_seconds=60,
+        next_run_at=now,
+    )
+    run_id = SchedulerService(repository).run_now(job.id, "expired-owner", now)
+    worker = WorkerService(repository, settings, worker_id="expired-owner")
+    assert worker.claim(now) == (run_id, 1)
+    expired = now + timedelta(seconds=settings.worker_lease_timeout)
+    assert worker.heartbeat(run_id, 1, expired) is False
+    with pytest.raises(LeaseLost):
+        worker.finish(run_id, 1, {"outcome": "STALE"}, expired)
+    with pytest.raises(LeaseLost):
+        worker.fail(run_id, 1, TimeoutError("stale"), expired)
+
+
+def test_retry_uses_materialized_account_strategy_and_job_type_snapshot(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    repository, _ = setup(tmp_path)
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+    job = repository.create_job(
+        job_type=JobType.RUN_RECONCILIATION,
+        account_id="paper-main",
+        schedule_type=ScheduleType.INTERVAL,
+        interval_seconds=60,
+        next_run_at=now,
+    )
+    run_id = SchedulerService(repository).run_now(job.id, "immutable-identity", now)
+    with Session(repository.engine) as session:
+        stored_job = session.get(type(job), job.id)
+        run = session.get(JobRun, run_id)
+        assert stored_job is not None and run is not None
+        stored_job.job_type = JobType.RUN_PAPER_CYCLE
+        stored_job.strategy_id = "changed-strategy"
+        session.commit()
+        session.expunge(stored_job)
+        session.expunge(run)
+    executor = JobExecutor(repository)
+    observed: list[str] = []
+    executor.reconciliation.reconcile = lambda account_id: type(  # type: ignore[method-assign]
+        "Result", (), {"id": "reconciliation", "status": observed.append(account_id) or "SUCCEEDED"}
+    )()
+    result = executor(stored_job, run)
+    assert observed == ["paper-main"]
+    assert result["reconciliation_id"] == "reconciliation"
+
+
+def test_manual_run_rejects_disabled_job_at_service_boundary(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    repository, _ = setup(tmp_path)
+    now = datetime.now(UTC)
+    job = repository.create_job(
+        job_type=JobType.RUN_RECONCILIATION,
+        account_id="paper-main",
+        schedule_type=ScheduleType.INTERVAL,
+        interval_seconds=60,
+        next_run_at=now,
+        enabled=False,
+    )
+    with pytest.raises(ValueError, match="Zakázaný job"):
+        SchedulerService(repository).run_now(job.id, "disabled", now)
+
+
 def test_executor_uses_only_first_bar_after_decision_and_rejects_incomplete_cycle(tmp_path) -> None:  # type: ignore[no-untyped-def]
     repository, _ = setup(tmp_path)
     csv_path = tmp_path / "bars.csv"

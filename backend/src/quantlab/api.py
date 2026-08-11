@@ -148,6 +148,8 @@ def disable_automation_job(job_id: str) -> dict[str, object]:
 def run_automation_job(
     job_id: str, idempotency_key: Annotated[str, Header(alias="Idempotency-Key")]
 ) -> dict[str, str]:
+    if not settings.automation_enabled:
+        raise HTTPException(status_code=503, detail="Automation je globálně vypnutá")
     try:
         return {"id": automation_scheduler.run_now(job_id, idempotency_key)}
     except KeyError as exc:

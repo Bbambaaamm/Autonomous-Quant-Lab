@@ -25,6 +25,8 @@ transakce se tím neruší. Runy a attempts kontrolujte přes `/automation/runs/
 `/operations/workers`, backlog přes `/operations/summary`; dead-letter ručně obnovte
 `POST /automation/runs/{id}/retry`. Manual occurrence vyžaduje hlavičku `Idempotency-Key` na
 `POST /automation/jobs/{id}/run-now`.
+Deaktivovaný job nelze spustit ani přes `run-now`; globálně vypnutá automation neclaimuje a
+nepovolí manual retry. Již běžící pokus se pouze bezpečně dokončí nebo nechá expirovat.
 
 * **Worker neheartbeatuje / DB outage:** nevynucujte paralelní běh; obnovte DB, ověřte readiness
   a nechte nový worker převzít pouze expirovaný lease.
