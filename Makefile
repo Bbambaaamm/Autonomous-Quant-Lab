@@ -1,6 +1,12 @@
-.PHONY: setup test format lint typecheck dev
-setup:
+.PHONY: install setup check test format lint typecheck dev
+install:
 	cd backend && uv sync --locked --all-groups
+setup: install
+check:
+	cd backend && uv lock --check
+	cd backend && uv run ruff format --check .
+	cd backend && uv run ruff check .
+	cd backend && uv run mypy src/quantlab
 test:
 	cd backend && uv run pytest
 format:
