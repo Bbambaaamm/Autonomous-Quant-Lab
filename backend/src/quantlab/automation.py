@@ -37,8 +37,9 @@ from sqlalchemy.orm import Mapped, Session, mapped_column
 
 from quantlab.config import Settings
 from quantlab.data import CSVMarketDataProvider
+from quantlab.domain import TradingCycleStatus
 from quantlab.persistence import Base, _sqlite_fk
-from quantlab.phase4 import ReconciliationService, TradingCycleService
+from quantlab.phase4 import ReconciliationService, TradingCycleRecord, TradingCycleService
 
 
 class JobType(StrEnum):
@@ -209,7 +210,7 @@ def next_occurrence(job: ScheduledJob, previous: datetime) -> datetime:
         raise ValueError("Neplatná časová zóna") from exc
     if not job.daily_time:
         raise ValueError("Daily schedule vyžaduje čas")
-    hour, minute = (int(part) for part in job.daily_time.split(":"))
+    hour, minute = parse_daily_time(job.daily_time)
     local_day = previous.astimezone(zone).date() + timedelta(days=1)
     # fold=0 volí první výskyt opakované hodiny; neexistující hodina se normalizuje dopředu.
     candidate = datetime.combine(local_day, time(hour, minute), zone).replace(fold=0)
@@ -217,6 +218,16 @@ def next_occurrence(job: ScheduledJob, previous: datetime) -> datetime:
     if (roundtrip.hour, roundtrip.minute) != (hour, minute):
         candidate = roundtrip
     return candidate.astimezone(UTC)
+
+
+def parse_daily_time(value: str) -> tuple[int, int]:
+    try:
+        parsed = time.fromisoformat(value)
+    except ValueError as exc:
+        raise ValueError("Daily čas musí mít platný formát HH:MM") from exc
+    if parsed.second or parsed.microsecond or len(value) != 5:
+        raise ValueError("Daily čas musí mít platný formát HH:MM")
+    return parsed.hour, parsed.minute
 
 
 class AutomationRepository:
@@ -255,8 +266,10 @@ class AutomationRepository:
             interval_seconds is None or interval_seconds <= 0
         ):
             raise ValueError("Interval musí být kladný")
-        if schedule_type == ScheduleType.DAILY and not daily_time:
-            raise ValueError("Daily schedule vyžaduje čas")
+        if schedule_type == ScheduleType.DAILY:
+            if not daily_time:
+                raise ValueError("Daily schedule vyžaduje čas")
+            parse_daily_time(daily_time)
         now = datetime.now(UTC)
         row = ScheduledJob(
             id=str(uuid4()),
@@ -285,10 +298,11 @@ class AutomationRepository:
         return row
 
     def page(self, model: type[Any], limit: int = 50, offset: int = 0) -> list[Any]:
+        order_column = model.created_at if hasattr(model, "created_at") else model.last_heartbeat_at
         with Session(self.engine) as session:
             rows = list(
                 session.scalars(
-                    select(model).order_by(model.created_at.desc()).limit(limit).offset(offset)
+                    select(model).order_by(order_column.desc()).limit(limit).offset(offset)
                 )
             )
             for row in rows:
@@ -386,6 +400,10 @@ class PermanentJobError(RuntimeError):
     pass
 
 
+class TransientJobError(RuntimeError):
+    pass
+
+
 class JobExecutor:
     def __init__(self, repository: AutomationRepository) -> None:
         from quantlab.phase4 import Phase4Repository
@@ -398,9 +416,11 @@ class JobExecutor:
         payload = json.loads(run.config_snapshot_json)
         validate_payload(payload)
         connection = self.trading.repository.engine.connect()
+        advisory_lock_acquired = False
         try:
             if connection.dialect.name == "postgresql":
                 connection.execute(select(func.pg_advisory_lock(func.hashtext(job.account_id))))
+                advisory_lock_acquired = True
             if job.job_type == JobType.RUN_RECONCILIATION:
                 result = self.reconciliation.reconcile(job.account_id)
                 return {
@@ -416,10 +436,12 @@ class JobExecutor:
             except (KeyError, TypeError, ValueError) as exc:
                 raise PermanentJobError("Neplatná konfigurace paper cycle") from exc
             symbol = str(payload.get("symbol", "SPY"))
-            bars = CSVMarketDataProvider(Path(path)).load(symbol)
-            if not bars:
-                raise PermanentJobError("Snapshot market dat není dostupný")
             decision_time = utc(run.scheduled_for)
+            bars = CSVMarketDataProvider(Path(path)).load(symbol, end=decision_time)
+            if not bars:
+                raise PermanentJobError("K decision time nejsou dostupná žádná market data")
+            if any(bar.timestamp > decision_time for bar in bars):
+                raise PermanentJobError("Market data obsahují hodnotu po decision time")
             cycle_id = self.trading.run(
                 job.account_id,
                 job.strategy_id or "",
@@ -428,8 +450,18 @@ class JobExecutor:
                 date.fromisoformat(payload.get("session_date", decision_time.date().isoformat())),
                 decision_time,
             )
+            with Session(self.trading.repository.engine) as session:
+                cycle = session.get(TradingCycleRecord, cycle_id)
+                if cycle is None:
+                    raise TransientJobError("Phase 4 cycle po execution chybí")
+                if cycle.status == TradingCycleStatus.RUNNING:
+                    raise TransientJobError("Phase 4 cycle je stále RUNNING")
+                if cycle.status != TradingCycleStatus.COMPLETED:
+                    raise PermanentJobError(f"Phase 4 cycle skončil stavem {cycle.status}")
             return {"trading_cycle_id": cycle_id, "reconciliation_id": None, "outcome": "PROCESSED"}
         finally:
+            if advisory_lock_acquired:
+                connection.execute(select(func.pg_advisory_unlock(func.hashtext(job.account_id))))
             connection.close()
 
 
@@ -505,6 +537,20 @@ class WorkerService:
             run = session.scalar(query)
             if run is None:
                 return None
+            if run.status in {RunStatus.CLAIMED, RunStatus.RUNNING} and run.attempt_count > 0:
+                superseded = session.scalar(
+                    select(JobAttempt).where(
+                        JobAttempt.job_run_id == run.id,
+                        JobAttempt.attempt_number == run.attempt_count,
+                        JobAttempt.status == AttemptStatus.RUNNING,
+                    )
+                )
+                if superseded is not None:
+                    superseded.status = AttemptStatus.LEASE_LOST
+                    superseded.finished_at = now
+                    superseded.error_type = "LEASE_LOST"
+                    superseded.error_message = "Lease expiroval a run převzal jiný worker"
+                    superseded.retryable = True
             run.fencing_token += 1
             run.lease_owner = self.worker_id
             run.lease_acquired_at = now
@@ -562,7 +608,9 @@ class WorkerService:
 
     def fail(self, run_id: str, token: int, exc: Exception, now: datetime | None = None) -> None:
         now = utc(now or datetime.now(UTC))
-        retryable = isinstance(exc, (OperationalError, DBAPIError, TimeoutError, ConnectionError))
+        retryable = isinstance(
+            exc, (OperationalError, DBAPIError, TimeoutError, ConnectionError, TransientJobError)
+        )
         with Session(self.repository.engine) as session:
             run = session.scalar(
                 select(JobRun)

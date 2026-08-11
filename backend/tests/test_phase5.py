@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from quantlab.automation import (
     AutomationRepository,
     JobAttempt,
+    JobExecutor,
     JobRun,
     JobType,
     LeaseLost,
@@ -16,11 +17,13 @@ from quantlab.automation import (
     RunStatus,
     SchedulerService,
     ScheduleType,
+    TransientJobError,
+    WorkerHeartbeat,
     WorkerService,
     next_occurrence,
 )
 from quantlab.config import Settings
-from quantlab.phase4 import Phase4Repository
+from quantlab.phase4 import Phase4Repository, TradingCycleRecord
 
 
 def test_migration_revisions_own_only_their_tables() -> None:
@@ -159,3 +162,107 @@ def test_manual_trigger_and_unsafe_payload(tmp_path) -> None:  # type: ignore[no
 def test_invalid_worker_configuration_fails_closed() -> None:
     with pytest.raises(ValueError, match="Heartbeat"):
         Settings(worker_heartbeat_interval=60, worker_lease_timeout=30)
+
+
+def test_daily_time_is_validated_when_job_is_created(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    repository, _ = setup(tmp_path)
+    with pytest.raises(ValueError, match="HH:MM"):
+        repository.create_job(
+            job_type=JobType.RUN_RECONCILIATION,
+            account_id="paper-main",
+            schedule_type=ScheduleType.DAILY,
+            daily_time="25:00",
+            next_run_at=datetime.now(UTC),
+        )
+
+
+def test_worker_heartbeat_page_uses_heartbeat_order(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    repository, settings = setup(tmp_path)
+    worker = WorkerService(repository, settings, worker_id="worker-health")
+    assert worker.heartbeat(now=datetime.now(UTC))
+    rows = repository.page(WorkerHeartbeat)
+    assert [row.worker_id for row in rows] == ["worker-health"]
+
+
+def test_reclaim_closes_superseded_attempt(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    repository, settings = setup(tmp_path)
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+    job = repository.create_job(
+        job_type=JobType.RUN_RECONCILIATION,
+        account_id="paper-main",
+        schedule_type=ScheduleType.INTERVAL,
+        interval_seconds=60,
+        next_run_at=now,
+    )
+    run_id = SchedulerService(repository).run_now(job.id, "expired", now)
+    worker_a = WorkerService(repository, settings, worker_id="expired-worker")
+    assert worker_a.claim(now) == (run_id, 1)
+    worker_b = WorkerService(repository, settings, worker_id="replacement-worker")
+    assert worker_b.claim(now + timedelta(seconds=11)) == (run_id, 2)
+    with Session(repository.engine) as session:
+        old_attempt = session.scalar(
+            select(JobAttempt).where(
+                JobAttempt.job_run_id == run_id, JobAttempt.attempt_number == 1
+            )
+        )
+        assert old_attempt is not None
+        assert old_attempt.status == "LEASE_LOST"
+        assert old_attempt.finished_at is not None
+        assert old_attempt.retryable is True
+
+
+def test_executor_bounds_bars_and_rejects_incomplete_cycle(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    repository, _ = setup(tmp_path)
+    csv_path = tmp_path / "bars.csv"
+    csv_path.write_text(
+        "symbol,timestamp,open,high,low,close,volume,adjusted_close,source,timeframe\n"
+        "SPY,2026-01-01T20:00:00+00:00,100,101,99,100,1000,100,test,1d\n"
+        "SPY,2026-01-02T20:00:00+00:00,200,201,199,200,1000,200,test,1d\n",
+        encoding="utf-8",
+    )
+    decision_time = datetime(2026, 1, 1, 20, tzinfo=UTC)
+    job = repository.create_job(
+        job_type=JobType.RUN_PAPER_CYCLE,
+        account_id="paper-main",
+        strategy_id="moving_average:1.0.0",
+        schedule_type=ScheduleType.INTERVAL,
+        interval_seconds=60,
+        next_run_at=decision_time,
+        config={"dataset_path": str(csv_path), "symbol": "SPY", "target_weights": {}},
+    )
+    run_id = SchedulerService(repository).run_now(job.id, "point-in-time", decision_time)
+    with Session(repository.engine) as session:
+        run = session.get(JobRun, run_id)
+        assert run is not None
+        session.expunge(run)
+    executor = JobExecutor(repository)
+    observed_timestamps: list[datetime] = []
+
+    def incomplete_run(
+        account_id, strategy_id, bars, target_weights, session_date, supplied_decision_time
+    ):  # type: ignore[no-untyped-def]
+        observed_timestamps.extend(bar.timestamp for bar in bars)
+        cycle_id = "incomplete-cycle"
+        with Session(repository.engine) as session:
+            session.add(
+                TradingCycleRecord(
+                    id=cycle_id,
+                    cycle_key=cycle_id,
+                    account_id=account_id,
+                    strategy_id=strategy_id,
+                    session_date=session_date,
+                    started_at=decision_time,
+                    status="RUNNING",
+                    correlation_id=cycle_id,
+                    data_fingerprint="test",
+                    lease_owner="phase4-worker",
+                    lease_expires_at=decision_time + timedelta(minutes=5),
+                )
+            )
+            session.commit()
+        return cycle_id
+
+    executor.trading.run = incomplete_run  # type: ignore[method-assign]
+    with pytest.raises(TransientJobError, match="stále RUNNING"):
+        executor(job, run)
+    assert observed_timestamps == [decision_time]
