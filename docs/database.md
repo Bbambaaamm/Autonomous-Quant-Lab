@@ -23,3 +23,6 @@ Závislosti jsou uzamčené v `backend/uv.lock`. Lokální instalace i všechny 
 `pyproject.toml` a lockfilem selže bez automatické změny lockfilu.
 
 Phase 4 audit přidal migraci `20260811_02`, která vynucuje kladné order/fill hodnoty, nezáporné filled/remaining/commission, zákaz overfillu a přesnou quantity bilanci. Migrace před vytvořením nebo odstraněním každého constraintu kontroluje skutečné databázové schema; podporuje tak jak upgrade starší Phase 4 databáze bez constraintů, tak fresh upgrade, kde je může vytvořit aktuální SQLAlchemy metadata už v předchozí revizi. Aplikační fill transakce zamyká na PostgreSQL řádek příkazu i účtu; SQLite zůstává vývojový backend, nikoli důkaz produkční souběžnosti.
+
+## Phase 6
+Phase 6 je implementována jako provider → validace/immutable revisions → XNYS calendar/corporate actions → PIT universe → immutable snapshot → multi-asset target portfolio. Detailní invariants jsou v `docs/market-data.md` a `docs/strategy-research.md`. Žádná část nevytváří live execution path; automatický data refresh zatím není allowlistovaný job a refresh se provádí odděleně od trading cycle.

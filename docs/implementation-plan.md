@@ -73,3 +73,6 @@ Další etapa nemá rozšiřovat research strategie. Přesný doporučený scope
 9. zdokumentovat risk pravidla, paper trading, provoz a live-safety boundary.
 
 Mimo Phase 4 zůstávají live broker, live credentials, Next.js dashboard a nové strategie.
+
+## Phase 6
+Phase 6 je implementována jako provider → validace/immutable revisions → XNYS calendar/corporate actions → PIT universe → immutable snapshot → multi-asset target portfolio. Detailní invariants jsou v `docs/market-data.md` a `docs/strategy-research.md`. Žádná část nevytváří live execution path; automatický data refresh zatím není allowlistovaný job a refresh se provádí odděleně od trading cycle.

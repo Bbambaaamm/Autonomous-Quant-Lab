@@ -48,7 +48,7 @@ jobs:
             backend/pyproject.toml
             backend/uv.lock
       - run: uv sync --locked --all-groups
-      - run: uv run pytest -q tests/test_research.py tests/test_research_engine.py
+      - run: uv run pytest -q tests/test_research.py tests/test_research_engine.py tests/test_phase6.py
 
   api:
     runs-on: ubuntu-latest
@@ -98,10 +98,11 @@ jobs:
             backend/uv.lock
       - run: uv sync --locked --all-groups
       - run: uv run alembic -c ../alembic.ini upgrade head
-      - name: PostgreSQL Phase 3–5, concurrency a recovery
+      - name: PostgreSQL Phase 3–6, concurrency a recovery
         run: >-
           uv run pytest -q
           tests/test_phase3_platform.py
           tests/test_phase4.py
           tests/test_phase5.py
           tests/test_phase5_postgres.py
+          tests/test_phase6_postgres.py

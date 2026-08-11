@@ -41,3 +41,6 @@ Interval se počítá z předchozí occurrence bez driftu. Daily schedule použ�
 timezone: při opakované hodině první výskyt, při neexistující hodině první normalizovaný čas po
 skoku. `SKIP_IF_TOO_OLD` přeskočí occurrence za grace; `RUN_ONCE_IF_MISSED` materializuje nejvýše
 jeden run a next time posune do budoucnosti. Historie se automaticky nemaže.
+
+## Phase 6
+Phase 6 je implementována jako provider → validace/immutable revisions → XNYS calendar/corporate actions → PIT universe → immutable snapshot → multi-asset target portfolio. Detailní invariants jsou v `docs/market-data.md` a `docs/strategy-research.md`. Žádná část nevytváří live execution path; automatický data refresh zatím není allowlistovaný job a refresh se provádí odděleně od trading cycle.

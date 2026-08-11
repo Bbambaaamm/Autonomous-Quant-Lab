@@ -108,3 +108,6 @@ volá autoritativní Phase 4 `TradingCycleService` nebo `ReconciliationService`.
 scheduled time, snapshot konfigurace a tím i identitu Phase 4 cycle. PostgreSQL unique constraints
 chrání occurrence a attempt; account a order locks z Phase 4 serializují ekonomický commit.
 SQLite je pouze rychlý test adapter a neposkytuje produkční concurrency důkaz.
+
+## Phase 6
+Phase 6 je implementována jako provider → validace/immutable revisions → XNYS calendar/corporate actions → PIT universe → immutable snapshot → multi-asset target portfolio. Detailní invariants jsou v `docs/market-data.md` a `docs/strategy-research.md`. Žádná část nevytváří live execution path; automatický data refresh zatím není allowlistovaný job a refresh se provádí odděleně od trading cycle.
