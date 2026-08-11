@@ -332,26 +332,28 @@ class SchedulerService:
                 if not (too_old and job.misfire_policy == MisfirePolicy.SKIP_IF_TOO_OLD):
                     occurrence = f"scheduled:{scheduled_for.isoformat()}"
                     run_id = hashlib.sha256(f"{job.id}|{occurrence}".encode()).hexdigest()
-                    session.add(
-                        JobRun(
-                            id=run_id,
-                            scheduled_job_id=job.id,
-                            occurrence_key=occurrence,
-                            scheduled_for=scheduled_for,
-                            status=RunStatus.PENDING,
-                            attempt_count=0,
-                            fencing_token=0,
-                            config_snapshot_json=job.config_json,
-                            correlation_id=run_id,
-                            created_at=now,
-                        )
+                    run = JobRun(
+                        id=run_id,
+                        scheduled_job_id=job.id,
+                        occurrence_key=occurrence,
+                        scheduled_for=scheduled_for,
+                        status=RunStatus.PENDING,
+                        attempt_count=0,
+                        fencing_token=0,
+                        config_snapshot_json=job.config_json,
+                        correlation_id=run_id,
+                        created_at=now,
                     )
                     try:
-                        session.flush()
+                        # Savepoint zachová zámek i změny schedule, pokud již occurrence
+                        # vložila jiná transakce a databáze ohlásí konflikt.
+                        with session.begin_nested():
+                            session.add(run)
+                            session.flush()
                         made.append(run_id)
                     except IntegrityError:
-                        session.rollback()
-                        continue
+                        # Vnější transakce zůstává použitelná a schedule se posune níže.
+                        pass
                 job.last_run_at = scheduled_for
                 following = next_occurrence(job, scheduled_for)
                 while following <= now:

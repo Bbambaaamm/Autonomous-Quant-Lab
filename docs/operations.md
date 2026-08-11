@@ -7,6 +7,12 @@
 
 Diagnostika používá risk events/decisions, orders, audit a reconciliation status. Po crashi spusťte stejný logical cycle: DB identity obnoví existující stav namísto nového obchodu. Testy: `uv run pytest -q`.
 
+PostgreSQL Phase 5 acceptance suite je v `tests/test_phase5_postgres.py` a používá oddělené
+enginy, sessions a souběžná vlákna. Ověřuje race schedulerů, race worker claimů včetně lease a
+fencing tokenu, restart po ekonomickém commitu Phase 4 a account lock mezi paper cycle a
+reconciliation. CI ji spouští v `integration-postgres` s `RUN_POSTGRES_TESTS=1` společně s Phase
+3, Phase 4 a ostatními Phase 5 testy. Lokální běh vyžaduje migrované PostgreSQL v `DATABASE_URL`.
+
 RUNNING cycle má databázový lease. Aktivní lease chrání před paralelním vlastníkem; po jeho
 expiraci může retry cycle atomicky převzít a pokračovat idempotentně z persisted orders/fills.
 
