@@ -332,26 +332,28 @@ class SchedulerService:
                 if not (too_old and job.misfire_policy == MisfirePolicy.SKIP_IF_TOO_OLD):
                     occurrence = f"scheduled:{scheduled_for.isoformat()}"
                     run_id = hashlib.sha256(f"{job.id}|{occurrence}".encode()).hexdigest()
-                    session.add(
-                        JobRun(
-                            id=run_id,
-                            scheduled_job_id=job.id,
-                            occurrence_key=occurrence,
-                            scheduled_for=scheduled_for,
-                            status=RunStatus.PENDING,
-                            attempt_count=0,
-                            fencing_token=0,
-                            config_snapshot_json=job.config_json,
-                            correlation_id=run_id,
-                            created_at=now,
-                        )
+                    run = JobRun(
+                        id=run_id,
+                        scheduled_job_id=job.id,
+                        occurrence_key=occurrence,
+                        scheduled_for=scheduled_for,
+                        status=RunStatus.PENDING,
+                        attempt_count=0,
+                        fencing_token=0,
+                        config_snapshot_json=job.config_json,
+                        correlation_id=run_id,
+                        created_at=now,
                     )
                     try:
-                        session.flush()
+                        # Savepoint zachová zámek i změny schedule, pokud již occurrence
+                        # vložila jiná transakce a databáze ohlásí konflikt.
+                        with session.begin_nested():
+                            session.add(run)
+                            session.flush()
                         made.append(run_id)
                     except IntegrityError:
-                        session.rollback()
-                        continue
+                        # Vnější transakce zůstává použitelná a schedule se posune níže.
+                        pass
                 job.last_run_at = scheduled_for
                 following = next_occurrence(job, scheduled_for)
                 while following <= now:
@@ -437,11 +439,22 @@ class JobExecutor:
                 raise PermanentJobError("Neplatná konfigurace paper cycle") from exc
             symbol = str(payload.get("symbol", "SPY"))
             decision_time = utc(run.scheduled_for)
-            bars = CSVMarketDataProvider(Path(path)).load(symbol, end=decision_time)
-            if not bars:
+            available_bars = CSVMarketDataProvider(Path(path)).load(symbol)
+            execution_index = next(
+                (
+                    index
+                    for index, bar in enumerate(available_bars)
+                    if bar.timestamp > decision_time
+                ),
+                None,
+            )
+            if execution_index == 0:
                 raise PermanentJobError("K decision time nejsou dostupná žádná market data")
-            if any(bar.timestamp > decision_time for bar in bars):
-                raise PermanentJobError("Market data obsahují hodnotu po decision time")
+            if execution_index is None:
+                raise PermanentJobError("Po decision time chybí následující executable bar")
+            # Close-derived rozhodnutí smí použít pouze historii k decision time a první
+            # následující bar pro fill; pozdější bary do cycle vstupů nepatří.
+            bars = available_bars[: execution_index + 1]
             cycle_id = self.trading.run(
                 job.account_id,
                 job.strategy_id or "",

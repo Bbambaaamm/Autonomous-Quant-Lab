@@ -1,3 +1,4 @@
+import hashlib
 from datetime import UTC, datetime, timedelta
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
@@ -76,6 +77,43 @@ def test_scheduler_is_idempotent_and_advances_without_drift(tmp_path) -> None:  
         assert session.get(type(job), job.id).next_run_at.replace(tzinfo=UTC) == due + timedelta(
             seconds=60
         )  # type: ignore[union-attr]
+
+
+def test_scheduler_recovers_session_after_duplicate_occurrence(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    repository, _ = setup(tmp_path)
+    due = datetime(2026, 1, 1, tzinfo=UTC)
+    job = repository.create_job(
+        job_type=JobType.RUN_RECONCILIATION,
+        account_id="paper-main",
+        schedule_type=ScheduleType.INTERVAL,
+        interval_seconds=60,
+        next_run_at=due,
+    )
+    occurrence = f"scheduled:{due.isoformat()}"
+    run_id = hashlib.sha256(f"{job.id}|{occurrence}".encode()).hexdigest()
+    with Session(repository.engine) as session:
+        session.add(
+            JobRun(
+                id=run_id,
+                scheduled_job_id=job.id,
+                occurrence_key=occurrence,
+                scheduled_for=due,
+                status=RunStatus.PENDING,
+                attempt_count=0,
+                fencing_token=0,
+                config_snapshot_json="{}",
+                correlation_id=run_id,
+                created_at=due,
+            )
+        )
+        session.commit()
+
+    assert SchedulerService(repository).tick(due) == []
+    with Session(repository.engine) as session:
+        stored_job = session.get(type(job), job.id)
+        assert stored_job is not None
+        assert stored_job.next_run_at.replace(tzinfo=UTC) == due + timedelta(seconds=60)
+        assert session.scalar(select(func.count()).select_from(JobRun)) == 1
 
 
 def test_misfire_skip_does_not_materialize_backlog(tmp_path) -> None:  # type: ignore[no-untyped-def]
@@ -211,13 +249,14 @@ def test_reclaim_closes_superseded_attempt(tmp_path) -> None:  # type: ignore[no
         assert old_attempt.retryable is True
 
 
-def test_executor_bounds_bars_and_rejects_incomplete_cycle(tmp_path) -> None:  # type: ignore[no-untyped-def]
+def test_executor_uses_only_first_bar_after_decision_and_rejects_incomplete_cycle(tmp_path) -> None:  # type: ignore[no-untyped-def]
     repository, _ = setup(tmp_path)
     csv_path = tmp_path / "bars.csv"
     csv_path.write_text(
         "symbol,timestamp,open,high,low,close,volume,adjusted_close,source,timeframe\n"
         "SPY,2026-01-01T20:00:00+00:00,100,101,99,100,1000,100,test,1d\n"
-        "SPY,2026-01-02T20:00:00+00:00,200,201,199,200,1000,200,test,1d\n",
+        "SPY,2026-01-02T20:00:00+00:00,200,201,199,200,1000,200,test,1d\n"
+        "SPY,2026-01-03T20:00:00+00:00,300,301,299,300,1000,300,test,1d\n",
         encoding="utf-8",
     )
     decision_time = datetime(2026, 1, 1, 20, tzinfo=UTC)
@@ -265,4 +304,4 @@ def test_executor_bounds_bars_and_rejects_incomplete_cycle(tmp_path) -> None:  #
     executor.trading.run = incomplete_run  # type: ignore[method-assign]
     with pytest.raises(TransientJobError, match="stále RUNNING"):
         executor(job, run)
-    assert observed_timestamps == [decision_time]
+    assert observed_timestamps == [decision_time, decision_time + timedelta(days=1)]
