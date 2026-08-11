@@ -7,7 +7,12 @@ from decimal import ROUND_DOWN, Decimal
 from enum import StrEnum
 
 from quantlab.domain import Side, require_utc
-from quantlab.market_data import CorporateAction, CorporateActionKind, Observation
+from quantlab.market_data import (
+    CorporateAction,
+    CorporateActionKind,
+    Observation,
+    causal_adjusted_close,
+)
 from quantlab.universe import PointInTimeUniverse
 
 
@@ -22,13 +27,23 @@ class StrategyContext:
     decision_time: datetime
     history: Mapping[str, tuple[Observation, ...]]
     eligible_instruments: tuple[str, ...]
+    signal_prices: Mapping[str, tuple[Decimal, ...]]
 
     def __post_init__(self) -> None:
         cutoff = require_utc(self.decision_time)
-        if any(bar.timestamp > cutoff for bars in self.history.values() for bar in bars):
+        if any(
+            bar.timestamp > cutoff or bar.observed_at > cutoff
+            for bars in self.history.values()
+            for bar in bars
+        ):
             raise ValueError("Strategy context obsahuje budoucí observation")
         if any(symbol not in self.eligible_instruments for symbol in self.history):
             raise ValueError("Strategy context obsahuje asset mimo PIT universe")
+        if set(self.signal_prices) != set(self.history) or any(
+            len(self.signal_prices[instrument]) != len(bars)
+            for instrument, bars in self.history.items()
+        ):
+            raise ValueError("Adjusted signal series neodpovídá causal observation history")
 
 
 @dataclass(frozen=True)
@@ -79,7 +94,7 @@ class TrendStrategy(PortfolioStrategy):
     def generate_targets(self, context: StrategyContext) -> TargetPortfolio:
         selected = []
         for instrument in context.eligible_instruments:
-            prices = [bar.close for bar in context.history.get(instrument, ())]
+            prices = context.signal_prices.get(instrument, ())
             if (
                 len(prices) >= self.slow
                 and sum(prices[-self.fast :]) / self.fast > sum(prices[-self.slow :]) / self.slow
@@ -108,9 +123,9 @@ class CrossSectionalMomentumStrategy(PortfolioStrategy):
     def generate_targets(self, context: StrategyContext) -> TargetPortfolio:
         ranks: list[tuple[Decimal, str]] = []
         for instrument in context.eligible_instruments:
-            bars = context.history.get(instrument, ())
-            if len(bars) >= self.required_lookback:
-                ranks.append((bars[-1].close / bars[-self.required_lookback].close - 1, instrument))
+            prices = context.signal_prices.get(instrument, ())
+            if len(prices) >= self.required_lookback:
+                ranks.append((prices[-1] / prices[-self.required_lookback] - 1, instrument))
         # Vyšší výnos první, ticker-independent canonical ID řeší tie deterministicky.
         chosen = [
             instrument for _, instrument in sorted(ranks, key=lambda x: (-x[0], x[1]))[: self.top_n]
@@ -140,12 +155,10 @@ class MeanReversionStrategy(PortfolioStrategy):
     def generate_targets(self, context: StrategyContext) -> TargetPortfolio:
         selected = []
         for instrument in context.eligible_instruments:
-            bars = context.history.get(instrument, ())
-            if len(bars) >= self.lookback:
-                mean = (
-                    sum((bar.close for bar in bars[-self.lookback :]), Decimal("0")) / self.lookback
-                )
-                if bars[-1].close / mean <= self.threshold:
+            prices = context.signal_prices.get(instrument, ())
+            if len(prices) >= self.lookback:
+                mean = sum(prices[-self.lookback :], Decimal("0")) / self.lookback
+                if prices[-1] / mean <= self.threshold:
                     selected.append(instrument)
         weight = Decimal("1") / len(selected) if selected else Decimal("0")
         return TargetPortfolio(
@@ -223,6 +236,9 @@ class MultiAssetResult:
     requested_assets: int
     used_assets: int
     excluded: tuple[tuple[str, str], ...]
+    final_cash: Decimal
+    final_positions: tuple[tuple[str, Decimal], ...]
+    dividend_income: Decimal
 
 
 def _rebalance(day: datetime, previous: datetime | None, frequency: RebalanceFrequency) -> bool:
@@ -241,15 +257,17 @@ def run_multi_asset(
     commission_bps: Decimal = Decimal("1"),
     stale_sessions: int = 1,
     currencies: Mapping[str, str] | None = None,
+    corporate_actions: Sequence[CorporateAction] = (),
 ) -> MultiAssetResult:
     if currencies and len(set(currencies.values())) > 1:
         raise ValueError("Multi-currency portfolio bez FX konverze není podporováno")
-    by_time: dict[datetime, dict[str, Observation]] = {}
-    for row in observations:
-        by_time.setdefault(row.timestamp, {})[row.instrument_id] = row
-    times = sorted(by_time)
+    revisions: dict[tuple[str, datetime], list[Observation]] = {}
+    for row in sorted(
+        observations, key=lambda item: (item.timestamp, item.observed_at, item.revision)
+    ):
+        revisions.setdefault((row.instrument_id, row.timestamp), []).append(row)
+    times = sorted({row.timestamp for row in observations})
     portfolio = MultiAssetPortfolio(initial_cash)
-    history: dict[str, list[Observation]] = {}
     pending: TargetPortfolio | None = None
     fills: list[MultiAssetFill] = []
     decisions: list[tuple[datetime, TargetPortfolio]] = []
@@ -257,23 +275,53 @@ def run_multi_asset(
     last_rebalance: datetime | None = None
     last_prices: dict[str, tuple[Decimal, int]] = {}
     excluded: dict[str, str] = {}
+    ordered_actions = sorted(
+        corporate_actions, key=lambda action: (action.effective_at, action.action_id)
+    )
     for index, when in enumerate(times):
-        current = by_time[when]
+        known_rows = {
+            key: max(
+                (row for row in rows if row.observed_at <= when),
+                key=lambda row: (row.observed_at, row.revision),
+            )
+            for key, rows in revisions.items()
+            if key[1] <= when and any(row.observed_at <= when for row in rows)
+        }
+        current = {
+            instrument: row
+            for (instrument, timestamp), row in known_rows.items()
+            if timestamp == when
+        }
+        for action in ordered_actions:
+            if action.effective_at <= when and action.known_at <= when:
+                portfolio.apply_action(action)
         # Pending close T targets se realizují až na raw open další dostupné společné session.
         if pending is not None:
             prices = {instrument: bar.open for instrument, bar in current.items()}
-            values = {
-                instrument: portfolio.positions.get(instrument, Decimal("0")) * price
-                for instrument, price in prices.items()
-            }
-            total = portfolio.cash + sum(values.values())
-            desired = {
-                instrument: (total * weight / prices[instrument]).to_integral_value(
-                    rounding=ROUND_DOWN
-                )
-                for instrument, weight in pending.weights
-                if instrument in prices
-            }
+            missing_positions = [
+                instrument
+                for instrument, quantity in portfolio.positions.items()
+                if quantity and instrument not in prices
+            ]
+            if missing_positions:
+                for instrument in missing_positions:
+                    excluded[instrument] = "missing_rebalance_execution_bar"
+            total = portfolio.cash + sum(
+                quantity * prices[instrument]
+                for instrument, quantity in portfolio.positions.items()
+                if quantity and instrument in prices
+            )
+            desired = (
+                {}
+                if missing_positions
+                else {
+                    instrument: (total * weight / prices[instrument]).to_integral_value(
+                        rounding=ROUND_DOWN
+                    )
+                    for instrument, weight in pending.weights
+                    if instrument in prices
+                }
+            )
             # Pozice, které již nejsou v targetu (včetně PIT leaverů), se bezpečně uzavřou
             # pouze tehdy, když existuje čerstvý executable open; cenu nikdy nedopočítáváme.
             for instrument, quantity in portfolio.positions.items():
@@ -301,18 +349,29 @@ def run_multi_asset(
                     fill = MultiAssetFill(instrument, side, quantity, price, fee, when)
                     portfolio.apply_fill(fill)
                     fills.append(fill)
-            pending = None
+            if not missing_positions:
+                pending = None
         for instrument, bar in current.items():
-            history.setdefault(instrument, []).append(bar)
             last_prices[instrument] = (bar.close, index)
+        history: dict[str, list[Observation]] = {}
+        for (instrument, _), bar in sorted(known_rows.items(), key=lambda item: item[0][1]):
+            history.setdefault(instrument, []).append(bar)
         eligible = universe.eligible(when)
         visible = {instrument: tuple(history.get(instrument, ())) for instrument in eligible}
-        if _rebalance(when, last_rebalance, strategy.rebalance_frequency):
+        if pending is None and _rebalance(when, last_rebalance, strategy.rebalance_frequency):
             fresh = tuple(instrument for instrument in eligible if instrument in current)
             for instrument in eligible:
                 if instrument not in fresh:
                     excluded[instrument] = "stale_or_missing_execution_bar"
-            context = StrategyContext(when, {k: visible[k] for k in fresh}, fresh)
+            causal_history = {k: visible[k] for k in fresh}
+            signal_prices = {
+                instrument: tuple(
+                    causal_adjusted_close(bars, ordered_actions, when)[bar.session_date]
+                    for bar in bars
+                )
+                for instrument, bars in causal_history.items()
+            }
+            context = StrategyContext(when, causal_history, fresh, signal_prices)
             pending = strategy.generate_targets(context)
             decisions.append((when, pending))
             last_rebalance = when
@@ -334,4 +393,7 @@ def run_multi_asset(
         requested,
         used,
         tuple(sorted(excluded.items())),
+        portfolio.cash,
+        tuple(sorted(portfolio.positions.items())),
+        portfolio.dividend_income,
     )

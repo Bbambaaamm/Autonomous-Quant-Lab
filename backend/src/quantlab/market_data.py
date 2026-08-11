@@ -12,7 +12,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, timedelta
 from datetime import time as clock
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from enum import StrEnum
 from typing import Protocol
 from uuid import uuid4
@@ -159,8 +159,19 @@ class XNYSCalendar:
         thanksgiving = date(day.year, 11, 1) + timedelta(
             days=(3 - date(day.year, 11, 1).weekday()) % 7 + 21
         )
-        return day == thanksgiving + timedelta(days=1) or (
-            day.month == 12 and day.day == 24 and self.is_session(day)
+        independence_day = date(day.year, 7, 4)
+        observed_independence_day = (
+            independence_day - timedelta(days=1)
+            if independence_day.weekday() == 5
+            else independence_day + timedelta(days=1)
+            if independence_day.weekday() == 6
+            else independence_day
+        )
+        session_before_independence_day = self.previous_session(observed_independence_day)
+        return (
+            day == thanksgiving + timedelta(days=1)
+            or day == session_before_independence_day
+            or (day.month == 12 and day.day == 24 and self.is_session(day))
         )
 
     def session_open(self, day: date) -> datetime:
@@ -243,15 +254,27 @@ def normalize_bar(
         raise InvalidMarketData("Ceny musí být konečné a kladné a volume nezáporný")
     if bar.high < max(*values) or bar.low > min(*values):
         raise InvalidMarketData("Provider bar porušuje OHLC invariant")
+    timeframe = "1d"
     payload = "|".join(
-        map(str, (instrument.instrument_id, bar.session_date, *values, bar.volume, bar.source_id))
+        map(
+            str,
+            (
+                instrument.instrument_id,
+                provider,
+                timeframe,
+                bar.session_date,
+                *values,
+                bar.volume,
+                bar.source_id,
+            ),
+        )
     )
     digest = hashlib.sha256(payload.encode()).hexdigest()
     return Observation(
         digest,
         instrument.instrument_id,
         provider,
-        "1d",
+        timeframe,
         bar.session_date,
         calendar.session_close(bar.session_date),
         *values,
@@ -392,7 +415,7 @@ class StooqProvider:
                 )
                 for r in rows
             ]
-        except (KeyError, ValueError, UnicodeError) as exc:
+        except (InvalidOperation, KeyError, ValueError, UnicodeError) as exc:
             raise InvalidProviderResponse("Provider vrátil neplatné CSV") from exc
         if len({bar.session_date for bar in bars}) != len(bars):
             raise InvalidProviderResponse("Provider vrátil duplicitní bary")
@@ -510,6 +533,7 @@ def build_snapshot(
     start: date,
     end: date,
     minimum_coverage: Decimal = Decimal("0.8"),
+    calendar: XNYSCalendar | None = None,
 ) -> DatasetSnapshot:
     ids = frozenset(instrument_ids)
     rows = tuple(
@@ -517,8 +541,11 @@ def build_snapshot(
         for r in store.as_known_at(as_of)
         if r.instrument_id in ids and r.provider == provider and start <= r.session_date <= end
     )
-    used = {r.instrument_id for r in rows}
-    coverage = Decimal(len(used)) / Decimal(len(ids)) if ids else Decimal("1")
+    active_calendar = calendar or XNYSCalendar()
+    sessions = active_calendar.sessions_between(start, end)
+    expected = len(ids) * len(sessions)
+    present = {(r.instrument_id, r.session_date) for r in rows}
+    coverage = Decimal(len(present)) / Decimal(expected) if expected else Decimal("1")
     canonical = [
         {"id": r.observation_id, "revision": r.revision, "hash": r.source_hash}
         for r in sorted(rows, key=lambda r: (r.instrument_id, r.session_date))
