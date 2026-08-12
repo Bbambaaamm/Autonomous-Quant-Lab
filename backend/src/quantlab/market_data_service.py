@@ -37,6 +37,13 @@ def _instant(day: date) -> datetime:
     return datetime.combine(day, time.min, UTC)
 
 
+def _database_utc(value: datetime) -> datetime:
+    """Normalizuje ORM timestamp; SQLite může timezone informaci při čtení zahodit."""
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
+
+
 def _lock(session: Session, identity: str) -> None:
     if session.bind is not None and session.bind.dialect.name == "postgresql":
         key = int.from_bytes(hashlib.sha256(identity.encode()).digest()[:8], "big", signed=True)
@@ -82,6 +89,8 @@ class PersistentMarketDataService:
         observed_at: datetime,
     ) -> IngestionResult:
         observed_at = require_utc(observed_at)
+        if len(provider.metadata.name) > 40:
+            raise DatasetInvalid("Provider identity překračuje persistentní limit 40 znaků")
         scope = hashlib.sha256(
             f"{provider.metadata.name}|{instrument.instrument_id}|{start}|{end}|{observed_at.isoformat()}".encode()
         ).hexdigest()
@@ -262,7 +271,7 @@ class DatasetSnapshotService:
                 and (instrument.active_to is None or day < instrument.active_to.date())
                 and any(
                     membership.instrument_id == instrument_id
-                    and membership.known_at <= self.calendar.session_close(day)
+                    and _database_utc(membership.known_at) <= self.calendar.session_close(day)
                     and membership.valid_from.date() <= day
                     and (membership.valid_to is None or day < membership.valid_to.date())
                     for membership in memberships

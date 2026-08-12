@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from decimal import Decimal
@@ -73,7 +74,7 @@ def seed_phase6_snapshot(
         date(2020, 1, 1),
     )
     provider = MappingProvider(
-        f"provider-{suffix}",
+        f"p6-{hashlib.sha256(suffix.encode()).hexdigest()[:32]}",
         {
             instrument.symbol: [
                 daily_bar(day, value) for day, value in zip(sessions, closes, strict=True)
