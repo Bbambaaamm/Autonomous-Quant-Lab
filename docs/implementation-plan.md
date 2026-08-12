@@ -78,8 +78,11 @@ Mimo Phase 4 zůstávají live broker, live credentials, Next.js dashboard a nov
 Phase 6 je implementována jako provider → validace/immutable revisions → XNYS calendar/corporate actions → PIT universe → immutable snapshot → multi-asset target portfolio. Detailní invariants jsou v `docs/market-data.md` a `docs/strategy-research.md`. Žádná část nevytváří live execution path; automatický data refresh zatím není allowlistovaný job a refresh se provádí odděleně od trading cycle.
 
 ## Aktuální Phase 6 completion stav
-Dokončen je persistentní transakční ingestion, DB snapshot builder s PIT coverage, read API, current-data accessor a forward schema pro experiment/deployment lineage. Zbývá produkční exchange-calendar dependency, kompletní IS/validation/exactly-once OOS multi-asset runner, PostgreSQL master/concurrency evidence a paper integration E2E. Phase 6 je proto `INCOMPLETE`; starý pre-Phase6 seznam výše není aktuálním remaining scope.
+Dokončen je persistentní transakční ingestion, DB snapshot builder s PIT coverage, read API, current-data accessor, produkční exchange calendar a experiment/deployment lineage. Aktuální stav se ověřuje Phase 6 unit a PostgreSQL integračními gates v CI.
 
 ## Phase 6 completion controls
 
 Produkční XNYS kalendář používá verzovaný auditovaný schedule včetně explicitních exceptional closures. Exactly-once ingestion/snapshot/experiment je serializována v PostgreSQL. Immutable replay a validation-only parameter selection chrání proti korekcím a OOS leakage. Deployment zůstává explicitní manual paper-only gate do stávající Phase 4 cesty; current data se validují odděleně podle poslední dokončené session a `HALTED` nelze obejít.
+
+## Phase 6 finalizace
+Produkční schedule poskytuje `exchange-calendars` 4.13.2 / XNYS s identitou `XNYS:exchange-calendars:4.13.2`, nikoli vlastní holiday seznam. Phase 6 zachovává immutable revision/snapshot correction replay, PIT a corporate-action causality, exactly-once experimenty a OOS isolation. Promotion je pouze ruční; current feed není snapshot replay. Phase 4 zůstá jedinou paper-only ekonomickou cestou, `HALTED` failne uzavřeně a live broker není součástí plánu.

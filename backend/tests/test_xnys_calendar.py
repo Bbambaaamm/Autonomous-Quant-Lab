@@ -1,5 +1,6 @@
 from datetime import UTC, date, datetime
 from decimal import Decimal
+from importlib.metadata import version
 
 import pytest
 
@@ -11,6 +12,7 @@ CALENDAR = XNYSCalendar()
 def test_normal_weekend_and_standard_holidays() -> None:
     assert CALENDAR.is_session(date(2026, 8, 12))
     assert not CALENDAR.is_session(date(2026, 8, 15))
+    assert not CALENDAR.is_session(date(2026, 8, 16))
     assert not CALENDAR.is_session(date(2026, 12, 25))
     assert not CALENDAR.is_session(date(2026, 11, 26))
 
@@ -28,6 +30,15 @@ def test_navigation_and_historical_exceptional_closure() -> None:
     # XNYS zůstala po teroristických útocích uzavřena 11.–14. září 2001.
     assert not CALENDAR.is_session(date(2001, 9, 11))
     assert CALENDAR.next_session(date(2001, 9, 10)) == date(2001, 9, 17)
+    assert CALENDAR.sessions_between(date(2024, 7, 3), date(2024, 7, 8)) == (
+        date(2024, 7, 3),
+        date(2024, 7, 5),
+        date(2024, 7, 8),
+    )
+
+
+def test_identity_pins_maintained_calendar_version() -> None:
+    assert CALENDAR.identity == f"XNYS:exchange-calendars:{version('exchange-calendars')}"
 
 
 def test_calendar_bounds_are_explicit_and_fail_closed() -> None:
@@ -44,6 +55,12 @@ def test_calendar_bounds_are_explicit_and_fail_closed() -> None:
 
 
 def test_latest_completed_session_is_session_aware() -> None:
+    assert CALENDAR.latest_completed_session(datetime(2024, 7, 8, 19, 59, tzinfo=UTC)) == date(
+        2024, 7, 5
+    )
+    assert CALENDAR.latest_completed_session(datetime(2024, 7, 8, 20, tzinfo=UTC)) == date(
+        2024, 7, 8
+    )
     assert CALENDAR.latest_completed_session(datetime(2024, 7, 6, 12, tzinfo=UTC)) == date(
         2024, 7, 5
     )

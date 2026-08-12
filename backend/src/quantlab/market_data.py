@@ -11,12 +11,14 @@ import urllib.request
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, timedelta
-from datetime import time as clock
 from decimal import Decimal, InvalidOperation
 from enum import StrEnum
-from typing import Protocol
+from importlib.metadata import version
+from typing import Protocol, cast
 from uuid import uuid4
 from zoneinfo import ZoneInfo
+
+import exchange_calendars
 
 from quantlab.domain import require_utc
 
@@ -106,104 +108,37 @@ class MarketDataProvider(Protocol):
     def corporate_actions(self, symbol: str, start: date, end: date) -> list[CorporateAction]: ...
 
 
-def _observed_holidays(year: int) -> set[date]:
-    # Záměrně malý algoritmický US kalendář; mimo podporované XNYS období selže uzavřeně.
-    def observed(day: date) -> date:
-        if day.weekday() == 5:
-            return day - timedelta(days=1)
-        if day.weekday() == 6:
-            return day + timedelta(days=1)
-        return day
-
-    def nth(month: int, weekday: int, n: int) -> date:
-        day = date(year, month, 1)
-        return day + timedelta(days=(weekday - day.weekday()) % 7 + 7 * (n - 1))
-
-    def last(month: int, weekday: int) -> date:
-        day = date(year + (month == 12), month % 12 + 1, 1) - timedelta(days=1)
-        return day - timedelta(days=(day.weekday() - weekday) % 7)
-
-    # Easter výpočet je použit pouze pro Good Friday.
-    a, b, c = year % 19, year // 100, year % 100
-    d, e, g = b // 4, b % 4, (b - (b + 8) // 25 + 1) // 3
-    h = (19 * a + b - d - g + 15) % 30
-    i, k = c // 4, c % 4
-    month = (h + 2 - e - i + (32 + 2 * e + 2 * i - h - k) // 7 + 114) // 31
-    easter = date(year, month, (h + 2 - e - i + (32 + 2 * e + 2 * i - h - k) // 7 + 114) % 31 + 1)
-    holidays = {
-        observed(date(year, 1, 1)),
-        nth(1, 0, 3),
-        nth(2, 0, 3),
-        easter - timedelta(days=2),
-        last(5, 0),
-        observed(date(year, 7, 4)),
-        nth(9, 0, 1),
-        nth(11, 3, 4),
-        observed(date(year, 12, 25)),
-    }
-    if year >= 2022:
-        holidays.add(observed(date(year, 6, 19)))
-    return holidays
-
-
-_EXCEPTIONAL_CLOSURES = {
-    date(2001, 9, 11),
-    date(2001, 9, 12),
-    date(2001, 9, 13),
-    date(2001, 9, 14),
-    date(2004, 6, 11),
-    date(2007, 1, 2),
-    date(2012, 10, 29),
-    date(2012, 10, 30),
-    date(2018, 12, 5),
-}
-
-
 class XNYSCalendar:
     audited_start = date(1970, 1, 1)
     audited_end = date(2100, 12, 31)
-    identity = "XNYS-audited-closures-2026.2"
     timezone = ZoneInfo("America/New_York")
 
-    def is_session(self, day: date) -> bool:
-        if not self.audited_start <= day <= self.audited_end:
-            raise ValueError("Datum je mimo auditované období kalendáře")
-        return (
-            day.weekday() < 5
-            and day not in _observed_holidays(day.year)
-            and day not in _EXCEPTIONAL_CLOSURES
+    def __init__(self) -> None:
+        library_version = version("exchange-calendars")
+        self.identity = f"XNYS:exchange-calendars:{library_version}"
+        self._calendar = exchange_calendars.get_calendar(
+            "XNYS", start=self.audited_start.isoformat(), end=self.audited_end.isoformat()
         )
 
-    def _early_close(self, day: date) -> bool:
-        thanksgiving = date(day.year, 11, 1) + timedelta(
-            days=(3 - date(day.year, 11, 1).weekday()) % 7 + 21
-        )
-        independence_day = date(day.year, 7, 4)
-        observed_independence_day = (
-            independence_day - timedelta(days=1)
-            if independence_day.weekday() == 5
-            else independence_day + timedelta(days=1)
-            if independence_day.weekday() == 6
-            else independence_day
-        )
-        session_before_independence_day = self.previous_session(observed_independence_day)
-        return (
-            day == thanksgiving + timedelta(days=1)
-            or day == session_before_independence_day
-            or (day.month == 12 and day.day == 24 and self.is_session(day))
-        )
+    def _validate_day(self, day: date) -> None:
+        if not self.audited_start <= day <= self.audited_end:
+            raise ValueError("Datum je mimo auditované období kalendáře")
+
+    def is_session(self, day: date) -> bool:
+        self._validate_day(day)
+        return bool(self._calendar.is_session(day.isoformat()))
 
     def session_open(self, day: date) -> datetime:
         if not self.is_session(day):
             raise ValueError("Datum není burzovní session")
-        return datetime.combine(day, clock(9, 30), self.timezone).astimezone(UTC)
+        opened = self._calendar.session_open(day.isoformat()).to_pydatetime().astimezone(UTC)
+        return cast(datetime, opened)
 
     def session_close(self, day: date) -> datetime:
         if not self.is_session(day):
             raise ValueError("Datum není burzovní session")
-        return datetime.combine(
-            day, clock(13 if self._early_close(day) else 16), self.timezone
-        ).astimezone(UTC)
+        closed = self._calendar.session_close(day.isoformat()).to_pydatetime().astimezone(UTC)
+        return cast(datetime, closed)
 
     def session_for_timestamp(self, timestamp: datetime) -> date | None:
         local = require_utc(timestamp).astimezone(self.timezone)
@@ -217,28 +152,29 @@ class XNYSCalendar:
     def next_session(self, day: date) -> date:
         if day >= self.audited_end:
             raise ValueError("Následující session je mimo auditované období kalendáře")
-        candidate = day + timedelta(days=1)
-        while not self.is_session(candidate):
-            candidate += timedelta(days=1)
-        return candidate
+        self._validate_day(day)
+        session = self._calendar.date_to_session(
+            (day + timedelta(days=1)).isoformat(), direction="next"
+        ).date()
+        return cast(date, session)
 
     def previous_session(self, day: date) -> date:
         if day <= self.audited_start:
             raise ValueError("Předchozí session je mimo auditované období kalendáře")
-        candidate = day - timedelta(days=1)
-        while not self.is_session(candidate):
-            candidate -= timedelta(days=1)
-        return candidate
+        self._validate_day(day)
+        session = self._calendar.date_to_session(
+            (day - timedelta(days=1)).isoformat(), direction="previous"
+        ).date()
+        return cast(date, session)
 
     def sessions_between(self, start: date, end: date) -> tuple[date, ...]:
         if start > end:
             raise ValueError("Začátek rozsahu kalendáře musí být nejpozději na konci")
-        self.is_session(start)
-        self.is_session(end)
+        self._validate_day(start)
+        self._validate_day(end)
         return tuple(
-            start + timedelta(days=i)
-            for i in range((end - start).days + 1)
-            if self.is_session(start + timedelta(days=i))
+            session.date()
+            for session in self._calendar.sessions_in_range(start.isoformat(), end.isoformat())
         )
 
     def latest_completed_session(self, now: datetime) -> date:

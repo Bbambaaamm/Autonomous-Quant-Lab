@@ -42,3 +42,6 @@ druhé OOS vyhodnocení.
 ## Phase 6 selection isolation
 
 Chronologické TRAIN a VALIDATION části rozhodnou o konfiguraci; OOS se spustí exactly once a nesmí selection ovlivnit. Experiment replay validuje immutable snapshot manifest včetně corporate actions a content hash. Pozdější provider correction proto nemění starý experiment. PAPER_CANDIDATE je pouze evidence pro ruční deployment approval, ne povolení přímého broker volání.
+
+## Reprodukovatelnost Phase 6
+Snapshot lineage pinuje `exchange-calendars` 4.13.2 / XNYS jako `XNYS:exchange-calendars:4.13.2`, immutable revisions, PIT universe a kauzálně známé corporate actions. Provider correction nezmění starý replay. PostgreSQL idempotence zajišťuje exactly-once experiment i OOS při souběhu; selection používá jen TRAIN+VALIDATION a OOS ji neovlivňuje. PAPER_CANDIDATE nic automaticky nenasazuje: deployment i approval jsou explicitní, current feed není research snapshot a execution vede pouze stávající Phase 4 paper path.

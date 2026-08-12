@@ -15,3 +15,6 @@ Deployment manifest vyžaduje explicitní ruční schválení a `paper_account_i
 ## Phase 6 remains paper only
 
 Phase 6 nepřidává live broker, live order adapter, live credentials ani `LIVE` execution mode. Provider, strategy a deployment nesmějí submitovat objednávky. Ruční approval pouze zpřístupní evidence existujícímu toku `TradingCycleService → ProductionRiskEngine → PersistentPaperBroker`; nevytváří alternativní execution path a nemůže obejít Phase 4 `HALTED` nebo reconciliation safety.
+
+## Phase 6 safety invariants
+XNYS schedule pochází z `exchange-calendars` 4.13.2 / XNYS a lineage nese `XNYS:exchange-calendars:4.13.2`; není založen na vlastní holiday tabulce. Immutable snapshot, exactly-once experiment a OOS isolation nejsou autorizace k obchodování. Deployment ani approval nejsou automatické, current feed není research replay a `HALTED` nelze obejít. Systém je paper-only: bez live credentials, live brokeru a live order path; jediná ekonomická cesta je stávající Phase 4 risk/execution/broker/reconciliation cesta.
