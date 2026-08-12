@@ -260,9 +260,9 @@ class StrategyDeploymentRecord(Base):
     universe_id: Mapped[str] = mapped_column(
         ForeignKey("universe_definitions.universe_id", ondelete="RESTRICT"), nullable=False
     )
-    paper_account_id: Mapped[str] = mapped_column(
-        ForeignKey("paper_accounts.id", ondelete="RESTRICT"), nullable=False
-    )
+    # Phase 4 model importuje tento modul, proto zde nelze vytvořit bezpečný ORM FK bez cyklu.
+    # Produkční FK na paper_accounts.id vynucuje forward migrace 20260811_06.
+    paper_account_id: Mapped[str] = mapped_column(String(64), nullable=False)
     experiment_id: Mapped[str] = mapped_column(
         ForeignKey("research_experiments.id", ondelete="RESTRICT"), nullable=False
     )
