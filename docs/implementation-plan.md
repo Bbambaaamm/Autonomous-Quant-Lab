@@ -79,3 +79,7 @@ Phase 6 je implementována jako provider → validace/immutable revisions → XN
 
 ## Aktuální Phase 6 completion stav
 Dokončen je persistentní transakční ingestion, DB snapshot builder s PIT coverage, read API, current-data accessor a forward schema pro experiment/deployment lineage. Zbývá produkční exchange-calendar dependency, kompletní IS/validation/exactly-once OOS multi-asset runner, PostgreSQL master/concurrency evidence a paper integration E2E. Phase 6 je proto `INCOMPLETE`; starý pre-Phase6 seznam výše není aktuálním remaining scope.
+
+## Phase 6 completion controls
+
+Produkční XNYS kalendář je delegován na maintained `exchange-calendars`. Exactly-once ingestion/snapshot/experiment je serializována v PostgreSQL. Immutable replay a validation-only parameter selection chrání proti korekcím a OOS leakage. Deployment zůstává explicitní manual paper-only gate do stávající Phase 4 cesty; current data se validují odděleně podle poslední dokončené session a `HALTED` nelze obejít.

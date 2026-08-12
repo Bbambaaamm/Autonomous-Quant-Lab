@@ -38,3 +38,7 @@ Logická idempotency identita zahrnuje snapshot, přesnou strategii, celý param
 kapitál, cost model, seed a skutečný Git SHA. PostgreSQL runner tuto identitu serializuje
 transaction-scoped advisory lockem; opakování vrací stejný `ResearchExperiment` a nevytváří
 druhé OOS vyhodnocení.
+
+## Phase 6 selection isolation
+
+Chronologické TRAIN a VALIDATION části rozhodnou o konfiguraci; OOS se spustí exactly once a nesmí selection ovlivnit. Experiment replay validuje immutable snapshot manifest včetně corporate actions a content hash. Pozdější provider correction proto nemění starý experiment. PAPER_CANDIDATE je pouze evidence pro ruční deployment approval, ne povolení přímého broker volání.

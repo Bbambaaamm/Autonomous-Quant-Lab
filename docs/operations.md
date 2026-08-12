@@ -47,3 +47,7 @@ Phase 6 je implementována jako provider → validace/immutable revisions → XN
 
 ### Phase 6 operator workflow
 Refresh se nepřidává do Phase 5 workeru, dokud není dokončen produkční calendar a PostgreSQL master E2E. Operátor používá pouze allowlistovaný provider, zkontroluje ingestion stav přes read API a až potom sestaví snapshot. Refresh nikdy nespouští trading. Paper accessor používá oddělený pohled poslední dokončené session a odmítne missing nebo neúspěšně ingestovaná data.
+
+## Phase 6 paper deployment operations
+
+Operátor vytváří `PENDING_REVIEW` deployment a schválení fail-closed ověří experiment, VALID snapshot, exact strategy version, universe, USD paper account, daily timeframe, code SHA, cost model a shodné parameters. Před cyklem se current data ověří proti poslední dokončené XNYS session; STARTED, FAILED nebo missing ingestion nejsou použitelné. Ekonomické provedení patří výhradně Phase 4 a `HALTED` account zastaví objednávku.

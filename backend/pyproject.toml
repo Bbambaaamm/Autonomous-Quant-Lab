@@ -5,6 +5,8 @@ description = "Auditovatelná quantitative research a paper-trading platforma"
 requires-python = ">=3.12"
 dependencies = [
   "alembic>=1.16,<2",
+  # Maintained XNYS schedules include exceptional closures and historical early closes.
+  "exchange-calendars>=4.11,<5",
   "fastapi>=0.116,<1",
   "pydantic-settings>=2.10,<3",
   "pyarrow>=20,<24",
@@ -47,5 +49,5 @@ strict = true
 packages = ["quantlab"]
 
 [[tool.mypy.overrides]]
-module = ["pyarrow", "pyarrow.*"]
+module = ["exchange_calendars", "exchange_calendars.*", "pyarrow", "pyarrow.*"]
 ignore_missing_imports = true
