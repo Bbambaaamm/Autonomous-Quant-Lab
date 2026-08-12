@@ -10,7 +10,25 @@ Universe typu `POINT_IN_TIME_MEMBERSHIP` filtruje `valid_from <= decision < vali
 
 Parametr selection zůstává chronologická IS → validation → OOS pipeline Phase 3; OOS se pouze jednou vyhodnotí a není vstupem výběru. Experiment manifest musí odkazovat na immutable snapshot, coverage, strategy version/parameters, commit a seed. Promotion pouze mění research candidate na schválenou konfiguraci stávající paper pipeline; strategie nikdy neposílá broker order přímo.
 
-## Persistentní lineage a otevřený runner
-Schema experiment registry má FK na Phase 6 snapshot a sloupce multi-asset metrik. Kompletní runner IS → validation → exactly-once OOS nad `run_multi_asset` však dosud není zapojen; není povolen silent fallback na legacy `DatasetRecord` a audit gate zůstává otevřený.
+## Persistentní lineage
+Schema experiment registry má FK na Phase 6 snapshot a sloupce multi-asset metrik. Runner nepovoluje silent fallback na legacy `DatasetRecord`.
 
 `strategy_deployments` je explicitní, ručně schvalovaný manifest strategie/verze, parametrů, universe, paper účtu, experimentu, snapshotu, měny a timeframe. Schválení failne bez `VALID` snapshotu a shodné experiment lineage. Manifest nevytváří nový execution path.
+# Persistentní Phase 6 experimenty
+
+`Phase6ExperimentRunner` přijímá výhradně identitu `VALID` dataset snapshotu. Manifest je
+před spuštěním ověřen proti přesným observation ID, revision a source hash; pozdější provider
+oprava proto nemůže změnit rekonstruovaný experiment. Přesná dvojice jméno/verze strategie
+musí být v registru a bounded parameter set se řadí kanonicky. Train, validation a OOS jsou
+chronologicky disjunktní: všechny konfigurace projdou train a validation, výběr používá pouze
+validation risk-adjusted return a OOS se vyhodnotí právě jednou.
+
+Persistentní OOS metriky jsou total return, anualizovaný výnos, anualizovaná volatilita,
+risk-adjusted return (Sharpe bez risk-free sazby), max drawdown, traded-notional turnover vůči
+počátečnímu kapitálu, časově vážená gross exposure, počet fillů a celkové komise. Exposure je
+integrál stavové portfolio exposure přes čas, nikoli počet nebo stav fillů.
+
+Logická idempotency identita zahrnuje snapshot, přesnou strategii, celý parameter set, split,
+kapitál, cost model, seed a skutečný Git SHA. PostgreSQL runner tuto identitu serializuje
+transaction-scoped advisory lockem; opakování vrací stejný `ResearchExperiment` a nevytváří
+druhé OOS vyhodnocení.
