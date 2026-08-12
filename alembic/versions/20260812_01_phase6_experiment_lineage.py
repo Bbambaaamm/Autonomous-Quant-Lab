@@ -12,19 +12,31 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
-    op.add_column("research_experiments", sa.Column("idempotency_key", sa.String(64)))
-    op.add_column("research_experiments", sa.Column("code_sha", sa.String(64)))
-    op.add_column("research_experiments", sa.Column("seed", sa.Integer()))
-    op.add_column("research_experiments", sa.Column("cost_model_json", sa.Text()))
-    op.add_column(
-        "research_experiments", sa.Column("selected_parameters_json", sa.Text())
-    )
-    op.create_index(
-        "ix_research_experiments_idempotency_key",
-        "research_experiments",
-        ["idempotency_key"],
-        unique=True,
-    )
+    bind = op.get_bind()
+    inspector = sa.inspect(bind)
+    columns = {
+        column["name"] for column in inspector.get_columns("research_experiments")
+    }
+    for name, kind in (
+        ("idempotency_key", sa.String(64)),
+        ("code_sha", sa.String(64)),
+        ("seed", sa.Integer()),
+        ("cost_model_json", sa.Text()),
+        ("selected_parameters_json", sa.Text()),
+    ):
+        # Initial migrace používá aktuální metadata, proto na prázdné DB sloupec už existuje.
+        if name not in columns:
+            op.add_column("research_experiments", sa.Column(name, kind))
+    indexes = {
+        index["name"] for index in sa.inspect(bind).get_indexes("research_experiments")
+    }
+    if "ix_research_experiments_idempotency_key" not in indexes:
+        op.create_index(
+            "ix_research_experiments_idempotency_key",
+            "research_experiments",
+            ["idempotency_key"],
+            unique=True,
+        )
 
 
 def downgrade() -> None:

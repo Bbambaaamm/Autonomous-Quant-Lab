@@ -136,12 +136,33 @@ class Phase6ExperimentRunner:
             strategy_type = STRATEGY_REGISTRY.get(request.strategy_name)
             if strategy_row is None or strategy_type is None:
                 raise DatasetInvalid("Přesná strategy version není registrována")
-            manifest = json.loads(snapshot.manifest_json)
+            try:
+                manifest: object = json.loads(snapshot.manifest_json)
+            except json.JSONDecodeError as exc:
+                raise DatasetInvalid("Snapshot manifest není validní JSON") from exc
+            if not isinstance(manifest, dict):
+                raise DatasetInvalid("Snapshot manifest musí být objekt")
             entries = manifest.get("observations")
             if not isinstance(entries, list) or not entries:
                 raise DatasetInvalid("Snapshot manifest neobsahuje observations")
-            ids = [entry.get("id") for entry in entries if isinstance(entry, dict)]
-            if len(ids) != len(entries) or len(set(ids)) != len(ids):
+            parsed_entries: list[tuple[str, int, str]] = []
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    raise DatasetInvalid("Snapshot manifest není interně konzistentní")
+                observation_id = entry.get("id")
+                revision = entry.get("revision")
+                source_hash = entry.get("hash")
+                if (
+                    not isinstance(observation_id, str)
+                    or not isinstance(revision, int)
+                    or isinstance(revision, bool)
+                    or revision <= 0
+                    or not isinstance(source_hash, str)
+                ):
+                    raise DatasetInvalid("Snapshot manifest není interně konzistentní")
+                parsed_entries.append((observation_id, revision, source_hash))
+            ids = [entry[0] for entry in parsed_entries]
+            if len(set(ids)) != len(ids):
                 raise DatasetInvalid("Snapshot manifest není interně konzistentní")
             rows = tuple(
                 session.scalars(
@@ -152,9 +173,9 @@ class Phase6ExperimentRunner:
             )
             by_id = {row.observation_id: row for row in rows}
             if set(by_id) != set(ids) or any(
-                by_id[entry["id"]].revision != entry["revision"]
-                or by_id[entry["id"]].source_hash != entry["hash"]
-                for entry in entries
+                by_id[observation_id].revision != revision
+                or by_id[observation_id].source_hash != source_hash
+                for observation_id, revision, source_hash in parsed_entries
             ):
                 raise DatasetInvalid("Snapshot manifest odkazuje na změněná nebo chybějící data")
             observations = tuple(_observation(by_id[item]) for item in ids)
