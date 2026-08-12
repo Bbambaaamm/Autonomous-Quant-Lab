@@ -76,3 +76,6 @@ Mimo Phase 4 zůstávají live broker, live credentials, Next.js dashboard a nov
 
 ## Phase 6
 Phase 6 je implementována jako provider → validace/immutable revisions → XNYS calendar/corporate actions → PIT universe → immutable snapshot → multi-asset target portfolio. Detailní invariants jsou v `docs/market-data.md` a `docs/strategy-research.md`. Žádná část nevytváří live execution path; automatický data refresh zatím není allowlistovaný job a refresh se provádí odděleně od trading cycle.
+
+## Aktuální Phase 6 completion stav
+Dokončen je persistentní transakční ingestion, DB snapshot builder s PIT coverage, read API, current-data accessor a forward schema pro experiment/deployment lineage. Zbývá produkční exchange-calendar dependency, kompletní IS/validation/exactly-once OOS multi-asset runner, PostgreSQL master/concurrency evidence a paper integration E2E. Phase 6 je proto `INCOMPLETE`; starý pre-Phase6 seznam výše není aktuálním remaining scope.

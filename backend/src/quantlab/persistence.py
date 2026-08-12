@@ -218,6 +218,9 @@ class ExperimentRecord(Base):
     dataset_id: Mapped[str | None] = mapped_column(
         ForeignKey("datasets.dataset_id", ondelete="RESTRICT"), index=True
     )
+    snapshot_id: Mapped[str | None] = mapped_column(
+        ForeignKey("dataset_snapshots.snapshot_id", ondelete="RESTRICT"), index=True
+    )
     strategy_identity: Mapped[str | None] = mapped_column(
         ForeignKey("strategies.strategy_identity", ondelete="RESTRICT"), index=True
     )
@@ -237,8 +240,38 @@ class ExperimentRecord(Base):
     turnover: Mapped[float | None] = mapped_column(Float)
     total_commissions: Mapped[float | None] = mapped_column(Float)
     total_slippage: Mapped[float | None] = mapped_column(Float)
+    annualized_return: Mapped[float | None] = mapped_column(Float)
+    volatility: Mapped[float | None] = mapped_column(Float)
+    time_weighted_exposure: Mapped[float | None] = mapped_column(Float)
+    trade_count: Mapped[int | None] = mapped_column(Integer)
+    total_costs: Mapped[float | None] = mapped_column(Float)
     config_json: Mapped[str] = mapped_column(Text, nullable=False)
     result_json: Mapped[str] = mapped_column(Text, nullable=False)
+
+
+class StrategyDeploymentRecord(Base):
+    __tablename__ = "strategy_deployments"
+    deployment_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    status: Mapped[str] = mapped_column(String(20), nullable=False)
+    strategy_name: Mapped[str] = mapped_column(String(100), nullable=False)
+    strategy_version: Mapped[str] = mapped_column(String(50), nullable=False)
+    parameters_json: Mapped[str] = mapped_column(Text, nullable=False)
+    universe_id: Mapped[str] = mapped_column(
+        ForeignKey("universe_definitions.universe_id", ondelete="RESTRICT"), nullable=False
+    )
+    paper_account_id: Mapped[str] = mapped_column(
+        ForeignKey("paper_accounts.account_id", ondelete="RESTRICT"), nullable=False
+    )
+    experiment_id: Mapped[str] = mapped_column(
+        ForeignKey("research_experiments.id", ondelete="RESTRICT"), nullable=False
+    )
+    snapshot_id: Mapped[str] = mapped_column(
+        ForeignKey("dataset_snapshots.snapshot_id", ondelete="RESTRICT"), nullable=False
+    )
+    currency: Mapped[str] = mapped_column(String(3), nullable=False)
+    timeframe: Mapped[str] = mapped_column(String(10), nullable=False)
 
 
 class ExperimentFoldRecord(Base):

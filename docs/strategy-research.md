@@ -9,3 +9,8 @@ Engine vede společnou USD hotovost, více pozic, cost basis, fills a portfolio 
 Universe typu `POINT_IN_TIME_MEMBERSHIP` filtruje `valid_from <= decision < valid_to` i `known_at <= knowledge_as_of`. `STATIC` je vždy označen `BIAS_PRONE_STATIC`: dnešní static seznam není survivorship-bias-free. Budoucí prices, membership a corporate actions nesmí ovlivnit prefix rozhodnutí.
 
 Parametr selection zůstává chronologická IS → validation → OOS pipeline Phase 3; OOS se pouze jednou vyhodnotí a není vstupem výběru. Experiment manifest musí odkazovat na immutable snapshot, coverage, strategy version/parameters, commit a seed. Promotion pouze mění research candidate na schválenou konfiguraci stávající paper pipeline; strategie nikdy neposílá broker order přímo.
+
+## Persistentní lineage a otevřený runner
+Schema experiment registry má FK na Phase 6 snapshot a sloupce multi-asset metrik. Kompletní runner IS → validation → exactly-once OOS nad `run_multi_asset` však dosud není zapojen; není povolen silent fallback na legacy `DatasetRecord` a audit gate zůstává otevřený.
+
+`strategy_deployments` je explicitní, ručně schvalovaný manifest strategie/verze, parametrů, universe, paper účtu, experimentu, snapshotu, měny a timeframe. Schválení failne bez `VALID` snapshotu a shodné experiment lineage. Manifest nevytváří nový execution path.

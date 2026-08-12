@@ -26,7 +26,14 @@ from quantlab.config import get_settings
 from quantlab.demo import load_fixture, run_demo
 from quantlab.market_data import StooqProvider, XNYSCalendar
 from quantlab.multi_asset import STRATEGY_REGISTRY
-from quantlab.persistence import DatasetSnapshotRecord, RunRepository, UniverseDefinitionRecord
+from quantlab.persistence import (
+    DatasetSnapshotRecord,
+    InstrumentRecord,
+    MarketDataIngestionRecord,
+    RunRepository,
+    UniverseDefinitionRecord,
+    UniverseMembershipRecord,
+)
 from quantlab.phase4 import (
     AuditEventRecord,
     PaperOrderRecord,
@@ -151,6 +158,62 @@ def dataset_snapshot(snapshot_id: str) -> dict[str, object]:
         }
 
 
+@app.get("/datasets")
+def dataset_snapshots(
+    limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=0)
+) -> list[dict[str, object]]:
+    with Session(repository.engine) as session:
+        rows = session.scalars(
+            select(DatasetSnapshotRecord)
+            .order_by(DatasetSnapshotRecord.created_at.desc())
+            .limit(limit)
+            .offset(offset)
+        )
+        return [_row(row) for row in rows]
+
+
+@app.get("/market-data/instruments")
+def market_data_instruments() -> list[dict[str, object]]:
+    with Session(repository.engine) as session:
+        return [
+            _row(row)
+            for row in session.scalars(
+                select(InstrumentRecord).order_by(InstrumentRecord.instrument_id)
+            )
+        ]
+
+
+@app.get("/market-data/instruments/{instrument_id}")
+def market_data_instrument(instrument_id: str) -> dict[str, object]:
+    with Session(repository.engine) as session:
+        row = session.get(InstrumentRecord, instrument_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="Instrument nebyl nalezen")
+        return _row(row)
+
+
+@app.get("/market-data/ingestions")
+def market_data_ingestions() -> list[dict[str, object]]:
+    with Session(repository.engine) as session:
+        return [
+            _row(row)
+            for row in session.scalars(
+                select(MarketDataIngestionRecord).order_by(
+                    MarketDataIngestionRecord.started_at.desc()
+                )
+            )
+        ]
+
+
+@app.get("/market-data/ingestions/{ingestion_id}")
+def market_data_ingestion(ingestion_id: str) -> dict[str, object]:
+    with Session(repository.engine) as session:
+        row = session.get(MarketDataIngestionRecord, ingestion_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="Ingestion nebyl nalezen")
+        return _row(row)
+
+
 @app.get("/universes")
 def universes() -> list[dict[str, object]]:
     with Session(repository.engine) as session:
@@ -168,6 +231,20 @@ def universes() -> list[dict[str, object]]:
             }
             for row in rows
         ]
+
+
+@app.get("/universes/{universe_id}")
+def universe(universe_id: str) -> dict[str, object]:
+    with Session(repository.engine) as session:
+        row = session.get(UniverseDefinitionRecord, universe_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="Universe nebyl nalezen")
+        memberships = session.scalars(
+            select(UniverseMembershipRecord)
+            .where(UniverseMembershipRecord.universe_id == universe_id)
+            .order_by(UniverseMembershipRecord.valid_from)
+        )
+        return {**_row(row), "memberships": [_row(item) for item in memberships]}
 
 
 @app.post("/automation/jobs")
