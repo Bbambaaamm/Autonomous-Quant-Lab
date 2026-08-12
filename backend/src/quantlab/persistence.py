@@ -244,6 +244,11 @@ class ExperimentRecord(Base):
     time_weighted_exposure: Mapped[float | None] = mapped_column(Float)
     trade_count: Mapped[int | None] = mapped_column(Integer)
     total_costs: Mapped[float | None] = mapped_column(Float)
+    idempotency_key: Mapped[str | None] = mapped_column(String(64), unique=True, index=True)
+    code_sha: Mapped[str | None] = mapped_column(String(64))
+    seed: Mapped[int | None] = mapped_column(Integer)
+    cost_model_json: Mapped[str | None] = mapped_column(Text)
+    selected_parameters_json: Mapped[str | None] = mapped_column(Text)
     config_json: Mapped[str] = mapped_column(Text, nullable=False)
     result_json: Mapped[str] = mapped_column(Text, nullable=False)
 

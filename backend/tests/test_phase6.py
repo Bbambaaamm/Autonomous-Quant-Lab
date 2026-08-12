@@ -437,3 +437,22 @@ def test_runner_uses_adjusted_signals_and_applies_actions():
     )
     assert dict(result.decisions)[CAL.session_close(days[2])].weights == (("a", Decimal("1")),)
     assert result.dividend_income > 0
+
+
+def test_evaluation_window_preserves_lookback_without_pre_window_trades():
+    days = [date(2024, 1, day) for day in (3, 4, 5, 8, 9)]
+    rows = [obs("a", day, str(100 + index)) for index, day in enumerate(days)]
+    evaluation_start = CAL.session_close(days[3])
+
+    result = run_multi_asset(
+        rows,
+        single_asset_universe(),
+        TrendStrategy(2, 3, rebalance_frequency=RebalanceFrequency.DAILY),
+        initial_cash=Decimal("1000"),
+        commission_bps=Decimal("0"),
+        evaluation_start=evaluation_start,
+    )
+
+    assert result.equity[0][0] == evaluation_start
+    assert result.decisions[0][0] == evaluation_start
+    assert all(fill.timestamp > evaluation_start for fill in result.fills)

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import math
+import subprocess
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -10,15 +13,31 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from quantlab.domain import require_utc
-from quantlab.market_data import DatasetInvalid, Observation, XNYSCalendar
-from quantlab.market_data_service import _observation
-from quantlab.multi_asset import MultiAssetResult
+from quantlab.market_data import (
+    CorporateAction,
+    CorporateActionKind,
+    DatasetInvalid,
+    Observation,
+    XNYSCalendar,
+)
+from quantlab.market_data_service import _lock, _observation
+from quantlab.multi_asset import STRATEGY_REGISTRY, MultiAssetResult, run_multi_asset
 from quantlab.persistence import (
     DatasetSnapshotRecord,
     ExperimentRecord,
+    InstrumentRecord,
     MarketDataIngestionRecord,
     MarketObservationRecord,
     StrategyDeploymentRecord,
+    StrategyRecord,
+    UniverseDefinitionRecord,
+    UniverseMembershipRecord,
+)
+from quantlab.universe import (
+    PointInTimeUniverse,
+    UniverseDefinition,
+    UniverseKind,
+    UniverseMembership,
 )
 
 
@@ -33,6 +52,272 @@ class MultiAssetMetrics:
     time_weighted_exposure: Decimal
     trade_count: int
     total_costs: Decimal
+
+    @property
+    def risk_adjusted_return(self) -> Decimal:
+        return self.sharpe
+
+
+@dataclass(frozen=True)
+class Phase6ExperimentRequest:
+    snapshot_id: str
+    strategy_name: str
+    strategy_version: str
+    parameter_configs: tuple[dict[str, object], ...]
+    train_fraction: Decimal = Decimal("0.6")
+    validation_fraction: Decimal = Decimal("0.2")
+    initial_cash: Decimal = Decimal("100000")
+    commission_bps: Decimal = Decimal("1")
+    seed: int = 42
+    code_sha: str | None = None
+
+
+class Phase6ExperimentRunner:
+    """Snapshot-only Phase 6 runner s persistentní, exactly-once OOS identitou."""
+
+    def __init__(self, session_factory: Callable[[], Session]) -> None:
+        self._sessions = session_factory
+
+    @staticmethod
+    def _canonical(value: object) -> str:
+        return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
+
+    @staticmethod
+    def _code_sha(explicit: str | None) -> str:
+        value = explicit
+        if value is None:
+            try:
+                value = subprocess.run(
+                    ["git", "rev-parse", "HEAD"],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                ).stdout.strip()
+            except (OSError, subprocess.CalledProcessError) as exc:
+                raise DatasetInvalid("Git SHA nelze zjistit") from exc
+        if len(value) != 40 or any(character not in "0123456789abcdef" for character in value):
+            raise DatasetInvalid("Code SHA musí být plný lowercase Git SHA")
+        return value
+
+    def run(self, request: Phase6ExperimentRequest) -> ExperimentRecord:
+        if not request.parameter_configs:
+            raise ValueError("Parameter space nesmí být prázdný")
+        if not Decimal(0) < request.train_fraction < Decimal(1) or not Decimal(
+            0
+        ) < request.validation_fraction < Decimal(1):
+            raise ValueError("Chronologický split má neplatné poměry")
+        code_sha = self._code_sha(request.code_sha)
+        identity_payload = {
+            "snapshot_id": request.snapshot_id,
+            "strategy": [request.strategy_name, request.strategy_version],
+            "parameters": request.parameter_configs,
+            "train_fraction": request.train_fraction,
+            "validation_fraction": request.validation_fraction,
+            "initial_cash": request.initial_cash,
+            "commission_bps": request.commission_bps,
+            "seed": request.seed,
+            "code_sha": code_sha,
+        }
+        identity = hashlib.sha256(self._canonical(identity_payload).encode()).hexdigest()
+        with self._sessions() as session, session.begin():
+            _lock(session, f"phase6-experiment:{identity}")
+            existing = session.scalar(
+                select(ExperimentRecord).where(ExperimentRecord.idempotency_key == identity)
+            )
+            if existing is not None:
+                session.expunge(existing)
+                return existing
+            snapshot = session.get(DatasetSnapshotRecord, request.snapshot_id)
+            if (
+                snapshot is None
+                or snapshot.status != "VALID"
+                or not snapshot.content_hash
+                or session.get(UniverseDefinitionRecord, snapshot.universe_id) is None
+            ):
+                raise DatasetInvalid("Experiment vyžaduje existující VALID snapshot s universe")
+            strategy_row = session.scalar(
+                select(StrategyRecord).where(
+                    StrategyRecord.strategy_name == request.strategy_name,
+                    StrategyRecord.strategy_version == request.strategy_version,
+                )
+            )
+            strategy_type = STRATEGY_REGISTRY.get(request.strategy_name)
+            if strategy_row is None or strategy_type is None:
+                raise DatasetInvalid("Přesná strategy version není registrována")
+            try:
+                manifest: object = json.loads(snapshot.manifest_json)
+            except json.JSONDecodeError as exc:
+                raise DatasetInvalid("Snapshot manifest není validní JSON") from exc
+            if not isinstance(manifest, dict):
+                raise DatasetInvalid("Snapshot manifest musí být objekt")
+            entries = manifest.get("observations")
+            if not isinstance(entries, list) or not entries:
+                raise DatasetInvalid("Snapshot manifest neobsahuje observations")
+            parsed_entries: list[tuple[str, int, str]] = []
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    raise DatasetInvalid("Snapshot manifest není interně konzistentní")
+                observation_id = entry.get("id")
+                revision = entry.get("revision")
+                source_hash = entry.get("hash")
+                if (
+                    not isinstance(observation_id, str)
+                    or not isinstance(revision, int)
+                    or isinstance(revision, bool)
+                    or revision <= 0
+                    or not isinstance(source_hash, str)
+                ):
+                    raise DatasetInvalid("Snapshot manifest není interně konzistentní")
+                parsed_entries.append((observation_id, revision, source_hash))
+            ids = [entry[0] for entry in parsed_entries]
+            if len(set(ids)) != len(ids):
+                raise DatasetInvalid("Snapshot manifest není interně konzistentní")
+            rows = tuple(
+                session.scalars(
+                    select(MarketObservationRecord).where(
+                        MarketObservationRecord.observation_id.in_(ids)
+                    )
+                )
+            )
+            by_id = {row.observation_id: row for row in rows}
+            if set(by_id) != set(ids) or any(
+                by_id[observation_id].revision != revision
+                or by_id[observation_id].source_hash != source_hash
+                for observation_id, revision, source_hash in parsed_entries
+            ):
+                raise DatasetInvalid("Snapshot manifest odkazuje na změněná nebo chybějící data")
+            observations = tuple(_observation(by_id[item]) for item in ids)
+            action_entries = manifest.get("corporate_actions")
+            if not isinstance(action_entries, list):
+                raise DatasetInvalid("Snapshot manifest neobsahuje immutable corporate actions")
+            try:
+                corporate_actions = tuple(
+                    CorporateAction(
+                        action_id=entry["action_id"],
+                        instrument_id=entry["instrument_id"],
+                        kind=CorporateActionKind(entry["kind"]),
+                        effective_at=datetime.fromisoformat(entry["effective_at"]),
+                        known_at=datetime.fromisoformat(entry["known_at"]),
+                        value=Decimal(entry["value"]) if entry["value"] is not None else None,
+                        new_symbol=entry["new_symbol"],
+                    )
+                    for entry in action_entries
+                    if isinstance(entry, dict)
+                )
+            except (KeyError, TypeError, ValueError) as exc:
+                raise DatasetInvalid("Snapshot corporate actions nejsou konzistentní") from exc
+            if len(corporate_actions) != len(action_entries):
+                raise DatasetInvalid("Snapshot corporate actions nejsou konzistentní")
+            times = sorted({item.timestamp for item in observations})
+            train_end = int(len(times) * float(request.train_fraction))
+            validation_end = train_end + int(len(times) * float(request.validation_fraction))
+            if train_end < 1 or validation_end <= train_end or validation_end >= len(times):
+                raise DatasetInvalid("Každá chronologická část musí obsahovat data")
+            definition_row = session.get(UniverseDefinitionRecord, snapshot.universe_id)
+            assert definition_row is not None
+            membership_rows = tuple(
+                session.scalars(
+                    select(UniverseMembershipRecord).where(
+                        UniverseMembershipRecord.universe_id == snapshot.universe_id,
+                        UniverseMembershipRecord.known_at <= snapshot.as_of,
+                    )
+                )
+            )
+            universe = PointInTimeUniverse(
+                UniverseDefinition(
+                    definition_row.universe_id,
+                    definition_row.name,
+                    UniverseKind(definition_row.kind),
+                    definition_row.created_at,
+                ),
+                [
+                    UniverseMembership(
+                        row.universe_id,
+                        row.instrument_id,
+                        row.valid_from,
+                        row.valid_to,
+                        row.known_at,
+                    )
+                    for row in membership_rows
+                ],
+            )
+            instrument_ids = {item.instrument_id for item in observations}
+            instrument_rows = tuple(
+                session.scalars(
+                    select(InstrumentRecord).where(
+                        InstrumentRecord.instrument_id.in_(instrument_ids)
+                    )
+                )
+            )
+            currencies = {row.instrument_id: row.currency for row in instrument_rows}
+            if set(currencies) != instrument_ids:
+                raise DatasetInvalid("Snapshot odkazuje na chybějící instrument metadata")
+
+            def evaluate(
+                config: dict[str, object], selected_times: list[datetime]
+            ) -> MultiAssetMetrics:
+                strategy = strategy_type(**config)
+                if strategy.version != request.strategy_version:
+                    raise DatasetInvalid("Implementace strategy version neodpovídá registru")
+                evaluation_start = selected_times[0]
+                evaluation_end = selected_times[-1]
+                result = run_multi_asset(
+                    [item for item in observations if item.timestamp <= evaluation_end],
+                    universe,
+                    strategy,
+                    request.initial_cash,
+                    request.commission_bps,
+                    currencies=currencies,
+                    corporate_actions=corporate_actions,
+                    evaluation_start=evaluation_start,
+                )
+                return multi_asset_metrics(result, request.initial_cash)
+
+            scored: list[tuple[Decimal, str, dict[str, object], MultiAssetMetrics]] = []
+            for config in request.parameter_configs:
+                evaluate(config, times[:train_end])
+                validation = evaluate(config, times[train_end:validation_end])
+                scored.append(
+                    (validation.risk_adjusted_return, self._canonical(config), config, validation)
+                )
+            _, _, selected, _ = max(scored, key=lambda item: (item[0], item[1]))
+            oos = evaluate(selected, times[validation_end:])
+            experiment = ExperimentRecord(
+                id=identity,
+                idempotency_key=identity,
+                created_at=datetime.now(UTC),
+                completed_at=datetime.now(UTC),
+                status="COMPLETED",
+                snapshot_id=snapshot.snapshot_id,
+                strategy_identity=strategy_row.strategy_identity,
+                strategy_name=request.strategy_name,
+                strategy_version=request.strategy_version,
+                parameter_space_id=hashlib.sha256(
+                    self._canonical(request.parameter_configs).encode()
+                ).hexdigest(),
+                decision="RESEARCH_ONLY",
+                total_return=float(oos.total_return),
+                annualized_return=float(oos.annualized_return),
+                volatility=float(oos.volatility),
+                sharpe=float(oos.risk_adjusted_return),
+                max_drawdown=float(oos.max_drawdown),
+                turnover=float(oos.turnover),
+                time_weighted_exposure=float(oos.time_weighted_exposure),
+                trade_count=oos.trade_count,
+                total_costs=float(oos.total_costs),
+                code_sha=code_sha,
+                seed=request.seed,
+                cost_model_json=self._canonical(
+                    {"commission_bps": request.commission_bps, "slippage_model": "none"}
+                ),
+                selected_parameters_json=self._canonical(selected),
+                config_json=self._canonical(identity_payload),
+                result_json=self._canonical({"stage": "OOS", "metrics": oos.__dict__}),
+            )
+            session.add(experiment)
+            session.flush()
+            session.expunge(experiment)
+            return experiment
 
 
 def multi_asset_metrics(result: MultiAssetResult, initial_cash: Decimal) -> MultiAssetMetrics:
