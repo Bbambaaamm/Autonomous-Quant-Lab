@@ -1,6 +1,8 @@
 from datetime import UTC, date, datetime
 from decimal import Decimal
 
+import pytest
+
 from quantlab.market_data import AssetType, Instrument, ProviderBar, XNYSCalendar, normalize_bar
 
 CALENDAR = XNYSCalendar()
@@ -26,6 +28,19 @@ def test_navigation_and_historical_exceptional_closure() -> None:
     # XNYS zůstala po teroristických útocích uzavřena 11.–14. září 2001.
     assert not CALENDAR.is_session(date(2001, 9, 11))
     assert CALENDAR.next_session(date(2001, 9, 10)) == date(2001, 9, 17)
+
+
+def test_calendar_bounds_are_explicit_and_fail_closed() -> None:
+    assert CALENDAR.audited_start == date(1970, 1, 1)
+    assert CALENDAR.audited_end == date(2100, 12, 31)
+    with pytest.raises(ValueError, match="mimo auditované období"):
+        CALENDAR.is_session(date(1969, 12, 31))
+    with pytest.raises(ValueError, match="Následující session"):
+        CALENDAR.next_session(CALENDAR.audited_end)
+    with pytest.raises(ValueError, match="Předchozí session"):
+        CALENDAR.previous_session(CALENDAR.audited_start)
+    with pytest.raises(ValueError, match="Začátek rozsahu"):
+        CALENDAR.sessions_between(date(2024, 1, 3), date(2024, 1, 2))
 
 
 def test_latest_completed_session_is_session_aware() -> None:

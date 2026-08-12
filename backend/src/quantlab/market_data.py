@@ -160,11 +160,13 @@ _EXCEPTIONAL_CLOSURES = {
 
 
 class XNYSCalendar:
+    audited_start = date(1970, 1, 1)
+    audited_end = date(2100, 12, 31)
     identity = "XNYS-audited-closures-2026.2"
     timezone = ZoneInfo("America/New_York")
 
     def is_session(self, day: date) -> bool:
-        if not 1970 <= day.year <= 2100:
+        if not self.audited_start <= day <= self.audited_end:
             raise ValueError("Datum je mimo auditované období kalendáře")
         return (
             day.weekday() < 5
@@ -213,18 +215,26 @@ class XNYSCalendar:
         )
 
     def next_session(self, day: date) -> date:
+        if day >= self.audited_end:
+            raise ValueError("Následující session je mimo auditované období kalendáře")
         candidate = day + timedelta(days=1)
         while not self.is_session(candidate):
             candidate += timedelta(days=1)
         return candidate
 
     def previous_session(self, day: date) -> date:
+        if day <= self.audited_start:
+            raise ValueError("Předchozí session je mimo auditované období kalendáře")
         candidate = day - timedelta(days=1)
         while not self.is_session(candidate):
             candidate -= timedelta(days=1)
         return candidate
 
     def sessions_between(self, start: date, end: date) -> tuple[date, ...]:
+        if start > end:
+            raise ValueError("Začátek rozsahu kalendáře musí být nejpozději na konci")
+        self.is_session(start)
+        self.is_session(end)
         return tuple(
             start + timedelta(days=i)
             for i in range((end - start).days + 1)
