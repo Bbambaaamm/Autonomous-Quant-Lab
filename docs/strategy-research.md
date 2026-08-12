@@ -23,6 +23,12 @@ musí být v registru a bounded parameter set se řadí kanonicky. Train, valida
 chronologicky disjunktní: všechny konfigurace projdou train a validation, výběr používá pouze
 validation risk-adjusted return a OOS se vyhodnotí právě jednou.
 
+Snapshot manifest verze 3 zahrnuje také kanonické corporate actions známé k `as_of`; jejich
+obsah vstupuje do snapshot content hashe. Validation a OOS dostávají předchozí observations
+pouze jako lookback warm-up, ale portfolio, fills i metriky vznikají až od začátku příslušného
+evaluation okna. Runner před výpočtem načte měny všech instrumentů a mixed-currency universe
+bez explicitní FX konverze odmítne.
+
 Persistentní OOS metriky jsou total return, anualizovaný výnos, anualizovaná volatilita,
 risk-adjusted return (Sharpe bez risk-free sazby), max drawdown, traded-notional turnover vůči
 počátečnímu kapitálu, časově vážená gross exposure, počet fillů a celkové komise. Exposure je

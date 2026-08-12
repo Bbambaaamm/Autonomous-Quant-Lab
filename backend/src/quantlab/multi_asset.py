@@ -259,6 +259,7 @@ def run_multi_asset(
     stale_sessions: int = 1,
     currencies: Mapping[str, str] | None = None,
     corporate_actions: Sequence[CorporateAction] = (),
+    evaluation_start: datetime | None = None,
 ) -> MultiAssetResult:
     if currencies and len(set(currencies.values())) > 1:
         raise ValueError("Multi-currency portfolio bez FX konverze není podporováno")
@@ -298,7 +299,8 @@ def run_multi_asset(
             if action.effective_at <= when and action.known_at <= when:
                 portfolio.apply_action(action)
         # Pending close T targets se realizují až na raw open další dostupné společné session.
-        if pending is not None:
+        in_evaluation = evaluation_start is None or when >= require_utc(evaluation_start)
+        if pending is not None and in_evaluation:
             prices = {instrument: bar.open for instrument, bar in current.items()}
             missing_positions = [
                 instrument
@@ -360,7 +362,11 @@ def run_multi_asset(
             history.setdefault(instrument, []).append(bar)
         eligible = universe.eligible(when)
         visible = {instrument: tuple(history.get(instrument, ())) for instrument in eligible}
-        if pending is None and _rebalance(when, last_rebalance, strategy.rebalance_frequency):
+        if (
+            in_evaluation
+            and pending is None
+            and _rebalance(when, last_rebalance, strategy.rebalance_frequency)
+        ):
             fresh = tuple(instrument for instrument in eligible if instrument in current)
             for instrument in eligible:
                 if instrument not in fresh:
@@ -385,8 +391,9 @@ def run_multi_asset(
             if price_info is None or index - price_info[1] > stale_sessions:
                 raise RuntimeError("Existing position nelze ocenit kvůli stale datům")
             value += quantity * price_info[0]
-        equity.append((when, value))
-        exposure.append((when, (value - portfolio.cash) / value if value else Decimal("0")))
+        if in_evaluation:
+            equity.append((when, value))
+            exposure.append((when, (value - portfolio.cash) / value if value else Decimal("0")))
     requested = len({m for when in times for m in universe.eligible(when)})
     used = len({fill.instrument_id for fill in fills})
     return MultiAssetResult(

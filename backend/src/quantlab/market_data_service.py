@@ -4,7 +4,7 @@ import hashlib
 import json
 from collections.abc import Callable, Sequence
 from dataclasses import replace
-from datetime import UTC, date, datetime, time
+from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 
 from sqlalchemy import Select, and_, func, select, text
@@ -278,16 +278,40 @@ class DatasetSnapshotService:
                     selected, key=lambda item: (item.instrument_id, item.session_date)
                 )
             ]
+            selected_instruments = {row.instrument_id for row in selected}
+            actions = tuple(
+                session.scalars(
+                    select(CorporateActionRecord).where(
+                        CorporateActionRecord.instrument_id.in_(selected_instruments),
+                        CorporateActionRecord.known_at <= cutoff,
+                        CorporateActionRecord.effective_at <= _instant(end + timedelta(days=1)),
+                    )
+                )
+            )
+            canonical_actions = [
+                {
+                    "action_id": action.action_id,
+                    "instrument_id": action.instrument_id,
+                    "kind": action.kind,
+                    "effective_at": action.effective_at.isoformat(),
+                    "known_at": action.known_at.isoformat(),
+                    "value": action.value,
+                    "new_symbol": action.new_symbol,
+                }
+                for action in sorted(actions, key=lambda item: item.action_id)
+            ]
+            immutable_content = {"observations": canonical, "corporate_actions": canonical_actions}
             content_hash = hashlib.sha256(
-                json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode()
+                json.dumps(immutable_content, sort_keys=True, separators=(",", ":")).encode()
             ).hexdigest()
             snapshot_id = hashlib.sha256(f"{logical}|{content_hash}".encode()).hexdigest()
             status = "VALID" if expected and coverage >= minimum_coverage else "INVALID"
             manifest = json.dumps(
                 {
-                    "schema_version": "2",
+                    "schema_version": "3",
                     "logical_identity": logical,
                     "observations": canonical,
+                    "corporate_actions": canonical_actions,
                     "expected_count": len(expected),
                     "present_count": len(present),
                 },

@@ -13,12 +13,19 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from quantlab.domain import require_utc
-from quantlab.market_data import DatasetInvalid, Observation, XNYSCalendar
+from quantlab.market_data import (
+    CorporateAction,
+    CorporateActionKind,
+    DatasetInvalid,
+    Observation,
+    XNYSCalendar,
+)
 from quantlab.market_data_service import _lock, _observation
 from quantlab.multi_asset import STRATEGY_REGISTRY, MultiAssetResult, run_multi_asset
 from quantlab.persistence import (
     DatasetSnapshotRecord,
     ExperimentRecord,
+    InstrumentRecord,
     MarketDataIngestionRecord,
     MarketObservationRecord,
     StrategyDeploymentRecord,
@@ -118,6 +125,7 @@ class Phase6ExperimentRunner:
                 select(ExperimentRecord).where(ExperimentRecord.idempotency_key == identity)
             )
             if existing is not None:
+                session.expunge(existing)
                 return existing
             snapshot = session.get(DatasetSnapshotRecord, request.snapshot_id)
             if (
@@ -179,6 +187,27 @@ class Phase6ExperimentRunner:
             ):
                 raise DatasetInvalid("Snapshot manifest odkazuje na změněná nebo chybějící data")
             observations = tuple(_observation(by_id[item]) for item in ids)
+            action_entries = manifest.get("corporate_actions")
+            if not isinstance(action_entries, list):
+                raise DatasetInvalid("Snapshot manifest neobsahuje immutable corporate actions")
+            try:
+                corporate_actions = tuple(
+                    CorporateAction(
+                        action_id=entry["action_id"],
+                        instrument_id=entry["instrument_id"],
+                        kind=CorporateActionKind(entry["kind"]),
+                        effective_at=datetime.fromisoformat(entry["effective_at"]),
+                        known_at=datetime.fromisoformat(entry["known_at"]),
+                        value=Decimal(entry["value"]) if entry["value"] is not None else None,
+                        new_symbol=entry["new_symbol"],
+                    )
+                    for entry in action_entries
+                    if isinstance(entry, dict)
+                )
+            except (KeyError, TypeError, ValueError) as exc:
+                raise DatasetInvalid("Snapshot corporate actions nejsou konzistentní") from exc
+            if len(corporate_actions) != len(action_entries):
+                raise DatasetInvalid("Snapshot corporate actions nejsou konzistentní")
             times = sorted({item.timestamp for item in observations})
             train_end = int(len(times) * float(request.train_fraction))
             validation_end = train_end + int(len(times) * float(request.validation_fraction))
@@ -212,6 +241,17 @@ class Phase6ExperimentRunner:
                     for row in membership_rows
                 ],
             )
+            instrument_ids = {item.instrument_id for item in observations}
+            instrument_rows = tuple(
+                session.scalars(
+                    select(InstrumentRecord).where(
+                        InstrumentRecord.instrument_id.in_(instrument_ids)
+                    )
+                )
+            )
+            currencies = {row.instrument_id: row.currency for row in instrument_rows}
+            if set(currencies) != instrument_ids:
+                raise DatasetInvalid("Snapshot odkazuje na chybějící instrument metadata")
 
             def evaluate(
                 config: dict[str, object], selected_times: list[datetime]
@@ -219,12 +259,17 @@ class Phase6ExperimentRunner:
                 strategy = strategy_type(**config)
                 if strategy.version != request.strategy_version:
                     raise DatasetInvalid("Implementace strategy version neodpovídá registru")
+                evaluation_start = selected_times[0]
+                evaluation_end = selected_times[-1]
                 result = run_multi_asset(
-                    [item for item in observations if item.timestamp in selected_times],
+                    [item for item in observations if item.timestamp <= evaluation_end],
                     universe,
                     strategy,
                     request.initial_cash,
                     request.commission_bps,
+                    currencies=currencies,
+                    corporate_actions=corporate_actions,
+                    evaluation_start=evaluation_start,
                 )
                 return multi_asset_metrics(result, request.initial_cash)
 
@@ -271,6 +316,7 @@ class Phase6ExperimentRunner:
             )
             session.add(experiment)
             session.flush()
+            session.expunge(experiment)
             return experiment
 
 
