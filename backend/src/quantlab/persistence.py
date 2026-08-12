@@ -218,9 +218,8 @@ class ExperimentRecord(Base):
     dataset_id: Mapped[str | None] = mapped_column(
         ForeignKey("datasets.dataset_id", ondelete="RESTRICT"), index=True
     )
-    snapshot_id: Mapped[str | None] = mapped_column(
-        ForeignKey("dataset_snapshots.snapshot_id", ondelete="RESTRICT"), index=True
-    )
+    # FK vzniká až forward migrací 20260811_06; initial migrace importuje aktuální metadata.
+    snapshot_id: Mapped[str | None] = mapped_column(String(64), index=True)
     strategy_identity: Mapped[str | None] = mapped_column(
         ForeignKey("strategies.strategy_identity", ondelete="RESTRICT"), index=True
     )
@@ -262,7 +261,7 @@ class StrategyDeploymentRecord(Base):
         ForeignKey("universe_definitions.universe_id", ondelete="RESTRICT"), nullable=False
     )
     paper_account_id: Mapped[str] = mapped_column(
-        ForeignKey("paper_accounts.account_id", ondelete="RESTRICT"), nullable=False
+        ForeignKey("paper_accounts.id", ondelete="RESTRICT"), nullable=False
     )
     experiment_id: Mapped[str] = mapped_column(
         ForeignKey("research_experiments.id", ondelete="RESTRICT"), nullable=False

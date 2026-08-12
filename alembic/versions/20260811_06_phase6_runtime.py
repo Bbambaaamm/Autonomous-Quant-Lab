@@ -12,18 +12,34 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
-    op.add_column("research_experiments", sa.Column("snapshot_id", sa.String(64)))
-    op.create_foreign_key(
-        "fk_research_experiments_snapshot",
-        "research_experiments",
-        "dataset_snapshots",
-        ["snapshot_id"],
-        ["snapshot_id"],
-        ondelete="RESTRICT",
-    )
-    op.create_index(
-        "ix_research_experiments_snapshot_id", "research_experiments", ["snapshot_id"]
-    )
+    bind = op.get_bind()
+    columns = {
+        column["name"]
+        for column in sa.inspect(bind).get_columns("research_experiments")
+    }
+    if "snapshot_id" not in columns:
+        op.add_column("research_experiments", sa.Column("snapshot_id", sa.String(64)))
+    foreign_keys = sa.inspect(bind).get_foreign_keys("research_experiments")
+    if not any(
+        key.get("constrained_columns") == ["snapshot_id"] for key in foreign_keys
+    ):
+        op.create_foreign_key(
+            "fk_research_experiments_snapshot",
+            "research_experiments",
+            "dataset_snapshots",
+            ["snapshot_id"],
+            ["snapshot_id"],
+            ondelete="RESTRICT",
+        )
+    indexes = {
+        index["name"] for index in sa.inspect(bind).get_indexes("research_experiments")
+    }
+    if "ix_research_experiments_snapshot_id" not in indexes:
+        op.create_index(
+            "ix_research_experiments_snapshot_id",
+            "research_experiments",
+            ["snapshot_id"],
+        )
     for name, kind in (
         ("annualized_return", sa.Float()),
         ("volatility", sa.Float()),
@@ -31,7 +47,8 @@ def upgrade() -> None:
         ("trade_count", sa.Integer()),
         ("total_costs", sa.Float()),
     ):
-        op.add_column("research_experiments", sa.Column(name, kind))
+        if name not in columns:
+            op.add_column("research_experiments", sa.Column(name, kind))
     op.create_table(
         "strategy_deployments",
         sa.Column("deployment_id", sa.String(64), primary_key=True),
@@ -50,7 +67,7 @@ def upgrade() -> None:
         sa.Column(
             "paper_account_id",
             sa.String(64),
-            sa.ForeignKey("paper_accounts.account_id", ondelete="RESTRICT"),
+            sa.ForeignKey("paper_accounts.id", ondelete="RESTRICT"),
             nullable=False,
         ),
         sa.Column(

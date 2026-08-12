@@ -27,6 +27,11 @@ def test_multi_asset_metrics_use_time_weighted_exposure_and_hand_calculated_cost
         final_cash=Decimal(1048),
         final_positions=(("A", Decimal(0)),),
         dividend_income=Decimal(0),
+        exposure=(
+            (start, Decimal(500) / Decimal(999)),
+            (start + timedelta(days=1), Decimal(0)),
+            (start + timedelta(days=2), Decimal(0)),
+        ),
     )
 
     metrics = multi_asset_metrics(result, Decimal(1000))

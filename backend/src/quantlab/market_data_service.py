@@ -8,7 +8,6 @@ from datetime import UTC, date, datetime, time
 from decimal import Decimal
 
 from sqlalchemy import Select, and_, func, select, text
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from quantlab.domain import require_utc
@@ -20,7 +19,6 @@ from quantlab.market_data import (
     Instrument,
     MarketDataProvider,
     Observation,
-    ProviderError,
     XNYSCalendar,
     normalize_bar,
 )
@@ -88,6 +86,32 @@ class PersistentMarketDataService:
             f"{provider.metadata.name}|{instrument.instrument_id}|{start}|{end}|{observed_at.isoformat()}".encode()
         ).hexdigest()
         ingestion_id = scope
+        with self._sessions() as session, session.begin():
+            _lock(session, f"ingestion:{scope}")
+            existing = session.get(MarketDataIngestionRecord, ingestion_id)
+            if existing is None:
+                session.add(
+                    MarketDataIngestionRecord(
+                        id=ingestion_id,
+                        provider=provider.metadata.name,
+                        scope_hash=scope,
+                        started_at=observed_at,
+                        status="STARTED",
+                        requested_start=_instant(start),
+                        requested_end=_instant(end),
+                        instrument_count=1,
+                        row_count=0,
+                    )
+                )
+            elif existing.status == "SUCCEEDED":
+                rows = session.scalars(
+                    select(MarketObservationRecord).where(
+                        MarketObservationRecord.ingestion_id == ingestion_id
+                    )
+                )
+                return IngestionResult(
+                    ingestion_id, start, end, "SUCCEEDED", tuple(map(_observation, rows))
+                )
         try:
             bars = provider.historical_daily(instrument.symbol, start, end)
             actions = provider.corporate_actions(instrument.symbol, start, end)
@@ -105,15 +129,6 @@ class PersistentMarketDataService:
             with self._sessions() as session, session.begin():
                 _lock(session, f"ingestion:{scope}")
                 existing = session.get(MarketDataIngestionRecord, ingestion_id)
-                if existing is not None and existing.status == "SUCCEEDED":
-                    rows = session.scalars(
-                        select(MarketObservationRecord).where(
-                            MarketObservationRecord.ingestion_id == ingestion_id
-                        )
-                    )
-                    return IngestionResult(
-                        ingestion_id, start, end, "SUCCEEDED", tuple(map(_observation, rows))
-                    )
                 if session.get(InstrumentRecord, instrument.instrument_id) is None:
                     session.add(
                         InstrumentRecord(
@@ -132,18 +147,7 @@ class PersistentMarketDataService:
                     )
                     session.flush()
                 if existing is None:
-                    existing = MarketDataIngestionRecord(
-                        id=ingestion_id,
-                        provider=provider.metadata.name,
-                        scope_hash=scope,
-                        started_at=observed_at,
-                        status="STARTED",
-                        requested_start=_instant(start),
-                        requested_end=_instant(end),
-                        instrument_count=1,
-                        row_count=0,
-                    )
-                    session.add(existing)
+                    raise RuntimeError("Ingestion audit record po provider volání chybí")
                 added: list[Observation] = []
                 for incoming in normalized:
                     versions = list(
@@ -190,25 +194,13 @@ class PersistentMarketDataService:
                 existing.finished_at = datetime.now(UTC)
                 existing.row_count = len(added)
                 return IngestionResult(ingestion_id, start, end, "SUCCEEDED", tuple(added))
-        except (ProviderError, ValueError, IntegrityError) as exc:
+        except Exception as exc:
             with self._sessions() as session, session.begin():
                 row = session.get(MarketDataIngestionRecord, ingestion_id)
-                if row is None:
-                    session.add(
-                        MarketDataIngestionRecord(
-                            id=ingestion_id,
-                            provider=provider.metadata.name,
-                            scope_hash=scope,
-                            started_at=observed_at,
-                            finished_at=datetime.now(UTC),
-                            status="FAILED",
-                            requested_start=_instant(start),
-                            requested_end=_instant(end),
-                            instrument_count=1,
-                            row_count=0,
-                            error_summary=str(exc)[:1000],
-                        )
-                    )
+                if row is not None:
+                    row.finished_at = datetime.now(UTC)
+                    row.status = "FAILED"
+                    row.error_summary = str(exc)[:1000]
             return IngestionResult(ingestion_id, start, end, "FAILED", (), str(exc))
 
     @staticmethod
@@ -331,7 +323,7 @@ class DatasetSnapshotService:
                 end,
                 "1d",
                 content_hash,
-                tuple(item["id"] for item in canonical),
+                tuple(row.observation_id for row in selected),
                 status,
                 coverage,
             )
@@ -360,6 +352,7 @@ class DatasetSnapshotService:
             .where(
                 MarketObservationRecord.provider == provider,
                 MarketObservationRecord.observed_at <= cutoff,
+                MarketObservationRecord.timestamp <= cutoff,
                 MarketObservationRecord.session_date >= _instant(start),
                 MarketObservationRecord.session_date <= _instant(end),
             )

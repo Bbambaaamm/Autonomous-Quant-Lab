@@ -59,22 +59,17 @@ def multi_asset_metrics(result: MultiAssetResult, initial_cash: Decimal) -> Mult
     traded = sum((fill.quantity * fill.price for fill in result.fills), Decimal(0))
     turnover = traded / initial_cash
     costs = sum((fill.commission for fill in result.fills), Decimal(0))
-    # Equity body jsou konce stejně dlouhých sessions; exposure je vážená intervaly mezi body.
-    fill_index = 0
-    cash = initial_cash
+    if len(result.exposure) != len(result.equity) or any(
+        exposure_time != equity_time
+        for (exposure_time, _), (equity_time, _) in zip(result.exposure, result.equity, strict=True)
+    ):
+        raise ValueError("Výsledek neobsahuje konzistentní portfolio exposure series")
+    # Exposure vzniká přímo ze stavu portfolia, takže zahrnuje i dividendovou hotovost.
     weighted, duration = Decimal(0), Decimal(0)
     for index in range(len(result.equity) - 1):
-        when, equity = result.equity[index]
-        while fill_index < len(result.fills) and result.fills[fill_index].timestamp <= when:
-            fill = result.fills[fill_index]
-            amount = fill.quantity * fill.price
-            cash += (
-                amount - fill.commission if fill.side.value == "SELL" else -amount - fill.commission
-            )
-            fill_index += 1
+        when, _ = result.equity[index]
         seconds = Decimal(str((result.equity[index + 1][0] - when).total_seconds()))
-        exposure = max(Decimal(0), min(Decimal(1), (equity - cash) / equity))
-        weighted += exposure * seconds
+        weighted += result.exposure[index][1] * seconds
         duration += seconds
     return MultiAssetMetrics(
         total_return,
@@ -147,5 +142,7 @@ class DeploymentService:
                 raise DatasetInvalid("Deployment evidence není VALID")
             if experiment.snapshot_id != snapshot.snapshot_id:
                 raise DatasetInvalid("Experiment a deployment nepoužívají stejný snapshot")
+            if experiment.status != "COMPLETED" or experiment.decision != "PAPER_CANDIDATE":
+                raise DatasetInvalid("Deployment vyžaduje dokončený PAPER_CANDIDATE experiment")
             row.status = "APPROVED"
             row.approved_at = approved_at.astimezone(UTC)
