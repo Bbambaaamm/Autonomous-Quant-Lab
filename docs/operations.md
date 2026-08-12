@@ -51,3 +51,6 @@ Refresh se nepřidává do Phase 5 workeru, dokud není dokončen produkční ca
 ## Phase 6 paper deployment operations
 
 Operátor vytváří `PENDING_REVIEW` deployment a schválení fail-closed ověří experiment, VALID snapshot, exact strategy version, universe, USD paper account, daily timeframe, code SHA, cost model a shodné parameters. Před cyklem se current data ověří proti poslední dokončené XNYS session; STARTED, FAILED nebo missing ingestion nejsou použitelné. Ekonomické provedení patří výhradně Phase 4 a `HALTED` account zastaví objednávku.
+
+## Phase 6 provozní hranice
+Session freshness vyhodnocuje `XNYSCalendar` nad `exchange-calendars` 4.13.2 / XNYS (identita `XNYS:exchange-calendars:4.13.2`), nikoli fixed-hour TTL nebo ruční holiday tabulka. Concurrent ingestion, correction, snapshot a experiment se opírají o PostgreSQL idempotenci. Deployment/approval je vždy ruční a current feed je oddělen od immutable research replay. Paper ekonomika smí projít jen Phase 4 službami; `HALTED` účet failne uzavřeně a live broker není podporován.

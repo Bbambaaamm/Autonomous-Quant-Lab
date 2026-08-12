@@ -39,3 +39,6 @@ sloupcích experimentu.
 ## Phase 6 concurrency and replay
 
 `market_observations` uchovává append-only revisions. Transakční advisory locks odvozené z logické identity zabraňují, aby dva workeři vytvořili falešnou další revision, dva autoritativní snapshoty nebo dvě OOS evaluace. Snapshot manifest schema 3 pinů observation ID, revision, source hash a corporate-action payload; runner validuje JSON, duplicity, referenční integritu a content hash a selže uzavřeně.
+
+## Phase 6 immutable lineage
+Snapshot zapisuje identitu produkčního XNYS zdroje `XNYS:exchange-calendars:4.13.2` (`exchange-calendars` 4.13.2), observation ID, revision, source hash a kauzálně známé corporate actions. Observation revisions ani snapshot manifesty se po provider correction nemění; nová oprava vytváří novou lineage a starý replay zůstá reprodukovatelný. PIT membership určuje coverage denominator. PostgreSQL constraints a idempotency key prosazují jediný experiment a jediné autoritativní OOS i při concurrent volání.
