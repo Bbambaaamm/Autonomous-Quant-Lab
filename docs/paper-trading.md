@@ -6,3 +6,18 @@ MARKET používá povolenou raw executable cenu a nepříznivou bps slippage. LI
 
 Adverse slippage nikdy neporuší cenovou garanci limit orderu: BUY fill je nejvýše limit a SELL fill
 nejméně limit. Otevřený zbytek partial fillu se započítává do dalšího target-vs-actual výpočtu.
+
+### Phase 6 research → paper audit boundary
+
+Autoritativní workflow je `COMPLETED/RESEARCH_ONLY` experiment → explicitní
+`Phase6EligibilityService.promote()` → `PAPER_CANDIDATE` → explicitní
+`DeploymentService.create()` → `PENDING_REVIEW` → explicitní `approve()` → `APPROVED` →
+`ValidatedCurrentDataAccessor` → `Phase6PaperExecutionService` → existující Phase 4
+`TradingCycleService` / `ProductionRiskEngine` / `PersistentPaperBroker` → reconciliation.
+Promotion ani deployment nevznikají automaticky a opakovaná promotion je idempotentní.
+
+`PAPER_CANDIDATE` není automatický deployment a `APPROVED` neobchází risk engine ani stav
+`HALTED`. Research snapshot slouží pouze jako immutable lineage; current execution feed pochází z
+nejnovější dokončené XNYS session a přijímá jen nejnovější revizi z úspěšné ingestion. Runtime
+rekonstruuje pouze přesnou allowlisted strategii, verzi, parametry, PIT universe a USD/XNYS/1d
+scope. Live trading path nadále neexistuje.

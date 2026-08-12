@@ -27,3 +27,18 @@ Kalendář zachovává interní XNYS adapter, ale autoritativní schedule poskyt
 
 ## Autoritativní XNYS schedule
 Všechny produkční session, holiday, exceptional closure, early close a DST časy deleguje `XNYSCalendar` na `exchange-calendars` 4.13.2 / XNYS. Identita `XNYS:exchange-calendars:4.13.2` je součástí snapshot lineage; vlastní hand-maintained schedule se nepoužívá. Immutable observations/revisions a snapshot manifesty zachovávají provider correction replay, PIT coverage a pouze corporate actions s `known_at <= as_of`; raw executable ceny zůstávají oddělené od adjusted signal cen. Current execution feed se vždy validuje zvlášť a není research snapshot.
+
+### Phase 6 research → paper audit boundary
+
+Autoritativní workflow je `COMPLETED/RESEARCH_ONLY` experiment → explicitní
+`Phase6EligibilityService.promote()` → `PAPER_CANDIDATE` → explicitní
+`DeploymentService.create()` → `PENDING_REVIEW` → explicitní `approve()` → `APPROVED` →
+`ValidatedCurrentDataAccessor` → `Phase6PaperExecutionService` → existující Phase 4
+`TradingCycleService` / `ProductionRiskEngine` / `PersistentPaperBroker` → reconciliation.
+Promotion ani deployment nevznikají automaticky a opakovaná promotion je idempotentní.
+
+`PAPER_CANDIDATE` není automatický deployment a `APPROVED` neobchází risk engine ani stav
+`HALTED`. Research snapshot slouží pouze jako immutable lineage; current execution feed pochází z
+nejnovější dokončené XNYS session a přijímá jen nejnovější revizi z úspěšné ingestion. Runtime
+rekonstruuje pouze přesnou allowlisted strategii, verzi, parametry, PIT universe a USD/XNYS/1d
+scope. Live trading path nadále neexistuje.

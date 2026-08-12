@@ -262,6 +262,7 @@ class DatasetSnapshotService:
                 and (instrument.active_to is None or day < instrument.active_to.date())
                 and any(
                     membership.instrument_id == instrument_id
+                    and membership.known_at <= self.calendar.session_close(day)
                     and membership.valid_from.date() <= day
                     and (membership.valid_to is None or day < membership.valid_to.date())
                     for membership in memberships

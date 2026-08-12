@@ -122,3 +122,18 @@ Research deployment je ruční evidence gate, nikoli execution engine. Mutable c
 
 ## Phase 6 calendar a lineage
 `XNYSCalendar` je adapter nad `exchange-calendars` 4.13.2 / XNYS a jeho deterministická identita je `XNYS:exchange-calendars:4.13.2`; ruční schedule není produkční autorita. Immutable observation revisions, PIT snapshoty a causally-known corporate actions umožňují stabilní correction replay. PostgreSQL unikátnost chrání exactly-once experiment/OOS i při souběhu a TRAIN+VALIDATION selection nečte OOS. Deployment vzniká a schvaluje se pouze explicitně, current feed je oddělený od research replay a jediná ekonomická cesta je Phase 4 paper path; `HALTED` ji blokuje a live broker neexistuje.
+
+### Phase 6 research → paper audit boundary
+
+Autoritativní workflow je `COMPLETED/RESEARCH_ONLY` experiment → explicitní
+`Phase6EligibilityService.promote()` → `PAPER_CANDIDATE` → explicitní
+`DeploymentService.create()` → `PENDING_REVIEW` → explicitní `approve()` → `APPROVED` →
+`ValidatedCurrentDataAccessor` → `Phase6PaperExecutionService` → existující Phase 4
+`TradingCycleService` / `ProductionRiskEngine` / `PersistentPaperBroker` → reconciliation.
+Promotion ani deployment nevznikají automaticky a opakovaná promotion je idempotentní.
+
+`PAPER_CANDIDATE` není automatický deployment a `APPROVED` neobchází risk engine ani stav
+`HALTED`. Research snapshot slouží pouze jako immutable lineage; current execution feed pochází z
+nejnovější dokončené XNYS session a přijímá jen nejnovější revizi z úspěšné ingestion. Runtime
+rekonstruuje pouze přesnou allowlisted strategii, verzi, parametry, PIT universe a USD/XNYS/1d
+scope. Live trading path nadále neexistuje.

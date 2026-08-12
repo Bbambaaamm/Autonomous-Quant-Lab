@@ -141,11 +141,12 @@ class XNYSCalendar:
         return cast(datetime, closed)
 
     def session_for_timestamp(self, timestamp: datetime) -> date | None:
-        local = require_utc(timestamp).astimezone(self.timezone)
+        value = require_utc(timestamp)
+        local = value.astimezone(self.timezone)
         return (
             local.date()
             if self.is_session(local.date())
-            and local <= self.session_close(local.date()).astimezone(self.timezone)
+            and self.session_open(local.date()) <= value <= self.session_close(local.date())
             else None
         )
 

@@ -1088,9 +1088,19 @@ class TradingCycleService:
         session_date: date,
         decision_time: datetime,
     ) -> str:
-        validate_bars(bars)
         if not bars:
             raise ValueError("Chybí market data")
+        # Jeden current bar na instrument může mít shodný session close; validujeme je odděleně.
+        if len({bar.symbol for bar in bars}) != len(bars):
+            # Zpětně kompatibilní single-asset cesta přijímá chronologickou historii.
+            if len({bar.symbol for bar in bars}) != 1:
+                raise ValueError("Multi-asset cycle vyžaduje jeden current bar na instrument")
+            validate_bars(bars)
+        else:
+            if len({bar.timestamp for bar in bars}) != 1:
+                raise ValueError("Executable bary musí patřit ke stejné session")
+            for executable_bar in bars:
+                validate_bars([executable_bar])
         cycle_key = deterministic_cycle_key(account_id, strategy_id, session_date)
         input_fingerprint = cycle_input_fingerprint(bars, decision_time, target_weights)
         cycle_id = cycle_key
@@ -1205,7 +1215,7 @@ class TradingCycleService:
                     {"symbols": sorted(target_weights)},
                 )
             session.commit()
-        bar = bars[-1]
+        bars_by_symbol = {item.symbol: item for item in bars}
         with Session(self.repository.engine) as session:
             account_row = session.get(PaperAccountRecord, account_id)
             if account_row is None:
@@ -1226,7 +1236,7 @@ class TradingCycleService:
             pending[open_order.instrument_id] = (
                 pending.get(open_order.instrument_id, Decimal(0)) + signed_remaining
             )
-        prices = {bar.symbol: bar.close}
+        prices = {symbol: item.close for symbol, item in bars_by_symbol.items()}
         with Session(self.repository.engine) as session:
             daily_orders = int(
                 session.scalar(
@@ -1257,7 +1267,8 @@ class TradingCycleService:
                 or 0
             )
         for symbol, weight in sorted(target_weights.items()):
-            if symbol != bar.symbol:
+            bar = bars_by_symbol.get(symbol)
+            if bar is None:
                 raise ValueError("Cycle vyžaduje executable bar každého target instrumentu")
             desired = (account.equity * weight / bar.open).to_integral_value(rounding=ROUND_DOWN)
             delta = desired - positions.get(symbol, Decimal(0)) - pending.get(symbol, Decimal(0))
@@ -1354,6 +1365,14 @@ class TradingCycleService:
             self._assert_cycle_lease(cycle_id, lease_owner)
             order = self.execution.submit(account_id, strategy_id, intent, decision)
             self.broker.process(order.id, bar)
+            # Další multi-asset intent musí projít riskem nad stavem po předchozím fillu.
+            account = self.repository.account(account_id)
+            positions = {
+                position.instrument_id: position.quantity
+                for position in self.repository.positions(account_id)
+            }
+            daily_orders += 1
+            daily_notional += order.submitted_notional
         result = self.reconciliation.reconcile(account_id, correlation_id=correlation_id)
         with Session(self.repository.engine) as session:
             cycle = session.get(TradingCycleRecord, cycle_id)

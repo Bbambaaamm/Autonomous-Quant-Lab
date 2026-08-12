@@ -12,17 +12,19 @@ from decimal import Decimal
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from quantlab.domain import require_utc
+from quantlab.domain import AuditEventType, Bar, require_utc
 from quantlab.market_data import (
     CorporateAction,
     CorporateActionKind,
     DatasetInvalid,
     Observation,
     XNYSCalendar,
+    causal_adjusted_close,
 )
 from quantlab.market_data_service import _lock, _observation
 from quantlab.multi_asset import STRATEGY_REGISTRY, MultiAssetResult, run_multi_asset
 from quantlab.persistence import (
+    CorporateActionRecord,
     DatasetSnapshotRecord,
     ExperimentRecord,
     InstrumentRecord,
@@ -33,7 +35,7 @@ from quantlab.persistence import (
     UniverseDefinitionRecord,
     UniverseMembershipRecord,
 )
-from quantlab.phase4 import PaperAccountRecord
+from quantlab.phase4 import PaperAccountRecord, TradingCycleService
 from quantlab.universe import (
     PointInTimeUniverse,
     UniverseDefinition,
@@ -211,6 +213,30 @@ class Phase6ExperimentRunner:
                 raise DatasetInvalid("Snapshot corporate actions nejsou konzistentní") from exc
             if len(corporate_actions) != len(action_entries):
                 raise DatasetInvalid("Snapshot corporate actions nejsou konzistentní")
+            action_ids = [item.action_id for item in corporate_actions]
+            if len(set(action_ids)) != len(action_ids):
+                raise DatasetInvalid("Snapshot corporate actions obsahují duplicity")
+            persisted_actions = {
+                item.action_id: item
+                for item in session.scalars(
+                    select(CorporateActionRecord).where(
+                        CorporateActionRecord.action_id.in_(action_ids)
+                    )
+                )
+            }
+            if set(persisted_actions) != set(action_ids) or any(
+                persisted_actions[item.action_id].instrument_id != item.instrument_id
+                or persisted_actions[item.action_id].kind != item.kind.value
+                or persisted_actions[item.action_id].effective_at != item.effective_at
+                or persisted_actions[item.action_id].known_at != item.known_at
+                or persisted_actions[item.action_id].value
+                != (str(item.value) if item.value is not None else None)
+                or persisted_actions[item.action_id].new_symbol != item.new_symbol
+                for item in corporate_actions
+            ):
+                raise DatasetInvalid(
+                    "Snapshot corporate actions neodpovídají persistentní evidence"
+                )
             immutable_content = {"observations": entries, "corporate_actions": action_entries}
             manifest_hash = hashlib.sha256(self._canonical(immutable_content).encode()).hexdigest()
             if manifest_hash != snapshot.content_hash:
@@ -402,7 +428,8 @@ class ValidatedCurrentDataAccessor:
                         MarketObservationRecord.instrument_id.in_(instrument_ids),
                         MarketObservationRecord.session_date
                         == datetime.combine(candidate, datetime.min.time(), UTC),
-                        MarketDataIngestionRecord.status == "SUCCEEDED",
+                        MarketObservationRecord.observed_at <= now,
+                        MarketObservationRecord.timestamp <= now,
                     )
                     .order_by(
                         MarketObservationRecord.instrument_id,
@@ -416,12 +443,133 @@ class ValidatedCurrentDataAccessor:
             latest.setdefault(row.instrument_id, row)
         if set(latest) != set(instrument_ids):
             raise DatasetInvalid("Poslední dokončená session má missing nebo stale data")
+        ingestion_statuses: dict[str, str] = {}
+        with self._sessions() as session:
+            ingestion_statuses = {
+                item.id: item.status
+                for item in session.scalars(
+                    select(MarketDataIngestionRecord).where(
+                        MarketDataIngestionRecord.id.in_(
+                            row.ingestion_id for row in latest.values()
+                        )
+                    )
+                )
+            }
+        if any(ingestion_statuses.get(row.ingestion_id) != "SUCCEEDED" for row in latest.values()):
+            raise DatasetInvalid("Nejnovější current data nepocházejí z úspěšné ingestion")
         return tuple(_observation(latest[item]) for item in sorted(latest))
+
+    def history(
+        self, instrument_ids: Sequence[str], now: datetime, lookback: int
+    ) -> dict[str, tuple[Observation, ...]]:
+        """Vrátí pouze autoritativní revize do poslední dokončené session."""
+        current = self.latest(instrument_ids, now)
+        cutoff = current[0].session_date
+        with self._sessions() as session:
+            rows = tuple(
+                session.scalars(
+                    select(MarketObservationRecord)
+                    .join(MarketDataIngestionRecord)
+                    .where(
+                        MarketObservationRecord.instrument_id.in_(instrument_ids),
+                        MarketObservationRecord.session_date
+                        <= datetime.combine(cutoff, datetime.min.time(), UTC),
+                        MarketObservationRecord.observed_at <= now,
+                        MarketObservationRecord.timestamp <= now,
+                        MarketDataIngestionRecord.status == "SUCCEEDED",
+                    )
+                    .order_by(
+                        MarketObservationRecord.instrument_id,
+                        MarketObservationRecord.session_date.desc(),
+                        MarketObservationRecord.observed_at.desc(),
+                        MarketObservationRecord.revision.desc(),
+                    )
+                )
+            )
+        selected: dict[str, list[Observation]] = {item: [] for item in instrument_ids}
+        seen: set[tuple[str, object]] = set()
+        for row in rows:
+            key = (row.instrument_id, row.session_date)
+            if key in seen or len(selected[row.instrument_id]) >= lookback:
+                continue
+            seen.add(key)
+            selected[row.instrument_id].append(_observation(row))
+        return {key: tuple(reversed(value)) for key, value in selected.items()}
+
+
+class Phase6EligibilityService:
+    """Explicitní strukturální eligibility gate; nikdy se nespouští z research runneru."""
+
+    def __init__(self, session_factory: Callable[[], Session]) -> None:
+        self._sessions = session_factory
+
+    def promote(self, experiment_id: str) -> ExperimentRecord:
+        with self._sessions() as session, session.begin():
+            row = session.get(ExperimentRecord, experiment_id, with_for_update=True)
+            if row is None:
+                raise DatasetInvalid("Experiment neexistuje")
+            DeploymentService.validate_experiment(session, row)
+            if row.decision not in {"RESEARCH_ONLY", "PAPER_CANDIDATE"}:
+                raise DatasetInvalid("Experiment je v nekonzistentním decision state")
+            row.decision = "PAPER_CANDIDATE"
+            session.flush()
+            session.expunge(row)
+            return row
 
 
 class DeploymentService:
     def __init__(self, session_factory: Callable[[], Session]) -> None:
         self._sessions = session_factory
+
+    def create(
+        self,
+        experiment_id: str,
+        paper_account_id: str,
+        *,
+        currency: str = "USD",
+        timeframe: str = "1d",
+        created_at: datetime | None = None,
+    ) -> StrategyDeploymentRecord:
+        created_at = require_utc(created_at or datetime.now(UTC))
+        with self._sessions() as session, session.begin():
+            experiment = session.get(ExperimentRecord, experiment_id)
+            if experiment is None or experiment.decision != "PAPER_CANDIDATE":
+                raise DatasetInvalid("Deployment lze vytvořit pouze z PAPER_CANDIDATE")
+            snapshot, _, _ = self.validate_experiment(session, experiment)
+            parameters = self._evidence(experiment.selected_parameters_json, "parameters")
+            identity = hashlib.sha256(
+                self._canonical(
+                    {
+                        "experiment_id": experiment.id,
+                        "account_id": paper_account_id,
+                        "currency": currency,
+                        "timeframe": timeframe,
+                    }
+                ).encode()
+            ).hexdigest()
+            existing = session.get(StrategyDeploymentRecord, identity)
+            if existing is not None:
+                session.expunge(existing)
+                return existing
+            row = StrategyDeploymentRecord(
+                deployment_id=identity,
+                created_at=created_at,
+                approved_at=None,
+                status="PENDING_REVIEW",
+                strategy_name=experiment.strategy_name,
+                strategy_version=experiment.strategy_version,
+                parameters_json=self._canonical(parameters),
+                universe_id=snapshot.universe_id,
+                paper_account_id=paper_account_id,
+                experiment_id=experiment.id,
+                snapshot_id=snapshot.snapshot_id,
+                currency=currency,
+                timeframe=timeframe,
+            )
+            session.add(row)
+            session.flush()
+            session.expunge(row)
+            return row
 
     def approve(self, deployment_id: str, approved_at: datetime) -> None:
         approved_at = require_utc(approved_at)
@@ -429,15 +577,12 @@ class DeploymentService:
             row = session.get(StrategyDeploymentRecord, deployment_id, with_for_update=True)
             if row is None or row.status != "PENDING_REVIEW":
                 raise ValueError("Deployment neexistuje nebo není čekající na ruční schválení")
-            snapshot = session.get(DatasetSnapshotRecord, row.snapshot_id)
             experiment = session.get(ExperimentRecord, row.experiment_id)
-            if snapshot is None or snapshot.status != "VALID" or experiment is None:
-                raise DatasetInvalid("Deployment evidence není VALID")
-            if experiment.snapshot_id != snapshot.snapshot_id:
-                raise DatasetInvalid("Experiment a deployment nepoužívají stejný snapshot")
-            if experiment.status != "COMPLETED" or experiment.decision != "PAPER_CANDIDATE":
+            if experiment is None:
+                raise DatasetInvalid("Deployment experiment neexistuje")
+            snapshot, strategy, parameters = self.validate_experiment(session, experiment)
+            if experiment.decision != "PAPER_CANDIDATE":
                 raise DatasetInvalid("Deployment vyžaduje dokončený PAPER_CANDIDATE experiment")
-            strategy = session.get(StrategyRecord, experiment.strategy_identity)
             account = session.get(PaperAccountRecord, row.paper_account_id)
             if (
                 experiment.snapshot_id != row.snapshot_id
@@ -453,15 +598,66 @@ class DeploymentService:
                 raise DatasetInvalid("Deployment vyžaduje existující kompatibilní paper účet")
             if row.timeframe != "1d" or snapshot.timeframe != row.timeframe:
                 raise DatasetInvalid("Deployment timeframe není podporován")
-            if experiment.code_sha is None:
-                raise DatasetInvalid("Experiment nemá platnou code lineage")
-            self._valid_sha(experiment.code_sha)
-            self._evidence(experiment.cost_model_json, "cost model")
-            parameters = self._evidence(experiment.selected_parameters_json, "parameters")
             if self._evidence(row.parameters_json, "deployment parameters") != parameters:
                 raise DatasetInvalid("Deployment parameters neodpovídají experiment evidence")
             row.status = "APPROVED"
             row.approved_at = approved_at
+
+    @classmethod
+    def validate_experiment(
+        cls, session: Session, experiment: ExperimentRecord
+    ) -> tuple[DatasetSnapshotRecord, StrategyRecord, dict[str, object]]:
+        if experiment.status != "COMPLETED" or experiment.failure_kind is not None:
+            raise DatasetInvalid("Experiment není úspěšně COMPLETED")
+        if not experiment.snapshot_id:
+            raise DatasetInvalid("Experiment nemá snapshot lineage")
+        snapshot = session.get(DatasetSnapshotRecord, experiment.snapshot_id)
+        if snapshot is None or snapshot.status != "VALID":
+            raise DatasetInvalid("Experiment snapshot neexistuje nebo není VALID")
+        if (
+            not experiment.strategy_identity
+            or not experiment.strategy_name
+            or not experiment.strategy_version
+        ):
+            raise DatasetInvalid("Experiment nemá přesnou strategy identity")
+        strategy = session.get(StrategyRecord, experiment.strategy_identity)
+        strategy_type = STRATEGY_REGISTRY.get(experiment.strategy_name)
+        if (
+            strategy is None
+            or strategy_type is None
+            or strategy.strategy_name != experiment.strategy_name
+            or strategy.strategy_version != experiment.strategy_version
+        ):
+            raise DatasetInvalid("Experiment strategy identity neodpovídá registru")
+        if experiment.code_sha is None:
+            raise DatasetInvalid("Experiment nemá code SHA")
+        cls._valid_sha(experiment.code_sha)
+        cls._evidence(experiment.cost_model_json, "cost model")
+        parameters = cls._evidence(experiment.selected_parameters_json, "parameters")
+        try:
+            implementation = strategy_type(**parameters)
+        except (TypeError, ValueError) as exc:
+            raise DatasetInvalid("Experiment parameters nejsou pro strategii platné") from exc
+        if (
+            implementation.name != experiment.strategy_name
+            or implementation.version != experiment.strategy_version
+        ):
+            raise DatasetInvalid("Implementace strategy version neodpovídá experimentu")
+        try:
+            result: object = json.loads(experiment.result_json)
+        except json.JSONDecodeError as exc:
+            raise DatasetInvalid("Experiment nemá validní OOS result") from exc
+        if (
+            not isinstance(result, dict)
+            or result.get("stage") != "OOS"
+            or not isinstance(result.get("metrics"), dict)
+        ):
+            raise DatasetInvalid("Experiment nemá OOS result")
+        return snapshot, strategy, parameters
+
+    @staticmethod
+    def _canonical(value: object) -> str:
+        return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
 
     @staticmethod
     def _valid_sha(value: str) -> None:
@@ -469,7 +665,7 @@ class DeploymentService:
             raise DatasetInvalid("Experiment code SHA není platná lineage")
 
     @staticmethod
-    def _evidence(value: str | None, name: str) -> object:
+    def _evidence(value: str | None, name: str) -> dict[str, object]:
         if value is None:
             raise DatasetInvalid(f"Experiment nemá {name} evidence")
         try:
@@ -479,3 +675,172 @@ class DeploymentService:
         if not isinstance(parsed, dict):
             raise DatasetInvalid(f"Experiment má neplatnou {name} evidence")
         return parsed
+
+
+class Phase6PaperExecutionService:
+    """Autoritativní Phase 6 orchestrace nad jedinou ekonomickou cestou z Phase 4."""
+
+    def __init__(
+        self,
+        session_factory: Callable[[], Session],
+        current_data: ValidatedCurrentDataAccessor,
+        trading_cycle: TradingCycleService,
+    ) -> None:
+        self._sessions = session_factory
+        self.current_data = current_data
+        self.trading_cycle = trading_cycle
+
+    def run(self, deployment_id: str, now: datetime) -> str:
+        decision_time = require_utc(now)
+        with self._sessions() as session:
+            deployment = session.get(StrategyDeploymentRecord, deployment_id)
+            if deployment is None or deployment.status != "APPROVED":
+                raise DatasetInvalid("Paper execution vyžaduje APPROVED deployment")
+            experiment = session.get(ExperimentRecord, deployment.experiment_id)
+            if experiment is None:
+                raise DatasetInvalid("Deployment experiment neexistuje")
+            snapshot, strategy_row, selected = DeploymentService.validate_experiment(
+                session, experiment
+            )
+            account = session.get(PaperAccountRecord, deployment.paper_account_id)
+            if (
+                experiment.decision != "PAPER_CANDIDATE"
+                or deployment.snapshot_id != snapshot.snapshot_id
+                or deployment.universe_id != snapshot.universe_id
+                or deployment.strategy_name != strategy_row.strategy_name
+                or deployment.strategy_version != strategy_row.strategy_version
+                or DeploymentService._evidence(deployment.parameters_json, "deployment parameters")
+                != selected
+                or account is None
+                or deployment.currency != "USD"
+                or account.base_currency != "USD"
+                or deployment.timeframe != "1d"
+                or snapshot.timeframe != "1d"
+            ):
+                raise DatasetInvalid("Approved deployment evidence se od schválení změnila")
+            definition = session.get(UniverseDefinitionRecord, deployment.universe_id)
+            if definition is None or definition.kind != UniverseKind.POINT_IN_TIME_MEMBERSHIP:
+                raise DatasetInvalid("Paper execution vyžaduje podporovaný PIT universe")
+            memberships = tuple(
+                session.scalars(
+                    select(UniverseMembershipRecord).where(
+                        UniverseMembershipRecord.universe_id == deployment.universe_id,
+                        UniverseMembershipRecord.known_at <= decision_time,
+                        UniverseMembershipRecord.valid_from <= decision_time,
+                    )
+                )
+            )
+            eligible = tuple(
+                sorted(
+                    {
+                        item.instrument_id
+                        for item in memberships
+                        if item.valid_to is None or decision_time < item.valid_to
+                    }
+                )
+            )
+            if not eligible:
+                raise DatasetInvalid("PIT universe nemá v decision time eligible instrument")
+            instruments = {
+                item.instrument_id: item
+                for item in session.scalars(
+                    select(InstrumentRecord).where(InstrumentRecord.instrument_id.in_(eligible))
+                )
+            }
+            if set(instruments) != set(eligible) or any(
+                item.exchange != "XNYS"
+                or item.calendar != "XNYS"
+                or item.currency != "USD"
+                or item.asset_type != "EQUITY"
+                for item in instruments.values()
+            ):
+                raise DatasetInvalid("Current universe není podporovaný USD/XNYS equity scope")
+            action_rows = tuple(
+                session.scalars(
+                    select(CorporateActionRecord).where(
+                        CorporateActionRecord.instrument_id.in_(eligible),
+                        CorporateActionRecord.known_at <= decision_time,
+                    )
+                )
+            )
+        strategy_type = STRATEGY_REGISTRY.get(deployment.strategy_name)
+        if strategy_type is None:
+            raise DatasetInvalid("Deployment strategy není v allowlisted registru")
+        try:
+            strategy = strategy_type(**selected)
+        except (TypeError, ValueError) as exc:
+            raise DatasetInvalid("Deployment parameters nejsou pro strategii platné") from exc
+        if (
+            strategy.version != deployment.strategy_version
+            or strategy.name != deployment.strategy_name
+        ):
+            raise DatasetInvalid("Runtime strategy identity neodpovídá deploymentu")
+        history = self.current_data.history(eligible, decision_time, strategy.required_lookback)
+        if any(not values for values in history.values()):
+            raise DatasetInvalid("Current strategy history je neúplná")
+        actions = tuple(
+            CorporateAction(
+                item.action_id,
+                item.instrument_id,
+                CorporateActionKind(item.kind),
+                item.effective_at,
+                item.known_at,
+                Decimal(item.value) if item.value is not None else None,
+                item.new_symbol,
+            )
+            for item in action_rows
+        )
+        signal_prices = {
+            instrument: tuple(
+                causal_adjusted_close(values, actions, decision_time)[item.session_date]
+                for item in values
+            )
+            for instrument, values in history.items()
+        }
+        from quantlab.multi_asset import StrategyContext
+
+        target = strategy.generate_targets(
+            StrategyContext(decision_time, history, eligible, signal_prices)
+        )
+        if any(instrument not in eligible for instrument, _ in target.weights):
+            raise DatasetInvalid("Strategy vytvořila target mimo deployment PIT universe")
+        latest = self.current_data.latest(eligible, decision_time)
+        bars = [
+            Bar(
+                item.instrument_id,
+                item.timestamp,
+                item.open,
+                item.high,
+                item.low,
+                item.close,
+                item.volume,
+                signal_prices[item.instrument_id][-1],
+                item.provider,
+                item.timeframe,
+            )
+            for item in latest
+        ]
+        cycle_id = self.trading_cycle.run(
+            deployment.paper_account_id,
+            f"phase6:{deployment.deployment_id}",
+            bars,
+            dict(target.weights),
+            latest[0].session_date,
+            decision_time,
+        )
+        with Session(self.trading_cycle.repository.engine) as session, session.begin():
+            self.trading_cycle.repository.audit(
+                session,
+                AuditEventType.DATA_VALIDATED,
+                "phase6_deployment",
+                deployment.deployment_id,
+                cycle_id,
+                cycle_id,
+                {
+                    "deployment_id": deployment.deployment_id,
+                    "experiment_id": deployment.experiment_id,
+                    "snapshot_id": deployment.snapshot_id,
+                    "current_observation_ids": [item.observation_id for item in latest],
+                },
+            )
+        return cycle_id

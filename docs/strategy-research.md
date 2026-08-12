@@ -45,3 +45,18 @@ Chronologické TRAIN a VALIDATION části rozhodnou o konfiguraci; OOS se spust�
 
 ## Reprodukovatelnost Phase 6
 Snapshot lineage pinuje `exchange-calendars` 4.13.2 / XNYS jako `XNYS:exchange-calendars:4.13.2`, immutable revisions, PIT universe a kauzálně známé corporate actions. Provider correction nezmění starý replay. PostgreSQL idempotence zajišťuje exactly-once experiment i OOS při souběhu; selection používá jen TRAIN+VALIDATION a OOS ji neovlivňuje. PAPER_CANDIDATE nic automaticky nenasazuje: deployment i approval jsou explicitní, current feed není research snapshot a execution vede pouze stávající Phase 4 paper path.
+
+### Phase 6 research → paper audit boundary
+
+Autoritativní workflow je `COMPLETED/RESEARCH_ONLY` experiment → explicitní
+`Phase6EligibilityService.promote()` → `PAPER_CANDIDATE` → explicitní
+`DeploymentService.create()` → `PENDING_REVIEW` → explicitní `approve()` → `APPROVED` →
+`ValidatedCurrentDataAccessor` → `Phase6PaperExecutionService` → existující Phase 4
+`TradingCycleService` / `ProductionRiskEngine` / `PersistentPaperBroker` → reconciliation.
+Promotion ani deployment nevznikají automaticky a opakovaná promotion je idempotentní.
+
+`PAPER_CANDIDATE` není automatický deployment a `APPROVED` neobchází risk engine ani stav
+`HALTED`. Research snapshot slouží pouze jako immutable lineage; current execution feed pochází z
+nejnovější dokončené XNYS session a přijímá jen nejnovější revizi z úspěšné ingestion. Runtime
+rekonstruuje pouze přesnou allowlisted strategii, verzi, parametry, PIT universe a USD/XNYS/1d
+scope. Live trading path nadále neexistuje.
