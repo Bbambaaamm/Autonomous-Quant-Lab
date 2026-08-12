@@ -8,7 +8,13 @@ import pytest
 from sqlalchemy import inspect
 from sqlalchemy.orm import Session
 
-from quantlab.persistence import Base, ExperimentRecord, RunRepository, create_test_schema
+from quantlab.persistence import (
+    Base,
+    ExperimentRecord,
+    RunRepository,
+    StrategyDeploymentRecord,
+    create_test_schema,
+)
 
 
 def dataset(dataset_id: str = "a" * 64) -> dict[str, object]:
@@ -33,6 +39,12 @@ def test_empty_database_bootstrap_contains_expected_schema(tmp_path: object) -> 
     assert inspect(repository.engine).get_table_names() == []
     create_test_schema(repository.engine)
     assert set(inspect(repository.engine).get_table_names()) == set(Base.metadata.tables)
+
+
+def test_research_metadata_does_not_require_phase4_models() -> None:
+    """Research test bootstrap nesmí záviset na importu Phase 4 tabulek."""
+    assert not StrategyDeploymentRecord.__table__.c.paper_account_id.foreign_keys
+    assert StrategyDeploymentRecord.__table__ in Base.metadata.sorted_tables
 
 
 def test_dataset_registry_is_idempotent_and_fails_closed_on_conflict() -> None:

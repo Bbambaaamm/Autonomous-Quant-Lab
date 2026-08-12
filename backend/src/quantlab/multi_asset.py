@@ -239,6 +239,7 @@ class MultiAssetResult:
     final_cash: Decimal
     final_positions: tuple[tuple[str, Decimal], ...]
     dividend_income: Decimal
+    exposure: tuple[tuple[datetime, Decimal], ...] = ()
 
 
 def _rebalance(day: datetime, previous: datetime | None, frequency: RebalanceFrequency) -> bool:
@@ -272,6 +273,7 @@ def run_multi_asset(
     fills: list[MultiAssetFill] = []
     decisions: list[tuple[datetime, TargetPortfolio]] = []
     equity: list[tuple[datetime, Decimal]] = []
+    exposure: list[tuple[datetime, Decimal]] = []
     last_rebalance: datetime | None = None
     last_prices: dict[str, tuple[Decimal, int]] = {}
     excluded: dict[str, str] = {}
@@ -384,6 +386,7 @@ def run_multi_asset(
                 raise RuntimeError("Existing position nelze ocenit kvůli stale datům")
             value += quantity * price_info[0]
         equity.append((when, value))
+        exposure.append((when, (value - portfolio.cash) / value if value else Decimal("0")))
     requested = len({m for when in times for m in universe.eligible(when)})
     used = len({fill.instrument_id for fill in fills})
     return MultiAssetResult(
@@ -396,4 +399,5 @@ def run_multi_asset(
         portfolio.cash,
         tuple(sorted(portfolio.positions.items())),
         portfolio.dividend_income,
+        tuple(exposure),
     )

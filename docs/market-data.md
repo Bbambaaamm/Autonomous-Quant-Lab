@@ -13,3 +13,10 @@ Raw OHLC je jediná execution série. Signal adjustment je explicitní a použí
 
 ## Snapshoty
 Snapshot ukládá `as_of`, provider, calendar identity, PIT universe, rozsah, coverage, seřazený manifest observation revisions a SHA-256. Hash nezávisí na pořadí DB řádků. Pozdější correction vytvoří jiný snapshot, nikdy nezmění manifest starého. Snapshot pod minimální coverage (default 80 %) má stav `INVALID` a nesmí spustit experiment.
+
+## Persistentní runtime a známé omezení
+Produkční `PersistentMarketDataService` zapisuje ingestion, immutable revisions a corporate actions v jedné DB transakci. Deterministický scope identifikátor dělá restart stejného požadavku idempotentní; PostgreSQL advisory transaction lock serializuje stejný scope. Selhání se audituje jako `FAILED` bez observation řádků. In-memory adapter je pouze testovací/reference adapter.
+
+`DatasetSnapshotService` vybírá přes SQL window autoritativní revision známou k `as_of`. Coverage denominator je průnik session, active intervalu instrumentu a membership intervalu známého k `as_of`, nikoli kartézský součin. Prázdný nebo nedostatečně pokrytý snapshot je `INVALID`.
+
+Kalendář je nadále interní algoritmický XNYS adapter. Není úplnou historickou databází special closures, takže produkční calendar requirement Phase 6 zůstává otevřený; dependency nebyla přidána bez úspěšného locked sync.
