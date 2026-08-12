@@ -146,14 +146,33 @@ def _observed_holidays(year: int) -> set[date]:
     return holidays
 
 
+_EXCEPTIONAL_CLOSURES = {
+    date(2001, 9, 11),
+    date(2001, 9, 12),
+    date(2001, 9, 13),
+    date(2001, 9, 14),
+    date(2004, 6, 11),
+    date(2007, 1, 2),
+    date(2012, 10, 29),
+    date(2012, 10, 30),
+    date(2018, 12, 5),
+}
+
+
 class XNYSCalendar:
-    identity = "XNYS-algorithmic-2026.1"
+    audited_start = date(1970, 1, 1)
+    audited_end = date(2100, 12, 31)
+    identity = "XNYS-audited-closures-2026.2"
     timezone = ZoneInfo("America/New_York")
 
     def is_session(self, day: date) -> bool:
-        if not 1970 <= day.year <= 2100:
+        if not self.audited_start <= day <= self.audited_end:
             raise ValueError("Datum je mimo auditované období kalendáře")
-        return day.weekday() < 5 and day not in _observed_holidays(day.year)
+        return (
+            day.weekday() < 5
+            and day not in _observed_holidays(day.year)
+            and day not in _EXCEPTIONAL_CLOSURES
+        )
 
     def _early_close(self, day: date) -> bool:
         thanksgiving = date(day.year, 11, 1) + timedelta(
@@ -196,23 +215,38 @@ class XNYSCalendar:
         )
 
     def next_session(self, day: date) -> date:
+        if day >= self.audited_end:
+            raise ValueError("Následující session je mimo auditované období kalendáře")
         candidate = day + timedelta(days=1)
         while not self.is_session(candidate):
             candidate += timedelta(days=1)
         return candidate
 
     def previous_session(self, day: date) -> date:
+        if day <= self.audited_start:
+            raise ValueError("Předchozí session je mimo auditované období kalendáře")
         candidate = day - timedelta(days=1)
         while not self.is_session(candidate):
             candidate -= timedelta(days=1)
         return candidate
 
     def sessions_between(self, start: date, end: date) -> tuple[date, ...]:
+        if start > end:
+            raise ValueError("Začátek rozsahu kalendáře musí být nejpozději na konci")
+        self.is_session(start)
+        self.is_session(end)
         return tuple(
             start + timedelta(days=i)
             for i in range((end - start).days + 1)
             if self.is_session(start + timedelta(days=i))
         )
+
+    def latest_completed_session(self, now: datetime) -> date:
+        value = require_utc(now)
+        local_day = value.astimezone(self.timezone).date()
+        if self.is_session(local_day) and value >= self.session_close(local_day):
+            return local_day
+        return self.previous_session(local_day)
 
 
 @dataclass(frozen=True)

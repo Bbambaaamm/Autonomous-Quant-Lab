@@ -113,3 +113,9 @@ SQLite je pouze rychlý test adapter a neposkytuje produkční concurrency důka
 Phase 6 je implementována jako provider → validace/immutable revisions → XNYS calendar/corporate actions → PIT universe → immutable snapshot → multi-asset target portfolio. Detailní invariants jsou v `docs/market-data.md` a `docs/strategy-research.md`. Žádná část nevytváří live execution path; automatický data refresh zatím není allowlistovaný job a refresh se provádí odděleně od trading cycle.
 
 Persistentní Phase 6 služby nyní oddělují immutable research snapshot od mutable validovaného current-data pohledu pro paper runtime. Experiment/deployment schema pinují snapshot lineage, ale kompletní multi-asset evaluation runner a paper integration E2E jsou stále otevřené; architektura proto netvrdí dokončený audit gate.
+
+## Phase 6 runtime boundaries
+
+XNYS session normalizaci poskytuje `XNYSCalendar`; jeho verzovaná identita je součástí snapshot lineage. Auditovaný schedule pokrývá holidays, DST, early closes a podporovaná historická exceptional closures. PostgreSQL advisory transaction locks serializují shodnou ingestion, snapshot a experiment identitu. Immutable manifest pinů konkrétní revisions a actions odděluje replay od pozdějších korekcí. OOS data nevstupují do selection.
+
+Research deployment je ruční evidence gate, nikoli execution engine. Mutable current-data validace vyžaduje poslední dokončenou XNYS session. Schválený deployment smí vstoupit pouze do autoritativní Phase 4 paper cesty; `HALTED` ji zablokuje.

@@ -33,6 +33,7 @@ from quantlab.persistence import (
     UniverseDefinitionRecord,
     UniverseMembershipRecord,
 )
+from quantlab.phase4 import PaperAccountRecord
 from quantlab.universe import (
     PointInTimeUniverse,
     UniverseDefinition,
@@ -150,6 +151,8 @@ class Phase6ExperimentRunner:
                 raise DatasetInvalid("Snapshot manifest není validní JSON") from exc
             if not isinstance(manifest, dict):
                 raise DatasetInvalid("Snapshot manifest musí být objekt")
+            if manifest.get("schema_version") != "3":
+                raise DatasetInvalid("Snapshot manifest má nepodporovanou schema version")
             entries = manifest.get("observations")
             if not isinstance(entries, list) or not entries:
                 raise DatasetInvalid("Snapshot manifest neobsahuje observations")
@@ -208,6 +211,10 @@ class Phase6ExperimentRunner:
                 raise DatasetInvalid("Snapshot corporate actions nejsou konzistentní") from exc
             if len(corporate_actions) != len(action_entries):
                 raise DatasetInvalid("Snapshot corporate actions nejsou konzistentní")
+            immutable_content = {"observations": entries, "corporate_actions": action_entries}
+            manifest_hash = hashlib.sha256(self._canonical(immutable_content).encode()).hexdigest()
+            if manifest_hash != snapshot.content_hash:
+                raise DatasetInvalid("Snapshot manifest neodpovídá uloženému content hash")
             times = sorted({item.timestamp for item in observations})
             train_end = int(len(times) * float(request.train_fraction))
             validation_end = train_end + int(len(times) * float(request.validation_fraction))
@@ -380,9 +387,9 @@ class ValidatedCurrentDataAccessor:
 
     def latest(self, instrument_ids: Sequence[str], now: datetime) -> tuple[Observation, ...]:
         now = require_utc(now)
-        candidate = now.date()
-        if not self.calendar.is_session(candidate) or now < self.calendar.session_close(candidate):
-            candidate = self.calendar.previous_session(candidate)
+        if not instrument_ids or len(set(instrument_ids)) != len(instrument_ids):
+            raise DatasetInvalid("Požadavek na current data musí obsahovat unikátní instrumenty")
+        candidate = self.calendar.latest_completed_session(now)
         with self._sessions() as session:
             rows = tuple(
                 session.scalars(
@@ -417,6 +424,7 @@ class DeploymentService:
         self._sessions = session_factory
 
     def approve(self, deployment_id: str, approved_at: datetime) -> None:
+        approved_at = require_utc(approved_at)
         with self._sessions() as session, session.begin():
             row = session.get(StrategyDeploymentRecord, deployment_id, with_for_update=True)
             if row is None or row.status != "PENDING_REVIEW":
@@ -429,5 +437,45 @@ class DeploymentService:
                 raise DatasetInvalid("Experiment a deployment nepoužívají stejný snapshot")
             if experiment.status != "COMPLETED" or experiment.decision != "PAPER_CANDIDATE":
                 raise DatasetInvalid("Deployment vyžaduje dokončený PAPER_CANDIDATE experiment")
+            strategy = session.get(StrategyRecord, experiment.strategy_identity)
+            account = session.get(PaperAccountRecord, row.paper_account_id)
+            if (
+                experiment.snapshot_id != row.snapshot_id
+                or row.universe_id != snapshot.universe_id
+                or row.strategy_name != experiment.strategy_name
+                or row.strategy_version != experiment.strategy_version
+                or strategy is None
+                or strategy.strategy_name != row.strategy_name
+                or strategy.strategy_version != row.strategy_version
+            ):
+                raise DatasetInvalid("Deployment strategy, universe nebo lineage nesouhlasí")
+            if account is None or row.currency != "USD" or account.base_currency != row.currency:
+                raise DatasetInvalid("Deployment vyžaduje existující kompatibilní paper účet")
+            if row.timeframe != "1d" or snapshot.timeframe != row.timeframe:
+                raise DatasetInvalid("Deployment timeframe není podporován")
+            if experiment.code_sha is None:
+                raise DatasetInvalid("Experiment nemá platnou code lineage")
+            self._valid_sha(experiment.code_sha)
+            self._evidence(experiment.cost_model_json, "cost model")
+            parameters = self._evidence(experiment.selected_parameters_json, "parameters")
+            if self._evidence(row.parameters_json, "deployment parameters") != parameters:
+                raise DatasetInvalid("Deployment parameters neodpovídají experiment evidence")
             row.status = "APPROVED"
-            row.approved_at = approved_at.astimezone(UTC)
+            row.approved_at = approved_at
+
+    @staticmethod
+    def _valid_sha(value: str) -> None:
+        if len(value) != 40 or any(character not in "0123456789abcdef" for character in value):
+            raise DatasetInvalid("Experiment code SHA není platná lineage")
+
+    @staticmethod
+    def _evidence(value: str | None, name: str) -> object:
+        if value is None:
+            raise DatasetInvalid(f"Experiment nemá {name} evidence")
+        try:
+            parsed: object = json.loads(value)
+        except json.JSONDecodeError as exc:
+            raise DatasetInvalid(f"Experiment má neplatnou {name} evidence") from exc
+        if not isinstance(parsed, dict):
+            raise DatasetInvalid(f"Experiment má neplatnou {name} evidence")
+        return parsed

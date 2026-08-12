@@ -35,3 +35,7 @@ Migrace `20260811_06` je forward změna nad neměnnou `20260811_05`: přidává 
 `cost_model_json` a `selected_parameters_json`. Provider, calendar, universe a content hash se
 neduplikují: dohledají se přes snapshot FK. OOS metriky zůstávají v typovaných metrických
 sloupcích experimentu.
+
+## Phase 6 concurrency and replay
+
+`market_observations` uchovává append-only revisions. Transakční advisory locks odvozené z logické identity zabraňují, aby dva workeři vytvořili falešnou další revision, dva autoritativní snapshoty nebo dvě OOS evaluace. Snapshot manifest schema 3 pinů observation ID, revision, source hash a corporate-action payload; runner validuje JSON, duplicity, referenční integritu a content hash a selže uzavřeně.

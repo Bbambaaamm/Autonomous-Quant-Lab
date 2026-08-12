@@ -20,3 +20,7 @@ Produkční `PersistentMarketDataService` zapisuje ingestion, immutable revision
 `DatasetSnapshotService` vybírá přes SQL window autoritativní revision známou k `as_of`. Coverage denominator je průnik session, active intervalu instrumentu a membership intervalu známého k `as_of`, nikoli kartézský součin. Prázdný nebo nedostatečně pokrytý snapshot je `INVALID`.
 
 Kalendář je nadále interní algoritmický XNYS adapter. Není úplnou historickou databází special closures, takže produkční calendar requirement Phase 6 zůstává otevřený; dependency nebyla přidána bez úspěšného locked sync.
+
+## XNYS calendar and immutable evidence
+
+`XNYSCalendar` zachovává interní API a verzovaný auditovaný schedule zahrnuje DST, standardní i podporovaná exceptional closures a special closes. Datum denního baru se normalizuje na skutečný XNYS close v UTC; close-derived signál se provede nejdříve na open následující session. Current-data accessor určuje poslední dokončenou session z kalendáře (nikoli pevnou hodinovou tolerancí) a přijímá jen `SUCCEEDED` ingestion. Research snapshot je immutable revision manifest a nikdy neslouží jako mutable current-data pohled.
