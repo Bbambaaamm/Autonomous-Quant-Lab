@@ -22,8 +22,8 @@ jobs:
           version: ${{ env.UV_VERSION }}
           working-directory: backend
           cache-dependency-glob: |
-            backend/pyproject.toml
-            backend/uv.lock
+            pyproject.toml
+            uv.lock
       - run: uv --version
       - run: uv lock --check
       - run: uv sync --locked --all-groups
@@ -45,10 +45,15 @@ jobs:
           version: ${{ env.UV_VERSION }}
           working-directory: backend
           cache-dependency-glob: |
-            backend/pyproject.toml
-            backend/uv.lock
+            pyproject.toml
+            uv.lock
       - run: uv sync --locked --all-groups
-      - run: uv run pytest -q tests/test_research.py tests/test_research_engine.py tests/test_phase6.py
+      - run: >-
+          uv run pytest -q
+          tests/test_research.py
+          tests/test_research_engine.py
+          tests/test_phase6.py
+          tests/test_phase6_runtime.py
 
   api:
     runs-on: ubuntu-latest
@@ -64,8 +69,8 @@ jobs:
           version: ${{ env.UV_VERSION }}
           working-directory: backend
           cache-dependency-glob: |
-            backend/pyproject.toml
-            backend/uv.lock
+            pyproject.toml
+            uv.lock
       - run: uv sync --locked --all-groups
       - run: uv run pytest -q tests/test_vertical_slice.py
 
@@ -94,8 +99,8 @@ jobs:
           version: ${{ env.UV_VERSION }}
           working-directory: backend
           cache-dependency-glob: |
-            backend/pyproject.toml
-            backend/uv.lock
+            pyproject.toml
+            uv.lock
       - run: uv sync --locked --all-groups
       - run: uv run alembic -c ../alembic.ini upgrade head
       - name: PostgreSQL Phase 3–6, concurrency a recovery
@@ -105,4 +110,6 @@ jobs:
           tests/test_phase4.py
           tests/test_phase5.py
           tests/test_phase5_postgres.py
+          tests/test_phase6.py
+          tests/test_phase6_runtime.py
           tests/test_phase6_postgres.py
