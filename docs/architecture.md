@@ -116,6 +116,6 @@ Persistentní Phase 6 služby nyní oddělují immutable research snapshot od mu
 
 ## Phase 6 runtime boundaries
 
-XNYS session normalizaci poskytuje adaptér `XNYSCalendar` nad maintained `exchange-calendars`; jeho verzovaná identita je součástí snapshot lineage. Knihovna pokrývá holidays, DST, early closes a historická exceptional closures. PostgreSQL advisory transaction locks serializují shodnou ingestion, snapshot a experiment identitu. Immutable manifest pinů konkrétní revisions a actions odděluje replay od pozdějších korekcí. OOS data nevstupují do selection.
+XNYS session normalizaci poskytuje `XNYSCalendar`; jeho verzovaná identita je součástí snapshot lineage. Auditovaný schedule pokrývá holidays, DST, early closes a podporovaná historická exceptional closures. PostgreSQL advisory transaction locks serializují shodnou ingestion, snapshot a experiment identitu. Immutable manifest pinů konkrétní revisions a actions odděluje replay od pozdějších korekcí. OOS data nevstupují do selection.
 
 Research deployment je ruční evidence gate, nikoli execution engine. Mutable current-data validace vyžaduje poslední dokončenou XNYS session. Schválený deployment smí vstoupit pouze do autoritativní Phase 4 paper cesty; `HALTED` ji zablokuje.

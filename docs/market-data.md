@@ -23,4 +23,4 @@ Kalendář je nadále interní algoritmický XNYS adapter. Není úplnou histori
 
 ## XNYS calendar and immutable evidence
 
-`XNYSCalendar` zachovává interní API, ale schedule, DST, standardní i exceptional closures a special closes čerpá z maintained `exchange-calendars`. Datum denního baru se normalizuje na skutečný XNYS close v UTC; close-derived signál se provede nejdříve na open následující session. Current-data accessor určuje poslední dokončenou session z kalendáře (nikoli pevnou hodinovou tolerancí) a přijímá jen `SUCCEEDED` ingestion. Research snapshot je immutable revision manifest a nikdy neslouží jako mutable current-data pohled.
+`XNYSCalendar` zachovává interní API a verzovaný auditovaný schedule zahrnuje DST, standardní i podporovaná exceptional closures a special closes. Datum denního baru se normalizuje na skutečný XNYS close v UTC; close-derived signál se provede nejdříve na open následující session. Current-data accessor určuje poslední dokončenou session z kalendáře (nikoli pevnou hodinovou tolerancí) a přijímá jen `SUCCEEDED` ingestion. Research snapshot je immutable revision manifest a nikdy neslouží jako mutable current-data pohled.

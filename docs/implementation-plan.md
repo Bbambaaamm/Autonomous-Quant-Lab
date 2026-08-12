@@ -82,4 +82,4 @@ Dokončen je persistentní transakční ingestion, DB snapshot builder s PIT cov
 
 ## Phase 6 completion controls
 
-Produkční XNYS kalendář je delegován na maintained `exchange-calendars`. Exactly-once ingestion/snapshot/experiment je serializována v PostgreSQL. Immutable replay a validation-only parameter selection chrání proti korekcím a OOS leakage. Deployment zůstává explicitní manual paper-only gate do stávající Phase 4 cesty; current data se validují odděleně podle poslední dokončené session a `HALTED` nelze obejít.
+Produkční XNYS kalendář používá verzovaný auditovaný schedule včetně explicitních exceptional closures. Exactly-once ingestion/snapshot/experiment je serializována v PostgreSQL. Immutable replay a validation-only parameter selection chrání proti korekcím a OOS leakage. Deployment zůstává explicitní manual paper-only gate do stávající Phase 4 cesty; current data se validují odděleně podle poslední dokončené session a `HALTED` nelze obejít.

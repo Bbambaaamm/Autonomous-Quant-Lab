@@ -13,7 +13,7 @@ def test_normal_weekend_and_standard_holidays() -> None:
     assert not CALENDAR.is_session(date(2026, 11, 26))
 
 
-def test_maintained_schedule_contains_early_closes_and_dst() -> None:
+def test_audited_schedule_contains_early_closes_and_dst() -> None:
     assert CALENDAR.session_close(date(2024, 11, 29)) == datetime(2024, 11, 29, 18, tzinfo=UTC)
     assert CALENDAR.session_close(date(2024, 7, 3)) == datetime(2024, 7, 3, 17, tzinfo=UTC)
     assert CALENDAR.session_open(date(2024, 1, 8)) == datetime(2024, 1, 8, 14, 30, tzinfo=UTC)

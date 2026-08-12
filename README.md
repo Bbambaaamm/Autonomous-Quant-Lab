@@ -119,6 +119,6 @@ Phase 6 přidává canonical instruments, XNYS sessions, immutable observation r
 
 ## Phase 6 production invariants
 
-Phase 6 používá udržovaný kalendář `exchange-calendars` pro XNYS, včetně historických mimořádných uzavření, early-close sessions a DST. Snapshoty jsou immutable manifesty konkrétních observation revisions a corporate actions; pozdější korekce vytváří nový snapshot a nemění replay starého. Ingestion, snapshot build a experiment run mají databázové exactly-once identity a PostgreSQL advisory transaction lock. Výběr parametrů končí validací a OOS se vyhodnotí právě jednou až poté.
+Phase 6 používá verzovaný auditovaný XNYS kalendář, včetně podporovaných historických mimořádných uzavření, early-close sessions a DST. Snapshoty jsou immutable manifesty konkrétních observation revisions a corporate actions; pozdější korekce vytváří nový snapshot a nemění replay starého. Ingestion, snapshot build a experiment run mají databázové exactly-once identity a PostgreSQL advisory transaction lock. Výběr parametrů končí validací a OOS se vyhodnotí právě jednou až poté.
 
 Nasazení je pouze explicitně a ručně schvalované pro paper účet. Current-data accessor je session-aware a není research snapshot. Jediná ekonomická cesta zůstává Phase 4 `TradingCycleService → ProductionRiskEngine → PersistentPaperBroker`; stav `HALTED` selže uzavřeně. Live broker ani live execution mode neexistuje.
