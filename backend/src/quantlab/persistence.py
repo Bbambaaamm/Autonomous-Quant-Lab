@@ -32,6 +32,144 @@ class Base(DeclarativeBase):
     pass
 
 
+class InstrumentRecord(Base):
+    __tablename__ = "instruments"
+    instrument_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    symbol: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    exchange: Mapped[str] = mapped_column(String(32), nullable=False)
+    calendar: Mapped[str] = mapped_column(String(64), nullable=False)
+    currency: Mapped[str] = mapped_column(String(3), nullable=False)
+    asset_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    active_from: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    active_to: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class InstrumentSymbolRecord(Base):
+    __tablename__ = "instrument_symbol_history"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    instrument_id: Mapped[str] = mapped_column(
+        ForeignKey("instruments.instrument_id", ondelete="RESTRICT"), index=True
+    )
+    symbol: Mapped[str] = mapped_column(String(32), nullable=False)
+    valid_from: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    valid_to: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    __table_args__ = (UniqueConstraint("instrument_id", "symbol", "valid_from"),)
+
+
+class MarketDataIngestionRecord(Base):
+    __tablename__ = "market_data_ingestions"
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    provider: Mapped[str] = mapped_column(String(40), nullable=False, index=True)
+    scope_hash: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    status: Mapped[str] = mapped_column(String(20), nullable=False)
+    requested_start: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    requested_end: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    instrument_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    row_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    error_summary: Mapped[str | None] = mapped_column(Text)
+
+
+class MarketObservationRecord(Base):
+    __tablename__ = "market_observations"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    observation_id: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    instrument_id: Mapped[str] = mapped_column(
+        ForeignKey("instruments.instrument_id", ondelete="RESTRICT"), index=True
+    )
+    ingestion_id: Mapped[str] = mapped_column(
+        ForeignKey("market_data_ingestions.id", ondelete="RESTRICT"), index=True
+    )
+    provider: Mapped[str] = mapped_column(String(40), nullable=False)
+    timeframe: Mapped[str] = mapped_column(String(10), nullable=False)
+    session_date: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    open: Mapped[str] = mapped_column(String(50), nullable=False)
+    high: Mapped[str] = mapped_column(String(50), nullable=False)
+    low: Mapped[str] = mapped_column(String(50), nullable=False)
+    close: Mapped[str] = mapped_column(String(50), nullable=False)
+    volume: Mapped[str] = mapped_column(String(50), nullable=False)
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    source_id: Mapped[str] = mapped_column(String(200), nullable=False)
+    source_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    __table_args__ = (
+        UniqueConstraint("instrument_id", "provider", "session_date", "revision"),
+        Index("ix_observation_asof", "instrument_id", "session_date", "observed_at"),
+    )
+
+
+class CorporateActionRecord(Base):
+    __tablename__ = "corporate_actions"
+    action_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    instrument_id: Mapped[str] = mapped_column(
+        ForeignKey("instruments.instrument_id", ondelete="RESTRICT"), index=True
+    )
+    kind: Mapped[str] = mapped_column(String(30), nullable=False)
+    effective_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    known_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    value: Mapped[str | None] = mapped_column(String(50))
+    new_symbol: Mapped[str | None] = mapped_column(String(32))
+
+
+class UniverseDefinitionRecord(Base):
+    __tablename__ = "universe_definitions"
+    universe_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    name: Mapped[str] = mapped_column(String(100), nullable=False, unique=True)
+    kind: Mapped[str] = mapped_column(String(40), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class UniverseMembershipRecord(Base):
+    __tablename__ = "universe_memberships"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    universe_id: Mapped[str] = mapped_column(
+        ForeignKey("universe_definitions.universe_id", ondelete="RESTRICT"), index=True
+    )
+    instrument_id: Mapped[str] = mapped_column(
+        ForeignKey("instruments.instrument_id", ondelete="RESTRICT"), index=True
+    )
+    valid_from: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    valid_to: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    known_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    __table_args__ = (
+        UniqueConstraint("universe_id", "instrument_id", "valid_from"),
+        Index("ix_universe_pit", "universe_id", "valid_from", "valid_to", "known_at"),
+    )
+
+
+class DatasetSnapshotRecord(Base):
+    __tablename__ = "dataset_snapshots"
+    snapshot_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    as_of: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    provider: Mapped[str] = mapped_column(String(40), nullable=False)
+    calendar_identity: Mapped[str] = mapped_column(String(100), nullable=False)
+    universe_id: Mapped[str] = mapped_column(
+        ForeignKey("universe_definitions.universe_id", ondelete="RESTRICT"), index=True
+    )
+    start_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    end_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    timeframe: Mapped[str] = mapped_column(String(10), nullable=False)
+    content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False)
+    coverage: Mapped[str] = mapped_column(String(50), nullable=False)
+    manifest_json: Mapped[str] = mapped_column(Text, nullable=False)
+    __table_args__ = (
+        UniqueConstraint(
+            "provider",
+            "calendar_identity",
+            "universe_id",
+            "start_at",
+            "end_at",
+            "as_of",
+            "content_hash",
+        ),
+    )
+
+
 class RunRecord(Base):
     __tablename__ = "backtest_runs"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)

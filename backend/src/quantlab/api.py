@@ -24,7 +24,9 @@ from quantlab.automation import (
 from quantlab.backtest import serialize_result
 from quantlab.config import get_settings
 from quantlab.demo import load_fixture, run_demo
-from quantlab.persistence import RunRepository
+from quantlab.market_data import StooqProvider, XNYSCalendar
+from quantlab.multi_asset import STRATEGY_REGISTRY
+from quantlab.persistence import DatasetSnapshotRecord, RunRepository, UniverseDefinitionRecord
 from quantlab.phase4 import (
     AuditEventRecord,
     PaperOrderRecord,
@@ -92,6 +94,80 @@ def health_ready() -> dict[str, str]:
     except Exception as exc:
         raise HTTPException(status_code=503, detail="Databáze není dostupná") from exc
     return {"status": "ready", "database": "ok"}
+
+
+@app.get("/market-data/providers")
+def market_data_providers() -> list[dict[str, object]]:
+    """Vrací pouze allowlistované adaptery, nikdy dynamický import nebo arbitrary URL."""
+    metadata = StooqProvider.metadata
+    return [
+        {
+            "name": metadata.name,
+            "version": metadata.version,
+            "supports_actions": metadata.supports_actions,
+            "requires_credentials": metadata.requires_credentials,
+        }
+    ]
+
+
+@app.get("/market-data/calendar")
+def market_data_calendar() -> dict[str, str]:
+    calendar = XNYSCalendar()
+    return {"identity": calendar.identity, "timezone": str(calendar.timezone)}
+
+
+@app.get("/strategies")
+def phase6_strategies() -> list[dict[str, object]]:
+    result = []
+    for name, strategy_type in sorted(STRATEGY_REGISTRY.items()):
+        strategy = strategy_type()
+        result.append(
+            {
+                "name": name,
+                "version": strategy.version,
+                "required_lookback": strategy.required_lookback,
+                "rebalance_frequency": strategy.rebalance_frequency,
+                "asset_scope": "long-only USD equities on XNYS calendar",
+            }
+        )
+    return result
+
+
+@app.get("/datasets/{snapshot_id}")
+def dataset_snapshot(snapshot_id: str) -> dict[str, object]:
+    with Session(repository.engine) as session:
+        row = session.get(DatasetSnapshotRecord, snapshot_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="Dataset snapshot nebyl nalezen")
+        return {
+            "snapshot_id": row.snapshot_id,
+            "content_hash": row.content_hash,
+            "provider": row.provider,
+            "universe_id": row.universe_id,
+            "start_at": row.start_at,
+            "end_at": row.end_at,
+            "coverage": row.coverage,
+            "status": row.status,
+        }
+
+
+@app.get("/universes")
+def universes() -> list[dict[str, object]]:
+    with Session(repository.engine) as session:
+        rows = session.scalars(
+            select(UniverseDefinitionRecord).order_by(UniverseDefinitionRecord.universe_id)
+        )
+        return [
+            {
+                "universe_id": row.universe_id,
+                "name": row.name,
+                "kind": row.kind,
+                "survivorship_bias_status": (
+                    "BIAS_PRONE_STATIC" if row.kind == "STATIC" else "POINT_IN_TIME_SAFE"
+                ),
+            }
+            for row in rows
+        ]
 
 
 @app.post("/automation/jobs")

@@ -1088,9 +1088,18 @@ class TradingCycleService:
         session_date: date,
         decision_time: datetime,
     ) -> str:
-        validate_bars(bars)
         if not bars:
             raise ValueError("Chybí market data")
+        bars_by_symbol: dict[str, Bar] = {}
+        for symbol in sorted({item.symbol for item in bars}):
+            symbol_bars = sorted(
+                (item for item in bars if item.symbol == symbol), key=lambda item: item.timestamp
+            )
+            validate_bars(symbol_bars)
+            executable = symbol_bars[-1]
+            if executable.timestamp <= decision_time:
+                raise ValueError("Executable bar musí následovat po decision time")
+            bars_by_symbol[symbol] = executable
         cycle_key = deterministic_cycle_key(account_id, strategy_id, session_date)
         input_fingerprint = cycle_input_fingerprint(bars, decision_time, target_weights)
         cycle_id = cycle_key
@@ -1205,7 +1214,6 @@ class TradingCycleService:
                     {"symbols": sorted(target_weights)},
                 )
             session.commit()
-        bar = bars[-1]
         with Session(self.repository.engine) as session:
             account_row = session.get(PaperAccountRecord, account_id)
             if account_row is None:
@@ -1226,7 +1234,8 @@ class TradingCycleService:
             pending[open_order.instrument_id] = (
                 pending.get(open_order.instrument_id, Decimal(0)) + signed_remaining
             )
-        prices = {bar.symbol: bar.close}
+        # Risk snapshot na open nesmí obsahovat close stejné executable session.
+        prices = {symbol: item.open for symbol, item in bars_by_symbol.items()}
         with Session(self.repository.engine) as session:
             daily_orders = int(
                 session.scalar(
@@ -1256,9 +1265,16 @@ class TradingCycleService:
                 )
                 or 0
             )
-        for symbol, weight in sorted(target_weights.items()):
-            if symbol != bar.symbol:
-                raise ValueError("Cycle vyžaduje executable bar každého target instrumentu")
+        managed_symbols = set(target_weights) | {
+            symbol for symbol, quantity in positions.items() if quantity != 0
+        }
+        for symbol in sorted(managed_symbols):
+            weight = target_weights.get(symbol, Decimal("0"))
+            bar = bars_by_symbol.get(symbol)
+            if bar is None:
+                raise ValueError(
+                    "Cycle vyžaduje executable bar každého drženého a target instrumentu"
+                )
             desired = (account.equity * weight / bar.open).to_integral_value(rounding=ROUND_DOWN)
             delta = desired - positions.get(symbol, Decimal(0)) - pending.get(symbol, Decimal(0))
             if delta == 0:
