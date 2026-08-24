@@ -4,7 +4,6 @@ import os
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
-from decimal import Decimal
 from uuid import uuid4
 
 import pytest
@@ -16,7 +15,6 @@ from quantlab.persistence import CorporateActionRecord, MarketObservationRecord
 from quantlab.phase4 import PaperAccountRecord, PositionRecord
 from quantlab.phase6_runtime import ValidatedCurrentDataAccessor
 from quantlab.phase7 import (
-    EvaluationVerdict,
     MonitoringState,
     PaperCorporateActionApplicationRecord,
     PaperCorporateActionService,
@@ -105,9 +103,9 @@ def test_postgres_capture_and_evaluation_races_are_exactly_once(factory) -> None
     _account, _deployment, run, instrument = _executed_monitoring(factory)
     as_of = _completed_as_of(factory, instrument.instrument_id)
     captures = _concurrently(
-        lambda: PaperPerformanceService(
-            factory, ValidatedCurrentDataAccessor(factory)
-        ).capture(run.monitoring_id, as_of)
+        lambda: PaperPerformanceService(factory, ValidatedCurrentDataAccessor(factory)).capture(
+            run.monitoring_id, as_of
+        )
     )
     assert captures[0].snapshot_id == captures[1].snapshot_id
 
@@ -118,16 +116,25 @@ def test_postgres_capture_and_evaluation_races_are_exactly_once(factory) -> None
     )
     assert evaluations[0].evaluation_id == evaluations[1].evaluation_id
     with factory() as session:
-        assert session.scalar(
-            select(func.count()).select_from(PaperPerformanceSnapshotRecord).where(
-                PaperPerformanceSnapshotRecord.snapshot_id == captures[0].snapshot_id
+        assert (
+            session.scalar(
+                select(func.count())
+                .select_from(PaperPerformanceSnapshotRecord)
+                .where(PaperPerformanceSnapshotRecord.snapshot_id == captures[0].snapshot_id)
             )
-        ) == 1
-        assert session.scalar(
-            select(func.count()).select_from(PaperPerformanceEvaluationRecord).where(
-                PaperPerformanceEvaluationRecord.evaluation_id == evaluations[0].evaluation_id
+            == 1
+        )
+        assert (
+            session.scalar(
+                select(func.count())
+                .select_from(PaperPerformanceEvaluationRecord)
+                .where(
+                    PaperPerformanceEvaluationRecord.evaluation_id
+                    == evaluations[0].evaluation_id
+                )
             )
-        ) == 1
+            == 1
+        )
 
 
 def test_postgres_pause_and_resume_cannot_overwrite_safety_suspension(factory) -> None:
@@ -172,16 +179,22 @@ def test_postgres_split_and_dividend_races_credit_ledger_once(factory) -> None:
         session.add_all(
             [
                 CorporateActionRecord(
-                    action_id=split_id, instrument_id=instrument.instrument_id,
-                    kind=CorporateActionKind.SPLIT, effective_at=effective, known_at=effective,
-                    value="2", new_symbol=None, source_hash=split_id,
+                    action_id=split_id,
+                    instrument_id=instrument.instrument_id,
+                    kind=CorporateActionKind.SPLIT,
+                    effective_at=effective,
+                    known_at=effective,
+                    value="2",
+                    new_symbol=None,
                 ),
                 CorporateActionRecord(
-                    action_id=dividend_id, instrument_id=instrument.instrument_id,
+                    action_id=dividend_id,
+                    instrument_id=instrument.instrument_id,
                     kind=CorporateActionKind.CASH_DIVIDEND,
                     effective_at=effective + timedelta(seconds=1),
-                    known_at=effective + timedelta(seconds=1), value="1", new_symbol=None,
-                    source_hash=dividend_id,
+                    known_at=effective + timedelta(seconds=1),
+                    value="1",
+                    new_symbol=None,
                 ),
             ]
         )
@@ -191,8 +204,13 @@ def test_postgres_split_and_dividend_races_credit_ledger_once(factory) -> None:
         position = session.get(PositionRecord, (account_id, instrument.instrument_id))
         assert position.quantity == before * 2
         assert session.get(PaperAccountRecord, account_id).cash == cash_before + before * 2
-        assert session.scalar(
-            select(func.count()).select_from(PaperCorporateActionApplicationRecord).where(
-                PaperCorporateActionApplicationRecord.action_id.in_((split_id, dividend_id))
+        assert (
+            session.scalar(
+                select(func.count())
+                .select_from(PaperCorporateActionApplicationRecord)
+                .where(
+                    PaperCorporateActionApplicationRecord.action_id.in_((split_id, dividend_id))
+                )
             )
-        ) == 2
+            == 2
+        )

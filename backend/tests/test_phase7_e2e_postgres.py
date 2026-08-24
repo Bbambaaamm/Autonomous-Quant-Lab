@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import os
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -13,7 +12,6 @@ from phase6_audit_helpers import MappingProvider, daily_bar
 from quantlab.market_data_service import PersistentMarketDataService
 from quantlab.persistence import ExperimentRecord, MarketObservationRecord, StrategyDeploymentRecord
 from quantlab.phase4 import (
-    PaperAccountRecord,
     PaperFillRecord,
     PaperOrderRecord,
     Phase4Repository,
@@ -34,7 +32,6 @@ from quantlab.phase7 import (
     PaperPerformanceEvaluationRecord,
     PaperPerformanceEvaluationService,
     PaperPerformanceService,
-    PaperPerformanceSnapshotRecord,
 )
 from test_phase6_e2e_postgres import CALENDAR, _research_to_paper
 
@@ -74,7 +71,8 @@ def _full_multi_session_flow(factory, prices: tuple[Decimal, ...]):
     run = monitoring.enroll(deployment.deployment_id, policy.policy_id, datetime.now(UTC))
     repository = Phase4Repository(str(engine.url), bootstrap_test_schema=False)
     risk = ProductionRiskConfig(
-        max_position_pct=Decimal("1"), max_single_order_pct=Decimal("1"),
+        max_position_pct=Decimal("1"),
+        max_single_order_pct=Decimal("1"),
         max_single_order_notional=Decimal("200000"),
         instrument_allowlist=frozenset({instrument.instrument_id}),
     )
@@ -98,8 +96,9 @@ def _full_multi_session_flow(factory, prices: tuple[Decimal, ...]):
         session_day = CALENDAR.next_session(session_day)
         observed_at = CALENDAR.session_close(session_day) + timedelta(minutes=1)
         provider = MappingProvider(
-            f"phase7-current-{instrument.instrument_id}",
-            {instrument.symbol: [daily_bar(session_day, price, f"phase7-{session_day}")]}, {},
+            f"p7-{instrument.symbol}",
+            {instrument.symbol: [daily_bar(session_day, price, f"phase7-{session_day}")]},
+            {},
         )
         assert PersistentMarketDataService(factory).ingest(
             provider, instrument, session_day, session_day, observed_at
@@ -131,9 +130,14 @@ def test_true_phase7_production_flow_persists_ordered_multi_session_evidence(fac
     with factory() as session:
         assert session.get(ExperimentRecord, experiment.id).decision == "PAPER_CANDIDATE"
         assert session.get(StrategyDeploymentRecord, deployment.deployment_id).status == "APPROVED"
-        assert session.scalar(select(func.count()).select_from(PaperOrderRecord).where(
-            PaperOrderRecord.account_id == account
-        )) >= 1
+        assert (
+            session.scalar(
+                select(func.count())
+                .select_from(PaperOrderRecord)
+                .where(PaperOrderRecord.account_id == account)
+            )
+            >= 1
+        )
         assert (
             session.scalar(
                 select(func.count())
@@ -143,9 +147,11 @@ def test_true_phase7_production_flow_persists_ordered_multi_session_evidence(fac
             )
             >= 1
         )
-        assert len(evaluations) == session.scalar(select(func.count()).select_from(
-            PaperPerformanceEvaluationRecord
-        ).where(PaperPerformanceEvaluationRecord.monitoring_id == run.monitoring_id))
+        assert len(evaluations) == session.scalar(
+            select(func.count())
+            .select_from(PaperPerformanceEvaluationRecord)
+            .where(PaperPerformanceEvaluationRecord.monitoring_id == run.monitoring_id)
+        )
 
 
 def test_drawdown_uses_only_historical_peak(factory) -> None:
@@ -168,17 +174,24 @@ def test_hard_suspension_blocks_execution_and_resume_until_safe(factory) -> None
     )
     assert evaluation.verdict == EvaluationVerdict.SUSPENDED
     with factory() as session:
-        before_orders = session.scalar(select(func.count()).select_from(PaperOrderRecord).where(
-            PaperOrderRecord.account_id == account
-        ))
+        before_orders = session.scalar(
+            select(func.count())
+            .select_from(PaperOrderRecord)
+            .where(PaperOrderRecord.account_id == account)
+        )
     service = PaperMonitoringService(factory)
     with pytest.raises(ValueError):
         service.transition(run.monitoring_id, MonitoringState.ACTIVE, "unsafe", datetime.now(UTC))
     with factory() as session:
         assert session.get(PaperMonitoringRunRecord, run.monitoring_id).state == "SUSPENDED"
-        assert session.scalar(select(func.count()).select_from(PaperOrderRecord).where(
-            PaperOrderRecord.account_id == account
-        )) == before_orders
+        assert (
+            session.scalar(
+                select(func.count())
+                .select_from(PaperOrderRecord)
+                .where(PaperOrderRecord.account_id == account)
+            )
+            == before_orders
+        )
         assert session.get(ExperimentRecord, experiment.id).decision == "PAPER_CANDIDATE"
         assert session.get(StrategyDeploymentRecord, deployment.deployment_id).status == "APPROVED"
 
@@ -190,13 +203,19 @@ def test_baseline_is_immutable_after_provider_correction(factory) -> None:
     with factory() as session:
         baseline = session.get(PaperExpectationBaselineRecord, run.baseline_id)
         before = (
-            baseline.baseline_id, baseline.content_hash, baseline.oos_returns_json,
-            baseline.oos_equity_json, baseline.oos_metrics_json,
+            baseline.baseline_id,
+            baseline.content_hash,
+            baseline.oos_returns_json,
+            baseline.oos_equity_json,
+            baseline.oos_metrics_json,
         )
     # Baseline je immutable artefakt navázaný na snapshot; opakované enrollment jej neregeneruje.
     with factory() as session:
         baseline = session.get(PaperExpectationBaselineRecord, run.baseline_id)
         assert before == (
-            baseline.baseline_id, baseline.content_hash, baseline.oos_returns_json,
-            baseline.oos_equity_json, baseline.oos_metrics_json,
+            baseline.baseline_id,
+            baseline.content_hash,
+            baseline.oos_returns_json,
+            baseline.oos_equity_json,
+            baseline.oos_metrics_json,
         )

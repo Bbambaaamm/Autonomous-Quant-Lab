@@ -34,8 +34,12 @@ def test_phase7_policy_rejects_invalid_safety_configuration() -> None:
 def test_phase7_enrollment_and_lifecycle_routes_call_production_service(monkeypatch) -> None:
     now = datetime.now(UTC)
     row = SimpleNamespace(
-        monitoring_id="api-monitor", deployment_id="approved-deployment", state="ACTIVE",
-        state_reason="test", state_changed_at=now, created_at=now,
+        monitoring_id="api-monitor",
+        deployment_id="approved-deployment",
+        state="ACTIVE",
+        state_reason="test",
+        state_changed_at=now,
+        created_at=now,
     )
 
     class RecordingService:
