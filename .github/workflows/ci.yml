@@ -127,3 +127,5 @@ jobs:
           tests/test_phase7.py
           tests/test_phase7_postgres.py
           tests/test_phase7_e2e_postgres.py
+          tests/test_phase7_automation_postgres.py
+          tests/test_phase7_corporate_actions_postgres.py

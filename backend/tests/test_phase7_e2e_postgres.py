@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -10,13 +11,22 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import sessionmaker
 from test_phase6_e2e_postgres import CALENDAR, _research_to_paper
 
+from quantlab.market_data import AssetType, DatasetInvalid, Instrument
 from quantlab.market_data_service import PersistentMarketDataService
-from quantlab.persistence import ExperimentRecord, MarketObservationRecord, StrategyDeploymentRecord
+from quantlab.persistence import (
+    ExperimentRecord,
+    InstrumentRecord,
+    MarketObservationRecord,
+    StrategyDeploymentRecord,
+)
 from quantlab.phase4 import (
+    PaperAccountRecord,
     PaperFillRecord,
     PaperOrderRecord,
     Phase4Repository,
     ProductionRiskConfig,
+    ReconciliationService,
+    TradingCycleRecord,
     TradingCycleService,
 )
 from quantlab.phase6_runtime import (
@@ -33,6 +43,7 @@ from quantlab.phase7 import (
     PaperPerformanceEvaluationRecord,
     PaperPerformanceEvaluationService,
     PaperPerformanceService,
+    PaperPerformanceSnapshotRecord,
 )
 
 pytestmark = pytest.mark.skipif(
@@ -114,6 +125,56 @@ def _full_multi_session_flow(factory, prices: tuple[Decimal, ...]):
     return account_id, deployment, experiment, source_snapshot, run, snapshots, evaluations
 
 
+def _execution_service(factory, instrument_id: str) -> Phase6PaperExecutionService:
+    repository = Phase4Repository(str(factory.kw["bind"].url), bootstrap_test_schema=False)
+    risk = ProductionRiskConfig(
+        max_position_pct=Decimal("1"),
+        max_single_order_pct=Decimal("1"),
+        max_single_order_notional=Decimal("200000"),
+        instrument_allowlist=frozenset({instrument_id}),
+    )
+    return Phase6PaperExecutionService(
+        factory, ValidatedCurrentDataAccessor(factory), TradingCycleService(repository, risk)
+    )
+
+
+def _economic_counts(factory, account_id: str) -> tuple[int, int, int]:
+    with factory() as session:
+        return (
+            session.scalar(
+                select(func.count())
+                .select_from(PaperOrderRecord)
+                .where(PaperOrderRecord.account_id == account_id)
+            ),
+            session.scalar(
+                select(func.count())
+                .select_from(PaperFillRecord)
+                .join(PaperOrderRecord)
+                .where(PaperOrderRecord.account_id == account_id)
+            ),
+            session.scalar(
+                select(func.count())
+                .select_from(TradingCycleRecord)
+                .where(TradingCycleRecord.account_id == account_id)
+            ),
+        )
+
+
+def _instrument(factory, instrument_id: str) -> Instrument:
+    with factory() as session:
+        row = session.get(InstrumentRecord, instrument_id)
+        return Instrument(
+            row.instrument_id,
+            row.symbol,
+            row.exchange,
+            row.calendar,
+            row.currency,
+            AssetType(row.asset_type),
+            row.active_from.date(),
+            row.active_to.date() if row.active_to else None,
+        )
+
+
 def test_true_phase7_production_flow_persists_ordered_multi_session_evidence(factory) -> None:
     account, deployment, experiment, _source, run, snapshots, evaluations = (
         _full_multi_session_flow(
@@ -169,6 +230,73 @@ def test_drawdown_uses_only_historical_peak(factory) -> None:
     assert snapshots[-1].drawdown == expected
 
 
+@pytest.mark.parametrize(
+    ("name", "prices", "expected"),
+    [
+        ("HEALTHY", (Decimal("180"), Decimal("220")), EvaluationVerdict.HEALTHY),
+        ("WATCH", (Decimal("121"), Decimal("123.2")), EvaluationVerdict.WATCH),
+        (
+            "REVIEW_REQUIRED",
+            (Decimal("121"), Decimal("122.5")),
+            EvaluationVerdict.REVIEW_REQUIRED,
+        ),
+    ],
+)
+def test_controlled_paper_series_proves_healthy_watch_and_review_without_auto_retune(
+    factory, name, prices, expected
+) -> None:
+    with factory() as session:
+        experiments_before = session.scalar(select(func.count()).select_from(ExperimentRecord))
+        deployments_before = session.scalar(
+            select(func.count()).select_from(StrategyDeploymentRecord)
+        )
+    _account, deployment, experiment, _source, run, _snapshots, evaluations = (
+        _full_multi_session_flow(factory, prices)
+    )
+    assert evaluations[-1].verdict == expected, name
+    with factory() as session:
+        stored_run = session.get(PaperMonitoringRunRecord, run.monitoring_id)
+        stored_experiment = session.get(ExperimentRecord, experiment.id)
+        stored_deployment = session.get(StrategyDeploymentRecord, deployment.deployment_id)
+        assert stored_run.state == MonitoringState.ACTIVE
+        assert (
+            session.scalar(select(func.count()).select_from(ExperimentRecord))
+            == experiments_before + 1
+        )
+        assert (
+            session.scalar(select(func.count()).select_from(StrategyDeploymentRecord))
+            == deployments_before + 1
+        )
+        assert stored_experiment.selected_parameters_json == experiment.selected_parameters_json
+        assert stored_deployment.parameters_json == deployment.parameters_json
+        assert stored_deployment.strategy_version == deployment.strategy_version
+
+
+def test_suspended_monitoring_requires_safe_explicit_operator_resume(factory) -> None:
+    account, _deployment, _experiment, _source, run, _snapshots, _evaluations = (
+        _full_multi_session_flow(factory, ())
+    )
+    monitoring = PaperMonitoringService(factory)
+    monitoring.transition(
+        run.monitoring_id, MonitoringState.SUSPENDED, "reconciliation incident", datetime.now(UTC)
+    )
+    with factory() as session, session.begin():
+        session.get(PaperAccountRecord, account).reconciliation_safe = False
+    with pytest.raises(DatasetInvalid):
+        monitoring.transition(
+            run.monitoring_id, MonitoringState.ACTIVE, "unsafe resume", datetime.now(UTC)
+        )
+    repository = Phase4Repository(str(factory.kw["bind"].url), bootstrap_test_schema=False)
+    assert ReconciliationService(repository).reconcile(account).status == "SUCCEEDED"
+    resumed = monitoring.transition(
+        run.monitoring_id,
+        MonitoringState.ACTIVE,
+        "operator verified reconciliation",
+        datetime.now(UTC),
+    )
+    assert resumed.state == MonitoringState.ACTIVE
+
+
 def test_hard_suspension_blocks_execution_and_resume_until_safe(factory) -> None:
     account, deployment, experiment, _source, run, snapshots, _ = _full_multi_session_flow(
         factory, (Decimal("1"),)
@@ -178,30 +306,50 @@ def test_hard_suspension_blocks_execution_and_resume_until_safe(factory) -> None
     )
     assert evaluation.verdict == EvaluationVerdict.SUSPENDED
     with factory() as session:
-        before_orders = session.scalar(
-            select(func.count())
-            .select_from(PaperOrderRecord)
-            .where(PaperOrderRecord.account_id == account)
+        instrument_id = session.scalar(
+            select(MarketObservationRecord.instrument_id).order_by(
+                MarketObservationRecord.session_date.desc()
+            )
+        )
+    before = _economic_counts(factory, account)
+    with pytest.raises(DatasetInvalid):
+        _execution_service(factory, instrument_id).run(
+            deployment.deployment_id, datetime.now(UTC) + timedelta(days=1)
         )
     service = PaperMonitoringService(factory)
     with pytest.raises(ValueError):
         service.transition(run.monitoring_id, MonitoringState.ACTIVE, "unsafe", datetime.now(UTC))
     with factory() as session:
         assert session.get(PaperMonitoringRunRecord, run.monitoring_id).state == "SUSPENDED"
-        assert (
-            session.scalar(
-                select(func.count())
-                .select_from(PaperOrderRecord)
-                .where(PaperOrderRecord.account_id == account)
-            )
-            == before_orders
-        )
         assert session.get(ExperimentRecord, experiment.id).decision == "PAPER_CANDIDATE"
         assert session.get(StrategyDeploymentRecord, deployment.deployment_id).status == "APPROVED"
+    assert _economic_counts(factory, account) == before
+
+
+@pytest.mark.parametrize("blocked_state", [MonitoringState.PAUSED, MonitoringState.RETIRED])
+def test_paused_and_retired_monitoring_block_actual_execution(factory, blocked_state) -> None:
+    account, deployment, _experiment, _source, run, _snapshots, _ = _full_multi_session_flow(
+        factory, ()
+    )
+    with factory() as session:
+        instrument_id = session.scalar(
+            select(MarketObservationRecord.instrument_id).order_by(
+                MarketObservationRecord.session_date.desc()
+            )
+        )
+    PaperMonitoringService(factory).transition(
+        run.monitoring_id, blocked_state, f"audit {blocked_state}", datetime.now(UTC)
+    )
+    before = _economic_counts(factory, account)
+    with pytest.raises(DatasetInvalid):
+        _execution_service(factory, instrument_id).run(
+            deployment.deployment_id, datetime.now(UTC) + timedelta(days=1)
+        )
+    assert _economic_counts(factory, account) == before
 
 
 def test_baseline_is_immutable_after_provider_correction(factory) -> None:
-    _account, _deployment, _experiment, _source, run, _snapshots, _ = _full_multi_session_flow(
+    _account, _deployment, _experiment, _source, run, snapshots, _ = _full_multi_session_flow(
         factory, (Decimal("121"),)
     )
     with factory() as session:
@@ -213,7 +361,28 @@ def test_baseline_is_immutable_after_provider_correction(factory) -> None:
             baseline.oos_equity_json,
             baseline.oos_metrics_json,
         )
-    # Baseline je immutable artefakt navázaný na snapshot; opakované enrollment jej neregeneruje.
+        lineage = json.loads(snapshots[-1].observation_lineage_json)
+        observation = session.get(MarketObservationRecord, lineage[0]["observation_id"])
+        instrument = _instrument(factory, observation.instrument_id)
+    corrected_day = observation.session_date.date()
+    provider = MappingProvider(
+        observation.provider,
+        {
+            instrument.symbol: [
+                daily_bar(corrected_day, Decimal(observation.close) + Decimal("7"), "correction")
+            ]
+        },
+        {},
+    )
+    correction = PersistentMarketDataService(factory).ingest(
+        provider,
+        instrument,
+        corrected_day,
+        corrected_day,
+        snapshots[-1].as_of + timedelta(days=1),
+    )
+    assert correction.status == "SUCCEEDED"
+    assert correction.observations[0].revision == observation.revision + 1
     with factory() as session:
         baseline = session.get(PaperExpectationBaselineRecord, run.baseline_id)
         assert before == (
@@ -222,4 +391,65 @@ def test_baseline_is_immutable_after_provider_correction(factory) -> None:
             baseline.oos_returns_json,
             baseline.oos_equity_json,
             baseline.oos_metrics_json,
+        )
+
+
+def test_historical_paper_snapshot_and_evaluation_survive_real_provider_correction(factory) -> None:
+    _account, _deployment, _experiment, _source, run, snapshots, evaluations = (
+        _full_multi_session_flow(factory, (Decimal("121"),))
+    )
+    snapshot, evaluation = snapshots[-1], evaluations[-1]
+    before_snapshot = (
+        snapshot.snapshot_id,
+        snapshot.content_hash,
+        snapshot.observation_lineage_json,
+        snapshot.daily_return,
+        snapshot.cumulative_return,
+        snapshot.drawdown,
+    )
+    before_evaluation = (evaluation.evaluation_id, evaluation.content_hash, evaluation.verdict)
+    with factory() as session:
+        lineage = json.loads(snapshot.observation_lineage_json)
+        observation = session.get(MarketObservationRecord, lineage[0]["observation_id"])
+        instrument = _instrument(factory, observation.instrument_id)
+    day = observation.session_date.date()
+    correction = PersistentMarketDataService(factory).ingest(
+        MappingProvider(
+            observation.provider,
+            {instrument.symbol: [daily_bar(day, Decimal(observation.close) + 9, "correction")]},
+            {},
+        ),
+        instrument,
+        day,
+        day,
+        snapshot.as_of + timedelta(days=1),
+    )
+    assert correction.observations[0].revision == observation.revision + 1
+    assert (
+        PaperPerformanceService(factory, ValidatedCurrentDataAccessor(factory))
+        .capture(run.monitoring_id, snapshot.as_of)
+        .snapshot_id
+        == snapshot.snapshot_id
+    )
+    assert (
+        PaperPerformanceEvaluationService(factory)
+        .evaluate(run.monitoring_id, snapshot.snapshot_id, snapshot.as_of)
+        .evaluation_id
+        == evaluation.evaluation_id
+    )
+    with factory() as session:
+        stored_snapshot = session.get(PaperPerformanceSnapshotRecord, snapshot.snapshot_id)
+        stored_evaluation = session.get(PaperPerformanceEvaluationRecord, evaluation.evaluation_id)
+        assert before_snapshot == (
+            stored_snapshot.snapshot_id,
+            stored_snapshot.content_hash,
+            stored_snapshot.observation_lineage_json,
+            stored_snapshot.daily_return,
+            stored_snapshot.cumulative_return,
+            stored_snapshot.drawdown,
+        )
+        assert before_evaluation == (
+            stored_evaluation.evaluation_id,
+            stored_evaluation.content_hash,
+            stored_evaluation.verdict,
         )
