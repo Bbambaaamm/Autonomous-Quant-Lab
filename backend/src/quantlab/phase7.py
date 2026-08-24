@@ -240,6 +240,24 @@ class PaperCorporateActionApplicationRecord(Base):
     __table_args__ = (UniqueConstraint("account_id", "action_id"),)
 
 
+def _entitled_quantity(
+    fills: Sequence[tuple[datetime, Decimal, str]],
+    applied_splits: Sequence[tuple[datetime, str | None]],
+) -> Decimal:
+    """Vrátí ekonomické držení v čase entitlementu z neměnné ledger historie."""
+    quantity = Decimal(0)
+    for filled_at, filled_quantity, side in fills:
+        adjusted = filled_quantity
+        for split_at, value in applied_splits:
+            if _database_utc(split_at) > _database_utc(filled_at):
+                ratio = Decimal(value or "0")
+                if ratio <= 0:
+                    raise DatasetInvalid("Split ratio musí být kladné")
+                adjusted *= ratio
+        quantity += adjusted if side == "BUY" else -adjusted
+    return quantity
+
+
 class PaperCorporateActionService:
     """Aplikuje kauzální corporate actions přímo na paper ledger, bez order/fill cesty."""
 
@@ -289,7 +307,11 @@ class PaperCorporateActionService:
                 )
                 fill_rows = tuple(
                     session.execute(
-                        select(PaperFillRecord.quantity, PaperOrderRecord.side)
+                        select(
+                            PaperFillRecord.timestamp,
+                            PaperFillRecord.quantity,
+                            PaperOrderRecord.side,
+                        )
                         .join(PaperOrderRecord, PaperOrderRecord.id == PaperFillRecord.order_id)
                         .where(
                             PaperOrderRecord.account_id == account_id,
@@ -298,9 +320,25 @@ class PaperCorporateActionService:
                         )
                     )
                 )
-                historical_quantity = sum(
-                    (quantity if side == "BUY" else -quantity for quantity, side in fill_rows),
-                    Decimal(0),
+                applied_splits = tuple(
+                    session.execute(
+                        select(CorporateActionRecord.effective_at, CorporateActionRecord.value)
+                        .join(
+                            PaperCorporateActionApplicationRecord,
+                            PaperCorporateActionApplicationRecord.action_id
+                            == CorporateActionRecord.action_id,
+                        )
+                        .where(
+                            PaperCorporateActionApplicationRecord.account_id == account_id,
+                            CorporateActionRecord.instrument_id == action.instrument_id,
+                            CorporateActionRecord.kind == CorporateActionKind.SPLIT,
+                            CorporateActionRecord.effective_at <= action.effective_at,
+                        )
+                    )
+                )
+                historical_quantity = _entitled_quantity(
+                    [(timestamp, quantity, side) for timestamp, quantity, side in fill_rows],
+                    [(effective_at, value) for effective_at, value in applied_splits],
                 )
                 if (
                     not fill_rows
