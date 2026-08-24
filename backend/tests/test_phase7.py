@@ -78,6 +78,17 @@ def test_entitlement_applies_split_to_older_fills_only() -> None:
     assert quantity == Decimal("15")
 
 
+def test_entitlement_applies_split_to_fill_at_effective_timestamp() -> None:
+    effective_at = datetime(2026, 1, 7, tzinfo=UTC)
+
+    quantity = _entitled_quantity(
+        [(effective_at, Decimal("10"), "BUY")],
+        [(effective_at, "2")],
+    )
+
+    assert quantity == Decimal("20")
+
+
 def test_entitlement_compounds_multiple_splits_without_drift() -> None:
     bought_at = datetime(2026, 1, 2, tzinfo=UTC)
 

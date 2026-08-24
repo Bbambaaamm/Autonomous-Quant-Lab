@@ -249,7 +249,7 @@ def _entitled_quantity(
     for filled_at, filled_quantity, side in fills:
         adjusted = filled_quantity
         for split_at, value in applied_splits:
-            if _database_utc(split_at) > _database_utc(filled_at):
+            if _database_utc(split_at) >= _database_utc(filled_at):
                 ratio = Decimal(value or "0")
                 if ratio <= 0:
                     raise DatasetInvalid("Split ratio musí být kladné")
