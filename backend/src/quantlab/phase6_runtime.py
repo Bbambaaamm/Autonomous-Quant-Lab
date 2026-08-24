@@ -85,6 +85,19 @@ class Phase6ExperimentRequest:
     code_sha: str | None = None
 
 
+@dataclass(frozen=True)
+class Phase6ExperimentReplay:
+    """Deterministický výsledek společné Phase 6 research evaluace."""
+
+    selected_parameters: dict[str, object]
+    train: MultiAssetMetrics
+    validation: MultiAssetMetrics
+    oos: MultiAssetMetrics
+    oos_equity: tuple[tuple[datetime, Decimal], ...]
+    oos_returns: tuple[Decimal, ...]
+    oos_sessions: tuple[datetime, ...]
+
+
 class Phase6ExperimentRunner:
     """Snapshot-only Phase 6 runner s persistentní, exactly-once OOS identitou."""
 
@@ -113,6 +126,18 @@ class Phase6ExperimentRunner:
         return value
 
     def run(self, request: Phase6ExperimentRequest) -> ExperimentRecord:
+        result = self._execute(request, persist=True)
+        assert isinstance(result, ExperimentRecord)
+        return result
+
+    def replay(self, request: Phase6ExperimentRequest) -> Phase6ExperimentReplay:
+        result = self._execute(request, persist=False)
+        assert isinstance(result, Phase6ExperimentReplay)
+        return result
+
+    def _execute(
+        self, request: Phase6ExperimentRequest, *, persist: bool
+    ) -> ExperimentRecord | Phase6ExperimentReplay:
         if not request.parameter_configs:
             raise ValueError("Parameter space nesmí být prázdný")
         if not Decimal(0) < request.train_fraction < Decimal(1) or not Decimal(
@@ -134,12 +159,13 @@ class Phase6ExperimentRunner:
         identity = hashlib.sha256(self._canonical(identity_payload).encode()).hexdigest()
         with self._sessions() as session, session.begin():
             _lock(session, f"phase6-experiment:{identity}")
-            existing = session.scalar(
-                select(ExperimentRecord).where(ExperimentRecord.idempotency_key == identity)
-            )
-            if existing is not None:
-                session.expunge(existing)
-                return existing
+            if persist:
+                existing = session.scalar(
+                    select(ExperimentRecord).where(ExperimentRecord.idempotency_key == identity)
+                )
+                if existing is not None:
+                    session.expunge(existing)
+                    return existing
             snapshot = session.get(DatasetSnapshotRecord, request.snapshot_id)
             if (
                 snapshot is None
@@ -298,7 +324,7 @@ class Phase6ExperimentRunner:
 
             def evaluate(
                 config: dict[str, object], selected_times: list[datetime]
-            ) -> MultiAssetMetrics:
+            ) -> tuple[MultiAssetMetrics, MultiAssetResult]:
                 strategy = strategy_type(**config)
                 if strategy.version != request.strategy_version:
                     raise DatasetInvalid("Implementace strategy version neodpovídá registru")
@@ -314,17 +340,35 @@ class Phase6ExperimentRunner:
                     corporate_actions=corporate_actions,
                     evaluation_start=evaluation_start,
                 )
-                return multi_asset_metrics(result, request.initial_cash)
+                return multi_asset_metrics(result, request.initial_cash), result
 
             scored: list[tuple[Decimal, str, dict[str, object], MultiAssetMetrics]] = []
             for config in request.parameter_configs:
                 evaluate(config, times[:train_end])
-                validation = evaluate(config, times[train_end:validation_end])
+                validation, _ = evaluate(config, times[train_end:validation_end])
                 scored.append(
                     (validation.risk_adjusted_return, self._canonical(config), config, validation)
                 )
             _, _, selected, _ = max(scored, key=lambda item: (item[0], item[1]))
-            oos = evaluate(selected, times[validation_end:])
+            train, _ = evaluate(selected, times[:train_end])
+            validation, _ = evaluate(selected, times[train_end:validation_end])
+            oos, oos_result = evaluate(selected, times[validation_end:])
+            oos_equity = tuple(oos_result.equity)
+            oos_returns = tuple(
+                oos_equity[index][1] / oos_equity[index - 1][1] - 1
+                for index in range(1, len(oos_equity))
+            )
+            replay = Phase6ExperimentReplay(
+                selected,
+                train,
+                validation,
+                oos,
+                oos_equity,
+                oos_returns,
+                tuple(when for when, _ in oos_equity),
+            )
+            if not persist:
+                return replay
             experiment = ExperimentRecord(
                 id=identity,
                 idempotency_key=identity,
@@ -355,12 +399,30 @@ class Phase6ExperimentRunner:
                 ),
                 selected_parameters_json=self._canonical(selected),
                 config_json=self._canonical(identity_payload),
-                result_json=self._canonical({"stage": "OOS", "metrics": oos.__dict__}),
+                result_json=self._canonical(
+                    {
+                        "stage": "OOS",
+                        "metrics": oos.__dict__,
+                        "equity": oos_equity,
+                        "returns": oos_returns,
+                        "sessions": replay.oos_sessions,
+                    }
+                ),
             )
             session.add(experiment)
             session.flush()
             session.expunge(experiment)
             return experiment
+
+
+class Phase6ExperimentReplayService:
+    """Replay používající tutéž authoritative implementaci jako experiment runner."""
+
+    def __init__(self, session_factory: Callable[[], Session]) -> None:
+        self._runner = Phase6ExperimentRunner(session_factory)
+
+    def replay(self, request: Phase6ExperimentRequest) -> Phase6ExperimentReplay:
+        return self._runner.replay(request)
 
 
 def multi_asset_metrics(result: MultiAssetResult, initial_cash: Decimal) -> MultiAssetMetrics:

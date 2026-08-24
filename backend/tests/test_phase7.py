@@ -30,3 +30,27 @@ def test_block_bootstrap_is_deterministic_and_horizon_aware() -> None:
 
 def test_no_synthetic_bootstrap_without_baseline_series() -> None:
     assert deterministic_block_bootstrap([], 20, 100, 5, "seed") == []
+
+
+@pytest.mark.parametrize(
+    ("returns", "horizon", "block_size"),
+    [
+        ([Decimal("0")], 1, 10),
+        ([Decimal("0")], 20, 50),
+        ([Decimal("0.01")], 25, 3),
+        ([Decimal("0.01"), Decimal("-0.01")], 40, 20),
+    ],
+)
+def test_bootstrap_handles_short_and_zero_series_without_non_finite_values(
+    returns: list[Decimal], horizon: int, block_size: int
+) -> None:
+    distribution = deterministic_block_bootstrap(returns, horizon, 50, block_size, "safe")
+    assert len(distribution) == 50
+    assert all(value.is_finite() for value in distribution)
+
+
+def test_bootstrap_distribution_changes_with_paper_horizon() -> None:
+    returns = [Decimal("0.01"), Decimal("-0.02"), Decimal("0.03")]
+    short = deterministic_block_bootstrap(returns, 3, 100, 2, "monitor:3")
+    long = deterministic_block_bootstrap(returns, 8, 100, 2, "monitor:8")
+    assert short != long

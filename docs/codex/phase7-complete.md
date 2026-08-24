@@ -1,5 +1,23 @@
 # Phase 7 — Paper Performance Monitoring and Strategy Lifecycle
 
+## Finální auditní opravy
+
+Validní enrollment deterministicky přehrává immutable Phase 6 snapshot stejnou authoritative
+evaluací jako `Phase6ExperimentRunner`. Před vytvořením monitoringu ověří přesnou shodu
+vybraných parametrů a uložených OOS metrik. Baseline ukládá denní OOS returns, session
+timestamps a equity curve; prázdná série je pro nový enrollment fail-closed. Provider correction
+proto nemůže přepsat již hashovanou baseline evidenci.
+
+Paper ledger má produkční `PaperCorporateActionService`. Kauzálně (`effective_at` i `known_at`)
+a exactly-once aplikuje split a cash dividend bez orderu, fillu nebo syntetického P&L. Symbol
+change zachovává canonical `instrument_id`; delisting otevřené pozice bez authoritative ceny
+suspenduje monitoring s důvodem `DELISTING_UNSUPPORTED` a nevytváří syntetickou likvidaci.
+Authoritative orchestration probíhá před performance valuation dokončené session.
+
+Expected-vs-realized evaluace používá uložené skutečné OOS returns v horizon-aware
+deterministickém block bootstrapu. WATCH, REVIEW_REQUIRED ani SUSPENDED nikdy nemění parametry,
+nevytvářejí experiment/deployment a neprovádějí ekonomickou nebo live operaci.
+
 ## Verdict
 
 Implementace je dokončena; auditní verdict závisí na locked quality a PostgreSQL CI gate.
