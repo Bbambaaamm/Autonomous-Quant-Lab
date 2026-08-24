@@ -27,6 +27,7 @@ from sqlalchemy.orm import Mapped, Session, mapped_column
 
 from quantlab.domain import SystemTradingState, require_utc
 from quantlab.market_data import CorporateActionKind, DatasetInvalid, XNYSCalendar
+from quantlab.market_data_service import _database_utc
 from quantlab.persistence import (
     Base,
     CorporateActionRecord,
@@ -264,6 +265,7 @@ class PaperCorporateActionService:
                     .where(
                         CorporateActionRecord.known_at <= cutoff,
                         CorporateActionRecord.effective_at <= cutoff,
+                        CorporateActionRecord.effective_at >= account.created_at,
                     )
                     .order_by(CorporateActionRecord.effective_at, CorporateActionRecord.action_id)
                 )
@@ -285,15 +287,62 @@ class PaperCorporateActionService:
                     )
                     .with_for_update()
                 )
-                quantity = position.quantity if position is not None else Decimal(0)
+                fill_rows = tuple(
+                    session.execute(
+                        select(PaperFillRecord.quantity, PaperOrderRecord.side)
+                        .join(PaperOrderRecord, PaperOrderRecord.id == PaperFillRecord.order_id)
+                        .where(
+                            PaperOrderRecord.account_id == account_id,
+                            PaperOrderRecord.instrument_id == action.instrument_id,
+                            PaperFillRecord.timestamp <= action.effective_at,
+                        )
+                    )
+                )
+                historical_quantity = sum(
+                    (quantity if side == "BUY" else -quantity for quantity, side in fill_rows),
+                    Decimal(0),
+                )
+                if (
+                    not fill_rows
+                    and position is not None
+                    and position.updated_at <= action.effective_at
+                ):
+                    historical_quantity = position.quantity
+                quantity = max(historical_quantity, Decimal(0))
                 kind = CorporateActionKind(action.kind)
                 effect: dict[str, object] = {"kind": kind, "eligible_quantity": quantity}
                 if kind is CorporateActionKind.SPLIT and position is not None:
                     ratio = Decimal(action.value or "0")
                     if ratio <= 0:
                         raise DatasetInvalid("Split ratio musí být kladné")
-                    position.quantity *= ratio
-                    position.average_cost /= ratio
+                    lots: object = json.loads(position.lots_json)
+                    if not isinstance(lots, list) or any(not isinstance(lot, dict) for lot in lots):
+                        raise DatasetInvalid("Paper position lots nejsou validní")
+                    adjusted_quantity = Decimal(0)
+                    for lot in cast(list[dict[str, object]], lots):
+                        lot_quantity = Decimal(str(lot["quantity"]))
+                        unit_basis = Decimal(str(lot["unit_basis"]))
+                        acquired_at = lot.get("acquired_at")
+                        eligible = acquired_at is None or require_utc(
+                            datetime.fromisoformat(str(acquired_at))
+                        ) <= _database_utc(action.effective_at)
+                        if eligible:
+                            lot_quantity *= ratio
+                            unit_basis /= ratio
+                            lot["quantity"] = str(lot_quantity)
+                            lot["unit_basis"] = str(unit_basis)
+                        adjusted_quantity += lot_quantity
+                    position.quantity = adjusted_quantity
+                    position.lots_json = canonical(lots)
+                    position.average_cost = (
+                        sum(
+                            Decimal(str(lot["quantity"])) * Decimal(str(lot["unit_basis"]))
+                            for lot in cast(list[dict[str, object]], lots)
+                        )
+                        / adjusted_quantity
+                        if adjusted_quantity
+                        else Decimal(0)
+                    )
                     position.updated_at = cutoff
                     effect.update({"ratio": ratio, "quantity_after": position.quantity})
                 elif kind is CorporateActionKind.CASH_DIVIDEND:
@@ -305,7 +354,11 @@ class PaperCorporateActionService:
                     account.equity += credit
                     account.updated_at = cutoff
                     effect.update({"per_share": dividend, "cash_credit": credit})
-                elif kind is CorporateActionKind.DELISTING and quantity:
+                elif (
+                    kind is CorporateActionKind.DELISTING
+                    and position is not None
+                    and position.quantity
+                ):
                     run = session.scalar(
                         select(PaperMonitoringRunRecord)
                         .where(

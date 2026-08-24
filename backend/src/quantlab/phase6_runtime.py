@@ -850,6 +850,13 @@ class Phase6PaperExecutionService:
                 or snapshot.timeframe != "1d"
             ):
                 raise DatasetInvalid("Approved deployment evidence se od schválení změnila")
+            from quantlab.phase7 import PaperCorporateActionService
+
+            PaperCorporateActionService(self._sessions).apply(account.id, decision_time)
+            session.expire_all()
+            monitoring = session.get(PaperMonitoringRunRecord, monitoring.monitoring_id)
+            if monitoring is None or monitoring.state != "ACTIVE":
+                raise DatasetInvalid("Corporate action zablokovala paper execution")
             definition = session.get(UniverseDefinitionRecord, deployment.universe_id)
             if definition is None or definition.kind != UniverseKind.POINT_IN_TIME_MEMBERSHIP:
                 raise DatasetInvalid("Paper execution vyžaduje podporovaný PIT universe")
