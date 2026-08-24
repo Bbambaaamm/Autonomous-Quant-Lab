@@ -92,11 +92,14 @@ def test_postgres_enrollment_race_is_service_level_exactly_once(factory) -> None
 
     assert rows[0].monitoring_id == rows[1].monitoring_id
     with factory() as session:
-        assert session.scalar(
-            select(func.count()).select_from(PaperMonitoringRunRecord).where(
-                PaperMonitoringRunRecord.monitoring_id == rows[0].monitoring_id
+        assert (
+            session.scalar(
+                select(func.count())
+                .select_from(PaperMonitoringRunRecord)
+                .where(PaperMonitoringRunRecord.monitoring_id == rows[0].monitoring_id)
             )
-        ) == 1
+            == 1
+        )
 
 
 def test_postgres_capture_and_evaluation_races_are_exactly_once(factory) -> None:
@@ -129,8 +132,7 @@ def test_postgres_capture_and_evaluation_races_are_exactly_once(factory) -> None
                 select(func.count())
                 .select_from(PaperPerformanceEvaluationRecord)
                 .where(
-                    PaperPerformanceEvaluationRecord.evaluation_id
-                    == evaluations[0].evaluation_id
+                    PaperPerformanceEvaluationRecord.evaluation_id == evaluations[0].evaluation_id
                 )
             )
             == 1
@@ -208,9 +210,7 @@ def test_postgres_split_and_dividend_races_credit_ledger_once(factory) -> None:
             session.scalar(
                 select(func.count())
                 .select_from(PaperCorporateActionApplicationRecord)
-                .where(
-                    PaperCorporateActionApplicationRecord.action_id.in_((split_id, dividend_id))
-                )
+                .where(PaperCorporateActionApplicationRecord.action_id.in_((split_id, dividend_id)))
             )
             == 2
         )

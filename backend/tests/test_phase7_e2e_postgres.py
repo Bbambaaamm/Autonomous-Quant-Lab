@@ -50,8 +50,8 @@ def factory():
 def _full_multi_session_flow(factory, prices: tuple[Decimal, ...]):
     """Naváže na production research→promotion→approval→enrollment→execution flow."""
     engine = factory.kw["bind"]
-    account_id, deployment, experiment, source_snapshot, _cycle, instrument, _ = (
-        _research_to_paper(factory, engine, halted=False)
+    account_id, deployment, experiment, source_snapshot, _cycle, instrument, _ = _research_to_paper(
+        factory, engine, halted=False
     )
     with factory() as session:
         initial_run = session.scalar(
@@ -94,19 +94,23 @@ def _full_multi_session_flow(factory, prices: tuple[Decimal, ...]):
     session_day = snapshots[-1].session_date
     for price in prices:
         session_day = CALENDAR.next_session(session_day)
-        observed_at = CALENDAR.session_close(session_day) + timedelta(minutes=1)
+        observed_at = CALENDAR.session_close(session_day)
+        decision_time = observed_at + timedelta(minutes=1)
         provider = MappingProvider(
             f"p7-{instrument.symbol}",
             {instrument.symbol: [daily_bar(session_day, price, f"phase7-{session_day}")]},
             {},
         )
-        assert PersistentMarketDataService(factory).ingest(
-            provider, instrument, session_day, session_day, observed_at
-        ).status == "SUCCEEDED"
-        execution.run(deployment.deployment_id, observed_at)
-        item = performance.capture(run.monitoring_id, observed_at)
+        assert (
+            PersistentMarketDataService(factory)
+            .ingest(provider, instrument, session_day, session_day, observed_at)
+            .status
+            == "SUCCEEDED"
+        )
+        execution.run(deployment.deployment_id, decision_time)
+        item = performance.capture(run.monitoring_id, decision_time)
         snapshots.append(item)
-        evaluations.append(evaluation.evaluate(run.monitoring_id, item.snapshot_id, observed_at))
+        evaluations.append(evaluation.evaluate(run.monitoring_id, item.snapshot_id, decision_time))
     return account_id, deployment, experiment, source_snapshot, run, snapshots, evaluations
 
 

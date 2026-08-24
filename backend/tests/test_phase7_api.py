@@ -82,6 +82,7 @@ def test_phase7_enrollment_and_invalid_transition_fail_closed(monkeypatch) -> No
     client = TestClient(api.app)
     response = client.post("/paper/deployments/unapproved/monitoring/enroll?policy_id=p")
     assert response.status_code == 409
-    assert client.post(
-        "/paper/monitoring/unknown/resume", json={"reason": "operator"}
-    ).status_code == 409
+    assert (
+        client.post("/paper/monitoring/unknown/resume", json={"reason": "operator"}).status_code
+        == 409
+    )
