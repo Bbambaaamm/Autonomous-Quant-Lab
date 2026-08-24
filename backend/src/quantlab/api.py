@@ -153,6 +153,8 @@ def monitoring_performance(
     monitoring_id: str, limit: int = Query(500, ge=1, le=1000), offset: int = Query(0, ge=0)
 ) -> list[dict[str, object]]:
     with Session(paper_repository.engine) as session:
+        if session.get(PaperMonitoringRunRecord, monitoring_id) is None:
+            raise HTTPException(404, "Monitoring neexistuje")
         return [
             _row(item)
             for item in session.scalars(
@@ -170,6 +172,8 @@ def monitoring_evaluations(
     monitoring_id: str, limit: int = Query(100, ge=1, le=500), offset: int = Query(0, ge=0)
 ) -> list[dict[str, object]]:
     with Session(paper_repository.engine) as session:
+        if session.get(PaperMonitoringRunRecord, monitoring_id) is None:
+            raise HTTPException(404, "Monitoring neexistuje")
         return [
             _row(item)
             for item in session.scalars(

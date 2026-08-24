@@ -521,7 +521,14 @@ class PaperMonitoringService:
     def enroll(self, deployment_id: str, policy_id: str, now: datetime) -> PaperMonitoringRunRecord:
         started = require_utc(now)
         with self.sessions() as session, session.begin():
-            deployment = session.get(StrategyDeploymentRecord, deployment_id)
+            # Serializace na deploymentu uzavírá okno mezi kontrolou open runu a insertem.
+            # PostgreSQL unique index zůstává poslední obranou, ale běžný souběh
+            # proto nepadá na konflikt při vytváření immutable baseline.
+            deployment = session.scalar(
+                select(StrategyDeploymentRecord)
+                .where(StrategyDeploymentRecord.deployment_id == deployment_id)
+                .with_for_update()
+            )
             policy = session.get(PaperMonitoringPolicyRecord, policy_id)
             if deployment is None or deployment.status != "APPROVED" or policy is None:
                 raise DatasetInvalid("Enrollment vyžaduje APPROVED deployment a validní policy")
@@ -719,12 +726,22 @@ class PaperMonitoringService:
             if target is MonitoringState.ACTIVE:
                 deployment = session.get(StrategyDeploymentRecord, run.deployment_id)
                 account = session.get(PaperAccountRecord, run.paper_account_id)
+                latest_evaluation = session.scalar(
+                    select(PaperPerformanceEvaluationRecord)
+                    .where(PaperPerformanceEvaluationRecord.monitoring_id == monitoring_id)
+                    .order_by(PaperPerformanceEvaluationRecord.created_at.desc())
+                    .limit(1)
+                )
                 if (
                     deployment is None
                     or deployment.status != "APPROVED"
                     or account is None
                     or account.trading_state == SystemTradingState.HALTED
                     or not account.reconciliation_safe
+                    or (
+                        latest_evaluation is not None
+                        and latest_evaluation.verdict == EvaluationVerdict.SUSPENDED
+                    )
                 ):
                     raise DatasetInvalid("Monitoring nelze bezpečně resume")
             run.state, run.state_reason, run.state_changed_at = target, reason, changed
