@@ -86,3 +86,18 @@ Produkční XNYS kalendář používá verzovaný auditovaný schedule včetně 
 
 ## Phase 6 finalizace
 Produkční schedule poskytuje `exchange-calendars` 4.13.2 / XNYS s identitou `XNYS:exchange-calendars:4.13.2`, nikoli vlastní holiday seznam. Phase 6 zachovává immutable revision/snapshot correction replay, PIT a corporate-action causality, exactly-once experimenty a OOS isolation. Promotion je pouze ruční; current feed není snapshot replay. Phase 4 zůstá jedinou paper-only ekonomickou cestou, `HALTED` failne uzavřeně a live broker není součástí plánu.
+
+### Phase 6 research → paper audit boundary
+
+Autoritativní workflow je `COMPLETED/RESEARCH_ONLY` experiment → explicitní
+`Phase6EligibilityService.promote()` → `PAPER_CANDIDATE` → explicitní
+`DeploymentService.create()` → `PENDING_REVIEW` → explicitní `approve()` → `APPROVED` →
+`ValidatedCurrentDataAccessor` → `Phase6PaperExecutionService` → existující Phase 4
+`TradingCycleService` / `ProductionRiskEngine` / `PersistentPaperBroker` → reconciliation.
+Promotion ani deployment nevznikají automaticky a opakovaná promotion je idempotentní.
+
+`PAPER_CANDIDATE` není automatický deployment a `APPROVED` neobchází risk engine ani stav
+`HALTED`. Research snapshot slouží pouze jako immutable lineage; current execution feed pochází z
+nejnovější dokončené XNYS session a přijímá jen nejnovější revizi z úspěšné ingestion. Runtime
+rekonstruuje pouze přesnou allowlisted strategii, verzi, parametry, PIT universe a USD/XNYS/1d
+scope. Live trading path nadále neexistuje.

@@ -18,3 +18,18 @@ Phase 6 nepřidává live broker, live order adapter, live credentials ani `LIVE
 
 ## Phase 6 safety invariants
 XNYS schedule pochází z `exchange-calendars` 4.13.2 / XNYS a lineage nese `XNYS:exchange-calendars:4.13.2`; není založen na vlastní holiday tabulce. Immutable snapshot, exactly-once experiment a OOS isolation nejsou autorizace k obchodování. Deployment ani approval nejsou automatické, current feed není research replay a `HALTED` nelze obejít. Systém je paper-only: bez live credentials, live brokeru a live order path; jediná ekonomická cesta je stávající Phase 4 risk/execution/broker/reconciliation cesta.
+
+### Phase 6 research → paper audit boundary
+
+Autoritativní workflow je `COMPLETED/RESEARCH_ONLY` experiment → explicitní
+`Phase6EligibilityService.promote()` → `PAPER_CANDIDATE` → explicitní
+`DeploymentService.create()` → `PENDING_REVIEW` → explicitní `approve()` → `APPROVED` →
+`ValidatedCurrentDataAccessor` → `Phase6PaperExecutionService` → existující Phase 4
+`TradingCycleService` / `ProductionRiskEngine` / `PersistentPaperBroker` → reconciliation.
+Promotion ani deployment nevznikají automaticky a opakovaná promotion je idempotentní.
+
+`PAPER_CANDIDATE` není automatický deployment a `APPROVED` neobchází risk engine ani stav
+`HALTED`. Research snapshot slouží pouze jako immutable lineage; current execution feed pochází z
+nejnovější dokončené XNYS session a přijímá jen nejnovější revizi z úspěšné ingestion. Runtime
+rekonstruuje pouze přesnou allowlisted strategii, verzi, parametry, PIT universe a USD/XNYS/1d
+scope. Live trading path nadále neexistuje.

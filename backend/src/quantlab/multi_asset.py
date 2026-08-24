@@ -84,6 +84,9 @@ class TrendStrategy(PortfolioStrategy):
     rebalance_frequency: RebalanceFrequency = RebalanceFrequency.MONTHLY
 
     def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "rebalance_frequency", RebalanceFrequency(self.rebalance_frequency)
+        )
         if not 0 < self.fast < self.slow:
             raise ValueError("Platí 0 < fast < slow")
 
@@ -113,6 +116,9 @@ class CrossSectionalMomentumStrategy(PortfolioStrategy):
     rebalance_frequency: RebalanceFrequency = RebalanceFrequency.MONTHLY
 
     def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "rebalance_frequency", RebalanceFrequency(self.rebalance_frequency)
+        )
         if self.lookback < 2 or self.top_n < 1 or self.top_n > 100:
             raise ValueError("Momentum parametry jsou mimo bezpečné meze")
 
@@ -145,6 +151,9 @@ class MeanReversionStrategy(PortfolioStrategy):
     rebalance_frequency: RebalanceFrequency = RebalanceFrequency.WEEKLY
 
     def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "rebalance_frequency", RebalanceFrequency(self.rebalance_frequency)
+        )
         if self.lookback < 2 or not Decimal("0.5") <= self.threshold < 1:
             raise ValueError("Mean-reversion parametry jsou mimo bezpečné meze")
 

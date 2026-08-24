@@ -38,3 +38,32 @@ def test_strategy_provider_and_deployment_modules_do_not_submit_orders() -> None
             and node.func.attr in {"submit", "fill"}
         ]
         assert calls == [], f"{module} nesmí obsahovat přímou broker/order cestu"
+
+
+def test_phase6_services_preserve_the_single_phase4_economic_boundary() -> None:
+    tree = ast.parse((SOURCE_ROOT / "phase6_runtime.py").read_text())
+    classes = {node.name: node for node in tree.body if isinstance(node, ast.ClassDef)}
+    for name in ("Phase6EligibilityService", "DeploymentService", "Phase6ExperimentRunner"):
+        calls = {
+            node.func.attr
+            for node in ast.walk(classes[name])
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+        }
+        assert calls.isdisjoint(
+            {"submit", "fill", "process", "run"}
+            if name != "Phase6ExperimentRunner"
+            else {"submit", "fill", "process"}
+        )
+    paper = classes["Phase6PaperExecutionService"]
+    referenced_names = {node.id for node in ast.walk(paper) if isinstance(node, ast.Name)} | {
+        node.attr for node in ast.walk(paper) if isinstance(node, ast.Attribute)
+    }
+    assert "PersistentPaperBroker" not in referenced_names
+    assert "PersistentExecutionEngine" not in referenced_names
+    assert "TradingCycleService" in referenced_names
+    calls = [
+        node
+        for node in ast.walk(paper)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+    ]
+    assert all(node.func.attr not in {"submit", "fill", "process"} for node in calls)

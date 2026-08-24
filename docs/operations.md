@@ -54,3 +54,18 @@ Operátor vytváří `PENDING_REVIEW` deployment a schválení fail-closed ově�
 
 ## Phase 6 provozní hranice
 Session freshness vyhodnocuje `XNYSCalendar` nad `exchange-calendars` 4.13.2 / XNYS (identita `XNYS:exchange-calendars:4.13.2`), nikoli fixed-hour TTL nebo ruční holiday tabulka. Concurrent ingestion, correction, snapshot a experiment se opírají o PostgreSQL idempotenci. Deployment/approval je vždy ruční a current feed je oddělen od immutable research replay. Paper ekonomika smí projít jen Phase 4 službami; `HALTED` účet failne uzavřeně a live broker není podporován.
+
+### Phase 6 research → paper audit boundary
+
+Autoritativní workflow je `COMPLETED/RESEARCH_ONLY` experiment → explicitní
+`Phase6EligibilityService.promote()` → `PAPER_CANDIDATE` → explicitní
+`DeploymentService.create()` → `PENDING_REVIEW` → explicitní `approve()` → `APPROVED` →
+`ValidatedCurrentDataAccessor` → `Phase6PaperExecutionService` → existující Phase 4
+`TradingCycleService` / `ProductionRiskEngine` / `PersistentPaperBroker` → reconciliation.
+Promotion ani deployment nevznikají automaticky a opakovaná promotion je idempotentní.
+
+`PAPER_CANDIDATE` není automatický deployment a `APPROVED` neobchází risk engine ani stav
+`HALTED`. Research snapshot slouží pouze jako immutable lineage; current execution feed pochází z
+nejnovější dokončené XNYS session a přijímá jen nejnovější revizi z úspěšné ingestion. Runtime
+rekonstruuje pouze přesnou allowlisted strategii, verzi, parametry, PIT universe a USD/XNYS/1d
+scope. Live trading path nadále neexistuje.
