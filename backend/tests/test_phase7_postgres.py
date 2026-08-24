@@ -9,6 +9,7 @@ from uuid import uuid4
 import pytest
 from sqlalchemy import func, select
 from sqlalchemy.orm import sessionmaker
+from test_phase6_e2e_postgres import CALENDAR, _research_to_paper
 
 from quantlab.market_data import CorporateActionKind
 from quantlab.persistence import CorporateActionRecord, MarketObservationRecord
@@ -25,7 +26,6 @@ from quantlab.phase7 import (
     PaperPerformanceService,
     PaperPerformanceSnapshotRecord,
 )
-from test_phase6_e2e_postgres import CALENDAR, _research_to_paper
 
 pytestmark = pytest.mark.skipif(
     os.getenv("RUN_POSTGRES_TESTS") != "1", reason="Vyžaduje PostgreSQL CI service"

@@ -5,10 +5,11 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
+from phase6_audit_helpers import MappingProvider, daily_bar
 from sqlalchemy import func, select
 from sqlalchemy.orm import sessionmaker
+from test_phase6_e2e_postgres import CALENDAR, _research_to_paper
 
-from phase6_audit_helpers import MappingProvider, daily_bar
 from quantlab.market_data_service import PersistentMarketDataService
 from quantlab.persistence import ExperimentRecord, MarketObservationRecord, StrategyDeploymentRecord
 from quantlab.phase4 import (
@@ -33,7 +34,6 @@ from quantlab.phase7 import (
     PaperPerformanceEvaluationService,
     PaperPerformanceService,
 )
-from test_phase6_e2e_postgres import CALENDAR, _research_to_paper
 
 pytestmark = pytest.mark.skipif(
     os.getenv("RUN_POSTGRES_TESTS") != "1", reason="Vyžaduje PostgreSQL CI service"
