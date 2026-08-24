@@ -64,8 +64,10 @@ def seed_phase6_snapshot(
     suffix = suffix or uuid4().hex
     sessions = list(CALENDAR.sessions_between(date(2026, 1, 2), date(2026, 1, 30)))[:15]
     closes = closes or [Decimal(100 + index) for index in range(len(sessions))]
+    # Phase 4 paper schema omezuje executable instrument identity na 40 znaků.
+    instrument_identity = f"i-{hashlib.sha256(suffix.encode()).hexdigest()[:38]}"
     instrument = Instrument(
-        f"instrument-{suffix}",
+        instrument_identity,
         f"S{suffix[:7]}",
         "XNYS",
         "XNYS",

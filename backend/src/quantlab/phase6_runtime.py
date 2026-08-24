@@ -271,15 +271,15 @@ class Phase6ExperimentRunner:
                     definition_row.universe_id,
                     definition_row.name,
                     UniverseKind(definition_row.kind),
-                    definition_row.created_at,
+                    _database_utc(definition_row.created_at),
                 ),
                 [
                     UniverseMembership(
                         row.universe_id,
                         row.instrument_id,
-                        row.valid_from,
-                        row.valid_to,
-                        row.known_at,
+                        _database_utc(row.valid_from),
+                        _database_utc(row.valid_to) if row.valid_to is not None else None,
+                        _database_utc(row.known_at),
                     )
                     for row in membership_rows
                 ],
@@ -772,6 +772,8 @@ class Phase6PaperExecutionService:
                 )
             }
             execution_instruments = tuple(sorted(set(eligible) | held))
+            if any(len(instrument_id) > 40 for instrument_id in execution_instruments):
+                raise DatasetInvalid("Paper execution instrument ID překračuje Phase 4 limit")
             instruments = {
                 item.instrument_id: item
                 for item in session.scalars(
@@ -835,8 +837,8 @@ class Phase6PaperExecutionService:
                 item.action_id,
                 item.instrument_id,
                 CorporateActionKind(item.kind),
-                item.effective_at,
-                item.known_at,
+                _database_utc(item.effective_at),
+                _database_utc(item.known_at),
                 Decimal(item.value) if item.value is not None else None,
                 item.new_symbol,
             )
