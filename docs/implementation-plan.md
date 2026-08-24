@@ -101,3 +101,10 @@ Promotion ani deployment nevznikají automaticky a opakovaná promotion je idemp
 nejnovější dokončené XNYS session a přijímá jen nejnovější revizi z úspěšné ingestion. Runtime
 rekonstruuje pouze přesnou allowlisted strategii, verzi, parametry, PIT universe a USD/XNYS/1d
 scope. Live trading path nadále neexistuje.
+## Phase 7 — Paper Performance Monitoring and Strategy Lifecycle
+
+**IMPLEMENTED — audit gate pending.** Schválený paper deployment nyní vyžaduje explicitní
+monitoring enrollment a stav `ACTIVE`. Vrstva ukládá neměnnou policy, OOS baseline lineage,
+denní XNYS valuation snapshots a verzované drift evaluations. Lifecycle je `ACTIVE`, `PAUSED`,
+`SUSPENDED`, `RETIRED`; automatický návrat, retuning, nový experiment, deployment a live cesta
+neexistují. Autoritativní detail je v `docs/codex/phase7-complete.md`.

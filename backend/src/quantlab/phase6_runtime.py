@@ -714,9 +714,21 @@ class Phase6PaperExecutionService:
     def run(self, deployment_id: str, now: datetime) -> str:
         decision_time = require_utc(now)
         with self._sessions() as session:
+            # Phase 7 je samostatná observation/control brána. Import je lokální, aby
+            # monitoring mohl znovu použít validační Phase 6 služby bez importního cyklu.
+            from quantlab.phase7 import OPEN_STATES, PaperMonitoringRunRecord
+
             deployment = session.get(StrategyDeploymentRecord, deployment_id)
             if deployment is None or deployment.status != "APPROVED":
                 raise DatasetInvalid("Paper execution vyžaduje APPROVED deployment")
+            monitoring = session.scalar(
+                select(PaperMonitoringRunRecord).where(
+                    PaperMonitoringRunRecord.deployment_id == deployment_id,
+                    PaperMonitoringRunRecord.state.in_(OPEN_STATES),
+                )
+            )
+            if monitoring is None or monitoring.state != "ACTIVE":
+                raise DatasetInvalid("Paper execution vyžaduje právě jeden ACTIVE monitoring run")
             experiment = session.get(ExperimentRecord, deployment.experiment_id)
             if experiment is None:
                 raise DatasetInvalid("Deployment experiment neexistuje")
@@ -907,6 +919,29 @@ class Phase6PaperExecutionService:
             latest[0].session_date,
             execution_time,
         )
+        from quantlab.phase7 import PaperDeploymentCycleRecord
+
+        with self._sessions() as session, session.begin():
+            if (
+                session.scalar(
+                    select(PaperDeploymentCycleRecord).where(
+                        PaperDeploymentCycleRecord.trading_cycle_id == cycle_id
+                    )
+                )
+                is None
+            ):
+                session.add(
+                    PaperDeploymentCycleRecord(
+                        lineage_id=hashlib.sha256(
+                            f"{monitoring.monitoring_id}:{cycle_id}".encode()
+                        ).hexdigest(),
+                        monitoring_id=monitoring.monitoring_id,
+                        deployment_id=deployment.deployment_id,
+                        trading_cycle_id=cycle_id,
+                        session_date=latest[0].session_date,
+                        linked_at=decision_time,
+                    )
+                )
         with Session(self.trading_cycle.repository.engine) as session, session.begin():
             self.trading_cycle.repository.audit(
                 session,

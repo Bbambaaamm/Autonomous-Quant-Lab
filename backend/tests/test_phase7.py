@@ -1,0 +1,32 @@
+from decimal import Decimal
+
+import pytest
+
+from quantlab.phase7 import DEFAULT_POLICY, deterministic_block_bootstrap, validate_policy
+
+
+def test_default_policy_is_fail_closed_and_valid() -> None:
+    validate_policy(DEFAULT_POLICY.copy())
+    unsafe = DEFAULT_POLICY | {"hard_suspend_on_halted": False}
+    with pytest.raises(ValueError, match="nelze vypnout"):
+        validate_policy(unsafe)
+
+
+def test_policy_rejects_hidden_and_malformed_values() -> None:
+    with pytest.raises(ValueError, match="allowlisted"):
+        validate_policy(DEFAULT_POLICY | {"broker": "live"})
+    with pytest.raises(ValueError, match="integer"):
+        validate_policy(DEFAULT_POLICY | {"minimum_sessions": True})
+
+
+def test_block_bootstrap_is_deterministic_and_horizon_aware() -> None:
+    returns = [Decimal("0.01"), Decimal("-0.02"), Decimal("0.03")]
+    first = deterministic_block_bootstrap(returns, 7, 200, 2, "monitor:policy:7:v1")
+    second = deterministic_block_bootstrap(returns, 7, 200, 2, "monitor:policy:7:v1")
+    assert first == second
+    assert len(first) == 200
+    assert first == sorted(first)
+
+
+def test_no_synthetic_bootstrap_without_baseline_series() -> None:
+    assert deterministic_block_bootstrap([], 20, 100, 5, "seed") == []
