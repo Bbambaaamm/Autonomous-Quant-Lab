@@ -811,7 +811,11 @@ class PersistentPaperBroker:
             realized = Decimal(0)
             if side is Side.BUY:
                 lots.append(
-                    {"quantity": str(quantity), "unit_basis": str(price + commission / quantity)}
+                    {
+                        "quantity": str(quantity),
+                        "unit_basis": str(price + commission / quantity),
+                        "acquired_at": bar.timestamp.isoformat(),
+                    }
                 )
                 position.quantity += quantity
             else:

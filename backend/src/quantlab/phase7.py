@@ -26,9 +26,11 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Mapped, Session, mapped_column
 
 from quantlab.domain import SystemTradingState, require_utc
-from quantlab.market_data import DatasetInvalid, XNYSCalendar
+from quantlab.market_data import CorporateActionKind, DatasetInvalid, XNYSCalendar
+from quantlab.market_data_service import _database_utc
 from quantlab.persistence import (
     Base,
+    CorporateActionRecord,
     ExperimentRecord,
     StrategyDeploymentRecord,
 )
@@ -41,7 +43,12 @@ from quantlab.phase4 import (
     RiskDecisionRecord,
     TradingCycleRecord,
 )
-from quantlab.phase6_runtime import DeploymentService, ValidatedCurrentDataAccessor
+from quantlab.phase6_runtime import (
+    DeploymentService,
+    Phase6ExperimentReplayService,
+    Phase6ExperimentRequest,
+    ValidatedCurrentDataAccessor,
+)
 
 ALGORITHM_VERSION = "paper-monitoring-v1"
 OPEN_STATES = ("ACTIVE", "PAUSED", "SUSPENDED")
@@ -94,6 +101,7 @@ class PaperExpectationBaselineRecord(Base):
     cost_model_json: Mapped[str] = mapped_column(Text, nullable=False)
     oos_metrics_json: Mapped[str] = mapped_column(Text, nullable=False)
     oos_returns_json: Mapped[str] = mapped_column(Text, nullable=False)
+    oos_equity_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
     oos_session_count: Mapped[int] = mapped_column(Integer, nullable=False)
     algorithm_version: Mapped[str] = mapped_column(String(40), nullable=False)
     content_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
@@ -232,6 +240,160 @@ class PaperCorporateActionApplicationRecord(Base):
     __table_args__ = (UniqueConstraint("account_id", "action_id"),)
 
 
+class PaperCorporateActionService:
+    """Aplikuje kauzální corporate actions přímo na paper ledger, bez order/fill cesty."""
+
+    def __init__(self, sessions: Callable[[], Session]) -> None:
+        self.sessions = sessions
+
+    def apply(
+        self, account_id: str, as_of: datetime
+    ) -> tuple[PaperCorporateActionApplicationRecord, ...]:
+        cutoff = require_utc(as_of)
+        applied: list[PaperCorporateActionApplicationRecord] = []
+        with self.sessions() as session, session.begin():
+            account = session.scalar(
+                select(PaperAccountRecord)
+                .where(PaperAccountRecord.id == account_id)
+                .with_for_update()
+            )
+            if account is None:
+                raise DatasetInvalid("Paper účet neexistuje")
+            actions = tuple(
+                session.scalars(
+                    select(CorporateActionRecord)
+                    .where(
+                        CorporateActionRecord.known_at <= cutoff,
+                        CorporateActionRecord.effective_at <= cutoff,
+                        CorporateActionRecord.effective_at >= account.created_at,
+                    )
+                    .order_by(CorporateActionRecord.effective_at, CorporateActionRecord.action_id)
+                )
+            )
+            for action in actions:
+                existing = session.scalar(
+                    select(PaperCorporateActionApplicationRecord).where(
+                        PaperCorporateActionApplicationRecord.account_id == account_id,
+                        PaperCorporateActionApplicationRecord.action_id == action.action_id,
+                    )
+                )
+                if existing is not None:
+                    continue
+                position = session.scalar(
+                    select(PositionRecord)
+                    .where(
+                        PositionRecord.account_id == account_id,
+                        PositionRecord.instrument_id == action.instrument_id,
+                    )
+                    .with_for_update()
+                )
+                fill_rows = tuple(
+                    session.execute(
+                        select(PaperFillRecord.quantity, PaperOrderRecord.side)
+                        .join(PaperOrderRecord, PaperOrderRecord.id == PaperFillRecord.order_id)
+                        .where(
+                            PaperOrderRecord.account_id == account_id,
+                            PaperOrderRecord.instrument_id == action.instrument_id,
+                            PaperFillRecord.timestamp <= action.effective_at,
+                        )
+                    )
+                )
+                historical_quantity = sum(
+                    (quantity if side == "BUY" else -quantity for quantity, side in fill_rows),
+                    Decimal(0),
+                )
+                if (
+                    not fill_rows
+                    and position is not None
+                    and position.updated_at <= action.effective_at
+                ):
+                    historical_quantity = position.quantity
+                quantity = max(historical_quantity, Decimal(0))
+                kind = CorporateActionKind(action.kind)
+                effect: dict[str, object] = {"kind": kind, "eligible_quantity": quantity}
+                if kind is CorporateActionKind.SPLIT and position is not None:
+                    ratio = Decimal(action.value or "0")
+                    if ratio <= 0:
+                        raise DatasetInvalid("Split ratio musí být kladné")
+                    lots: object = json.loads(position.lots_json)
+                    if not isinstance(lots, list) or any(not isinstance(lot, dict) for lot in lots):
+                        raise DatasetInvalid("Paper position lots nejsou validní")
+                    adjusted_quantity = Decimal(0)
+                    for lot in cast(list[dict[str, object]], lots):
+                        lot_quantity = Decimal(str(lot["quantity"]))
+                        unit_basis = Decimal(str(lot["unit_basis"]))
+                        acquired_at = lot.get("acquired_at")
+                        eligible = acquired_at is None or require_utc(
+                            datetime.fromisoformat(str(acquired_at))
+                        ) <= _database_utc(action.effective_at)
+                        if eligible:
+                            lot_quantity *= ratio
+                            unit_basis /= ratio
+                            lot["quantity"] = str(lot_quantity)
+                            lot["unit_basis"] = str(unit_basis)
+                        adjusted_quantity += lot_quantity
+                    position.quantity = adjusted_quantity
+                    position.lots_json = canonical(lots)
+                    position.average_cost = (
+                        sum(
+                            Decimal(str(lot["quantity"])) * Decimal(str(lot["unit_basis"]))
+                            for lot in cast(list[dict[str, object]], lots)
+                        )
+                        / adjusted_quantity
+                        if adjusted_quantity
+                        else Decimal(0)
+                    )
+                    position.updated_at = cutoff
+                    effect.update({"ratio": ratio, "quantity_after": position.quantity})
+                elif kind is CorporateActionKind.CASH_DIVIDEND:
+                    dividend = Decimal(action.value or "0")
+                    if dividend <= 0:
+                        raise DatasetInvalid("Dividend amount musí být kladný")
+                    credit = quantity * dividend
+                    account.cash += credit
+                    account.equity += credit
+                    account.updated_at = cutoff
+                    effect.update({"per_share": dividend, "cash_credit": credit})
+                elif (
+                    kind is CorporateActionKind.DELISTING
+                    and position is not None
+                    and position.quantity
+                ):
+                    run = session.scalar(
+                        select(PaperMonitoringRunRecord)
+                        .where(
+                            PaperMonitoringRunRecord.paper_account_id == account_id,
+                            PaperMonitoringRunRecord.state.in_(OPEN_STATES),
+                        )
+                        .with_for_update()
+                    )
+                    if run is not None:
+                        run.state = MonitoringState.SUSPENDED
+                        run.state_reason = "DELISTING_UNSUPPORTED"
+                        run.state_changed_at = cutoff
+                    effect["resolution"] = "SUSPENDED_NO_SYNTHETIC_FILL"
+                elif kind is CorporateActionKind.SYMBOL_CHANGE:
+                    effect.update(
+                        {"canonical_instrument_unchanged": True, "new_symbol": action.new_symbol}
+                    )
+                row = PaperCorporateActionApplicationRecord(
+                    application_id=identity(
+                        {"account_id": account_id, "action_id": action.action_id}
+                    ),
+                    action_id=action.action_id,
+                    account_id=account_id,
+                    instrument_id=action.instrument_id,
+                    applied_at=cutoff,
+                    effect_json=canonical(effect),
+                )
+                session.add(row)
+                session.flush()
+                applied.append(row)
+            for row in applied:
+                session.expunge(row)
+        return tuple(applied)
+
+
 def canonical(value: object) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
 
@@ -368,12 +530,45 @@ class PaperMonitoringService:
                     "sharpe",
                     "max_drawdown",
                     "turnover",
+                    "time_weighted_exposure",
                     "trade_count",
                     "total_costs",
                 )
             }
-            # Phase 6 v1 ukládá agregovanou OOS evidenci. Prázdná série je explicitní NOT_AVAILABLE,
-            # nikoli syntetická řada odvozená z agregátů.
+            if (
+                experiment.snapshot_id is None
+                or experiment.strategy_name is None
+                or experiment.strategy_version is None
+            ):
+                raise DatasetInvalid("Experiment nemá úplnou Phase 6 replay lineage")
+            config = json.loads(experiment.config_json)
+            replay = Phase6ExperimentReplayService(self.sessions).replay(
+                Phase6ExperimentRequest(
+                    snapshot_id=experiment.snapshot_id,
+                    strategy_name=experiment.strategy_name,
+                    strategy_version=experiment.strategy_version,
+                    parameter_configs=tuple(config["parameters"]),
+                    train_fraction=Decimal(str(config["train_fraction"])),
+                    validation_fraction=Decimal(str(config["validation_fraction"])),
+                    initial_cash=Decimal(str(config["initial_cash"])),
+                    commission_bps=Decimal(str(config["commission_bps"])),
+                    seed=int(config["seed"]),
+                    code_sha=experiment.code_sha,
+                )
+            )
+            if canonical(replay.selected_parameters) != canonical(selected):
+                raise DatasetInvalid("Phase 6 replay vybral jiné parametry")
+            for key, persisted in metrics.items():
+                replayed = getattr(replay.oos, key)
+                if abs(Decimal(str(persisted)) - Decimal(str(replayed))) > Decimal("1e-10"):
+                    raise DatasetInvalid(f"Phase 6 replay metric mismatch: {key}")
+            if not replay.oos_returns:
+                raise DatasetInvalid("Validní Phase 6 replay nemá denní OOS returns")
+            returns = list(replay.oos_returns)
+            equity = [
+                {"timestamp": when.isoformat(), "equity": str(value)}
+                for when, value in replay.oos_equity
+            ]
             baseline_payload = {
                 "deployment_id": deployment_id,
                 "experiment_id": experiment.id,
@@ -384,8 +579,9 @@ class PaperMonitoringService:
                 "code_sha": experiment.code_sha,
                 "cost_model": json.loads(experiment.cost_model_json or "{}"),
                 "metrics": metrics,
-                "returns": [],
-                "algorithm_version": "phase6-oos-evidence-v1",
+                "returns": returns,
+                "equity": equity,
+                "algorithm_version": "phase6-oos-replay-v2",
             }
             baseline_hash = identity(baseline_payload)
             baseline = session.scalar(
@@ -406,9 +602,10 @@ class PaperMonitoringService:
                     code_sha=experiment.code_sha or "",
                     cost_model_json=experiment.cost_model_json or "{}",
                     oos_metrics_json=canonical(metrics),
-                    oos_returns_json="[]",
-                    oos_session_count=0,
-                    algorithm_version="phase6-oos-evidence-v1",
+                    oos_returns_json=canonical(returns),
+                    oos_equity_json=canonical(equity),
+                    oos_session_count=len(replay.oos_sessions),
+                    algorithm_version="phase6-oos-replay-v2",
                     content_hash=baseline_hash,
                     created_at=started,
                 )
@@ -547,6 +744,14 @@ class PaperPerformanceService:
     def capture(self, monitoring_id: str, as_of: datetime) -> PaperPerformanceSnapshotRecord:
         captured = require_utc(as_of)
         session_date = self.calendar.latest_completed_session(captured)
+        with self.sessions() as lookup:
+            account_id = lookup.scalar(
+                select(PaperMonitoringRunRecord.paper_account_id).where(
+                    PaperMonitoringRunRecord.monitoring_id == monitoring_id
+                )
+            )
+        if account_id is not None:
+            PaperCorporateActionService(self.sessions).apply(account_id, captured)
         with self.sessions() as session, session.begin():
             run = session.get(PaperMonitoringRunRecord, monitoring_id)
             if run is None or run.state == MonitoringState.RETIRED:
