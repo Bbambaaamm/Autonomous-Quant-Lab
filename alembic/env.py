@@ -7,6 +7,7 @@ from sqlalchemy import engine_from_config, pool
 
 import quantlab.automation  # noqa: F401, E402
 import quantlab.phase4  # noqa: F401, E402
+import quantlab.phase7  # noqa: F401, E402
 from quantlab.persistence import Base
 
 config = context.config

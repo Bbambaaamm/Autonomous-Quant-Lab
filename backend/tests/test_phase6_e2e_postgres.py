@@ -51,6 +51,7 @@ from quantlab.phase6_runtime import (
     Phase6PaperExecutionService,
     ValidatedCurrentDataAccessor,
 )
+from quantlab.phase7 import DEFAULT_POLICY, MonitoringState, PaperMonitoringService
 
 pytestmark = pytest.mark.skipif(
     os.getenv("RUN_POSTGRES_TESTS") != "1", reason="vyžaduje PostgreSQL CI"
@@ -411,6 +412,14 @@ def _research_to_paper(factory, engine, *, halted: bool):
     deployment = deployment_service.create(experiment.id, account_id)
     assert deployment.status == "PENDING_REVIEW"
     deployment_service.approve(deployment.deployment_id, datetime.now(UTC))
+    monitoring_service = PaperMonitoringService(factory)
+    policy = monitoring_service.create_policy(
+        f"phase6-e2e-{suffix}", DEFAULT_POLICY.copy(), datetime.now(UTC)
+    )
+    monitoring = monitoring_service.enroll(
+        deployment.deployment_id, policy.policy_id, datetime.now(UTC)
+    )
+    assert monitoring.state == MonitoringState.ACTIVE
     next_session = CALENDAR.next_session(sessions[-1])
     current_provider = MappingProvider(
         provider.name,

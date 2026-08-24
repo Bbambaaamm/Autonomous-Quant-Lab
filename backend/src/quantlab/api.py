@@ -45,6 +45,14 @@ from quantlab.phase4 import (
     TradingCycleRecord,
     TradingCycleService,
 )
+from quantlab.phase7 import (
+    DEFAULT_POLICY,
+    MonitoringState,
+    PaperMonitoringRunRecord,
+    PaperMonitoringService,
+    PaperPerformanceEvaluationRecord,
+    PaperPerformanceSnapshotRecord,
+)
 from quantlab.research_service import ResearchService
 
 app = FastAPI(title="Autonomous Quant Lab", version="0.1.0")
@@ -61,6 +69,7 @@ reconciliation_service = ReconciliationService(paper_repository)
 automation_repository = AutomationRepository(settings.database_url)
 automation_scheduler = SchedulerService(automation_repository)
 automation_worker = WorkerService(automation_repository, settings)
+monitoring_service = PaperMonitoringService(lambda: Session(paper_repository.engine))
 
 
 class JobCreate(BaseModel):
@@ -83,8 +92,172 @@ class JobPatch(BaseModel):
     next_run_at: datetime | None = None
 
 
+class MonitoringPolicyCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=100)
+    config: dict[str, object] = DEFAULT_POLICY.copy()
+
+
+class MonitoringTransition(BaseModel):
+    reason: str = Field(min_length=1, max_length=1000)
+
+
 def _row(row: object) -> dict[str, object]:
     return {key: value for key, value in vars(row).items() if not key.startswith("_")}
+
+
+@app.post("/paper/monitoring/policies")
+def create_monitoring_policy(request: MonitoringPolicyCreate) -> dict[str, object]:
+    try:
+        return _row(
+            monitoring_service.create_policy(request.name, request.config, datetime.now(UTC))
+        )
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@app.post("/paper/deployments/{deployment_id}/monitoring/enroll")
+def enroll_monitoring(deployment_id: str, policy_id: str) -> dict[str, object]:
+    try:
+        return _row(monitoring_service.enroll(deployment_id, policy_id, datetime.now(UTC)))
+    except (ValueError, RuntimeError) as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@app.get("/paper/monitoring")
+def monitoring_runs(
+    limit: int = Query(50, ge=1, le=500), offset: int = Query(0, ge=0)
+) -> list[dict[str, object]]:
+    with Session(paper_repository.engine) as session:
+        return [
+            _row(item)
+            for item in session.scalars(
+                select(PaperMonitoringRunRecord)
+                .order_by(PaperMonitoringRunRecord.created_at.desc())
+                .limit(limit)
+                .offset(offset)
+            )
+        ]
+
+
+@app.get("/paper/monitoring/{monitoring_id}")
+def monitoring_run(monitoring_id: str) -> dict[str, object]:
+    with Session(paper_repository.engine) as session:
+        row = session.get(PaperMonitoringRunRecord, monitoring_id)
+        if row is None:
+            raise HTTPException(404, "Monitoring neexistuje")
+        return _row(row)
+
+
+@app.get("/paper/monitoring/{monitoring_id}/performance")
+def monitoring_performance(
+    monitoring_id: str, limit: int = Query(500, ge=1, le=1000), offset: int = Query(0, ge=0)
+) -> list[dict[str, object]]:
+    with Session(paper_repository.engine) as session:
+        return [
+            _row(item)
+            for item in session.scalars(
+                select(PaperPerformanceSnapshotRecord)
+                .where(PaperPerformanceSnapshotRecord.monitoring_id == monitoring_id)
+                .order_by(PaperPerformanceSnapshotRecord.session_date)
+                .limit(limit)
+                .offset(offset)
+            )
+        ]
+
+
+@app.get("/paper/monitoring/{monitoring_id}/evaluations")
+def monitoring_evaluations(
+    monitoring_id: str, limit: int = Query(100, ge=1, le=500), offset: int = Query(0, ge=0)
+) -> list[dict[str, object]]:
+    with Session(paper_repository.engine) as session:
+        return [
+            _row(item)
+            for item in session.scalars(
+                select(PaperPerformanceEvaluationRecord)
+                .where(PaperPerformanceEvaluationRecord.monitoring_id == monitoring_id)
+                .order_by(PaperPerformanceEvaluationRecord.created_at)
+                .limit(limit)
+                .offset(offset)
+            )
+        ]
+
+
+def _transition_monitoring(
+    monitoring_id: str, target: MonitoringState, request: MonitoringTransition
+) -> dict[str, object]:
+    try:
+        return _row(
+            monitoring_service.transition(monitoring_id, target, request.reason, datetime.now(UTC))
+        )
+    except (ValueError, RuntimeError) as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@app.post("/paper/monitoring/{monitoring_id}/pause")
+def pause_monitoring(monitoring_id: str, request: MonitoringTransition) -> dict[str, object]:
+    return _transition_monitoring(monitoring_id, MonitoringState.PAUSED, request)
+
+
+@app.post("/paper/monitoring/{monitoring_id}/resume")
+def resume_monitoring(monitoring_id: str, request: MonitoringTransition) -> dict[str, object]:
+    return _transition_monitoring(monitoring_id, MonitoringState.ACTIVE, request)
+
+
+@app.post("/paper/monitoring/{monitoring_id}/retire")
+def retire_monitoring(monitoring_id: str, request: MonitoringTransition) -> dict[str, object]:
+    return _transition_monitoring(monitoring_id, MonitoringState.RETIRED, request)
+
+
+@app.get("/paper/deployments/{deployment_id}/performance")
+def deployment_performance(
+    deployment_id: str, limit: int = Query(500, ge=1, le=1000)
+) -> list[dict[str, object]]:
+    with Session(paper_repository.engine) as session:
+        return [
+            _row(item)
+            for item in session.scalars(
+                select(PaperPerformanceSnapshotRecord)
+                .where(PaperPerformanceSnapshotRecord.deployment_id == deployment_id)
+                .order_by(PaperPerformanceSnapshotRecord.session_date)
+                .limit(limit)
+            )
+        ]
+
+
+@app.get("/paper/performance/summary")
+def performance_summary() -> list[dict[str, object]]:
+    with Session(paper_repository.engine) as session:
+        runs = tuple(
+            session.scalars(
+                select(PaperMonitoringRunRecord).order_by(PaperMonitoringRunRecord.created_at)
+            )
+        )
+        result = []
+        for run in runs:
+            latest = session.scalar(
+                select(PaperPerformanceSnapshotRecord)
+                .where(PaperPerformanceSnapshotRecord.monitoring_id == run.monitoring_id)
+                .order_by(PaperPerformanceSnapshotRecord.session_date.desc())
+                .limit(1)
+            )
+            evaluation = session.scalar(
+                select(PaperPerformanceEvaluationRecord)
+                .where(PaperPerformanceEvaluationRecord.monitoring_id == run.monitoring_id)
+                .order_by(PaperPerformanceEvaluationRecord.created_at.desc())
+                .limit(1)
+            )
+            result.append(
+                {
+                    "monitoring_id": run.monitoring_id,
+                    "deployment_id": run.deployment_id,
+                    "state": run.state,
+                    "starting_equity": run.starting_equity,
+                    "current_equity": latest.marked_equity if latest else None,
+                    "cumulative_return": latest.cumulative_return if latest else None,
+                    "latest_verdict": evaluation.verdict if evaluation else None,
+                }
+            )
+        return result
 
 
 @app.get("/health")

@@ -45,6 +45,7 @@ from quantlab.phase4 import ReconciliationService, TradingCycleRecord, TradingCy
 class JobType(StrEnum):
     RUN_PAPER_CYCLE = "RUN_PAPER_CYCLE"
     RUN_RECONCILIATION = "RUN_RECONCILIATION"
+    MONITOR_PAPER_DEPLOYMENT = "MONITOR_PAPER_DEPLOYMENT"
 
 
 class ScheduleType(StrEnum):
@@ -263,6 +264,8 @@ class AutomationRepository:
         ZoneInfo(timezone)
         if job_type == JobType.RUN_PAPER_CYCLE and not strategy_id:
             raise ValueError("Paper cycle vyžaduje strategy_id")
+        if job_type == JobType.MONITOR_PAPER_DEPLOYMENT and set(config) != {"monitoring_id"}:
+            raise ValueError("Monitoring job přijímá pouze monitoring_id")
         if schedule_type == ScheduleType.INTERVAL and (
             interval_seconds is None or interval_seconds <= 0
         ):
@@ -456,6 +459,32 @@ class JobExecutor:
         ):
             raise PermanentJobError("JobRun obsahuje neplatnou execution identitu")
         validate_payload(payload)
+        if job_type == JobType.MONITOR_PAPER_DEPLOYMENT:
+            monitoring_id = payload.get("monitoring_id")
+            if not isinstance(monitoring_id, str) or not monitoring_id:
+                raise PermanentJobError("Monitoring job nemá platné monitoring_id")
+            from quantlab.phase6_runtime import ValidatedCurrentDataAccessor
+            from quantlab.phase7 import (
+                PaperPerformanceEvaluationService,
+                PaperPerformanceService,
+            )
+
+            def sessions() -> Session:
+                return Session(self.trading.repository.engine)
+
+            performance = PaperPerformanceService(sessions, ValidatedCurrentDataAccessor(sessions))
+            # Ledger účtu není historicky rekonstruovatelný. Opožděný job proto musí
+            # ocenit skutečný stav v čase execution, nikdy jej backdatovat na occurrence.
+            execution_time = datetime.now(UTC)
+            snapshot = performance.capture(monitoring_id, execution_time)
+            evaluation = PaperPerformanceEvaluationService(sessions).evaluate(
+                monitoring_id, snapshot.snapshot_id, execution_time
+            )
+            return {
+                "trading_cycle_id": None,
+                "reconciliation_id": None,
+                "outcome": evaluation.verdict,
+            }
         connection = self.trading.repository.engine.connect()
         advisory_lock_acquired = False
         try:

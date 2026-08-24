@@ -711,12 +711,61 @@ class Phase6PaperExecutionService:
         self.current_data = current_data
         self.trading_cycle = trading_cycle
 
+    def _ensure_cycle_lineage(
+        self,
+        monitoring_id: str,
+        deployment_id: str,
+        cycle_id: str,
+        session_date: date,
+        linked_at: datetime,
+    ) -> None:
+        from quantlab.phase7 import PaperDeploymentCycleRecord
+
+        lineage_id = hashlib.sha256(f"{monitoring_id}:{cycle_id}".encode()).hexdigest()
+        with self._sessions() as session, session.begin():
+            _lock(session, f"phase7-cycle-lineage:{cycle_id}")
+            by_cycle = session.scalar(
+                select(PaperDeploymentCycleRecord).where(
+                    PaperDeploymentCycleRecord.trading_cycle_id == cycle_id
+                )
+            )
+            if by_cycle is not None:
+                if (
+                    by_cycle.monitoring_id != monitoring_id
+                    or by_cycle.deployment_id != deployment_id
+                    or by_cycle.session_date != session_date
+                ):
+                    raise DatasetInvalid("Trading cycle má konfliktní monitoring lineage")
+                return
+            session.merge(
+                PaperDeploymentCycleRecord(
+                    lineage_id=lineage_id,
+                    monitoring_id=monitoring_id,
+                    deployment_id=deployment_id,
+                    trading_cycle_id=cycle_id,
+                    session_date=session_date,
+                    linked_at=linked_at,
+                )
+            )
+
     def run(self, deployment_id: str, now: datetime) -> str:
         decision_time = require_utc(now)
         with self._sessions() as session:
+            # Phase 7 je samostatná observation/control brána. Import je lokální, aby
+            # monitoring mohl znovu použít validační Phase 6 služby bez importního cyklu.
+            from quantlab.phase7 import OPEN_STATES, PaperMonitoringRunRecord
+
             deployment = session.get(StrategyDeploymentRecord, deployment_id)
             if deployment is None or deployment.status != "APPROVED":
                 raise DatasetInvalid("Paper execution vyžaduje APPROVED deployment")
+            monitoring = session.scalar(
+                select(PaperMonitoringRunRecord).where(
+                    PaperMonitoringRunRecord.deployment_id == deployment_id,
+                    PaperMonitoringRunRecord.state.in_(OPEN_STATES),
+                )
+            )
+            if monitoring is None or monitoring.state != "ACTIVE":
+                raise DatasetInvalid("Paper execution vyžaduje právě jeden ACTIVE monitoring run")
             experiment = session.get(ExperimentRecord, deployment.experiment_id)
             if experiment is None:
                 raise DatasetInvalid("Deployment experiment neexistuje")
@@ -868,6 +917,13 @@ class Phase6PaperExecutionService:
                 .limit(1)
             )
         if previous_cycle is not None and previous_cycle.session_date == executable_session:
+            self._ensure_cycle_lineage(
+                monitoring.monitoring_id,
+                deployment.deployment_id,
+                previous_cycle.id,
+                previous_cycle.session_date,
+                decision_time,
+            )
             return previous_cycle.id
         if previous_cycle is not None and not self._rebalance_due(
             executable_session,
@@ -906,6 +962,13 @@ class Phase6PaperExecutionService:
             target_weights,
             latest[0].session_date,
             execution_time,
+        )
+        self._ensure_cycle_lineage(
+            monitoring.monitoring_id,
+            deployment.deployment_id,
+            cycle_id,
+            latest[0].session_date,
+            decision_time,
         )
         with Session(self.trading_cycle.repository.engine) as session, session.begin():
             self.trading_cycle.repository.audit(

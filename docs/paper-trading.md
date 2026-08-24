@@ -28,3 +28,15 @@ týdenní nebo měsíční rebalance frekvenci. Sparse target doplní držené p
 ztracený signál nebo odchod z PIT universe vede přes standardní risk cestu k likvidaci; chybějící
 executable bar likvidaci raději uzavřeně odmítne. Multi-asset risk oceňuje všechny pozice raw open
 cenami dostupnými v okamžiku execution, nikoli pozdějšími close cenami.
+## Phase 7 monitoring gate
+
+`APPROVED` deployment sám o sobě obchodování nepovoluje. Operátor musí vytvořit monitoring
+run nad verzovanou immutable policy. Pouze jediný `ACTIVE` run pro paper účet propustí volání do
+stávající cesty `Phase6PaperExecutionService → TradingCycleService → ProductionRiskEngine →
+PersistentPaperBroker → ReconciliationService`. `PAUSED`, `SUSPENDED`, `RETIRED`, HALTED účet
+nebo unsafe reconciliation selžou uzavřeně před ekonomickou akcí.
+
+Denní snapshot používá poslední dokončenou XNYS session, kauzálně dostupné validované ceny a
+počítá marked equity z cash a pozic. První daily return je `NULL`; další return, cumulative return
+a drawdown používají pouze minulou uloženou řadu. Historické snapshots a evaluations jsou
+append-only a pinují observation revision/source hash. Vklady a výběry nejsou podporovány.

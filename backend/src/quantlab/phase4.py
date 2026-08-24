@@ -251,6 +251,9 @@ class Phase4Repository:
         if self.engine.dialect.name == "sqlite":
             event.listen(self.engine, "connect", _sqlite_fk)
         if bootstrap_test_schema:
+            # Test adapter musí registrovat i Phase 7 metadata před create_all.
+            import quantlab.phase7  # noqa: F401
+
             Base.metadata.create_all(self.engine)
 
     def seed_account(
