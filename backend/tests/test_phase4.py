@@ -249,6 +249,18 @@ def test_partial_fill_cancel_and_invalid_transition() -> None:
     assert service.broker.cancel_order(order_id).status == OrderStatus.CANCELLED
 
 
+def test_paper_broker_caps_buy_fill_for_authoritative_costs() -> None:
+    repository = Phase4Repository()
+    broker = TradingCycleService(repository).broker
+    cash = Decimal("100000")
+    price = Decimal("120.06")
+
+    quantity = broker._affordable_buy_quantity(cash, price, Decimal("833"))
+
+    assert Decimal(0) < quantity < Decimal("833")
+    assert price * quantity + broker.costs.commission(price * quantity) <= cash
+
+
 def test_limit_order_not_reached_then_filled_and_risk_cannot_be_bypassed() -> None:
     repository = Phase4Repository()
     repository.seed_account()

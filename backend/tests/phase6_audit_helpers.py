@@ -86,10 +86,17 @@ def seed_phase6_snapshot(
         {},
     )
     observed_at = as_of or CALENDAR.session_close(sessions[-1])
-    result = PersistentMarketDataService(factory).ingest(
-        provider, instrument, sessions[0], sessions[-1], observed_at
-    )
-    assert result.status == "SUCCEEDED"
+    market_data = PersistentMarketDataService(factory)
+    for day in sessions:
+        # PIT research fixture zveřejní každý bar až na jeho skutečném session close.
+        result = market_data.ingest(
+            provider,
+            instrument,
+            day,
+            day,
+            min(observed_at, CALENDAR.session_close(day)),
+        )
+        assert result.status == "SUCCEEDED"
     universe_id = f"universe-{suffix}"
     with factory() as session, session.begin():
         session.add(

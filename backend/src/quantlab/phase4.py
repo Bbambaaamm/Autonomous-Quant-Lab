@@ -780,6 +780,11 @@ class PersistentPaperBroker:
             )
             if account is None:
                 raise KeyError(order.account_id)
+            if side is Side.BUY:
+                quantity = self._affordable_buy_quantity(account.cash, price, quantity)
+                if quantity <= 0:
+                    return order
+                commission = self.costs.commission(price * quantity)
             cash_delta = (
                 -(price * quantity + commission)
                 if side is Side.BUY
@@ -905,6 +910,31 @@ class PersistentPaperBroker:
             session.commit()
             session.refresh(order)
             return order
+
+    def _affordable_buy_quantity(
+        self, cash: Decimal, price: Decimal, requested: Decimal
+    ) -> Decimal:
+        """Omezí BUY fill na množství, které pokryje notional i autoritativní komisi."""
+        if requested <= 0 or cash <= 0 or price <= 0:
+            return Decimal(0)
+        candidates = [requested]
+        if cash >= self.costs.minimum:
+            candidates.append((cash - self.costs.minimum) / price)
+        if cash >= self.costs.fixed:
+            candidates.append(
+                (cash - self.costs.fixed) / (price * (Decimal("1") + self.costs.rate))
+            )
+        affordable = [
+            min(requested, candidate)
+            for candidate in candidates
+            if candidate >= 0
+            and price * min(requested, candidate)
+            + self.costs.commission(price * min(requested, candidate))
+            <= cash
+        ]
+        return max(affordable, default=Decimal(0)).quantize(
+            Decimal("0.00000001"), rounding=ROUND_DOWN
+        )
 
     def cancel_order(self, order_id: str) -> PaperOrderRecord:
         with Session(self.repository.engine) as session:
