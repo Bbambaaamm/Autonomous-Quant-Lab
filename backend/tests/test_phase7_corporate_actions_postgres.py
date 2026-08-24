@@ -16,9 +16,11 @@ from test_phase7_postgres import _completed_as_of, _executed_monitoring
 from quantlab.domain import Bar
 from quantlab.market_data import CorporateActionKind, DatasetInvalid
 from quantlab.market_data_service import PersistentMarketDataService
-from quantlab.persistence import CorporateActionRecord
+from quantlab.persistence import CorporateActionRecord, MarketObservationRecord
 from quantlab.phase4 import (
     PaperAccountRecord,
+    PaperFillRecord,
+    PaperOrderRecord,
     Phase4Repository,
     PositionRecord,
     ProductionRiskConfig,
@@ -66,6 +68,18 @@ def _action(
             )
         )
     return action_id
+
+
+def _snapshot_market_price(factory, snapshot) -> Decimal:
+    observation_id = json.loads(snapshot.observation_lineage_json)[0]["observation_id"]
+    with factory() as session:
+        return Decimal(
+            session.scalar(
+                select(MarketObservationRecord.close).where(
+                    MarketObservationRecord.observation_id == observation_id
+                )
+            )
+        )
 
 
 def test_late_known_corporate_action_is_causal_and_exactly_once(factory) -> None:
@@ -121,27 +135,40 @@ def test_multiple_splits_then_dividend_preserve_entitlement_and_retry(factory) -
         quantity = session.get(PositionRecord, (account, instrument.instrument_id)).quantity
         cash = session.get(PaperAccountRecord, account).cash
     start = datetime.now(UTC) + timedelta(seconds=1)
-    _action(factory, instrument.instrument_id, CorporateActionKind.SPLIT, start, start, "2")
-    _action(
-        factory,
-        instrument.instrument_id,
-        CorporateActionKind.SPLIT,
-        start + timedelta(seconds=1),
-        start + timedelta(seconds=1),
-        "1.5",
-    )
-    _action(
-        factory,
-        instrument.instrument_id,
-        CorporateActionKind.CASH_DIVIDEND,
-        start + timedelta(seconds=2),
-        start + timedelta(seconds=2),
-        "1",
-    )
+    action_ids = [
+        _action(factory, instrument.instrument_id, CorporateActionKind.SPLIT, start, start, "2"),
+        _action(
+            factory,
+            instrument.instrument_id,
+            CorporateActionKind.SPLIT,
+            start + timedelta(seconds=1),
+            start + timedelta(seconds=1),
+            "1.5",
+        ),
+        _action(
+            factory,
+            instrument.instrument_id,
+            CorporateActionKind.CASH_DIVIDEND,
+            start + timedelta(seconds=2),
+            start + timedelta(seconds=2),
+            "1",
+        ),
+    ]
     service = PaperCorporateActionService(factory)
-    assert len(service.apply(account, start + timedelta(seconds=3))) == 3
-    assert service.apply(account, start + timedelta(seconds=4)) == ()
+    service.apply(account, start + timedelta(seconds=3))
+    service.apply(account, start + timedelta(seconds=4))
     with factory() as session:
+        assert (
+            session.scalar(
+                select(func.count())
+                .select_from(PaperCorporateActionApplicationRecord)
+                .where(
+                    PaperCorporateActionApplicationRecord.account_id == account,
+                    PaperCorporateActionApplicationRecord.action_id.in_(action_ids),
+                )
+            )
+            == 3
+        )
         assert (
             session.get(PositionRecord, (account, instrument.instrument_id)).quantity
             == quantity * 3
@@ -189,10 +216,11 @@ def test_sell_after_split_preserves_basis_and_realized_pnl(factory) -> None:
             max_position_pct=Decimal("1"),
             max_single_order_pct=Decimal("1"),
             max_single_order_notional=Decimal("1000000"),
+            max_notional_per_day=Decimal("200000"),
             instrument_allowlist=frozenset({instrument.instrument_id}),
         ),
     )
-    service.run(
+    cycle_id = service.run(
         account,
         "phase7-split-sell",
         bars,
@@ -202,9 +230,13 @@ def test_sell_after_split_preserves_basis_and_realized_pnl(factory) -> None:
     )
     with factory() as session:
         position = session.get(PositionRecord, (account, instrument.instrument_id))
+        commission = session.scalar(
+            select(func.sum(PaperFillRecord.commission))
+            .join(PaperOrderRecord)
+            .where(PaperOrderRecord.trading_cycle_id == cycle_id)
+        )
         assert position.quantity == 0
-        assert position.realized_pnl <= realized_before
-        assert position.realized_pnl == pytest.approx(realized_before, abs=Decimal("1"))
+        assert position.realized_pnl == realized_before - commission
 
 
 def test_partial_sell_after_split_keeps_remaining_dividend_entitlement(factory) -> None:
@@ -249,6 +281,7 @@ def test_partial_sell_after_split_keeps_remaining_dividend_entitlement(factory) 
             max_position_pct=Decimal("1"),
             max_single_order_pct=Decimal("1"),
             max_single_order_notional=Decimal("1000000"),
+            max_notional_per_day=Decimal("200000"),
             instrument_allowlist=frozenset({instrument.instrument_id}),
         ),
     ).run(
@@ -286,14 +319,11 @@ def test_split_performance_continuity_has_no_fake_minus_fifty_percent_return(fac
     next_day = CALENDAR.next_session(before.session_date)
     effective = CALENDAR.session_open(next_day)
     _action(factory, instrument.instrument_id, CorporateActionKind.SPLIT, effective, effective, "2")
-    with factory() as session:
-        pre_split_price = session.get(
-            PositionRecord, (account, instrument.instrument_id)
-        ).average_cost
+    pre_split_price = _snapshot_market_price(factory, before)
     observed = CALENDAR.session_close(next_day)
     PersistentMarketDataService(factory).ingest(
         MappingProvider(
-            f"split-continuity-{uuid4().hex}",
+            f"split-{uuid4().hex[:24]}",
             {instrument.symbol: [daily_bar(next_day, pre_split_price / 2, "post-split")]},
             {},
         ),
@@ -324,12 +354,12 @@ def test_dividend_performance_continuity_credits_equity_once_on_retry(factory) -
         "1",
     )
     with factory() as session:
-        price = session.get(PositionRecord, (account, instrument.instrument_id)).average_cost
         quantity = session.get(PositionRecord, (account, instrument.instrument_id)).quantity
+    price = _snapshot_market_price(factory, before)
     observed = CALENDAR.session_close(next_day)
     PersistentMarketDataService(factory).ingest(
         MappingProvider(
-            f"dividend-continuity-{uuid4().hex}",
+            f"dividend-{uuid4().hex[:21]}",
             {instrument.symbol: [daily_bar(next_day, price, "ex-dividend-equivalent")]},
             {},
         ),

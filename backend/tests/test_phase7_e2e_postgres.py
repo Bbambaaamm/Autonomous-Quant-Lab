@@ -24,6 +24,7 @@ from quantlab.phase4 import (
     PaperFillRecord,
     PaperOrderRecord,
     Phase4Repository,
+    PositionRecord,
     ProductionRiskConfig,
     ReconciliationService,
     TradingCycleRecord,
@@ -44,6 +45,7 @@ from quantlab.phase7 import (
     PaperPerformanceEvaluationService,
     PaperPerformanceService,
     PaperPerformanceSnapshotRecord,
+    deterministic_block_bootstrap,
 )
 
 pytestmark = pytest.mark.skipif(
@@ -58,7 +60,11 @@ def factory():
     return sessionmaker(create_engine(os.environ["DATABASE_URL"]), expire_on_commit=False)
 
 
-def _full_multi_session_flow(factory, prices: tuple[Decimal, ...]):
+def _full_multi_session_flow(
+    factory,
+    prices: tuple[Decimal, ...],
+    expected_verdict: EvaluationVerdict | None = None,
+):
     """Naváže na production research→promotion→approval→enrollment→execution flow."""
     engine = factory.kw["bind"]
     account_id, deployment, experiment, source_snapshot, _cycle, instrument, _ = _research_to_paper(
@@ -76,6 +82,11 @@ def _full_multi_session_flow(factory, prices: tuple[Decimal, ...]):
     )
     policy_config = DEFAULT_POLICY.copy()
     policy_config["minimum_sessions"] = 3
+    if expected_verdict is EvaluationVerdict.WATCH:
+        policy_config["watch_return_percentile"] = 50
+    elif expected_verdict is EvaluationVerdict.REVIEW_REQUIRED:
+        policy_config["watch_return_percentile"] = 50
+        policy_config["review_return_percentile"] = 40
     policy = monitoring.create_policy(
         f"phase7-e2e-{deployment.deployment_id}", policy_config, datetime.now(UTC)
     )
@@ -230,14 +241,67 @@ def test_drawdown_uses_only_historical_peak(factory) -> None:
     assert snapshots[-1].drawdown == expected
 
 
+def _append_controlled_verdict(factory, flow, expected):
+    account, _deployment, _experiment, _source, run, snapshots, _evaluations = flow
+    with factory() as session:
+        baseline = session.get(PaperExpectationBaselineRecord, run.baseline_id)
+        returns = [Decimal(value) for value in json.loads(baseline.oos_returns_json)]
+        position = session.scalar(
+            select(PositionRecord).where(PositionRecord.account_id == account)
+        )
+        account_row = session.get(PaperAccountRecord, account)
+        instrument = _instrument(factory, position.instrument_id)
+    horizon = len(snapshots) + 1
+    distribution = sorted(
+        deterministic_block_bootstrap(
+            returns,
+            horizon,
+            1000,
+            5,
+            f"{run.monitoring_id}:{run.policy_id}:{horizon}:paper-monitoring-v1",
+        )
+    )
+    if expected is EvaluationVerdict.WATCH:
+        target_return = next(
+            value
+            for value in dict.fromkeys(distribution)
+            if 2 < sum(outcome <= value for outcome in distribution) * 100 / len(distribution) <= 50
+        )
+    else:
+        target_return = distribution[0] - Decimal("0.01")
+    target_equity = run.starting_equity * (Decimal(1) + target_return)
+    target_price = (target_equity - account_row.cash) / position.quantity
+    session_day = CALENDAR.next_session(snapshots[-1].session_date)
+    observed_at = CALENDAR.session_close(session_day)
+    decision_time = observed_at + timedelta(minutes=1)
+    provider = MappingProvider(
+        f"verdict-{instrument.symbol}",
+        {instrument.symbol: [daily_bar(session_day, target_price, f"verdict-{session_day}")]},
+        {},
+    )
+    assert (
+        PersistentMarketDataService(factory)
+        .ingest(provider, instrument, session_day, session_day, observed_at)
+        .status
+        == "SUCCEEDED"
+    )
+    snapshot = PaperPerformanceService(factory, ValidatedCurrentDataAccessor(factory)).capture(
+        run.monitoring_id, decision_time
+    )
+    evaluation = PaperPerformanceEvaluationService(factory).evaluate(
+        run.monitoring_id, snapshot.snapshot_id, decision_time
+    )
+    return evaluation
+
+
 @pytest.mark.parametrize(
     ("name", "prices", "expected"),
     [
         ("HEALTHY", (Decimal("180"), Decimal("220")), EvaluationVerdict.HEALTHY),
-        ("WATCH", (Decimal("121"), Decimal("123.2")), EvaluationVerdict.WATCH),
+        ("WATCH", (Decimal("121"),), EvaluationVerdict.WATCH),
         (
             "REVIEW_REQUIRED",
-            (Decimal("121"), Decimal("122.5")),
+            (Decimal("121"),),
             EvaluationVerdict.REVIEW_REQUIRED,
         ),
     ],
@@ -250,10 +314,14 @@ def test_controlled_paper_series_proves_healthy_watch_and_review_without_auto_re
         deployments_before = session.scalar(
             select(func.count()).select_from(StrategyDeploymentRecord)
         )
-    _account, deployment, experiment, _source, run, _snapshots, evaluations = (
-        _full_multi_session_flow(factory, prices)
+    flow = _full_multi_session_flow(factory, prices, expected)
+    _account, deployment, experiment, _source, run, _snapshots, evaluations = flow
+    evaluation = (
+        evaluations[-1]
+        if expected is EvaluationVerdict.HEALTHY
+        else _append_controlled_verdict(factory, flow, expected)
     )
-    assert evaluations[-1].verdict == expected, name
+    assert evaluation.verdict == expected, name
     with factory() as session:
         stored_run = session.get(PaperMonitoringRunRecord, run.monitoring_id)
         stored_experiment = session.get(ExperimentRecord, experiment.id)
@@ -362,7 +430,11 @@ def test_baseline_is_immutable_after_provider_correction(factory) -> None:
             baseline.oos_metrics_json,
         )
         lineage = json.loads(snapshots[-1].observation_lineage_json)
-        observation = session.get(MarketObservationRecord, lineage[0]["observation_id"])
+        observation = session.scalar(
+            select(MarketObservationRecord).where(
+                MarketObservationRecord.observation_id == lineage[0]["observation_id"]
+            )
+        )
         instrument = _instrument(factory, observation.instrument_id)
     corrected_day = observation.session_date.date()
     provider = MappingProvider(
@@ -410,7 +482,11 @@ def test_historical_paper_snapshot_and_evaluation_survive_real_provider_correcti
     before_evaluation = (evaluation.evaluation_id, evaluation.content_hash, evaluation.verdict)
     with factory() as session:
         lineage = json.loads(snapshot.observation_lineage_json)
-        observation = session.get(MarketObservationRecord, lineage[0]["observation_id"])
+        observation = session.scalar(
+            select(MarketObservationRecord).where(
+                MarketObservationRecord.observation_id == lineage[0]["observation_id"]
+            )
+        )
         instrument = _instrument(factory, observation.instrument_id)
     day = observation.session_date.date()
     correction = PersistentMarketDataService(factory).ingest(

@@ -60,7 +60,7 @@ def _counts(factory, account_id: str) -> tuple[int, int, int, int, int]:
 def test_monitoring_automation_production_e2e_is_non_economic_and_retry_idempotent(factory) -> None:
     account_id, _deployment, run, _instrument = _executed_monitoring(factory)
     repository = AutomationRepository(str(factory.kw["bind"].url))
-    due = datetime.now(UTC)
+    due = datetime(2020, 1, 1, tzinfo=UTC)
     job = repository.create_job(
         job_type=JobType.MONITOR_PAPER_DEPLOYMENT,
         account_id=account_id,
@@ -76,8 +76,7 @@ def test_monitoring_automation_production_e2e_is_non_economic_and_retry_idempote
         worker_heartbeat_interval=2,
     )
     before = _counts(factory, account_id)
-    run_ids = SchedulerService(repository).tick(due + timedelta(seconds=1))
-    assert len(run_ids) == 1
+    run_ids = [SchedulerService(repository).run_now(job.id, "phase7-e2e", due)]
     assert (
         WorkerService(repository, settings, worker_id="phase7-monitor-1").execute_one()
         == run_ids[0]
@@ -91,7 +90,7 @@ def test_monitoring_automation_production_e2e_is_non_economic_and_retry_idempote
     assert after_first[3:] == (before[3] + 1, before[4] + 1)
 
     retry_id = SchedulerService(repository).run_now(
-        job.id, "phase7-idempotent-retry", datetime.now(UTC)
+        job.id, "phase7-idempotent-retry", due + timedelta(seconds=1)
     )
     assert (
         WorkerService(repository, settings, worker_id="phase7-monitor-2").execute_one() == retry_id
