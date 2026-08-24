@@ -6,7 +6,7 @@ import math
 import subprocess
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
 
 from sqlalchemy import select
@@ -21,8 +21,13 @@ from quantlab.market_data import (
     XNYSCalendar,
     causal_adjusted_close,
 )
-from quantlab.market_data_service import _lock, _observation
-from quantlab.multi_asset import STRATEGY_REGISTRY, MultiAssetResult, run_multi_asset
+from quantlab.market_data_service import _database_utc, _lock, _observation
+from quantlab.multi_asset import (
+    STRATEGY_REGISTRY,
+    MultiAssetResult,
+    RebalanceFrequency,
+    run_multi_asset,
+)
 from quantlab.persistence import (
     CorporateActionRecord,
     DatasetSnapshotRecord,
@@ -35,7 +40,12 @@ from quantlab.persistence import (
     UniverseDefinitionRecord,
     UniverseMembershipRecord,
 )
-from quantlab.phase4 import PaperAccountRecord, TradingCycleService
+from quantlab.phase4 import (
+    PaperAccountRecord,
+    PositionRecord,
+    TradingCycleRecord,
+    TradingCycleService,
+)
 from quantlab.universe import (
     PointInTimeUniverse,
     UniverseDefinition,
@@ -460,11 +470,22 @@ class ValidatedCurrentDataAccessor:
         return tuple(_observation(latest[item]) for item in sorted(latest))
 
     def history(
-        self, instrument_ids: Sequence[str], now: datetime, lookback: int
+        self,
+        instrument_ids: Sequence[str],
+        now: datetime,
+        lookback: int,
+        *,
+        before_session: date | None = None,
+        known_at: datetime | None = None,
     ) -> dict[str, tuple[Observation, ...]]:
-        """Vrátí pouze autoritativní revize do poslední dokončené session."""
+        """Vrátí autoritativní revize; volitelně pouze před executable session."""
+        if lookback < 1:
+            raise DatasetInvalid("Strategy lookback musí být kladný")
         current = self.latest(instrument_ids, now)
         cutoff = current[0].session_date
+        knowledge_cutoff = require_utc(known_at or now)
+        if before_session is not None:
+            cutoff = self.calendar.previous_session(before_session)
         with self._sessions() as session:
             rows = tuple(
                 session.scalars(
@@ -474,8 +495,8 @@ class ValidatedCurrentDataAccessor:
                         MarketObservationRecord.instrument_id.in_(instrument_ids),
                         MarketObservationRecord.session_date
                         <= datetime.combine(cutoff, datetime.min.time(), UTC),
-                        MarketObservationRecord.observed_at <= now,
-                        MarketObservationRecord.timestamp <= now,
+                        MarketObservationRecord.observed_at <= knowledge_cutoff,
+                        MarketObservationRecord.timestamp <= knowledge_cutoff,
                         MarketDataIngestionRecord.status == "SUCCEEDED",
                     )
                     .order_by(
@@ -741,13 +762,25 @@ class Phase6PaperExecutionService:
             )
             if not eligible:
                 raise DatasetInvalid("PIT universe nemá v decision time eligible instrument")
+            held = {
+                item.instrument_id
+                for item in session.scalars(
+                    select(PositionRecord).where(
+                        PositionRecord.account_id == deployment.paper_account_id,
+                        PositionRecord.quantity > 0,
+                    )
+                )
+            }
+            execution_instruments = tuple(sorted(set(eligible) | held))
             instruments = {
                 item.instrument_id: item
                 for item in session.scalars(
-                    select(InstrumentRecord).where(InstrumentRecord.instrument_id.in_(eligible))
+                    select(InstrumentRecord).where(
+                        InstrumentRecord.instrument_id.in_(execution_instruments)
+                    )
                 )
             }
-            if set(instruments) != set(eligible) or any(
+            if set(instruments) != set(execution_instruments) or any(
                 item.exchange != "XNYS"
                 or item.calendar != "XNYS"
                 or item.currency != "USD"
@@ -775,8 +808,27 @@ class Phase6PaperExecutionService:
             or strategy.name != deployment.strategy_name
         ):
             raise DatasetInvalid("Runtime strategy identity neodpovídá deploymentu")
-        history = self.current_data.history(eligible, decision_time, strategy.required_lookback)
-        if any(not values for values in history.values()):
+        latest = self.current_data.latest(execution_instruments, decision_time)
+        executable_session = latest[0].session_date
+        execution_time = self.current_data.calendar.session_open(executable_session)
+        history = self.current_data.history(
+            eligible,
+            decision_time,
+            strategy.required_lookback,
+            before_session=executable_session,
+            known_at=execution_time,
+        )
+        expected_sessions: list[date] = []
+        history_session = executable_session
+        for _ in range(strategy.required_lookback):
+            history_session = self.current_data.calendar.previous_session(history_session)
+            expected_sessions.append(history_session)
+        expected_sessions.reverse()
+        if any(
+            len(values) != strategy.required_lookback
+            or [item.session_date for item in values] != expected_sessions
+            for values in history.values()
+        ):
             raise DatasetInvalid("Current strategy history je neúplná")
         actions = tuple(
             CorporateAction(
@@ -789,6 +841,7 @@ class Phase6PaperExecutionService:
                 item.new_symbol,
             )
             for item in action_rows
+            if _database_utc(item.known_at) <= execution_time
         )
         signal_prices = {
             instrument: tuple(
@@ -799,12 +852,32 @@ class Phase6PaperExecutionService:
         }
         from quantlab.multi_asset import StrategyContext
 
+        strategy_id = f"phase6:{deployment.deployment_id}"
+        with self._sessions() as session:
+            previous_cycle = session.scalar(
+                select(TradingCycleRecord)
+                .where(
+                    TradingCycleRecord.account_id == deployment.paper_account_id,
+                    TradingCycleRecord.strategy_id == strategy_id,
+                    TradingCycleRecord.status == "COMPLETED",
+                )
+                .order_by(TradingCycleRecord.session_date.desc())
+                .limit(1)
+            )
+        if previous_cycle is not None and previous_cycle.session_date == executable_session:
+            return previous_cycle.id
+        if previous_cycle is not None and not self._rebalance_due(
+            executable_session,
+            previous_cycle.session_date,
+            strategy.rebalance_frequency,
+        ):
+            raise DatasetInvalid("Deployment dnes nemá povolený rebalance")
+        signal_time = execution_time
         target = strategy.generate_targets(
-            StrategyContext(decision_time, history, eligible, signal_prices)
+            StrategyContext(signal_time, history, eligible, signal_prices)
         )
         if any(instrument not in eligible for instrument, _ in target.weights):
             raise DatasetInvalid("Strategy vytvořila target mimo deployment PIT universe")
-        latest = self.current_data.latest(eligible, decision_time)
         bars = [
             Bar(
                 item.instrument_id,
@@ -814,17 +887,21 @@ class Phase6PaperExecutionService:
                 item.low,
                 item.close,
                 item.volume,
-                signal_prices[item.instrument_id][-1],
+                signal_prices[item.instrument_id][-1]
+                if item.instrument_id in signal_prices
+                else item.open,
                 item.provider,
                 item.timeframe,
             )
             for item in latest
         ]
+        target_weights = {instrument: Decimal("0") for instrument in held}
+        target_weights.update(dict(target.weights))
         cycle_id = self.trading_cycle.run(
             deployment.paper_account_id,
-            f"phase6:{deployment.deployment_id}",
+            strategy_id,
             bars,
-            dict(target.weights),
+            target_weights,
             latest[0].session_date,
             decision_time,
         )
@@ -840,7 +917,20 @@ class Phase6PaperExecutionService:
                     "deployment_id": deployment.deployment_id,
                     "experiment_id": deployment.experiment_id,
                     "snapshot_id": deployment.snapshot_id,
+                    "signal_observation_ids": [
+                        item.observation_id for values in history.values() for item in values
+                    ],
+                    "signal_through_session": expected_sessions[-1].isoformat(),
+                    "executable_session": executable_session.isoformat(),
                     "current_observation_ids": [item.observation_id for item in latest],
                 },
             )
         return cycle_id
+
+    @staticmethod
+    def _rebalance_due(current: date, previous: date, frequency: RebalanceFrequency) -> bool:
+        if frequency is RebalanceFrequency.DAILY:
+            return True
+        if frequency is RebalanceFrequency.WEEKLY:
+            return current.isocalendar()[:2] != previous.isocalendar()[:2]
+        return (current.year, current.month) != (previous.year, previous.month)

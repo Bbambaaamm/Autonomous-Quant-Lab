@@ -21,3 +21,10 @@ Promotion ani deployment nevznikají automaticky a opakovaná promotion je idemp
 nejnovější dokončené XNYS session a přijímá jen nejnovější revizi z úspěšné ingestion. Runtime
 rekonstruuje pouze přesnou allowlisted strategii, verzi, parametry, PIT universe a USD/XNYS/1d
 scope. Live trading path nadále neexistuje.
+
+Close-derived target používá přesný, souvislý strategy lookback končící před executable session
+a fill proto nastane nejdříve na raw open následující session. Runtime vynucuje deklarovanou denní,
+týdenní nebo měsíční rebalance frekvenci. Sparse target doplní držené pozice nulovou vahou, takže
+ztracený signál nebo odchod z PIT universe vede přes standardní risk cestu k likvidaci; chybějící
+executable bar likvidaci raději uzavřeně odmítne. Multi-asset risk oceňuje všechny pozice raw open
+cenami dostupnými v okamžiku execution, nikoli pozdějšími close cenami.

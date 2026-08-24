@@ -459,6 +459,14 @@ def test_postgres_research_to_paper_authoritative_e2e(factory, engine) -> None:
             )
             == 1
         )
+        fill = session.scalar(
+            select(PaperFillRecord)
+            .join(PaperOrderRecord)
+            .where(PaperOrderRecord.trading_cycle_id == cycle_id)
+        )
+        assert fill is not None
+        # Close-derived signal končí před executable session a fill používá její raw open.
+        assert fill.reference_price == Decimal("120")
         assert (
             session.scalar(
                 select(func.count())
@@ -504,6 +512,8 @@ def test_postgres_research_to_paper_authoritative_e2e(factory, engine) -> None:
     )
     assert matching["current_observation_ids"]
     assert set(matching["current_observation_ids"]).isdisjoint(snapshot_ids)
+    assert set(matching["signal_observation_ids"]).isdisjoint(matching["current_observation_ids"])
+    assert matching["signal_through_session"] < matching["executable_session"]
 
 
 def test_postgres_halted_approved_deployment_cannot_trade(factory, engine) -> None:

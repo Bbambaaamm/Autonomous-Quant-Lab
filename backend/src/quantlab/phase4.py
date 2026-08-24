@@ -1236,7 +1236,8 @@ class TradingCycleService:
             pending[open_order.instrument_id] = (
                 pending.get(open_order.instrument_id, Decimal(0)) + signed_remaining
             )
-        prices = {symbol: item.close for symbol, item in bars_by_symbol.items()}
+        # Všechny risk marky musí být dostupné ve stejném okamžiku jako next-open fill.
+        prices = {symbol: item.open for symbol, item in bars_by_symbol.items()}
         with Session(self.repository.engine) as session:
             daily_orders = int(
                 session.scalar(

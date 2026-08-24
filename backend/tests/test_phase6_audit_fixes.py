@@ -6,6 +6,7 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 
 from quantlab.market_data import DatasetInvalid, XNYSCalendar
+from quantlab.multi_asset import RebalanceFrequency
 from quantlab.persistence import (
     Base,
     DatasetSnapshotRecord,
@@ -15,7 +16,11 @@ from quantlab.persistence import (
     UniverseDefinitionRecord,
 )
 from quantlab.phase4 import PaperAccountRecord
-from quantlab.phase6_runtime import DeploymentService, Phase6EligibilityService
+from quantlab.phase6_runtime import (
+    DeploymentService,
+    Phase6EligibilityService,
+    Phase6PaperExecutionService,
+)
 
 
 def _factory():
@@ -155,6 +160,22 @@ def test_xnys_session_for_timestamp_checks_open_and_close() -> None:
     for hour, minute, second, expected in cases:
         local = datetime(2026, 1, 2, hour, minute, second, tzinfo=calendar.timezone)
         assert calendar.session_for_timestamp(local.astimezone(UTC)) == expected
+
+
+@pytest.mark.parametrize(
+    "frequency,previous,current,expected",
+    [
+        (RebalanceFrequency.DAILY, date(2026, 1, 5), date(2026, 1, 6), True),
+        (RebalanceFrequency.WEEKLY, date(2026, 1, 5), date(2026, 1, 6), False),
+        (RebalanceFrequency.WEEKLY, date(2026, 1, 9), date(2026, 1, 12), True),
+        (RebalanceFrequency.MONTHLY, date(2026, 1, 30), date(2026, 2, 2), True),
+        (RebalanceFrequency.MONTHLY, date(2026, 2, 2), date(2026, 2, 27), False),
+    ],
+)
+def test_phase6_paper_execution_enforces_rebalance_frequency(
+    frequency: RebalanceFrequency, previous: date, current: date, expected: bool
+) -> None:
+    assert Phase6PaperExecutionService._rebalance_due(current, previous, frequency) is expected
 
 
 def _approved_candidate(factory):
