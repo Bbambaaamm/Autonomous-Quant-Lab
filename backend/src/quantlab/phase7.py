@@ -482,6 +482,12 @@ class PaperMonitoringService:
                     "total_costs",
                 )
             }
+            if (
+                experiment.snapshot_id is None
+                or experiment.strategy_name is None
+                or experiment.strategy_version is None
+            ):
+                raise DatasetInvalid("Experiment nemá úplnou Phase 6 replay lineage")
             config = json.loads(experiment.config_json)
             replay = Phase6ExperimentReplayService(self.sessions).replay(
                 Phase6ExperimentRequest(
