@@ -13,6 +13,11 @@ a exactly-once aplikuje split a cash dividend bez orderu, fillu nebo syntetické
 change zachovává canonical `instrument_id`; delisting otevřené pozice bez authoritative ceny
 suspenduje monitoring s důvodem `DELISTING_UNSUPPORTED` a nevytváří syntetickou likvidaci.
 Authoritative orchestration probíhá před performance valuation dokončené session.
+Dividendový entitlement se rekonstruuje z immutable fillů a pouze z dříve aplikovaných splitů.
+Každý split násobí jen fill, který mu časově předcházel; post-split prodej proto zůstává v nové
+jednotce. To zachovává správné držení pro split→dividend, vícenásobné splity i částečný prodej.
+Legacy lot bez `acquired_at` zůstává při přímé úpravě aktuální pozice zpětně kompatibilně
+způsobilý, místo aby byl nesprávně označen za future data.
 
 Expected-vs-realized evaluace používá uložené skutečné OOS returns v horizon-aware
 deterministickém block bootstrapu. WATCH, REVIEW_REQUIRED ani SUSPENDED nikdy nemění parametry,
@@ -97,8 +102,10 @@ Neexistuje auto-tune, auto-experiment, auto-deployment ani live promotion.
 
 ## Tests a CI
 
-`test_phase7.py` pokrývá policy safety a deterministic bootstrap. PostgreSQL soubory ověřují
-migration/schema a partial index; Phase 6 PostgreSQL E2E zůstává autoritativní pro předcházející
+`test_phase7.py` pokrývá policy safety, deterministic bootstrap a regresní výpočet entitlementu
+pro split→dividend, více splitů a post-split částečný prodej. PostgreSQL soubory aktuálně ověřují
+migration/schema a partial index; nejde o náhradu požadovaného service-level concurrency a
+multi-session E2E důkazu. Phase 6 PostgreSQL E2E zůstává autoritativní pouze pro předcházející
 research→paper tok. CI explicitně spouští Phase 7 unit i PostgreSQL soubory, locked Ruff/mypy a
 fresh Alembic upgrade.
 

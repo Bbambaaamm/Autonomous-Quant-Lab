@@ -1,8 +1,14 @@
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
 
-from quantlab.phase7 import DEFAULT_POLICY, deterministic_block_bootstrap, validate_policy
+from quantlab.phase7 import (
+    DEFAULT_POLICY,
+    _entitled_quantity,
+    deterministic_block_bootstrap,
+    validate_policy,
+)
 
 
 def test_default_policy_is_fail_closed_and_valid() -> None:
@@ -54,3 +60,43 @@ def test_bootstrap_distribution_changes_with_paper_horizon() -> None:
     short = deterministic_block_bootstrap(returns, 3, 100, 2, "monitor:3")
     long = deterministic_block_bootstrap(returns, 8, 100, 2, "monitor:8")
     assert short != long
+
+
+def test_entitlement_applies_split_to_older_fills_only() -> None:
+    bought_at = datetime(2026, 1, 2, tzinfo=UTC)
+    split_at = bought_at + timedelta(days=5)
+    sold_at = split_at + timedelta(days=1)
+
+    quantity = _entitled_quantity(
+        [
+            (bought_at, Decimal("10"), "BUY"),
+            (sold_at, Decimal("5"), "SELL"),
+        ],
+        [(split_at, "2")],
+    )
+
+    assert quantity == Decimal("15")
+
+
+def test_entitlement_compounds_multiple_splits_without_drift() -> None:
+    bought_at = datetime(2026, 1, 2, tzinfo=UTC)
+
+    quantity = _entitled_quantity(
+        [(bought_at, Decimal("10"), "BUY")],
+        [
+            (bought_at + timedelta(days=2), "2"),
+            (bought_at + timedelta(days=4), "1.5"),
+        ],
+    )
+
+    assert quantity == Decimal("30")
+
+
+def test_entitlement_rejects_invalid_applied_split_evidence() -> None:
+    bought_at = datetime(2026, 1, 2, tzinfo=UTC)
+
+    with pytest.raises(ValueError, match="Split ratio"):
+        _entitled_quantity(
+            [(bought_at, Decimal("10"), "BUY")],
+            [(bought_at + timedelta(days=1), "0")],
+        )
