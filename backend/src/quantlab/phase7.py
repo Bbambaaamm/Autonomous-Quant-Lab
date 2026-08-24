@@ -39,6 +39,7 @@ from quantlab.phase4 import (
     PositionRecord,
     ReconciliationRecord,
     RiskDecisionRecord,
+    TradingCycleRecord,
 )
 from quantlab.phase6_runtime import DeploymentService, ValidatedCurrentDataAccessor
 
@@ -530,6 +531,19 @@ class PaperPerformanceService:
         self.sessions, self.current_data = sessions, current_data
         self.calendar = calendar or XNYSCalendar()
 
+    def _suspend(self, monitoring_id: str, reason: str, changed_at: datetime) -> None:
+        """Persistuje safety stop v oddělené transakci před vyhozením capture chyby."""
+        with self.sessions() as session, session.begin():
+            run = session.scalar(
+                select(PaperMonitoringRunRecord)
+                .where(PaperMonitoringRunRecord.monitoring_id == monitoring_id)
+                .with_for_update()
+            )
+            if run is not None and run.state != MonitoringState.RETIRED:
+                run.state = MonitoringState.SUSPENDED
+                run.state_reason = reason
+                run.state_changed_at = changed_at
+
     def capture(self, monitoring_id: str, as_of: datetime) -> PaperPerformanceSnapshotRecord:
         captured = require_utc(as_of)
         session_date = self.calendar.latest_completed_session(captured)
@@ -548,6 +562,7 @@ class PaperPerformanceService:
                 return existing
             account = session.get(PaperAccountRecord, run.paper_account_id)
             if account is None or not account.reconciliation_safe:
+                self._suspend(monitoring_id, "RECONCILIATION_UNSAFE", captured)
                 raise DatasetInvalid("Paper účet není reconciliation-safe")
             latest_reconciliation = session.scalar(
                 select(ReconciliationRecord)
@@ -556,6 +571,7 @@ class PaperPerformanceService:
                 .limit(1)
             )
             if latest_reconciliation is not None and latest_reconciliation.status != "SUCCEEDED":
+                self._suspend(monitoring_id, "RECONCILIATION_UNSAFE", captured)
                 raise DatasetInvalid("Poslední reconciliation selhala")
             positions = tuple(
                 session.scalars(
@@ -606,13 +622,26 @@ class PaperPerformanceService:
                 )
                 if historical_peak is not None:
                     peak = max(peak, Decimal(historical_peak))
+            cycle_ids = select(PaperDeploymentCycleRecord.trading_cycle_id).where(
+                PaperDeploymentCycleRecord.monitoring_id == monitoring_id,
+                PaperDeploymentCycleRecord.session_date <= session_date,
+            )
+            unrelated_cycle = session.scalar(
+                select(TradingCycleRecord.id)
+                .where(
+                    TradingCycleRecord.account_id == account.id,
+                    TradingCycleRecord.started_at >= run.started_at,
+                    TradingCycleRecord.started_at <= captured,
+                    TradingCycleRecord.id.not_in(cycle_ids),
+                )
+                .limit(1)
+            )
+            if unrelated_cycle is not None:
+                self._suspend(monitoring_id, "UNATTRIBUTED_ACCOUNT_ACTIVITY", captured)
+                raise DatasetInvalid("Paper účet obsahuje aktivitu mimo monitoring lineage")
             orders = tuple(
                 session.scalars(
-                    select(PaperOrderRecord).where(
-                        PaperOrderRecord.account_id == account.id,
-                        PaperOrderRecord.created_at >= run.started_at,
-                        PaperOrderRecord.created_at <= captured,
-                    )
+                    select(PaperOrderRecord).where(PaperOrderRecord.trading_cycle_id.in_(cycle_ids))
                 )
             )
             order_ids = [item.id for item in orders]
@@ -639,9 +668,7 @@ class PaperPerformanceService:
                     select(func.count())
                     .select_from(RiskDecisionRecord)
                     .where(
-                        RiskDecisionRecord.account_id == account.id,
-                        RiskDecisionRecord.timestamp >= run.started_at,
-                        RiskDecisionRecord.timestamp <= captured,
+                        RiskDecisionRecord.trading_cycle_id.in_(cycle_ids),
                         RiskDecisionRecord.status == "REJECTED",
                     )
                 )
@@ -818,7 +845,10 @@ class PaperPerformanceEvaluationService:
                     else:
                         verdict = EvaluationVerdict.HEALTHY
                 else:
-                    verdict, reasons = EvaluationVerdict.HEALTHY, ["BASELINE_SERIES_NOT_AVAILABLE"]
+                    verdict, reasons = (
+                        EvaluationVerdict.INSUFFICIENT_DATA,
+                        ["BASELINE_SERIES_NOT_AVAILABLE"],
+                    )
             comparison = {
                 "baseline_metrics": json.loads(baseline.oos_metrics_json),
                 "baseline_series_available": baseline.oos_session_count > 0,

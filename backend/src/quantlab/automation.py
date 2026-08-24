@@ -473,9 +473,12 @@ class JobExecutor:
                 return Session(self.trading.repository.engine)
 
             performance = PaperPerformanceService(sessions, ValidatedCurrentDataAccessor(sessions))
-            snapshot = performance.capture(monitoring_id, utc(run.scheduled_for))
+            # Ledger účtu není historicky rekonstruovatelný. Opožděný job proto musí
+            # ocenit skutečný stav v čase execution, nikdy jej backdatovat na occurrence.
+            execution_time = datetime.now(UTC)
+            snapshot = performance.capture(monitoring_id, execution_time)
             evaluation = PaperPerformanceEvaluationService(sessions).evaluate(
-                monitoring_id, snapshot.snapshot_id, utc(run.scheduled_for)
+                monitoring_id, snapshot.snapshot_id, execution_time
             )
             return {
                 "trading_cycle_id": None,
