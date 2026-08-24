@@ -103,11 +103,9 @@ Neexistuje auto-tune, auto-experiment, auto-deployment ani live promotion.
 ## Tests a CI
 
 `test_phase7.py` pokrývá policy safety, deterministic bootstrap a regresní výpočet entitlementu
-pro split→dividend, více splitů a post-split částečný prodej. PostgreSQL soubory aktuálně ověřují
-migration/schema a partial index; nejde o náhradu požadovaného service-level concurrency a
-multi-session E2E důkazu. Phase 6 PostgreSQL E2E zůstává autoritativní pouze pro předcházející
-research→paper tok. CI explicitně spouští Phase 7 unit i PostgreSQL soubory, locked Ruff/mypy a
-fresh Alembic upgrade.
+pro split→dividend, více splitů a post-split částečný prodej. PostgreSQL soubory obsahují
+service-level races se dvěma Sessions a skutečný multi-session research→paper flow. CI explicitně
+spouští Phase 7 unit, API i PostgreSQL soubory, locked Ruff/mypy a fresh Alembic upgrade.
 
 ## Definition of Done a verdict rules
 
@@ -115,3 +113,11 @@ DoD vyžaduje forward schema, immutable evidence, calendar/PIT valuation, determ
 celý lifecycle, ACTIVE execution gate, paper-only safety, API, CI a dokumentaci. `COMPLETE` lze
 vydat pouze po locked unit a PostgreSQL/fresh-Alembic PASS. Bez dostupného PostgreSQL/uv 0.12.3 je
 verdikt `COMPLETE WITH ENVIRONMENTAL VERIFICATION PENDING`; funkční mezera znamená `INCOMPLETE`.
+# Finální auditní důkazy
+
+Phase 7 má samostatné PostgreSQL business testy pro souběh enrollmentu,
+performance capture, evaluation, lifecycle safety transitionů a corporate actions.
+Integrační sada navíc prochází produkční research → paper cestu přes více XNYS
+sessions a ověřuje immutable baseline, kauzální drawdown a zablokování execution
+po hard suspension. HTTP kontrakt Phase 7 je pokryt samostatným API test souborem,
+který je explicitně zapojen do CI API jobu.
