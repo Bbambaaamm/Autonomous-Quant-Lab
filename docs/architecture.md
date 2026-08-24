@@ -50,7 +50,8 @@ hranice; selection smí používat train/validation, nikoli test. Monte Carlo bo
 opakováním trade returns a explicitním seedem. Parameter stability přímo reportuje medián,
 populační varianci a podíl profitabilních sousedů. Cost stress obsahuje nenulový base model.
 
-Split násobí počet akcií a cash dividend připíše držené množství krát dividend na ex-date.
+Split násobí počet akcií včetně lotů a fillů se shodným effective timestampem; cash dividend
+připíše držené množství krát dividend na ex-date.
 Adjusted signalová řada se znovu účetně nepřipisuje. Corporate actions musí být dodány explicitně.
 
 ## Známá omezení research vrstvy
