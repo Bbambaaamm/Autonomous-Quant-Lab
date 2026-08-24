@@ -813,19 +813,20 @@ class Phase6PaperExecutionService:
         latest = self.current_data.latest(execution_instruments, decision_time)
         executable_session = latest[0].session_date
         execution_time = self.current_data.calendar.session_open(executable_session)
-        history = self.current_data.history(
-            eligible,
-            decision_time,
-            strategy.required_lookback,
-            before_session=executable_session,
-            known_at=execution_time,
-        )
         expected_sessions: list[date] = []
         history_session = executable_session
         for _ in range(strategy.required_lookback):
             history_session = self.current_data.calendar.previous_session(history_session)
             expected_sessions.append(history_session)
         expected_sessions.reverse()
+        signal_time = self.current_data.calendar.session_close(expected_sessions[-1])
+        history = self.current_data.history(
+            eligible,
+            decision_time,
+            strategy.required_lookback,
+            before_session=executable_session,
+            known_at=signal_time,
+        )
         if any(
             len(values) != strategy.required_lookback
             or [item.session_date for item in values] != expected_sessions
@@ -843,7 +844,7 @@ class Phase6PaperExecutionService:
                 item.new_symbol,
             )
             for item in action_rows
-            if _database_utc(item.known_at) <= execution_time
+            if _database_utc(item.known_at) <= signal_time
         )
         signal_prices = {
             instrument: tuple(
@@ -874,7 +875,6 @@ class Phase6PaperExecutionService:
             strategy.rebalance_frequency,
         ):
             raise DatasetInvalid("Deployment dnes nemá povolený rebalance")
-        signal_time = execution_time
         target = strategy.generate_targets(
             StrategyContext(signal_time, history, eligible, signal_prices)
         )
@@ -905,7 +905,7 @@ class Phase6PaperExecutionService:
             bars,
             target_weights,
             latest[0].session_date,
-            decision_time,
+            execution_time,
         )
         with Session(self.trading_cycle.repository.engine) as session, session.begin():
             self.trading_cycle.repository.audit(

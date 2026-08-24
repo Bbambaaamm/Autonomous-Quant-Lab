@@ -17,6 +17,7 @@ from quantlab.market_data import (
     XNYSCalendar,
 )
 from quantlab.market_data_service import DatasetSnapshotService, PersistentMarketDataService
+from quantlab.multi_asset import RebalanceFrequency
 from quantlab.persistence import StrategyRecord, UniverseDefinitionRecord, UniverseMembershipRecord
 from quantlab.phase6_runtime import Phase6ExperimentRequest
 
@@ -136,7 +137,10 @@ def seed_phase6_snapshot(
         snapshot.snapshot_id,
         "multi_asset_trend",
         "1.0.0",
-        ({"fast": 2, "slow": 3}, {"fast": 3, "slow": 5}),
+        (
+            {"fast": 2, "slow": 3, "rebalance_frequency": RebalanceFrequency.DAILY},
+            {"fast": 3, "slow": 5, "rebalance_frequency": RebalanceFrequency.DAILY},
+        ),
         code_sha=CODE_SHA,
     )
     return instrument, provider, sessions, snapshot, request
