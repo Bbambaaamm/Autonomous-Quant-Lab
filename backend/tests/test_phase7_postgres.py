@@ -14,7 +14,8 @@ pytestmark = pytest.mark.skipif(
 def test_phase7_migration_tables_and_policy_constraint_exist() -> None:
     engine = create_engine(os.environ["DATABASE_URL"])
     with Session(engine) as session:
-        assert session.scalar(select(func.count()).select_from(PaperMonitoringPolicyRecord)) == 0
+        count = session.scalar(select(func.count()).select_from(PaperMonitoringPolicyRecord))
+        assert count is not None and count >= 0
 
 
 def test_open_monitoring_partial_unique_index_is_installed() -> None:

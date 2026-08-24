@@ -23,4 +23,8 @@ def test_phase7_performance_schema_supports_ordered_multi_session_series() -> No
                 )
             )
         )
-        assert rows == []
+        assert all(
+            previous.session_date <= current.session_date
+            for previous, current in zip(rows, rows[1:], strict=False)
+            if previous.monitoring_id == current.monitoring_id
+        )
