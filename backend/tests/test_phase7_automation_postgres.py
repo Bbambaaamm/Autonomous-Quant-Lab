@@ -7,7 +7,7 @@ from uuid import uuid4
 
 import pytest
 from phase6_audit_helpers import CALENDAR, MappingProvider, daily_bar
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session, sessionmaker
 from test_phase7_postgres import _executed_monitoring
 
@@ -16,6 +16,7 @@ from quantlab.automation import (
     JobRun,
     JobType,
     RunStatus,
+    ScheduledJob,
     SchedulerService,
     ScheduleType,
     WorkerService,
@@ -62,10 +63,23 @@ def _counts(factory, account_id: str) -> tuple[int, int, int, int, int]:
         )
 
 
+def _isolate_automation_queue(repository: AutomationRepository, now: datetime) -> None:
+    """Ukončí pouze nevyřízenou evidenci, kterou ve sdílené DB zanechaly starší testy."""
+    with Session(repository.engine) as session:
+        session.execute(update(ScheduledJob).values(enabled=False, updated_at=now))
+        session.execute(
+            update(JobRun)
+            .where(JobRun.status.in_((RunStatus.PENDING, RunStatus.RETRY_SCHEDULED)))
+            .values(status=RunStatus.CANCELLED, finished_at=now, next_attempt_at=None)
+        )
+        session.commit()
+
+
 def test_monitoring_automation_production_e2e_is_non_economic_and_retry_idempotent(factory) -> None:
     account_id, _deployment, run, instrument = _executed_monitoring(factory)
     repository = AutomationRepository(str(factory.kw["bind"].url))
     execution_time = datetime.now(UTC)
+    _isolate_automation_queue(repository, execution_time)
     completed_session = CALENDAR.latest_completed_session(execution_time)
     with factory() as session:
         price = Decimal(
@@ -87,7 +101,7 @@ def test_monitoring_automation_production_e2e_is_non_economic_and_retry_idempote
         completed_session,
         CALENDAR.session_close(completed_session),
     )
-    due = datetime(2020, 1, 1, tzinfo=UTC)
+    due = execution_time
     job = repository.create_job(
         job_type=JobType.MONITOR_PAPER_DEPLOYMENT,
         account_id=account_id,
@@ -103,7 +117,8 @@ def test_monitoring_automation_production_e2e_is_non_economic_and_retry_idempote
         worker_heartbeat_interval=2,
     )
     before = _counts(factory, account_id)
-    run_ids = [SchedulerService(repository).run_now(job.id, "phase7-e2e", due)]
+    run_ids = SchedulerService(repository).tick(due + timedelta(seconds=1))
+    assert len(run_ids) == 1
     assert (
         WorkerService(repository, settings, worker_id="phase7-monitor-1").execute_one()
         == run_ids[0]
