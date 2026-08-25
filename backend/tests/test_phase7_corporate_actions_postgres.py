@@ -243,20 +243,27 @@ def test_sell_after_split_preserves_basis_and_realized_pnl(factory) -> None:
     )
     with factory() as session:
         position = session.get(PositionRecord, (account, instrument.instrument_id))
-        commission = session.scalar(
-            select(func.sum(PaperFillRecord.commission))
-            .join(PaperOrderRecord)
-            .where(PaperOrderRecord.trading_cycle_id == cycle_id)
+        fills = tuple(
+            session.scalars(
+                select(PaperFillRecord)
+                .join(PaperOrderRecord)
+                .where(PaperOrderRecord.trading_cycle_id == cycle_id)
+                .order_by(PaperFillRecord.sequence)
+            )
         )
-        sold_quantity = session.scalar(
-            select(func.sum(PaperFillRecord.quantity))
-            .join(PaperOrderRecord)
-            .where(PaperOrderRecord.trading_cycle_id == cycle_id)
+        sold_quantity = sum((fill.quantity for fill in fills), Decimal(0))
+        execution_cost = sum(
+            (
+                fill.quantity * (fill.reference_price - fill.price) + fill.commission
+                for fill in fills
+            ),
+            Decimal(0),
         )
+        assert fills
         assert sold_quantity > 0
         assert position.quantity == split_quantity - sold_quantity
         assert position.realized_pnl == pytest.approx(
-            realized_before - commission, abs=Decimal("0.0001")
+            realized_before - execution_cost, abs=Decimal("0.0001")
         )
 
 

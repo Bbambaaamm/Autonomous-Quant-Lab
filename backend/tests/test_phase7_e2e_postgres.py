@@ -83,8 +83,10 @@ def _full_multi_session_flow(
     policy_config = DEFAULT_POLICY.copy()
     policy_config["minimum_sessions"] = 3
     if expected_verdict is EvaluationVerdict.WATCH:
+        policy_config["bootstrap_block_size"] = 1
         policy_config["watch_return_percentile"] = 50
     elif expected_verdict is EvaluationVerdict.REVIEW_REQUIRED:
+        policy_config["bootstrap_block_size"] = 1
         policy_config["watch_return_percentile"] = 50
         policy_config["review_return_percentile"] = 40
     policy = monitoring.create_policy(
@@ -257,7 +259,7 @@ def _append_controlled_verdict(factory, flow, expected):
             returns,
             horizon,
             1000,
-            5,
+            1,
             f"{run.monitoring_id}:{run.policy_id}:{horizon}:paper-monitoring-v1",
         )
     )
