@@ -28,7 +28,8 @@ formulář. Reconciliation vyžaduje `RECONCILE`. Systém je pouze PAPER a nikde
 Data stránka používá authoritative XNYS latest completed session, nikoli 24h TTL. STARTED,
 FAILED nebo chybějící session se nezobrazí jako healthy. Operations zobrazuje PostgreSQL jobs,
 runs, dead letters a heartbeat freshness. Audit filtry a stránkování probíhají na serveru;
-payload se renderuje escapovaným React textem bez raw HTML.
+payload se renderuje escapovaným React textem bez raw HTML. Časové auditní filtry se před
+porovnáním normalizují do UTC; hodnota bez offsetu z pole označeného UTC se interpretuje jako UTC.
 
 Kontroly: `npm run lint`, `npm run typecheck`, `npm test`, `npm run build`. Při 503 nebo síťové
 chybě stránka zobrazí unavailable stav; prázdná evidence se nikdy nenahrazuje nulami.

@@ -233,6 +233,8 @@ def operator_audit(
     start_utc: datetime | None = None,
     end_utc: datetime | None = None,
 ) -> dict[str, object]:
+    start_utc = _normalize_utc_filter(start_utc)
+    end_utc = _normalize_utc_filter(end_utc)
     if start_utc and end_utc and start_utc > end_utc:
         raise HTTPException(422, "start_utc musí být před end_utc")
     return operator_read_model.audit(
@@ -245,6 +247,14 @@ def operator_audit(
         start=start_utc,
         end=end_utc,
     )
+
+
+def _normalize_utc_filter(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
 
 
 @app.post("/operator/risk/halt", response_model=OperatorDocument)
