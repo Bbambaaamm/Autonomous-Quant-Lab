@@ -377,7 +377,7 @@ class Phase4Repository:
             )
             session.commit()
 
-    def resume(self, account_id: str, correlation_id: str) -> None:
+    def resume(self, account_id: str, correlation_id: str, reason: str | None = None) -> None:
         with Session(self.engine) as session:
             account = session.get(PaperAccountRecord, account_id)
             if account is None or not account.reconciliation_safe:
@@ -391,6 +391,7 @@ class Phase4Repository:
                 account_id,
                 None,
                 correlation_id,
+                {"reason": reason} if reason is not None else None,
             )
             session.commit()
 

@@ -1,10 +1,11 @@
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Annotated
+from uuid import uuid4
 
 from fastapi import FastAPI, Header, HTTPException, Query
-from fastapi.responses import HTMLResponse
+from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
@@ -24,8 +25,10 @@ from quantlab.automation import (
 from quantlab.backtest import serialize_result
 from quantlab.config import get_settings
 from quantlab.demo import load_fixture, run_demo
+from quantlab.domain import AuditEventType
 from quantlab.market_data import StooqProvider, XNYSCalendar
 from quantlab.multi_asset import STRATEGY_REGISTRY
+from quantlab.operator_read_model import OperatorReadModel
 from quantlab.persistence import (
     DatasetSnapshotRecord,
     InstrumentRecord,
@@ -70,6 +73,7 @@ automation_repository = AutomationRepository(settings.database_url)
 automation_scheduler = SchedulerService(automation_repository)
 automation_worker = WorkerService(automation_repository, settings)
 monitoring_service = PaperMonitoringService(lambda: Session(paper_repository.engine))
+operator_read_model = OperatorReadModel(lambda: Session(paper_repository.engine), settings)
 
 
 class JobCreate(BaseModel):
@@ -99,6 +103,287 @@ class MonitoringPolicyCreate(BaseModel):
 
 class MonitoringTransition(BaseModel):
     reason: str = Field(min_length=1, max_length=1000)
+
+
+class OperatorAction(BaseModel):
+    confirmation: str = Field(min_length=4, max_length=10)
+    reason: str = Field(min_length=3, max_length=1000)
+
+
+class OperatorOverview(BaseModel):
+    server_time_utc: datetime
+    trading_mode: str
+    live_trading_enabled: bool
+    api_health: str
+    readiness: str
+    paper_account_id: str | None
+    trading_state: str | None
+    reconciliation_safe: bool | None
+    latest_reconciliation_status: str | None
+    monitoring_id: str | None
+    monitoring_state: str | None
+    monitoring_verdict: str | None
+    paper_equity: Decimal | None
+    paper_cash: Decimal | None
+    cumulative_return: Decimal | None
+    current_drawdown: Decimal | None
+    position_count: int
+    open_order_count: int
+    last_trading_cycle: datetime | None
+    next_scheduled_paper_cycle: datetime | None
+    latest_completed_market_session: date
+    latest_market_data_status: str | None
+    latest_market_data_at: datetime | None
+    automation_enabled: bool
+    enabled_job_count: int
+    dead_letter_count: int
+    healthy_worker_count: int
+    stale_worker_count: int
+    as_of: datetime | None
+
+
+class OperatorList(BaseModel):
+    items: list[dict[str, object]]
+    total: int
+    limit: int
+    offset: int
+
+
+class OperatorActionResult(BaseModel):
+    trading_state: str
+
+
+class OperatorPerformancePoint(BaseModel):
+    session_date: date
+    as_of: datetime
+    marked_equity: Decimal
+    cash: Decimal
+    daily_return: Decimal | None
+    cumulative_return: Decimal
+    drawdown: Decimal
+    gross_exposure: Decimal
+    net_exposure: Decimal
+    turnover: Decimal
+    commissions: Decimal
+    slippage: Decimal
+    order_count: int
+    fill_count: int
+    risk_rejection_count: int
+
+
+class OperatorPerformance(BaseModel):
+    period: str
+    monitoring_id: str | None
+    points: list[OperatorPerformancePoint]
+
+
+class OperatorPaper(BaseModel):
+    account: dict[str, object] | None
+    marked_equity: Decimal | None
+    positions: list[dict[str, object]]
+    orders: list[dict[str, object]]
+    fills: list[dict[str, object]]
+    latest_reconciliation: dict[str, object] | None
+    monitoring: dict[str, object] | None
+    latest_evaluation: dict[str, object] | None
+    as_of: datetime | None
+
+
+class OperatorRisk(BaseModel):
+    trading_state: str | None
+    reconciliation_safe: bool | None
+    marked_equity: Decimal | None
+    current_drawdown: Decimal | None
+    gross_exposure: Decimal | None
+    net_exposure: Decimal | None
+    position_count: int
+    limits: dict[str, object]
+    decisions: list[dict[str, object]]
+    events: list[dict[str, object]]
+
+
+class OperatorDataHealth(BaseModel):
+    provider: dict[str, object]
+    calendar_identity: str
+    latest_completed_session: date
+    latest_successful_session: date | None
+    fresh: bool
+    relevant_instrument_count: int
+    current_observation_count: int
+    instruments: list[dict[str, object]]
+    ingestions: list[dict[str, object]]
+    snapshots: list[dict[str, object]]
+
+
+class OperatorAutomation(BaseModel):
+    enabled: bool
+    jobs: list[dict[str, object]]
+    runs: list[dict[str, object]]
+    workers: list[dict[str, object]]
+
+
+class OperatorStrategy(BaseModel):
+    strategy_identity: str
+    strategy_name: str
+    strategy_version: str
+    created_at: datetime
+    metadata_json: str
+    experiments: list[dict[str, object]] | None = None
+    deployments: list[dict[str, object]] | None = None
+
+
+class OperatorExperiment(BaseModel):
+    id: str
+    created_at: datetime
+    status: str
+    strategy_identity: str | None
+    strategy_name: str | None
+    strategy_version: str | None
+    snapshot_id: str | None
+    decision: str | None
+    code_sha: str | None
+    config_json: str
+    result_json: str
+
+
+class OperatorExperimentList(BaseModel):
+    items: list[OperatorExperiment]
+    total: int
+    limit: int
+    offset: int
+
+
+class OperatorAuditList(OperatorList):
+    pass
+
+
+class OperatorComparison(BaseModel):
+    monitoring: dict[str, object]
+    policy: dict[str, object] | None
+    baseline: dict[str, object] | None
+    paper_points: list[dict[str, object]]
+    evaluations: list[dict[str, object]]
+
+
+@app.get("/operator/overview", response_model=OperatorOverview)
+def operator_overview() -> dict[str, object]:
+    return operator_read_model.overview(datetime.now(UTC))
+
+
+@app.get("/operator/paper", response_model=OperatorPaper)
+def operator_paper() -> dict[str, object]:
+    return operator_read_model.paper()
+
+
+@app.get("/operator/paper/performance", response_model=OperatorPerformance)
+def operator_performance(
+    period: str = Query("ALL", pattern="^(1M|3M|6M|YTD|1Y|ALL)$"),
+) -> dict[str, object]:
+    return operator_read_model.performance(period, datetime.now(UTC))
+
+
+@app.get("/operator/monitoring/{monitoring_id}/comparison", response_model=OperatorComparison)
+def operator_monitoring_comparison(monitoring_id: str) -> dict[str, object]:
+    result = operator_read_model.comparison(monitoring_id)
+    if result is None:
+        raise HTTPException(404, "Monitoring neexistuje")
+    return result
+
+
+@app.get("/operator/strategies", response_model=list[OperatorStrategy])
+def operator_strategies() -> list[dict[str, object]]:
+    return operator_read_model.strategies()
+
+
+@app.get("/operator/strategies/{strategy_identity}", response_model=OperatorStrategy)
+def operator_strategy(strategy_identity: str) -> dict[str, object]:
+    result = operator_read_model.strategy(strategy_identity)
+    if result is None:
+        raise HTTPException(404, "Strategie neexistuje")
+    return result
+
+
+@app.get("/operator/research/experiments", response_model=OperatorExperimentList)
+def operator_experiments(
+    limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=0)
+) -> dict[str, object]:
+    return operator_read_model.experiments(limit, offset)
+
+
+@app.get("/operator/research/experiments/{experiment_id}", response_model=OperatorExperiment)
+def operator_experiment(experiment_id: str) -> dict[str, object]:
+    result = operator_read_model.experiment(experiment_id)
+    if result is None:
+        raise HTTPException(404, "Experiment neexistuje")
+    return result
+
+
+@app.get("/operator/risk", response_model=OperatorRisk)
+def operator_risk() -> dict[str, object]:
+    return operator_read_model.risk()
+
+
+@app.get("/operator/data-health", response_model=OperatorDataHealth)
+def operator_data_health() -> dict[str, object]:
+    return operator_read_model.data_health(datetime.now(UTC))
+
+
+@app.get("/operator/automation", response_model=OperatorAutomation)
+def operator_automation() -> dict[str, object]:
+    return operator_read_model.automation(datetime.now(UTC))
+
+
+@app.get("/operator/audit", response_model=OperatorAuditList)
+def operator_audit(
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    event_type: str | None = None,
+    entity_type: str | None = None,
+    entity_id: str | None = None,
+    correlation_id: str | None = None,
+    start_utc: datetime | None = None,
+    end_utc: datetime | None = None,
+) -> dict[str, object]:
+    if (start_utc and start_utc.tzinfo is None) or (end_utc and end_utc.tzinfo is None):
+        raise HTTPException(422, "Auditní čas musí obsahovat UTC offset")
+    start_utc = start_utc.astimezone(UTC) if start_utc else None
+    end_utc = end_utc.astimezone(UTC) if end_utc else None
+    if start_utc and end_utc and start_utc > end_utc:
+        raise HTTPException(422, "start_utc musí být před end_utc")
+    return operator_read_model.audit(
+        limit=limit,
+        offset=offset,
+        event_type=event_type,
+        entity_type=entity_type,
+        entity_id=entity_id,
+        correlation_id=correlation_id,
+        start=start_utc,
+        end=end_utc,
+    )
+
+
+@app.post("/operator/risk/halt", response_model=OperatorActionResult)
+def operator_halt(request: OperatorAction) -> dict[str, str]:
+    if request.confirmation != "HALT":
+        raise HTTPException(422, "Potvrzení musí být HALT")
+    paper_repository.halt(
+        "paper-main",
+        request.reason,
+        str(uuid4()),
+        AuditEventType.KILL_SWITCH_MANUAL_HALT,
+    )
+    return {"trading_state": "HALTED"}
+
+
+@app.post("/operator/risk/resume", response_model=OperatorActionResult)
+def operator_resume(request: OperatorAction) -> dict[str, str]:
+    if request.confirmation != "RESUME":
+        raise HTTPException(422, "Potvrzení musí být RESUME")
+    try:
+        paper_repository.resume("paper-main", str(uuid4()), request.reason)
+    except PermissionError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return {"trading_state": "NORMAL"}
 
 
 def _row(row: object) -> dict[str, object]:
@@ -747,11 +1032,7 @@ def research_report(experiment_id: str) -> dict[str, str]:
     return {"id": experiment_id, "report": result["report"]}
 
 
-@app.get("/", response_class=HTMLResponse)
-def dashboard() -> str:
-    # ruff: noqa: E501
-    return """<!doctype html><html lang='cs'><head><meta charset='utf-8'><title>Autonomous Quant Lab</title>
-<style>body{font-family:system-ui;max-width:900px;margin:3rem auto;background:#07111f;color:#e6f1ff}button{padding:.7rem;background:#40c9a2;border:0}pre{background:#101f33;padding:1rem}</style></head>
-<body><h1>Autonomous Quant Lab</h1><p>Bezpečný paper-trading vertical slice.</p>
-<button onclick='run()'>Spustit MA backtest</button><pre id='out'>Připraveno</pre>
-<script>async function run(){let r=await fetch('/api/backtests/demo',{method:'POST'});document.querySelector('#out').textContent=JSON.stringify(await r.json(),null,2)}</script></body></html>"""
+@app.get("/", response_class=RedirectResponse)
+def api_root() -> str:
+    """Backend je API; produktové uživatelské rozhraní obsluhuje Next.js."""
+    return "/docs"

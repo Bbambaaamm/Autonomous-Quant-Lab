@@ -1,0 +1,7 @@
+"use server";
+import {revalidatePath} from "next/cache";
+const base=process.env.QUANTLAB_API_URL??"http://127.0.0.1:8000";
+async function mutate(path:string,body:Record<string,string>){const r=await fetch(`${base}${path}`,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(body),cache:"no-store"});if(!r.ok){const detail=await r.text();throw new Error(`Akce selhala (${r.status}): ${detail}`)}revalidatePath("/");revalidatePath("/risk");revalidatePath("/paper")}
+export async function riskAction(form:FormData){const action=String(form.get("action"));const confirmation=String(form.get("confirmation"));const reason=String(form.get("reason"));if(!["halt","resume"].includes(action))throw new Error("Neplatná akce");await mutate(`/operator/risk/${action}`,{confirmation,reason})}
+export async function monitoringAction(form:FormData){const id=String(form.get("id"));const action=String(form.get("action"));const reason=String(form.get("reason"));const confirmation=String(form.get("confirmation"));if(!/^[\w-]{1,64}$/.test(id)||!["pause","resume","retire"].includes(action)||confirmation!==action.toUpperCase()||reason.length<3)throw new Error("Akce vyžaduje přesné potvrzení a důvod");await mutate(`/paper/monitoring/${id}/${action}`,{reason});revalidatePath(`/paper/monitoring/${id}`)}
+export async function reconcile(form:FormData){if(form.get("confirmation")!=="RECONCILE")throw new Error("Potvrzení musí být RECONCILE");await mutate("/reconciliation/run",{});revalidatePath("/data")}

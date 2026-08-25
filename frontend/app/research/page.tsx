@@ -1,0 +1,2 @@
+import {api} from "@/lib/api";import {JsonTable} from "@/components/ui";export const dynamic="force-dynamic";
+export default async function Research(){const d=await api<{items:Record<string,unknown>[];total:number}>("/operator/research/experiments?limit=50&offset=0");return <><h1>Research evidence</h1><p>{d.total} immutable experimentů. Tato stránka nevytváří demo experimenty.</p><JsonTable rows={d.items}/></>}
