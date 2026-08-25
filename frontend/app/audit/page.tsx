@@ -1,2 +1,25 @@
-import {api} from "@/lib/api";import {JsonTable} from "@/components/ui";export const dynamic="force-dynamic";
-export default async function Audit({searchParams}:{searchParams:Promise<Record<string,string>>}){const p=await searchParams;const allowed=["event_type","entity_type","entity_id","correlation_id","start_utc","end_utc","offset"];const q=new URLSearchParams({limit:"50"});for(const k of allowed)if(p[k])q.set(k,p[k]);const d=await api<{items:Record<string,unknown>[];total:number;offset:number;limit:number}>(`/operator/audit?${q}`);return <><h1>Audit history</h1><form className="toolbar" method="get"><label>Event type <input name="event_type" defaultValue={p.event_type}/></label><label>Entity type <input name="entity_type" defaultValue={p.entity_type}/></label><label>Entity ID <input name="entity_id" defaultValue={p.entity_id}/></label><label>Correlation ID <input name="correlation_id" defaultValue={p.correlation_id}/></label><label>Od UTC <input type="datetime-local" name="start_utc" defaultValue={p.start_utc}/></label><label>Do UTC <input type="datetime-local" name="end_utc" defaultValue={p.end_utc}/></label><button>Filtrovat na serveru</button></form><p>{d.total} událostí · offset {d.offset}</p><JsonTable rows={d.items}/><div className="toolbar">{d.offset>0&&<a className="badge" href={`?offset=${Math.max(0,d.offset-d.limit)}`}>Předchozí</a>}{d.offset+d.limit<d.total&&<a className="badge" href={`?offset=${d.offset+d.limit}`}>Další</a>}</div></>}
+import { JsonTable } from "@/components/ui";
+import { api } from "@/lib/api";
+import { auditFilterKeys, auditPageUrl } from "@/lib/audit-pagination";
+
+export const dynamic = "force-dynamic";
+
+export default async function Audit({
+  searchParams,
+}: {
+  searchParams: Promise<Record<string, string>>;
+}) {
+  const parameters = await searchParams;
+  const query = new URLSearchParams({ limit: "50", offset: parameters.offset ?? "0" });
+  for (const key of auditFilterKeys) {
+    if (parameters[key]) query.set(key, parameters[key]);
+  }
+  const data = await api<{
+    items: Record<string, unknown>[];
+    total: number;
+    offset: number;
+    limit: number;
+  }>(`/operator/audit?${query.toString()}`);
+
+  return <><h1>Audit history</h1><form className="toolbar" method="get"><label>Event type <input name="event_type" defaultValue={parameters.event_type} /></label><label>Entity type <input name="entity_type" defaultValue={parameters.entity_type} /></label><label>Entity ID <input name="entity_id" defaultValue={parameters.entity_id} /></label><label>Correlation ID <input name="correlation_id" defaultValue={parameters.correlation_id} /></label><label>Od UTC <input type="datetime-local" name="start_utc" defaultValue={parameters.start_utc} /></label><label>Do UTC <input type="datetime-local" name="end_utc" defaultValue={parameters.end_utc} /></label><button>Filtrovat na serveru</button></form><p>{data.total} událostí · offset {data.offset}</p><JsonTable rows={data.items} /><div className="toolbar">{data.offset > 0 && <a className="badge" href={auditPageUrl(parameters, Math.max(0, data.offset - data.limit))}>Předchozí</a>}{data.offset + data.limit < data.total && <a className="badge" href={auditPageUrl(parameters, data.offset + data.limit)}>Další</a>}</div></>;
+}

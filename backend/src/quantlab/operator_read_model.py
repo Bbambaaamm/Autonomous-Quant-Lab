@@ -15,6 +15,7 @@ from quantlab.persistence import (
     ExperimentRecord,
     InstrumentRecord,
     MarketDataIngestionRecord,
+    MarketObservationRecord,
     StrategyDeploymentRecord,
     StrategyRecord,
 )
@@ -310,6 +311,8 @@ class OperatorReadModel:
 
     def data_health(self, now: datetime) -> dict[str, Any]:
         completed = XNYSCalendar().latest_completed_session(now)
+        session_start = datetime.combine(completed, datetime.min.time(), tzinfo=UTC)
+        session_end = session_start + timedelta(days=1)
         with self._session_factory() as session:
             ingestions = list(
                 session.scalars(
@@ -325,15 +328,52 @@ class OperatorReadModel:
                     .limit(50)
                 )
             )
-            latest_success = next((x for x in ingestions if x.status == "SUCCEEDED"), None)
+            relevant_instruments = set(
+                session.scalars(
+                    select(InstrumentRecord.instrument_id).where(
+                        InstrumentRecord.active_from < session_end,
+                        (InstrumentRecord.active_to.is_(None))
+                        | (InstrumentRecord.active_to >= session_start),
+                        InstrumentRecord.calendar == "XNYS",
+                    )
+                )
+            )
+            observed_instruments = set(
+                session.scalars(
+                    select(MarketObservationRecord.instrument_id)
+                    .join(
+                        MarketDataIngestionRecord,
+                        MarketDataIngestionRecord.id == MarketObservationRecord.ingestion_id,
+                    )
+                    .where(
+                        MarketDataIngestionRecord.status == "SUCCEEDED",
+                        MarketObservationRecord.session_date >= session_start,
+                        MarketObservationRecord.session_date < session_end,
+                        MarketObservationRecord.instrument_id.in_(relevant_instruments),
+                    )
+                    .distinct()
+                )
+            )
+            latest_observation = session.scalar(
+                select(func.max(MarketObservationRecord.session_date))
+                .join(
+                    MarketDataIngestionRecord,
+                    MarketDataIngestionRecord.id == MarketObservationRecord.ingestion_id,
+                )
+                .where(MarketDataIngestionRecord.status == "SUCCEEDED")
+            )
             return {
                 "provider": {"name": "stooq", "type": "persistent"},
                 "calendar_identity": XNYSCalendar().identity,
                 "latest_completed_session": completed,
-                "latest_successful_session": latest_success.requested_end.date()
-                if latest_success
+                "latest_successful_session": latest_observation.date()
+                if latest_observation
                 else None,
-                "fresh": bool(latest_success and latest_success.requested_end.date() >= completed),
+                "fresh": bool(
+                    relevant_instruments and observed_instruments == relevant_instruments
+                ),
+                "relevant_instrument_count": len(relevant_instruments),
+                "current_observation_count": len(observed_instruments),
                 "instruments": [
                     _row(x)
                     for x in session.scalars(
@@ -425,7 +465,9 @@ class OperatorReadModel:
             return [
                 _row(x)
                 for x in session.scalars(
-                    select(StrategyRecord).order_by(StrategyRecord.name, StrategyRecord.version)
+                    select(StrategyRecord).order_by(
+                        StrategyRecord.strategy_name, StrategyRecord.strategy_version
+                    )
                 )
             ]
 
@@ -444,7 +486,10 @@ class OperatorReadModel:
             deployments = list(
                 session.scalars(
                     select(StrategyDeploymentRecord)
-                    .where(StrategyDeploymentRecord.strategy_identity == identity)
+                    .where(
+                        StrategyDeploymentRecord.strategy_name == row.strategy_name,
+                        StrategyDeploymentRecord.strategy_version == row.strategy_version,
+                    )
                     .order_by(StrategyDeploymentRecord.created_at.desc())
                 )
             )

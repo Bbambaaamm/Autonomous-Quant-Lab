@@ -2,6 +2,7 @@ from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Annotated
+from uuid import uuid4
 
 from fastapi import FastAPI, Header, HTTPException, Query
 from fastapi.responses import RedirectResponse
@@ -258,9 +259,7 @@ def operator_resume(request: OperatorAction) -> dict[str, str]:
     if request.confirmation != "RESUME":
         raise HTTPException(422, "Potvrzení musí být RESUME")
     try:
-        paper_repository.resume(
-            "paper-main", f"operator:{request.reason}:{datetime.now(UTC).timestamp()}"
-        )
+        paper_repository.resume("paper-main", str(uuid4()), request.reason)
     except PermissionError as exc:
         raise HTTPException(409, str(exc)) from exc
     return {"trading_state": "NORMAL"}
