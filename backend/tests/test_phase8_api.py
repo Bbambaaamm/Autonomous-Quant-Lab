@@ -101,6 +101,42 @@ def test_audit_normalizes_mixed_datetime_filters_to_utc(tmp_path, monkeypatch):
     assert response.json()["total"] == 1
 
 
+def test_audit_pagination_is_stable_when_timestamps_match(tmp_path, monkeypatch):
+    api = client(tmp_path, monkeypatch)
+    from datetime import UTC, datetime
+
+    from sqlalchemy.orm import Session
+
+    import quantlab.api as module
+    from quantlab.phase4 import AuditEventRecord
+
+    timestamp = datetime(2026, 8, 25, 12, tzinfo=UTC)
+    with Session(module.paper_repository.engine) as session:
+        for event_id in ("same-time-a", "same-time-b"):
+            session.add(
+                AuditEventRecord(
+                    id=event_id,
+                    timestamp=timestamp,
+                    event_type="PAGINATION_PROOF",
+                    entity_type="audit-test",
+                    entity_id=event_id,
+                    trading_cycle_id=None,
+                    correlation_id=event_id,
+                    payload_json="{}",
+                )
+            )
+        session.commit()
+
+    first = api.get("/operator/audit?event_type=PAGINATION_PROOF&limit=1&offset=0").json()
+    second = api.get("/operator/audit?event_type=PAGINATION_PROOF&limit=1&offset=1").json()
+
+    assert first["total"] == second["total"] == 2
+    assert [first["items"][0]["id"], second["items"][0]["id"]] == [
+        "same-time-b",
+        "same-time-a",
+    ]
+
+
 def test_openapi_exposes_stable_operator_contracts(tmp_path, monkeypatch):
     schema = client(tmp_path, monkeypatch).get("/openapi.json").json()
     required = {
