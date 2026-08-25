@@ -1,0 +1,202 @@
+name: Repair frontend lockfile
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: Branch/ref containing package.json to repair
+        required: true
+        default: main
+
+permissions:
+  contents: read
+
+env:
+  NODE_VERSION: "24"
+  NPM_VERSION: "11.17.0"
+
+jobs:
+  verify-repair:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      changed: ${{ steps.diff.outputs.changed }}
+      source_ref: ${{ steps.source.outputs.source_ref }}
+      tested_source_sha: ${{ steps.source.outputs.sha }}
+      lockfile_checksum: ${{ steps.artifact.outputs.checksum }}
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - name: Resolve source branch
+        id: source
+        uses: actions/github-script@v7
+        env:
+          SOURCE_REF: ${{ inputs.source_ref }}
+        with:
+          script: |
+            const sourceRef = process.env.SOURCE_REF;
+            try {
+              const { data } = await github.rest.repos.getBranch({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                branch: sourceRef,
+              });
+              core.setOutput("source_ref", sourceRef);
+              core.setOutput("sha", data.commit.sha);
+            } catch (error) {
+              core.setFailed(`source_ref '${sourceRef}' neexistuje jako vzdálená větev vhodná pro PR: ${error.message}`);
+            }
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.source.outputs.sha }}
+          persist-credentials: false
+      - name: Verify exact source checkout
+        env:
+          TESTED_SOURCE_SHA: ${{ steps.source.outputs.sha }}
+        run: test "$(git rev-parse HEAD)" = "${TESTED_SOURCE_SHA}"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: frontend/package.json
+      - name: Install and verify pinned npm
+        run: |
+          npm install --global "npm@${NPM_VERSION}"
+          node --version
+          npm --version
+          test "$(node --version | cut -d. -f1)" = "v${NODE_VERSION}"
+          test "$(npm --version)" = "${NPM_VERSION}"
+          test "$(node -p "require('./package.json').packageManager")" = "npm@${NPM_VERSION}"
+      - name: Regenerate lockfile with npm
+        run: npm install --package-lock-only --ignore-scripts
+      - name: Validate regenerated lockfile
+        run: npm run lockfile:check
+      - name: Install locked dependencies
+        run: npm ci
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+      - name: Detect lockfile change
+        id: diff
+        run: |
+          if test -z "$(git status --porcelain --untracked-files=all -- package-lock.json)"; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Prepare verified artifact
+        if: steps.diff.outputs.changed == 'true'
+        id: artifact
+        working-directory: .
+        env:
+          SOURCE_REF: ${{ steps.source.outputs.source_ref }}
+          TESTED_SOURCE_SHA: ${{ steps.source.outputs.sha }}
+        run: |
+          artifact_dir="${RUNNER_TEMP}/frontend-lockfile-repair"
+          mkdir -p "${artifact_dir}"
+          cp frontend/package-lock.json "${artifact_dir}/package-lock.json"
+          checksum="$(sha256sum "${artifact_dir}/package-lock.json" | cut -d' ' -f1)"
+          jq -n \
+            --arg source_ref "${SOURCE_REF}" \
+            --arg tested_source_sha "${TESTED_SOURCE_SHA}" \
+            --arg lockfile_checksum "${checksum}" \
+            '{source_ref: $source_ref, tested_source_sha: $tested_source_sha, lockfile_checksum: $lockfile_checksum}' \
+            > "${artifact_dir}/metadata.json"
+          echo "checksum=${checksum}" >> "$GITHUB_OUTPUT"
+      - name: Upload verified lockfile artifact
+        if: steps.diff.outputs.changed == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: verified-frontend-package-lock-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/frontend-lockfile-repair
+          if-no-files-found: error
+          retention-days: 3
+
+  publish-repair:
+    needs: verify-repair
+    if: needs.verify-repair.result == 'success' && needs.verify-repair.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Download verified lockfile artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: verified-frontend-package-lock-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/verified-frontend-lockfile
+      - name: Verify artifact metadata and checksum
+        env:
+          SOURCE_REF: ${{ needs.verify-repair.outputs.source_ref }}
+          TESTED_SOURCE_SHA: ${{ needs.verify-repair.outputs.tested_source_sha }}
+          LOCKFILE_CHECKSUM: ${{ needs.verify-repair.outputs.lockfile_checksum }}
+        run: |
+          artifact_dir="${RUNNER_TEMP}/verified-frontend-lockfile"
+          artifact_files="$(find "${artifact_dir}" -type f -printf '%f\n' | sort)"
+          test "${artifact_files}" = $'metadata.json\npackage-lock.json'
+          test -f "${artifact_dir}/package-lock.json"
+          test ! -L "${artifact_dir}/package-lock.json"
+          test -f "${artifact_dir}/metadata.json"
+          test ! -L "${artifact_dir}/metadata.json"
+          test "$(jq -r '.source_ref' "${artifact_dir}/metadata.json")" = "${SOURCE_REF}"
+          test "$(jq -r '.tested_source_sha' "${artifact_dir}/metadata.json")" = "${TESTED_SOURCE_SHA}"
+          test "$(jq -r '.lockfile_checksum' "${artifact_dir}/metadata.json")" = "${LOCKFILE_CHECKSUM}"
+          test "$(sha256sum "${artifact_dir}/package-lock.json" | cut -d' ' -f1)" = "${LOCKFILE_CHECKSUM}"
+      - name: Enforce source branch TOCTOU protection
+        uses: actions/github-script@v7
+        env:
+          SOURCE_REF: ${{ needs.verify-repair.outputs.source_ref }}
+          TESTED_SOURCE_SHA: ${{ needs.verify-repair.outputs.tested_source_sha }}
+        with:
+          script: |
+            try {
+              const { data } = await github.rest.repos.getBranch({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                branch: process.env.SOURCE_REF,
+              });
+              if (data.commit.sha !== process.env.TESTED_SOURCE_SHA) {
+                core.setFailed("SOURCE_REF_CHANGED_AFTER_VERIFICATION");
+              }
+            } catch (error) {
+              core.setFailed("SOURCE_REF_CHANGED_AFTER_VERIFICATION");
+            }
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.verify-repair.outputs.tested_source_sha }}
+          persist-credentials: true
+      - name: Publish only verified lockfile
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPAIR_BRANCH: automation/repair-frontend-lockfile-${{ github.run_id }}-${{ github.run_attempt }}
+          SOURCE_REF: ${{ needs.verify-repair.outputs.source_ref }}
+          TESTED_SOURCE_SHA: ${{ needs.verify-repair.outputs.tested_source_sha }}
+          LOCKFILE_CHECKSUM: ${{ needs.verify-repair.outputs.lockfile_checksum }}
+        run: |
+          test "$(git rev-parse HEAD)" = "${TESTED_SOURCE_SHA}"
+          cp "${RUNNER_TEMP}/verified-frontend-lockfile/package-lock.json" frontend/package-lock.json
+          test "$(sha256sum frontend/package-lock.json | cut -d' ' -f1)" = "${LOCKFILE_CHECKSUM}"
+          changed_files="$(git status --porcelain --untracked-files=all -- | cut -c4-)"
+          test "${changed_files}" = "frontend/package-lock.json" || {
+            echo "::error::Publish job smí změnit pouze frontend/package-lock.json."
+            exit 1
+          }
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "${REPAIR_BRANCH}"
+          git add -- frontend/package-lock.json
+          test "$(git diff --cached --name-only --)" = "frontend/package-lock.json"
+          git commit -m "Regenerace frontend package-lock.json pomocí npm"
+          git push origin "HEAD:refs/heads/${REPAIR_BRANCH}"
+          gh pr create \
+            --base "${SOURCE_REF}" \
+            --head "${REPAIR_BRANCH}" \
+            --title "Regenerace frontend dependency lockfilu" \
+            --body "Lockfile byl regenerován skutečným npm ${NPM_VERSION} na Node ${NODE_VERSION} a prošel npm ci, lintem, typecheckem, testy a buildem. Změna vyžaduje review před merge."
+      - name: Document pull request fallback
+        if: failure()
+        run: |
+          echo "Publikace PR selhala. Ověřený lockfile z verification jobu zůstává po dobu 3 dnů dostupný jako workflow artifact; workflow nikdy nepushuje do main ani source_ref." >> "$GITHUB_STEP_SUMMARY"

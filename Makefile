@@ -1,4 +1,4 @@
-.PHONY: install setup check test format lint typecheck dev api dashboard frontend-test
+.PHONY: install setup check test format lint typecheck dev api dashboard frontend-test frontend-install frontend-check frontend-lock-check
 install:
 	cd backend && uv sync --locked --all-groups
 setup: install
@@ -24,3 +24,9 @@ dashboard:
 	cd frontend && npm run dev
 frontend-test:
 	cd frontend && npm run lint && npm run typecheck && npm test && npm run build
+frontend-install:
+	cd frontend && npm ci
+frontend-check:
+	cd frontend && npm run lint && npm run typecheck && npm test && npm run build
+frontend-lock-check:
+	cd frontend && npm run lockfile:check && npm ci
