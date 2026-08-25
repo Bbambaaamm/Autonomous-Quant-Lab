@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from uuid import uuid4
 
@@ -80,6 +80,12 @@ def _snapshot_market_price(factory, snapshot) -> Decimal:
                 )
             )
         )
+
+
+def _next_account_session(factory, account_id: str, after: date) -> date:
+    with factory() as session:
+        created_day = session.get(PaperAccountRecord, account_id).created_at.date()
+    return CALENDAR.next_session(max(after, created_day))
 
 
 def test_late_known_corporate_action_is_causal_and_exactly_once(factory) -> None:
@@ -214,9 +220,12 @@ def test_sell_after_split_preserves_basis_and_realized_pnl(factory) -> None:
         repository,
         ProductionRiskConfig(
             max_position_pct=Decimal("1"),
-            max_single_order_pct=Decimal("1"),
+            max_single_order_pct=Decimal("2"),
             max_single_order_notional=Decimal("1000000"),
             max_notional_per_day=Decimal("200000"),
+            max_gross_exposure=Decimal("2"),
+            max_net_exposure=Decimal("2"),
+            max_leverage=Decimal("2"),
             instrument_allowlist=frozenset({instrument.instrument_id}),
         ),
     )
@@ -316,7 +325,7 @@ def test_split_performance_continuity_has_no_fake_minus_fifty_percent_return(fac
     before = performance.capture(
         run.monitoring_id, _completed_as_of(factory, instrument.instrument_id)
     )
-    next_day = CALENDAR.next_session(before.session_date)
+    next_day = _next_account_session(factory, account, before.session_date)
     effective = CALENDAR.session_open(next_day)
     _action(factory, instrument.instrument_id, CorporateActionKind.SPLIT, effective, effective, "2")
     pre_split_price = _snapshot_market_price(factory, before)
@@ -343,7 +352,7 @@ def test_dividend_performance_continuity_credits_equity_once_on_retry(factory) -
     before = performance.capture(
         run.monitoring_id, _completed_as_of(factory, instrument.instrument_id)
     )
-    next_day = CALENDAR.next_session(before.session_date)
+    next_day = _next_account_session(factory, account, before.session_date)
     effective = CALENDAR.session_open(next_day)
     _action(
         factory,

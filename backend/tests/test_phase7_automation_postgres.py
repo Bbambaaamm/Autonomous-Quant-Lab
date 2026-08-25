@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import os
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
+from uuid import uuid4
 
 import pytest
+from phase6_audit_helpers import CALENDAR, MappingProvider, daily_bar
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
 from test_phase7_postgres import _executed_monitoring
@@ -18,6 +21,8 @@ from quantlab.automation import (
     WorkerService,
 )
 from quantlab.config import Settings
+from quantlab.market_data_service import PersistentMarketDataService
+from quantlab.persistence import MarketObservationRecord
 from quantlab.phase4 import PaperFillRecord, PaperOrderRecord, TradingCycleRecord
 from quantlab.phase7 import PaperPerformanceEvaluationRecord, PaperPerformanceSnapshotRecord
 
@@ -58,8 +63,30 @@ def _counts(factory, account_id: str) -> tuple[int, int, int, int, int]:
 
 
 def test_monitoring_automation_production_e2e_is_non_economic_and_retry_idempotent(factory) -> None:
-    account_id, _deployment, run, _instrument = _executed_monitoring(factory)
+    account_id, _deployment, run, instrument = _executed_monitoring(factory)
     repository = AutomationRepository(str(factory.kw["bind"].url))
+    execution_time = datetime.now(UTC)
+    completed_session = CALENDAR.latest_completed_session(execution_time)
+    with factory() as session:
+        price = Decimal(
+            session.scalar(
+                select(MarketObservationRecord.close)
+                .where(MarketObservationRecord.instrument_id == instrument.instrument_id)
+                .order_by(MarketObservationRecord.session_date.desc())
+                .limit(1)
+            )
+        )
+    PersistentMarketDataService(factory).ingest(
+        MappingProvider(
+            f"automation-{uuid4().hex[:20]}",
+            {instrument.symbol: [daily_bar(completed_session, price, "automation-monitoring")]},
+            {},
+        ),
+        instrument,
+        completed_session,
+        completed_session,
+        CALENDAR.session_close(completed_session),
+    )
     due = datetime(2020, 1, 1, tzinfo=UTC)
     job = repository.create_job(
         job_type=JobType.MONITOR_PAPER_DEPLOYMENT,

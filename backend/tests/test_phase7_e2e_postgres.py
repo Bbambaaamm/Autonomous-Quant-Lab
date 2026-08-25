@@ -266,7 +266,7 @@ def _append_controlled_verdict(factory, flow, expected):
             value
             for value in dict.fromkeys(distribution)
             if 2 < sum(outcome <= value for outcome in distribution) * 100 / len(distribution) <= 50
-        )
+        ) + Decimal("0.000000001")
     else:
         target_return = distribution[0] - Decimal("0.01")
     target_equity = run.starting_equity * (Decimal(1) + target_return)
@@ -471,16 +471,24 @@ def test_historical_paper_snapshot_and_evaluation_survive_real_provider_correcti
         _full_multi_session_flow(factory, (Decimal("121"),))
     )
     snapshot, evaluation = snapshots[-1], evaluations[-1]
-    before_snapshot = (
-        snapshot.snapshot_id,
-        snapshot.content_hash,
-        snapshot.observation_lineage_json,
-        snapshot.daily_return,
-        snapshot.cumulative_return,
-        snapshot.drawdown,
-    )
-    before_evaluation = (evaluation.evaluation_id, evaluation.content_hash, evaluation.verdict)
     with factory() as session:
+        persisted_snapshot = session.get(PaperPerformanceSnapshotRecord, snapshot.snapshot_id)
+        persisted_evaluation = session.get(
+            PaperPerformanceEvaluationRecord, evaluation.evaluation_id
+        )
+        before_snapshot = (
+            persisted_snapshot.snapshot_id,
+            persisted_snapshot.content_hash,
+            persisted_snapshot.observation_lineage_json,
+            persisted_snapshot.daily_return,
+            persisted_snapshot.cumulative_return,
+            persisted_snapshot.drawdown,
+        )
+        before_evaluation = (
+            persisted_evaluation.evaluation_id,
+            persisted_evaluation.content_hash,
+            persisted_evaluation.verdict,
+        )
         lineage = json.loads(snapshot.observation_lineage_json)
         observation = session.scalar(
             select(MarketObservationRecord).where(
