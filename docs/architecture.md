@@ -1,5 +1,8 @@
 # Architektura
 
+Phase 9 přidává autentizovaný Next.js boundary, role-specific server bearer credentials a backend-authoritative RBAC před stávající ekonomickou cestu. Strategy → Portfolio → RiskEngine → ExecutionEngine → PersistentPaperBroker se nemění. Production data network je interní a aplikace je navržena pro jeden backend worker kvůli deterministickému process-local rate limiteru.
+
+
 ## Kontext a rozhodnutí
 
 První verze je modulární monolit v Pythonu. Je to nejmenší bezpečná varianta pro auditovatelný

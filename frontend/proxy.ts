@@ -1,0 +1,6 @@
+import {NextRequest,NextResponse} from "next/server";
+import {createHmac,timingSafeEqual} from "node:crypto";
+
+function valid(value:string|undefined){if(!value)return false;const secret=process.env.SESSION_SECRET??"";if(secret.length<43)return false;const [payload,mac,...rest]=value.split(".");if(!payload||!mac||rest.length)return false;const expected=Buffer.from(createHmac("sha256",secret).update(payload).digest("base64url"));const actual=Buffer.from(mac);if(expected.length!==actual.length||!timingSafeEqual(expected,actual))return false;try{return Number(JSON.parse(Buffer.from(payload,"base64url").toString()).exp)>Date.now()}catch{return false}}
+export function proxy(request:NextRequest){const allowed=(process.env.FRONTEND_ALLOWED_HOSTS??"localhost,127.0.0.1").split(",");const host=(request.headers.get("host")??"").split(":",1)[0];if(!allowed.includes(host))return NextResponse.json({detail:"Neplatný Host"},{status:400});if(request.nextUrl.pathname.startsWith("/login"))return NextResponse.next();const name=process.env.NODE_ENV==="production"?"__Host-quantlab_session":"quantlab_session";if(!valid(request.cookies.get(name)?.value))return NextResponse.redirect(new URL("/login",process.env.PUBLIC_BASE_URL??request.url));return NextResponse.next()}
+export const config={matcher:["/((?!_next/static|_next/image|favicon.ico).*)"]};

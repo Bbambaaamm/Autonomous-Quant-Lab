@@ -1,5 +1,8 @@
 # Provoz paper tradingu
 
+Production-like PAPER provoz vyžaduje explicitní migration step, strong secrets, HTTPS ingress, oddělenou runtime DB roli a pravidelně ověřovaný backup/restore. Viz `security.md` a `production-deployment.md`. HALT dovoluje OPERATOR/ADMIN ve vlastním limiter bucketu; RESUME je ADMIN-only a nadále fail-closed vyžaduje reconciliation.
+
+
 1. Spusťte PostgreSQL a `uv run alembic -c ../alembic.ini upgrade head`.
 2. Před prvním cyklem a po incidentu volejte `POST /reconciliation/run`.
 3. Cycle spouští `POST /trading/cycles/run-paper`; incident zastaví `POST /risk/halt`.

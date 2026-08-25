@@ -308,6 +308,24 @@ def causal_adjusted_close(
 Transport = Callable[[str, float], tuple[int, dict[str, str], bytes]]
 
 
+def _validate_stooq_url(url: str) -> None:
+    parsed = urllib.parse.urlsplit(url)
+    if (
+        parsed.scheme != "https"
+        or parsed.hostname != "stooq.com"
+        or parsed.port is not None
+        or parsed.username is not None
+        or parsed.password is not None
+    ):
+        raise ProviderUnavailable("Transport dovoluje pouze HTTPS endpoint stooq.com")
+
+
+class _StooqRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[no-untyped-def]
+        _validate_stooq_url(newurl)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
 class StooqProvider:
     """Auditovatelný CSV adapter; transport lze ve fixture testech plně nahradit."""
 
@@ -321,8 +339,11 @@ class StooqProvider:
 
     @staticmethod
     def _http(url: str, timeout: float) -> tuple[int, dict[str, str], bytes]:
+        _validate_stooq_url(url)
+        opener = urllib.request.build_opener(_StooqRedirectHandler())
         try:
-            with urllib.request.urlopen(url, timeout=timeout) as response:
+            # Každý redirect znovu prochází stejným allowlistem schématu a hostu.
+            with opener.open(url, timeout=timeout) as response:  # noqa: S310
                 return response.status, dict(response.headers), response.read()
         except urllib.error.HTTPError as exc:
             return exc.code, dict(exc.headers), b""
