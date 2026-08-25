@@ -40,6 +40,11 @@ Před Phase 9: **3 HIGH, 1 CRITICAL** dle autoritativního Phase 8 reportu.
 Po Phase 9: **UNKNOWN / BLOCKED BY ENVIRONMENT**. `npm audit --json` skončil HTTP 403; nuly nejsou
 odhadnuté ani deklarované.
 
+GitHub CI následně potvrdilo tři runtime HIGH nálezy v `next@16.1.6`, jeho transitive `postcss`
+a `sharp`. Oprava je dostupná v `next@16.3.2`, ale lokální registry odmítá npm 11.17.0 i package
+metadata HTTP 403. Podle lockfile policy proto dependency manifest ani lockfile nebyly změněny;
+remediation musí projít autorizovaným npm 11.17.0 repair workflow a čistým `npm ci`.
+
 ## Known limitations
 
 - Phase 10 není implementována.

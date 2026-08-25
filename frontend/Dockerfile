@@ -9,6 +9,15 @@ FROM node:24.7.0-bookworm-slim
 ENV NODE_ENV=production HOSTNAME=0.0.0.0 PORT=3000 VALIDATE_PRODUCTION_STARTUP=true
 RUN apt-get update \
     && apt-get upgrade --yes \
+    && rm -rf /usr/local/lib/node_modules/npm \
+        /usr/local/lib/node_modules/corepack \
+        /usr/local/bin/corepack \
+        /usr/local/bin/npm \
+        /usr/local/bin/npx \
+        /usr/local/bin/pnpm \
+        /usr/local/bin/pnpx \
+        /usr/local/bin/yarn \
+        /usr/local/bin/yarnpkg \
     && groupadd --system quantlab \
     && useradd --system --gid quantlab --home /app quantlab \
     && rm -rf /var/lib/apt/lists/*

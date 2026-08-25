@@ -2,7 +2,6 @@ from fastapi.testclient import TestClient
 
 from quantlab import api
 
-
 _original_init = TestClient.__init__
 
 
