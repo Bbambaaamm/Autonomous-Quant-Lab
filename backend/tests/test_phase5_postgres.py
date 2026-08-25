@@ -57,6 +57,10 @@ def repository() -> tuple[AutomationRepository, Settings, str]:
     )
 
 
+def _connection_url(repository: AutomationRepository) -> str:
+    return repository.engine.url.render_as_string(hide_password=False)
+
+
 def concurrent_calls(call_a, call_b):  # type: ignore[no-untyped-def]
     barrier = Barrier(2)
 
@@ -82,8 +86,8 @@ def test_postgres_concurrent_schedulers_materialize_one_occurrence() -> None:
         next_run_at=due,
     )
     results = concurrent_calls(
-        lambda: SchedulerService(AutomationRepository(str(repo.engine.url))).tick(due),
-        lambda: SchedulerService(AutomationRepository(str(repo.engine.url))).tick(due),
+        lambda: SchedulerService(AutomationRepository(_connection_url(repo))).tick(due),
+        lambda: SchedulerService(AutomationRepository(_connection_url(repo))).tick(due),
     )
     assert sorted(len(result) for result in results) == [0, 1]
     with Session(repo.engine) as session:
@@ -112,8 +116,8 @@ def test_postgres_two_workers_claim_exactly_one_execution_owner() -> None:
         next_run_at=now,
     )
     run_id = SchedulerService(repo).run_now(job.id, str(uuid4()), now)
-    worker_a = WorkerService(AutomationRepository(str(repo.engine.url)), settings, worker_id="A")
-    worker_b = WorkerService(AutomationRepository(str(repo.engine.url)), settings, worker_id="B")
+    worker_a = WorkerService(AutomationRepository(_connection_url(repo)), settings, worker_id="A")
+    worker_b = WorkerService(AutomationRepository(_connection_url(repo)), settings, worker_id="B")
     claims = concurrent_calls(lambda: worker_a.claim(now), lambda: worker_b.claim(now))
     assert sum(claim is not None for claim in claims) == 1
     assert {claim for claim in claims if claim is not None} == {(run_id, 1)}
@@ -149,10 +153,10 @@ def test_postgres_concurrent_manual_run_recovers_unique_conflict() -> None:
     )
     key = str(uuid4())
     results = concurrent_calls(
-        lambda: SchedulerService(AutomationRepository(str(repo.engine.url))).run_now(
+        lambda: SchedulerService(AutomationRepository(_connection_url(repo))).run_now(
             job.id, key, now
         ),
-        lambda: SchedulerService(AutomationRepository(str(repo.engine.url))).run_now(
+        lambda: SchedulerService(AutomationRepository(_connection_url(repo))).run_now(
             job.id, key, now
         ),
     )
@@ -214,7 +218,7 @@ def test_postgres_recovers_crash_after_economic_commit(tmp_path: Path) -> None:
     assert economic_result["trading_cycle_id"] is not None
     # Simulace pádu: ekonomický commit proběhl, finish JobRun nikoli.
     recovered = WorkerService(
-        AutomationRepository(str(repo.engine.url)), settings, worker_id="recovered-worker"
+        AutomationRepository(_connection_url(repo)), settings, worker_id="recovered-worker"
     )
     assert recovered.execute_one(now + timedelta(seconds=3)) == detached_run.id
     with Session(repo.engine) as session:
@@ -306,8 +310,8 @@ def test_postgres_account_lock_serializes_cycle_and_reconciliation(tmp_path: Pat
         reconciliation_run = session.get(JobRun, reconciliation_id)
         assert reconciliation_run is not None
         session.expunge(reconciliation_run)
-    executor_a = JobExecutor(AutomationRepository(str(repo.engine.url)))
-    executor_b = JobExecutor(AutomationRepository(str(repo.engine.url)))
+    executor_a = JobExecutor(AutomationRepository(_connection_url(repo)))
+    executor_b = JobExecutor(AutomationRepository(_connection_url(repo)))
     cycle_entered = Event()
     release_cycle = Event()
     reconciliation_entered = Event()

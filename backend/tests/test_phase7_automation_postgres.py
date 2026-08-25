@@ -77,7 +77,7 @@ def _isolate_automation_queue(repository: AutomationRepository, now: datetime) -
 
 def test_monitoring_automation_production_e2e_is_non_economic_and_retry_idempotent(factory) -> None:
     account_id, _deployment, run, instrument = _executed_monitoring(factory)
-    repository = AutomationRepository(str(factory.kw["bind"].url))
+    repository = AutomationRepository(factory.kw["bind"].url.render_as_string(hide_password=False))
     execution_time = datetime.now(UTC)
     _isolate_automation_queue(repository, execution_time)
     completed_session = CALENDAR.latest_completed_session(execution_time)
@@ -111,7 +111,7 @@ def test_monitoring_automation_production_e2e_is_non_economic_and_retry_idempote
         config={"monitoring_id": run.monitoring_id},
     )
     settings = Settings(
-        database_url=str(factory.kw["bind"].url),
+        database_url=factory.kw["bind"].url.render_as_string(hide_password=False),
         automation_enabled=True,
         worker_lease_timeout=30,
         worker_heartbeat_interval=2,

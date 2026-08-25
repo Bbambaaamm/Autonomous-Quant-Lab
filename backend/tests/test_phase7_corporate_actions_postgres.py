@@ -219,7 +219,10 @@ def test_sell_after_split_preserves_basis_and_realized_pnl(factory) -> None:
             split_basis,
         ),
     ]
-    repository = Phase4Repository(str(factory.kw["bind"].url), bootstrap_test_schema=False)
+    repository = Phase4Repository(
+        factory.kw["bind"].url.render_as_string(hide_password=False),
+        bootstrap_test_schema=False,
+    )
     service = TradingCycleService(
         repository,
         ProductionRiskConfig(
@@ -302,7 +305,10 @@ def test_partial_sell_after_split_keeps_remaining_dividend_entitlement(factory) 
             price,
         ),
     ]
-    repository = Phase4Repository(str(factory.kw["bind"].url), bootstrap_test_schema=False)
+    repository = Phase4Repository(
+        factory.kw["bind"].url.render_as_string(hide_password=False),
+        bootstrap_test_schema=False,
+    )
     TradingCycleService(
         repository,
         ProductionRiskConfig(

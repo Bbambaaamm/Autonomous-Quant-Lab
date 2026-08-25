@@ -93,7 +93,9 @@ def _full_multi_session_flow(
         f"phase7-e2e-{deployment.deployment_id}", policy_config, datetime.now(UTC)
     )
     run = monitoring.enroll(deployment.deployment_id, policy.policy_id, datetime.now(UTC))
-    repository = Phase4Repository(str(engine.url), bootstrap_test_schema=False)
+    repository = Phase4Repository(
+        engine.url.render_as_string(hide_password=False), bootstrap_test_schema=False
+    )
     risk = ProductionRiskConfig(
         max_position_pct=Decimal("1"),
         max_single_order_pct=Decimal("1"),
@@ -139,7 +141,10 @@ def _full_multi_session_flow(
 
 
 def _execution_service(factory, instrument_id: str) -> Phase6PaperExecutionService:
-    repository = Phase4Repository(str(factory.kw["bind"].url), bootstrap_test_schema=False)
+    repository = Phase4Repository(
+        factory.kw["bind"].url.render_as_string(hide_password=False),
+        bootstrap_test_schema=False,
+    )
     risk = ProductionRiskConfig(
         max_position_pct=Decimal("1"),
         max_single_order_pct=Decimal("1"),
@@ -356,7 +361,10 @@ def test_suspended_monitoring_requires_safe_explicit_operator_resume(factory) ->
         monitoring.transition(
             run.monitoring_id, MonitoringState.ACTIVE, "unsafe resume", datetime.now(UTC)
         )
-    repository = Phase4Repository(str(factory.kw["bind"].url), bootstrap_test_schema=False)
+    repository = Phase4Repository(
+        factory.kw["bind"].url.render_as_string(hide_password=False),
+        bootstrap_test_schema=False,
+    )
     assert ReconciliationService(repository).reconcile(account).status == "SUCCEEDED"
     resumed = monitoring.transition(
         run.monitoring_id,

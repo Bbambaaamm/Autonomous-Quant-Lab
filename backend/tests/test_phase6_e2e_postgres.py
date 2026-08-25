@@ -404,7 +404,9 @@ def _research_to_paper(factory, engine, *, halted: bool):
     promoted = Phase6EligibilityService(factory).promote(experiment.id)
     assert promoted.decision == "PAPER_CANDIDATE"
     account_id = f"paper-{suffix}"
-    repository = Phase4Repository(str(engine.url), bootstrap_test_schema=False)
+    repository = Phase4Repository(
+        engine.url.render_as_string(hide_password=False), bootstrap_test_schema=False
+    )
     repository.seed_account(account_id, Decimal("100000"))
     if halted:
         repository.halt(account_id, "audit-test", f"halt-{suffix}")

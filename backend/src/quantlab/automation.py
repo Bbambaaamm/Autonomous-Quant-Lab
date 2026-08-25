@@ -437,7 +437,10 @@ class JobExecutor:
     def __init__(self, repository: AutomationRepository) -> None:
         from quantlab.phase4 import Phase4Repository
 
-        phase4 = Phase4Repository(str(repository.engine.url), bootstrap_test_schema=False)
+        phase4 = Phase4Repository(
+            repository.engine.url.render_as_string(hide_password=False),
+            bootstrap_test_schema=False,
+        )
         self.trading = TradingCycleService(phase4)
         self.reconciliation = ReconciliationService(phase4)
 
