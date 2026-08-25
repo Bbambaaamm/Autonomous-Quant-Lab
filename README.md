@@ -140,3 +140,19 @@ Promotion ani deployment nevznikají automaticky a opakovaná promotion je idemp
 nejnovější dokončené XNYS session a přijímá jen nejnovější revizi z úspěšné ingestion. Runtime
 rekonstruuje pouze přesnou allowlisted strategii, verzi, parametry, PIT universe a USD/XNYS/1d
 scope. Live trading path nadále neexistuje.
+
+## Phase 8 operator dashboard
+
+Dashboard je skutečná Next.js aplikace v `frontend/`, nikoli původní inline demo. Kompletní
+architektura a bezpečnostní semantics jsou v [docs/dashboard.md](docs/dashboard.md).
+
+```bash
+docker compose up -d postgres
+cd backend && uv run alembic -c ../alembic.ini upgrade head
+cd backend && uv run uvicorn quantlab.api:app --host 127.0.0.1 --port 8000
+# volitelně AUTOMATION_ENABLED=true uv run quantlab-worker
+cd frontend && npm ci && npm run dev
+```
+
+Frontend i API jsou defaultně dostupné pouze přes loopback. Trading mode je vždy PAPER; Phase 8
+neobsahuje live broker, credential flow ani live order action.

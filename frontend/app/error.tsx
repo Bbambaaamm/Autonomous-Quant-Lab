@@ -1,0 +1,1 @@
+"use client";export default function ErrorPage({error,reset}:{error:Error&{digest?:string};reset:()=>void}){return <div className="error" role="alert"><h1>Data nejsou dostupná</h1><p>{error.message}</p><button onClick={reset}>Zkusit znovu</button></div>}

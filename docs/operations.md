@@ -69,3 +69,10 @@ Promotion ani deployment nevznikají automaticky a opakovaná promotion je idemp
 nejnovější dokončené XNYS session a přijímá jen nejnovější revizi z úspěšné ingestion. Runtime
 rekonstruuje pouze přesnou allowlisted strategii, verzi, parametry, PIT universe a USD/XNYS/1d
 scope. Live trading path nadále neexistuje.
+
+## Phase 8 dashboard operations
+
+Spouštějte API i dashboard na `127.0.0.1` podle `docs/dashboard.md`. Přehled ukazuje server UTC a
+financial `as_of` odděleně. HALT/RESUME vyžaduje potvrzení a auditní důvod; unsafe reconciliation
+vrátí 409 a účet zůstane HALTED. Account resume neresumuje Phase 7 monitoring. Data incident je
+healthy až tehdy, když poslední úspěšná ingestion pokrývá authoritative dokončenou XNYS session.
