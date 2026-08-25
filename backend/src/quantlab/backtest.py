@@ -66,7 +66,8 @@ def run_backtest(
             }
         )
     final_value = curve[-1]["portfolio_value"] if curve else initial_cash
-    assert isinstance(final_value, Decimal)
+    if not isinstance(final_value, Decimal):
+        raise TypeError("Konečná hodnota backtestu musí být Decimal")
     return BacktestResult(initial_cash, final_value, final_value / initial_cash - 1, fills, curve)
 
 

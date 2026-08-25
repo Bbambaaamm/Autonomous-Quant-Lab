@@ -355,6 +355,7 @@ class Phase4Repository:
         reason: str,
         correlation_id: str,
         event_type: AuditEventType = AuditEventType.KILL_SWITCH_TRIGGERED,
+        actor: dict[str, str] | None = None,
     ) -> None:
         with Session(self.engine) as session:
             account = session.get(PaperAccountRecord, account_id)
@@ -372,12 +373,19 @@ class Phase4Repository:
                     correlation_id=correlation_id,
                 )
             )
-            self.audit(
-                session, event_type, "account", account_id, None, correlation_id, {"reason": reason}
-            )
+            payload: dict[str, object] = {"reason": reason}
+            if actor:
+                payload["security_actor"] = actor
+            self.audit(session, event_type, "account", account_id, None, correlation_id, payload)
             session.commit()
 
-    def resume(self, account_id: str, correlation_id: str, reason: str | None = None) -> None:
+    def resume(
+        self,
+        account_id: str,
+        correlation_id: str,
+        reason: str | None = None,
+        actor: dict[str, str] | None = None,
+    ) -> None:
         with Session(self.engine) as session:
             account = session.get(PaperAccountRecord, account_id)
             if account is None or not account.reconciliation_safe:
@@ -391,7 +399,10 @@ class Phase4Repository:
                 account_id,
                 None,
                 correlation_id,
-                {"reason": reason} if reason is not None else None,
+                {
+                    **({"reason": reason} if reason is not None else {}),
+                    **({"security_actor": actor} if actor else {}),
+                },
             )
             session.commit()
 
@@ -741,7 +752,8 @@ class PersistentPaperBroker:
             if order.status in (OrderStatus.FILLED, OrderStatus.CANCELLED):
                 return order
             submitted_at = order.submitted_at
-            assert submitted_at is not None
+            if submitted_at is None:
+                raise RuntimeError("Persistovaný order nemá čas aktivace")
             if submitted_at.tzinfo is None:
                 submitted_at = submitted_at.replace(tzinfo=UTC)
             if bar.timestamp <= submitted_at:
@@ -770,7 +782,8 @@ class PersistentPaperBroker:
                 return order
             price = self.slippage.apply(reference, side)
             if order.order_type == OrderType.LIMIT:
-                assert order.limit_price is not None
+                if order.limit_price is None:
+                    raise RuntimeError("Persistovaný limit order nemá limit cenu")
                 price = (
                     min(price, order.limit_price)
                     if side is Side.BUY
@@ -1328,7 +1341,8 @@ class TradingCycleService:
             )
             with Session(self.repository.engine) as session:
                 account_row = session.get(PaperAccountRecord, account_id)
-                assert account_row is not None
+                if account_row is None:
+                    raise RuntimeError("Paper účet během trading cycle zmizel")
                 session_start_equity = account_row.session_start_equity or account.equity
             snapshot = PortfolioRiskSnapshot(
                 account.cash,
@@ -1415,7 +1429,8 @@ class TradingCycleService:
         result = self.reconciliation.reconcile(account_id, correlation_id=correlation_id)
         with Session(self.repository.engine) as session:
             cycle = session.get(TradingCycleRecord, cycle_id)
-            assert cycle is not None
+            if cycle is None:
+                raise RuntimeError("Trading cycle před dokončením zmizel")
             if cycle.lease_owner != lease_owner:
                 raise RuntimeError("Trading cycle ztratil databázový lease před dokončením")
             cycle.completed_at = datetime.now(UTC)

@@ -735,10 +735,12 @@ class RunRepository:
 
         def key(item: dict[str, object]) -> tuple[object, ...]:
             result = item["result"]
-            assert isinstance(result, dict)
+            if not isinstance(result, dict):
+                raise TypeError("Persistovaný research výsledek musí být objekt")
             metrics = result.get("aggregate_oos_metrics", {})
             eligibility = result.get("eligibility", {})
-            assert isinstance(metrics, dict) and isinstance(eligibility, dict)
+            if not isinstance(metrics, dict) or not isinstance(eligibility, dict):
+                raise TypeError("Persistované metriky a eligibility musí být objekty")
             stress = result.get("cost_stress", {})
             stability = result.get("parameter_stability", {})
             survived = bool(
@@ -776,7 +778,8 @@ class RunRepository:
             if item is None:
                 raise KeyError(experiment_id)
             result = item["result"]
-            assert isinstance(result, dict)
+            if not isinstance(result, dict):
+                raise TypeError("Persistovaný research výsledek musí být objekt")
             output.append(
                 {
                     "id": experiment_id,
@@ -798,7 +801,8 @@ class RunRepository:
         if not item:
             return None
         result, config = item["result"], item["config"]
-        assert isinstance(result, dict) and isinstance(config, dict)
+        if not isinstance(result, dict) or not isinstance(config, dict):
+            raise TypeError("Persistovaný research výsledek a konfigurace musí být objekty")
         research_config = config.get("research_config", {})
         dataset_id = str(result.get("dataset_id"))
         return {
