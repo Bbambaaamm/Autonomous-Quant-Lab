@@ -64,7 +64,10 @@ class OperatorReadModel:
     def _latest_monitoring(self, session: Session) -> PaperMonitoringRunRecord | None:
         return session.scalar(
             select(PaperMonitoringRunRecord)
-            .order_by(PaperMonitoringRunRecord.created_at.desc())
+            .order_by(
+                PaperMonitoringRunRecord.created_at.desc(),
+                PaperMonitoringRunRecord.monitoring_id.desc(),
+            )
             .limit(1)
         )
 
@@ -75,7 +78,10 @@ class OperatorReadModel:
         if monitoring_id:
             query = query.where(PaperPerformanceSnapshotRecord.monitoring_id == monitoring_id)
         return session.scalar(
-            query.order_by(PaperPerformanceSnapshotRecord.session_date.desc()).limit(1)
+            query.order_by(
+                PaperPerformanceSnapshotRecord.session_date.desc(),
+                PaperPerformanceSnapshotRecord.snapshot_id.desc(),
+            ).limit(1)
         )
 
     def _latest_evaluation(
@@ -85,7 +91,10 @@ class OperatorReadModel:
         if monitoring_id:
             query = query.where(PaperPerformanceEvaluationRecord.monitoring_id == monitoring_id)
         return session.scalar(
-            query.order_by(PaperPerformanceEvaluationRecord.created_at.desc()).limit(1)
+            query.order_by(
+                PaperPerformanceEvaluationRecord.created_at.desc(),
+                PaperPerformanceEvaluationRecord.evaluation_id.desc(),
+            ).limit(1)
         )
 
     def overview(self, now: datetime) -> dict[str, Any]:
@@ -102,15 +111,20 @@ class OperatorReadModel:
             )
             reconciliation = session.scalar(
                 select(ReconciliationRecord)
-                .order_by(ReconciliationRecord.timestamp.desc())
+                .order_by(ReconciliationRecord.timestamp.desc(), ReconciliationRecord.id.desc())
                 .limit(1)
             )
             cycle = session.scalar(
-                select(TradingCycleRecord).order_by(TradingCycleRecord.started_at.desc()).limit(1)
+                select(TradingCycleRecord)
+                .order_by(TradingCycleRecord.started_at.desc(), TradingCycleRecord.id.desc())
+                .limit(1)
             )
             ingestion = session.scalar(
                 select(MarketDataIngestionRecord)
-                .order_by(MarketDataIngestionRecord.started_at.desc())
+                .order_by(
+                    MarketDataIngestionRecord.started_at.desc(),
+                    MarketDataIngestionRecord.id.desc(),
+                )
                 .limit(1)
             )
             next_job = session.scalar(
@@ -206,7 +220,10 @@ class OperatorReadModel:
             if period != "ALL":
                 query = query.where(PaperPerformanceSnapshotRecord.session_date >= starts[period])
             rows = session.scalars(
-                query.order_by(PaperPerformanceSnapshotRecord.session_date)
+                query.order_by(
+                    PaperPerformanceSnapshotRecord.session_date,
+                    PaperPerformanceSnapshotRecord.snapshot_id,
+                )
             ).all()
             return {
                 "period": period,
@@ -245,7 +262,7 @@ class OperatorReadModel:
             )
             reconciliation = session.scalar(
                 select(ReconciliationRecord)
-                .order_by(ReconciliationRecord.timestamp.desc())
+                .order_by(ReconciliationRecord.timestamp.desc(), ReconciliationRecord.id.desc())
                 .limit(1)
             )
             return {
@@ -261,7 +278,7 @@ class OperatorReadModel:
                     _row(x)
                     for x in session.scalars(
                         select(PaperOrderRecord)
-                        .order_by(PaperOrderRecord.created_at.desc())
+                        .order_by(PaperOrderRecord.created_at.desc(), PaperOrderRecord.id.desc())
                         .limit(100)
                     )
                 ],
@@ -269,7 +286,7 @@ class OperatorReadModel:
                     _row(x)
                     for x in session.scalars(
                         select(PaperFillRecord)
-                        .order_by(PaperFillRecord.timestamp.desc())
+                        .order_by(PaperFillRecord.timestamp.desc(), PaperFillRecord.id.desc())
                         .limit(100)
                     )
                 ],
@@ -297,14 +314,16 @@ class OperatorReadModel:
                     _row(x)
                     for x in session.scalars(
                         select(RiskDecisionRecord)
-                        .order_by(RiskDecisionRecord.timestamp.desc())
+                        .order_by(RiskDecisionRecord.timestamp.desc(), RiskDecisionRecord.id.desc())
                         .limit(50)
                     )
                 ],
                 "events": [
                     _row(x)
                     for x in session.scalars(
-                        select(RiskEventRecord).order_by(RiskEventRecord.timestamp.desc()).limit(50)
+                        select(RiskEventRecord)
+                        .order_by(RiskEventRecord.timestamp.desc(), RiskEventRecord.id.desc())
+                        .limit(50)
                     )
                 ],
             }
@@ -317,14 +336,20 @@ class OperatorReadModel:
             ingestions = list(
                 session.scalars(
                     select(MarketDataIngestionRecord)
-                    .order_by(MarketDataIngestionRecord.started_at.desc())
+                    .order_by(
+                        MarketDataIngestionRecord.started_at.desc(),
+                        MarketDataIngestionRecord.id.desc(),
+                    )
                     .limit(50)
                 )
             )
             snapshots = list(
                 session.scalars(
                     select(DatasetSnapshotRecord)
-                    .order_by(DatasetSnapshotRecord.created_at.desc())
+                    .order_by(
+                        DatasetSnapshotRecord.created_at.desc(),
+                        DatasetSnapshotRecord.snapshot_id.desc(),
+                    )
                     .limit(50)
                 )
             )
@@ -389,7 +414,9 @@ class OperatorReadModel:
         with self._session_factory() as session:
             workers = list(
                 session.scalars(
-                    select(WorkerHeartbeat).order_by(WorkerHeartbeat.last_heartbeat_at.desc())
+                    select(WorkerHeartbeat).order_by(
+                        WorkerHeartbeat.last_heartbeat_at.desc(), WorkerHeartbeat.worker_id
+                    )
                 )
             )
             return {
@@ -397,13 +424,15 @@ class OperatorReadModel:
                 "jobs": [
                     _row(x)
                     for x in session.scalars(
-                        select(ScheduledJob).order_by(ScheduledJob.next_run_at)
+                        select(ScheduledJob).order_by(ScheduledJob.next_run_at, ScheduledJob.id)
                     )
                 ],
                 "runs": [
                     _row(x)
                     for x in session.scalars(
-                        select(JobRun).order_by(JobRun.created_at.desc()).limit(100)
+                        select(JobRun)
+                        .order_by(JobRun.created_at.desc(), JobRun.id.desc())
+                        .limit(100)
                     )
                 ],
                 "workers": [
@@ -451,7 +480,9 @@ class OperatorReadModel:
             query = query.where(*conditions)
             count = count.where(*conditions)
             rows = session.scalars(
-                query.order_by(AuditEventRecord.timestamp.desc()).limit(limit).offset(offset)
+                query.order_by(AuditEventRecord.timestamp.desc(), AuditEventRecord.id.desc())
+                .limit(limit)
+                .offset(offset)
             )
             return {
                 "items": [{**_row(x), "payload": _json(x.payload_json)} for x in rows],
@@ -480,7 +511,7 @@ class OperatorReadModel:
                 session.scalars(
                     select(ExperimentRecord)
                     .where(ExperimentRecord.strategy_identity == identity)
-                    .order_by(ExperimentRecord.created_at.desc())
+                    .order_by(ExperimentRecord.created_at.desc(), ExperimentRecord.id.desc())
                 )
             )
             deployments = list(
@@ -490,7 +521,10 @@ class OperatorReadModel:
                         StrategyDeploymentRecord.strategy_name == row.strategy_name,
                         StrategyDeploymentRecord.strategy_version == row.strategy_version,
                     )
-                    .order_by(StrategyDeploymentRecord.created_at.desc())
+                    .order_by(
+                        StrategyDeploymentRecord.created_at.desc(),
+                        StrategyDeploymentRecord.deployment_id.desc(),
+                    )
                 )
             )
             return {
@@ -503,7 +537,7 @@ class OperatorReadModel:
         with self._session_factory() as session:
             rows = session.scalars(
                 select(ExperimentRecord)
-                .order_by(ExperimentRecord.created_at.desc())
+                .order_by(ExperimentRecord.created_at.desc(), ExperimentRecord.id.desc())
                 .limit(limit)
                 .offset(offset)
             )
@@ -530,14 +564,20 @@ class OperatorReadModel:
                 session.scalars(
                     select(PaperPerformanceEvaluationRecord)
                     .where(PaperPerformanceEvaluationRecord.monitoring_id == monitoring_id)
-                    .order_by(PaperPerformanceEvaluationRecord.created_at)
+                    .order_by(
+                        PaperPerformanceEvaluationRecord.created_at,
+                        PaperPerformanceEvaluationRecord.evaluation_id,
+                    )
                 )
             )
             snapshots = list(
                 session.scalars(
                     select(PaperPerformanceSnapshotRecord)
                     .where(PaperPerformanceSnapshotRecord.monitoring_id == monitoring_id)
-                    .order_by(PaperPerformanceSnapshotRecord.session_date)
+                    .order_by(
+                        PaperPerformanceSnapshotRecord.session_date,
+                        PaperPerformanceSnapshotRecord.snapshot_id,
+                    )
                 )
             )
             return {

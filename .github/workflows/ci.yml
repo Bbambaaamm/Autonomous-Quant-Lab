@@ -110,7 +110,7 @@ jobs:
             uv.lock
       - run: uv sync --locked --all-groups
       - run: uv run alembic -c ../alembic.ini upgrade head
-      - name: PostgreSQL Phase 3–7, concurrency a recovery
+      - name: PostgreSQL Phase 3–8, concurrency a recovery
         run: >-
           uv run pytest -q
           tests/test_phase3_platform.py
@@ -131,6 +131,7 @@ jobs:
           tests/test_phase7_e2e_postgres.py
           tests/test_phase7_automation_postgres.py
           tests/test_phase7_corporate_actions_postgres.py
+          tests/test_phase8_postgres.py
 
   frontend:
     runs-on: ubuntu-latest
