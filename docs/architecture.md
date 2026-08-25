@@ -138,3 +138,12 @@ Promotion ani deployment nevznikají automaticky a opakovaná promotion je idemp
 nejnovější dokončené XNYS session a přijímá jen nejnovější revizi z úspěšné ingestion. Runtime
 rekonstruuje pouze přesnou allowlisted strategii, verzi, parametry, PIT universe a USD/XNYS/1d
 scope. Live trading path nadále neexistuje.
+
+## Phase 8 operator read architecture
+
+`OperatorReadModel` agreguje ORM evidence mimo FastAPI routes do stabilních Pydantic-dokumentovaných
+`/operator/*` projekcí. Decimal zůstává v backendu a FastAPI jej serializuje bezeztrátově; převod
+na JavaScript number nastává pouze na hranici SVG grafu. Next.js server components používají
+allowlistované paths a `no-store`; mutations jsou explicitní server actions do existujících
+risk, monitoring a reconciliation service boundaries. Browser ani React neobsahují účetní,
+risk nebo calendar business logiku.

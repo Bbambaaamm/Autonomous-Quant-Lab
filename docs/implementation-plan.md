@@ -103,8 +103,16 @@ rekonstruuje pouze přesnou allowlisted strategii, verzi, parametry, PIT univers
 scope. Live trading path nadále neexistuje.
 ## Phase 7 — Paper Performance Monitoring and Strategy Lifecycle
 
-**IMPLEMENTED — audit gate pending.** Schválený paper deployment nyní vyžaduje explicitní
+**PHASE 7: COMPLETE · PHASE 7 AUDIT GATE: PASSED.** Schválený paper deployment nyní vyžaduje explicitní
 monitoring enrollment a stav `ACTIVE`. Vrstva ukládá neměnnou policy, OOS baseline lineage,
 denní XNYS valuation snapshots a verzované drift evaluations. Lifecycle je `ACTIVE`, `PAUSED`,
 `SUSPENDED`, `RETIRED`; automatický návrat, retuning, nový experiment, deployment a live cesta
 neexistují. Autoritativní detail je v `docs/codex/phase7-complete.md`.
+
+## Phase 8 — Operator Control Plane
+
+**IMPLEMENTED — environmental verification pending.** Stabilní operator read model/API a český
+Next.js dashboard pokrývají paper portfolio, immutable performance, monitoring, strategies,
+research, risk, XNYS data health, automation a stránkovaný audit. Safety actions používají pouze
+existující service boundaries; live execution path neexistuje. Autoritativní completion record je
+`docs/codex/phase8-complete.md`.

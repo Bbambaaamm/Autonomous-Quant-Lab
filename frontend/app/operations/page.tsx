@@ -1,0 +1,2 @@
+import {api} from "@/lib/api";import {JsonTable,Status} from "@/components/ui";export const dynamic="force-dynamic";
+export default async function Operations(){const d=await api<Record<string,any>>("/operator/automation");return <><h1>Operations</h1><p>Automation global state: <Status value={d.enabled?"ENABLED":"DISABLED"}/></p><h2>Jobs</h2><JsonTable rows={d.jobs}/><h2>Runs / attempts / dead letters</h2><JsonTable rows={d.runs}/><h2>Workers</h2><JsonTable rows={d.workers}/><p className="muted">Read-only: dashboard neposkytuje run-now ekonomického cyklu.</p></>}
