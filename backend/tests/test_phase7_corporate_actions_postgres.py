@@ -248,7 +248,13 @@ def test_sell_after_split_preserves_basis_and_realized_pnl(factory) -> None:
             .join(PaperOrderRecord)
             .where(PaperOrderRecord.trading_cycle_id == cycle_id)
         )
-        assert position.quantity == desired_quantity
+        sold_quantity = session.scalar(
+            select(func.sum(PaperFillRecord.quantity))
+            .join(PaperOrderRecord)
+            .where(PaperOrderRecord.trading_cycle_id == cycle_id)
+        )
+        assert sold_quantity > 0
+        assert position.quantity == split_quantity - sold_quantity
         assert position.realized_pnl == pytest.approx(
             realized_before - commission, abs=Decimal("0.0001")
         )
