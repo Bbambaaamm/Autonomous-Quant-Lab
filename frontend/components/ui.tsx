@@ -1,0 +1,7 @@
+import React from "react";
+export const na=(v:unknown):string=>v===null||v===undefined||v===""?"N/A":String(v);
+export const pct=(v:unknown):string=>v===null||v===undefined?"N/A":`${(Number(v)*100).toFixed(2)} %`;
+export function Status({value}:{value:unknown}){const text=na(value);const bad=["HALTED","SUSPENDED","FAILED","DEAD_LETTER","STALE"].includes(text);const watch=["WATCH","REVIEW_REQUIRED","INSUFFICIENT_DATA","STARTED"].includes(text);return <span className={`badge ${bad?"unsafe":watch?"watch":"safe"}`}>{text}</span>}
+export function Card({title,value,asOf}:{title:string,value:React.ReactNode,asOf?:unknown}){return <section className="card"><div className="muted">{title}</div><h2>{value}</h2>{asOf&&<small className="muted">Stav k: {String(asOf)}</small>}</section>}
+export function JsonTable({rows}:{rows:Record<string,unknown>[]}){if(!rows.length)return <div className="card muted">Žádné dostupné záznamy. Hodnoty nejsou nahrazeny nulami.</div>;const keys=Object.keys(rows[0]).slice(0,8);return <div className="card" style={{overflowX:"auto"}}><table><thead><tr>{keys.map(k=><th key={k}>{k}</th>)}</tr></thead><tbody>{rows.map((r,i)=><tr key={String(r.id??r.snapshot_id??i)}>{keys.map(k=><td key={k}>{typeof r[k]==="object"?<pre>{JSON.stringify(r[k],null,2)}</pre>:na(r[k])}</td>)}</tr>)}</tbody></table></div>}
+export function Empty({children="Evidence není dostupná."}:{children?:React.ReactNode}){return <div className="card muted">{children}</div>}
