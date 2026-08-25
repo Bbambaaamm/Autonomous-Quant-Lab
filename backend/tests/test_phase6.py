@@ -3,6 +3,7 @@ from decimal import Decimal
 
 import pytest
 
+from quantlab import market_data
 from quantlab.domain import Side
 from quantlab.market_data import (
     AssetType,
@@ -16,6 +17,7 @@ from quantlab.market_data import (
     ProviderBar,
     ProviderMetadata,
     ProviderRateLimited,
+    ProviderUnavailable,
     StooqProvider,
     XNYSCalendar,
     build_snapshot,
@@ -136,6 +138,27 @@ def test_stooq_fixture_contract_valid_partial_empty_malformed_duplicate_rate_lim
         StooqProvider(lambda u, t: (200, {}, invalid_decimal), max_attempts=1).historical_daily(
             "A", date(2024, 1, 1), date(2024, 1, 2)
         )
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "file:///etc/passwd",
+        "http://stooq.com/q/d/l/",
+        "https://evil.example/q/d/l/",
+        "https://stooq.com:443/q/d/l/",
+        "https://user:password@stooq.com/q/d/l/",
+    ],
+)
+def test_stooq_http_transport_rejects_non_allowlisted_urls(url):
+    with pytest.raises(ProviderUnavailable):
+        StooqProvider._http(url, 1)
+
+
+def test_stooq_http_transport_rejects_redirect_outside_allowlist():
+    handler = market_data._StooqRedirectHandler()
+    with pytest.raises(ProviderUnavailable):
+        handler.redirect_request(None, None, 302, "Found", {}, "http://127.0.0.1/internal")
 
 
 def test_ingestion_idempotency_overlap_revision_and_snapshot_immutability():

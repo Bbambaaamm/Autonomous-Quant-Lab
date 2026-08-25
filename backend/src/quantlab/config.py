@@ -1,5 +1,6 @@
 from decimal import Decimal
 from functools import lru_cache
+from secrets import token_urlsafe
 
 from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -24,6 +25,15 @@ class Settings(BaseSettings):
     market_data_calendar: str = "XNYS"
     market_data_minimum_coverage: Decimal = Decimal("0.98")
     market_data_staleness_policy: int = 1
+    api_viewer_token: str = ""
+    api_operator_token: str = ""
+    api_admin_token: str = ""
+    trusted_hosts: str = "localhost,127.0.0.1,testserver"
+    api_read_limit: int = 120
+    api_mutation_limit: int = 20
+    api_halt_limit: int = 10
+    api_resume_limit: int = 5
+    api_auth_failure_limit: int = 20
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
@@ -45,7 +55,31 @@ class Settings(BaseSettings):
             raise ValueError("Market-data overlap a staleness musí být nezáporné")
         if not Decimal("0") < self.market_data_minimum_coverage <= Decimal("1"):
             raise ValueError("Minimální coverage musí být v intervalu (0, 1]")
+        tokens = [self.api_viewer_token, self.api_operator_token, self.api_admin_token]
+        if self.app_env == "production":
+            if self.database_url.startswith("sqlite"):
+                raise ValueError("Production vyžaduje PostgreSQL")
+            if "*" in self.allowed_hosts:
+                raise ValueError("Production nepovoluje wildcard trusted host")
+            if any(not _strong_secret(token) for token in tokens) or len(set(tokens)) != 3:
+                raise ValueError("Production API tokeny musí být unikátní a silné")
+        elif not any(tokens):
+            # Vývoj používá náhodné ephemeral credentials, nikoli secret uložený v repository.
+            self.api_viewer_token = token_urlsafe(32)
+            self.api_operator_token = token_urlsafe(32)
+            self.api_admin_token = token_urlsafe(32)
+        elif any(not token for token in tokens) or len(set(tokens)) != 3:
+            raise ValueError("Všechny tři API role musí mít unikátní credentials")
         return self
+
+    @property
+    def allowed_hosts(self) -> tuple[str, ...]:
+        return tuple(host.strip() for host in self.trusted_hosts.split(",") if host.strip())
+
+
+def _strong_secret(value: str) -> bool:
+    lowered = value.lower()
+    return len(value) >= 43 and not any(word in lowered for word in ("changeme", "placeholder"))
 
 
 @lru_cache

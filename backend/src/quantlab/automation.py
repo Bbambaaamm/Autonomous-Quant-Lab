@@ -437,7 +437,10 @@ class JobExecutor:
     def __init__(self, repository: AutomationRepository) -> None:
         from quantlab.phase4 import Phase4Repository
 
-        phase4 = Phase4Repository(str(repository.engine.url), bootstrap_test_schema=False)
+        phase4 = Phase4Repository(
+            repository.engine.url.render_as_string(hide_password=False),
+            bootstrap_test_schema=False,
+        )
         self.trading = TradingCycleService(phase4)
         self.reconciliation = ReconciliationService(phase4)
 
@@ -677,7 +680,8 @@ class WorkerService:
                     JobAttempt.job_run_id == run_id, JobAttempt.attempt_number == run.attempt_count
                 )
             )
-            assert attempt
+            if attempt is None:
+                raise RuntimeError("Aktivní automation attempt nebyl nalezen")
             run.status = RunStatus.SUCCEEDED
             run.finished_at = now
             run.outcome = result.get("outcome")
@@ -709,13 +713,15 @@ class WorkerService:
             if run is None:
                 raise LeaseLost("Lease byl ztracen")
             job = session.get(ScheduledJob, run.scheduled_job_id)
-            assert job
+            if job is None:
+                raise RuntimeError("Automation job nebyl nalezen")
             attempt = session.scalar(
                 select(JobAttempt).where(
                     JobAttempt.job_run_id == run_id, JobAttempt.attempt_number == run.attempt_count
                 )
             )
-            assert attempt
+            if attempt is None:
+                raise RuntimeError("Aktivní automation attempt nebyl nalezen")
             attempt.status = AttemptStatus.FAILED
             attempt.finished_at = now
             attempt.error_type = type(exc).__name__
@@ -748,9 +754,11 @@ class WorkerService:
         try:
             with Session(self.repository.engine) as session:
                 run = session.get(JobRun, run_id)
-                assert run
+                if run is None:
+                    raise RuntimeError("Automation run nebyl nalezen")
                 job = session.get(ScheduledJob, run.scheduled_job_id)
-                assert job
+                if job is None:
+                    raise RuntimeError("Automation job nebyl nalezen")
                 session.expunge(run)
                 session.expunge(job)
             heartbeat_stop = Event()

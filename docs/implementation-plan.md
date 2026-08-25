@@ -111,8 +111,17 @@ neexistují. Autoritativní detail je v `docs/codex/phase7-complete.md`.
 
 ## Phase 8 — Operator Control Plane
 
-**IMPLEMENTED — environmental verification pending.** Stabilní operator read model/API a český
+**COMPLETE — AUDIT PASSED WITH FIXES.** Stabilní operator read model/API a český
 Next.js dashboard pokrývají paper portfolio, immutable performance, monitoring, strategies,
 research, risk, XNYS data health, automation a stránkovaný audit. Safety actions používají pouze
 existující service boundaries; live execution path neexistuje. Autoritativní completion record je
 `docs/codex/phase8-complete.md`.
+
+## Phase 9 — Security & Production Hardening
+
+Implementace zavádí threat model, bearer auth, backend-authoritative VIEWER/OPERATOR/ADMIN RBAC,
+signed expiring dashboard session, CSRF/Host/CORS boundary, rate limits, actor evidence, container
+hardening, interní production-like síť a checksum backup/restore. Stav zůstává verification
+pending, protože lokální prostředí nemá připnutý uv, Docker ani přístup k advisory/registry API;
+security a container CI gates proto musí dodat autoritativní důkaz před auditem. Phase 10 ani live
+trading nejsou implementovány.

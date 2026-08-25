@@ -25,6 +25,14 @@ run unit and relevant integration tests, and update documentation.
 - CI and development use only `PaperBroker`.
 - Live trading requires independent mode, enablement, and confirmation gates and fails closed.
 
+## Security invariants
+- Never bypass authentication or disable RBAC to make a test pass; tests use real synthetic credentials.
+- Never commit or log credentials, and never expose server secrets through `NEXT_PUBLIC_*`.
+- Never use `npm audit fix --force` or manually construct either dependency lockfile.
+- Every security exception is advisory-specific, owned, mitigated, and time-bounded.
+- Production routes and configuration fail closed; GitHub Actions receive minimal permissions.
+- Do not add any live broker, live role, live endpoint, live flag, or other live execution path.
+
 ## Dependency and uv.lock policy
 - `backend/uv.lock` must be committed and is the authoritative dependency lockfile.
 - Never manually edit URLs, hashes, or package entries in `backend/uv.lock`; only `uv` may

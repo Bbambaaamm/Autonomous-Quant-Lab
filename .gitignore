@@ -8,3 +8,7 @@ __pycache__/
 .env
 node_modules/
 frontend/dist/
+.next/
+.secrets/
+backups/
+.env.production
