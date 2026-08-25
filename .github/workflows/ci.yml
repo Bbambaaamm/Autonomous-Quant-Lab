@@ -14,12 +14,12 @@ jobs:
     runs-on: ubuntu-latest
     defaults: {run: {working-directory: backend}}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
       - name: Install uv
-        uses: astral-sh/setup-uv@v6
+        uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
         with:
           version: ${{ env.UV_VERSION }}
           working-directory: backend
@@ -37,12 +37,12 @@ jobs:
     runs-on: ubuntu-latest
     defaults: {run: {working-directory: backend}}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
       - name: Install uv
-        uses: astral-sh/setup-uv@v6
+        uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
         with:
           version: ${{ env.UV_VERSION }}
           working-directory: backend
@@ -66,12 +66,12 @@ jobs:
     runs-on: ubuntu-latest
     defaults: {run: {working-directory: backend}}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
       - name: Install uv
-        uses: astral-sh/setup-uv@v6
+        uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
         with:
           version: ${{ env.UV_VERSION }}
           working-directory: backend
@@ -87,21 +87,21 @@ jobs:
     services:
       postgres:
         image: postgres:17-alpine
-        env: {POSTGRES_DB: quantlab, POSTGRES_USER: quantlab, POSTGRES_HOST_AUTH_METHOD: trust}
+        env: {POSTGRES_DB: quantlab, POSTGRES_USER: quantlab, POSTGRES_PASSWORD: phase9-ci-password}
         ports: ["5432:5432"]
         options: >-
           --health-cmd "pg_isready -U quantlab -d quantlab"
           --health-interval 5s --health-timeout 3s --health-retries 12
     env:
-      DATABASE_URL: postgresql+psycopg://quantlab@localhost:5432/quantlab
+      DATABASE_URL: postgresql+psycopg://quantlab:phase9-ci-password@localhost:5432/quantlab
       RUN_POSTGRES_TESTS: "1"
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
       - name: Install uv
-        uses: astral-sh/setup-uv@v6
+        uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
         with:
           version: ${{ env.UV_VERSION }}
           working-directory: backend
@@ -109,8 +109,9 @@ jobs:
             pyproject.toml
             uv.lock
       - run: uv sync --locked --all-groups
-      - run: uv run alembic -c ../alembic.ini upgrade head
-      - name: PostgreSQL Phase 3–8, concurrency a recovery
+      - name: Migrator role applies Alembic head with password authentication
+        run: uv run alembic -c ../alembic.ini upgrade head
+      - name: PostgreSQL Phase 3–9, least privilege, concurrency a recovery
         run: >-
           uv run pytest -q
           tests/test_phase3_platform.py
@@ -132,13 +133,14 @@ jobs:
           tests/test_phase7_automation_postgres.py
           tests/test_phase7_corporate_actions_postgres.py
           tests/test_phase8_postgres.py
+          tests/test_phase9_postgres.py
 
   frontend:
     runs-on: ubuntu-latest
     defaults: {run: {working-directory: frontend}}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
@@ -164,11 +166,11 @@ jobs:
     runs-on: ubuntu-latest
     permissions: {contents: read}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with: {persist-credentials: false}
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with: {python-version: "3.12"}
-      - uses: astral-sh/setup-uv@v6
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
         with: {version: "0.12.3", working-directory: backend}
       - run: uv sync --locked --all-groups
         working-directory: backend
@@ -176,7 +178,7 @@ jobs:
         working-directory: backend
       - run: uvx --from pip-audit==2.9.0 pip-audit --strict
         working-directory: backend
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with: {node-version: "24", cache: npm, cache-dependency-path: frontend/package-lock.json}
       - run: npm install --global npm@11.17.0
       - run: npm ci --ignore-scripts
@@ -194,7 +196,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions: {contents: read}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with: {persist-credentials: false}
       - run: docker build -f backend/Dockerfile -t quantlab-backend .
       - run: docker build -f frontend/Dockerfile -t quantlab-frontend .
@@ -226,3 +228,13 @@ jobs:
           docker run --rm -v "$RUNNER_TEMP:/scan:rw" aquasec/trivy:0.66.0
           image --input /scan/frontend-image.tar --format cyclonedx
           --output /scan/frontend-sbom.json --scanners vuln --skip-version-check
+
+  production-smoke:
+    runs-on: ubuntu-latest
+    permissions: {contents: read}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with: {persist-credentials: false}
+      - run: docker build -f backend/Dockerfile -t quantlab-backend .
+      - run: docker build -f frontend/Dockerfile -t quantlab-frontend .
+      - run: ./scripts/production-smoke.sh

@@ -14,6 +14,8 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY --from=build --chown=quantlab:quantlab /app/backend /app/backend
+COPY --chown=quantlab:quantlab alembic.ini /app/alembic.ini
+COPY --chown=quantlab:quantlab alembic /app/alembic
 ENV PATH=/app/backend/.venv/bin:$PATH PYTHONPATH=/app/backend/src
 USER quantlab
 EXPOSE 8000
