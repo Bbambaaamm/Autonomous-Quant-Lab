@@ -22,7 +22,8 @@ export function Status({ value }: { value: unknown }) {
 }
 
 export function Card({ title, value, asOf }: { title: string; value: React.ReactNode; asOf?: unknown }) {
-  return <section className="card"><div className="muted">{title}</div><h2>{value}</h2>{asOf && <small className="muted">Stav k: {String(asOf)}</small>}</section>;
+  const showAsOf = asOf !== null && asOf !== undefined && asOf !== "";
+  return <section className="card"><div className="muted">{title}</div><h2>{value}</h2>{showAsOf ? <small className="muted">Stav k: {String(asOf)}</small> : null}</section>;
 }
 
 export function JsonTable({ rows }: { rows: Record<string, unknown>[] }) {
