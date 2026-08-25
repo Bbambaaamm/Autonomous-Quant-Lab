@@ -47,6 +47,9 @@ select = ["E", "F", "I", "B", "UP"]
 # Git se volá pevným argv bez shellu a bez uživatelsky řízeného executable či argumentu.
 "src/quantlab/phase6_runtime.py" = ["S603"]
 
+[tool.ruff.lint.isort]
+known-first-party = ["quantlab"]
+
 [tool.mypy]
 python_version = "3.12"
 strict = true

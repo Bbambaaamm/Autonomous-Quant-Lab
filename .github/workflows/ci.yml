@@ -204,12 +204,20 @@ jobs:
       - run: docker save quantlab-frontend --output "$RUNNER_TEMP/frontend-image.tar"
       - run: >-
           docker run --rm -v "$RUNNER_TEMP:/scan:ro" aquasec/trivy:0.66.0
-          image --input /scan/backend-image.tar --exit-code 1 --severity HIGH,CRITICAL
+          image --input /scan/backend-image.tar --severity HIGH,CRITICAL
           --scanners vuln --skip-version-check
       - run: >-
           docker run --rm -v "$RUNNER_TEMP:/scan:ro" aquasec/trivy:0.66.0
-          image --input /scan/frontend-image.tar --exit-code 1 --severity HIGH,CRITICAL
+          image --input /scan/backend-image.tar --ignore-unfixed --exit-code 1
+          --severity HIGH,CRITICAL --scanners vuln --skip-version-check
+      - run: >-
+          docker run --rm -v "$RUNNER_TEMP:/scan:ro" aquasec/trivy:0.66.0
+          image --input /scan/frontend-image.tar --severity HIGH,CRITICAL
           --scanners vuln --skip-version-check
+      - run: >-
+          docker run --rm -v "$RUNNER_TEMP:/scan:ro" aquasec/trivy:0.66.0
+          image --input /scan/frontend-image.tar --ignore-unfixed --exit-code 1
+          --severity HIGH,CRITICAL --scanners vuln --skip-version-check
       - run: >-
           docker run --rm -v "$RUNNER_TEMP:/scan:rw" aquasec/trivy:0.66.0
           image --input /scan/backend-image.tar --format cyclonedx

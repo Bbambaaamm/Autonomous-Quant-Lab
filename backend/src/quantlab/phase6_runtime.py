@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import shutil
 import subprocess
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -112,9 +113,12 @@ class Phase6ExperimentRunner:
     def _code_sha(explicit: str | None) -> str:
         value = explicit
         if value is None:
+            git = shutil.which("git")
+            if git is None:
+                raise DatasetInvalid("Git executable nelze zjistit")
             try:
                 value = subprocess.run(
-                    ["git", "rev-parse", "HEAD"],
+                    [git, "rev-parse", "HEAD"],
                     check=True,
                     capture_output=True,
                     text=True,

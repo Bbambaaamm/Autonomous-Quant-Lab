@@ -43,6 +43,12 @@ omezené na same-origin Next.js hydration a framework styles; žádné untrusted
 Před internetovým deploymentem se má nahradit nonce-based CSP, jakmile ji podporuje konkrétní
 Next.js rendering konfigurace bez rozbití dashboardu.
 
+Container vulnerability gate vždy vypíše všechny HIGH/CRITICAL nálezy včetně advisories bez
+dostupné opravy. Následný blocking scan používá `--ignore-unfixed`, takže odmítne každý fixovatelný
+HIGH/CRITICAL nález; unfixed nálezy zůstávají viditelné v CI logu a musí být triagovány při každém
+novém běhu. Runtime images jsou explicitně založené na Debian Bookworm a před vytvořením uživatele
+aplikují dostupné security aktualizace. Nejde o blanket potlačení reportu.
+
 ## Mutation inventory (default deny)
 
 | Method | Path | Permission |

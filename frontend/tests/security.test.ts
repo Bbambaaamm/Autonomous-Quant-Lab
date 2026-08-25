@@ -37,6 +37,11 @@ describe("Phase 9 security boundary", () => {
     const config = fs.readFileSync(path.join(process.cwd(), "next.config.ts"), "utf8");
     for (const header of ["Content-Security-Policy", "X-Content-Type-Options", "Referrer-Policy", "Permissions-Policy", "X-Frame-Options"]) expect(config).toContain(header);
   });
+
+  it("dev helper vytváří obě strany role credentials a login identitu", () => {
+    const helper = fs.readFileSync(path.join(process.cwd(), "../scripts/generate-dev-secrets.sh"), "utf8");
+    for (const variable of ["OPERATOR_USERNAME", "QUANTLAB_API_VIEWER_TOKEN", "QUANTLAB_API_OPERATOR_TOKEN", "QUANTLAB_API_ADMIN_TOKEN"]) expect(helper).toContain(variable);
+  });
 });
 
 describe("audit pagination", () => {
