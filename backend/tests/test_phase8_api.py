@@ -86,6 +86,21 @@ def test_audit_filters_are_server_side_and_range_is_validated(tmp_path, monkeypa
     )
 
 
+def test_audit_normalizes_mixed_datetime_filters_to_utc(tmp_path, monkeypatch):
+    api = client(tmp_path, monkeypatch)
+    api.post("/operator/risk/halt", json={"confirmation": "HALT", "reason": "UTC audit"})
+
+    response = api.get(
+        "/operator/audit"
+        "?event_type=KILL_SWITCH_MANUAL_HALT"
+        "&start_utc=2020-01-01T00:00:00"
+        "&end_utc=2030-01-01T01:00:00%2B01:00"
+    )
+
+    assert response.status_code == 200
+    assert response.json()["total"] == 1
+
+
 def test_openapi_exposes_stable_operator_contracts(tmp_path, monkeypatch):
     schema = client(tmp_path, monkeypatch).get("/openapi.json").json()
     required = {
