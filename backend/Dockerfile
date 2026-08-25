@@ -1,12 +1,12 @@
 FROM ghcr.io/astral-sh/uv:0.12.3 AS uv
-FROM python:3.12.11-slim-bookworm AS build
+FROM python:3.12.14-slim-trixie AS build
 COPY --from=uv /uv /usr/local/bin/uv
 WORKDIR /app/backend
 COPY backend/pyproject.toml backend/uv.lock ./
 RUN uv sync --locked --no-dev --no-install-project
 COPY backend/src ./src
 
-FROM python:3.12.11-slim-bookworm
+FROM python:3.12.14-slim-trixie
 RUN apt-get update \
     && apt-get upgrade --yes \
     && groupadd --system quantlab \

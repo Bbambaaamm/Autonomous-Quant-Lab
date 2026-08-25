@@ -1,4 +1,4 @@
-FROM node:24.7.0-bookworm-slim AS build
+FROM node:24.18.1-trixie-slim AS build
 WORKDIR /app
 COPY frontend/package.json frontend/package-lock.json ./
 RUN npm install --global npm@11.17.0 && npm ci --ignore-scripts
@@ -7,7 +7,7 @@ ARG PUBLIC_BASE_URL=https://localhost
 ENV PUBLIC_BASE_URL=$PUBLIC_BASE_URL
 RUN npm run build
 
-FROM node:24.7.0-bookworm-slim
+FROM node:24.18.1-trixie-slim
 ENV NODE_ENV=production HOSTNAME=0.0.0.0 PORT=3000 VALIDATE_PRODUCTION_STARTUP=true
 RUN apt-get update \
     && apt-get upgrade --yes \
