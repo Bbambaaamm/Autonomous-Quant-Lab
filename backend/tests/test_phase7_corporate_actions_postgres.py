@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import os
 from datetime import UTC, date, datetime, timedelta
-from decimal import Decimal
+from decimal import ROUND_DOWN, Decimal
 from uuid import uuid4
 
 import pytest
@@ -189,8 +189,12 @@ def test_sell_after_split_preserves_basis_and_realized_pnl(factory) -> None:
     PaperCorporateActionService(factory).apply(account, effective + timedelta(seconds=1))
     with factory() as session:
         position = session.get(PositionRecord, (account, instrument.instrument_id))
+        split_quantity = position.quantity
         split_basis = position.average_cost
         realized_before = position.realized_pnl
+        account_equity = session.get(PaperAccountRecord, account).equity
+    desired_quantity = (split_quantity / 2).to_integral_value(rounding=ROUND_DOWN)
+    target_weight = (desired_quantity + Decimal("0.000001")) * split_basis / account_equity
     decision = effective + timedelta(days=1)
     executable = decision + timedelta(days=1)
     bars = [
@@ -233,7 +237,7 @@ def test_sell_after_split_preserves_basis_and_realized_pnl(factory) -> None:
         account,
         "phase7-split-sell",
         bars,
-        {instrument.instrument_id: Decimal("0")},
+        {instrument.instrument_id: target_weight},
         executable.date(),
         decision,
     )
@@ -244,8 +248,10 @@ def test_sell_after_split_preserves_basis_and_realized_pnl(factory) -> None:
             .join(PaperOrderRecord)
             .where(PaperOrderRecord.trading_cycle_id == cycle_id)
         )
-        assert position.quantity == 0
-        assert position.realized_pnl == realized_before - commission
+        assert position.quantity == desired_quantity
+        assert position.realized_pnl == pytest.approx(
+            realized_before - commission, abs=Decimal("0.0001")
+        )
 
 
 def test_partial_sell_after_split_keeps_remaining_dividend_entitlement(factory) -> None:
