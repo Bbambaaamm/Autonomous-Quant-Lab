@@ -471,12 +471,14 @@ class ResearchExperimentRunner:
         fills: list[Fill] = []
         capital = config.initial_cash
         for fold in completed:
-            assert fold.oos_backtest is not None
-            for point in fold.oos_backtest.equity_curve:
-                relative = point["portfolio_value"] / fold.oos_backtest.initial_cash  # type: ignore[operator]
+            oos_backtest = fold.oos_backtest
+            if oos_backtest is None:
+                raise RuntimeError("Dokončený fold nemá OOS backtest")
+            for point in oos_backtest.equity_curve:
+                relative = point["portfolio_value"] / oos_backtest.initial_cash  # type: ignore[operator]
                 curve.append((point["timestamp"], capital * relative))  # type: ignore[arg-type]
             capital = curve[-1][1] if curve else capital
-            fills.extend(fold.oos_backtest.fills)
+            fills.extend(oos_backtest.fills)
         aggregate_metrics = calculate_metrics(config.initial_cash, curve, fills)
         oos_bars = [
             bar

@@ -752,7 +752,8 @@ class PersistentPaperBroker:
             if order.status in (OrderStatus.FILLED, OrderStatus.CANCELLED):
                 return order
             submitted_at = order.submitted_at
-            assert submitted_at is not None
+            if submitted_at is None:
+                raise RuntimeError("Persistovaný order nemá čas aktivace")
             if submitted_at.tzinfo is None:
                 submitted_at = submitted_at.replace(tzinfo=UTC)
             if bar.timestamp <= submitted_at:
@@ -781,7 +782,8 @@ class PersistentPaperBroker:
                 return order
             price = self.slippage.apply(reference, side)
             if order.order_type == OrderType.LIMIT:
-                assert order.limit_price is not None
+                if order.limit_price is None:
+                    raise RuntimeError("Persistovaný limit order nemá limit cenu")
                 price = (
                     min(price, order.limit_price)
                     if side is Side.BUY
@@ -1339,7 +1341,8 @@ class TradingCycleService:
             )
             with Session(self.repository.engine) as session:
                 account_row = session.get(PaperAccountRecord, account_id)
-                assert account_row is not None
+                if account_row is None:
+                    raise RuntimeError("Paper účet během trading cycle zmizel")
                 session_start_equity = account_row.session_start_equity or account.equity
             snapshot = PortfolioRiskSnapshot(
                 account.cash,
@@ -1426,7 +1429,8 @@ class TradingCycleService:
         result = self.reconciliation.reconcile(account_id, correlation_id=correlation_id)
         with Session(self.repository.engine) as session:
             cycle = session.get(TradingCycleRecord, cycle_id)
-            assert cycle is not None
+            if cycle is None:
+                raise RuntimeError("Trading cycle před dokončením zmizel")
             if cycle.lease_owner != lease_owner:
                 raise RuntimeError("Trading cycle ztratil databázový lease před dokončením")
             cycle.completed_at = datetime.now(UTC)

@@ -3,10 +3,10 @@ import hmac
 import logging
 import time
 from collections import defaultdict, deque
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from enum import IntEnum
 from threading import Lock
-from typing import Awaitable, Callable
 
 from fastapi import HTTPException, Request
 from starlette.responses import JSONResponse, Response

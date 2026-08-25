@@ -41,6 +41,11 @@ select = ["E", "F", "I", "B", "UP"]
 
 [tool.ruff.lint.per-file-ignores]
 "src/quantlab/api.py" = ["E501"]
+# Oba generátory jsou záměrně deterministické numerické simulace, nikoli security primitive.
+"src/quantlab/phase7.py" = ["S311"]
+"src/quantlab/research.py" = ["S311"]
+# Git se volá pevným argv bez shellu a bez uživatelsky řízeného executable či argumentu.
+"src/quantlab/phase6_runtime.py" = ["S603"]
 
 [tool.mypy]
 python_version = "3.12"

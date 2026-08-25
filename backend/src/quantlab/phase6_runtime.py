@@ -127,12 +127,14 @@ class Phase6ExperimentRunner:
 
     def run(self, request: Phase6ExperimentRequest) -> ExperimentRecord:
         result = self._execute(request, persist=True)
-        assert isinstance(result, ExperimentRecord)
+        if not isinstance(result, ExperimentRecord):
+            raise TypeError("Persistovaný experiment vrátil neplatný typ")
         return result
 
     def replay(self, request: Phase6ExperimentRequest) -> Phase6ExperimentReplay:
         result = self._execute(request, persist=False)
-        assert isinstance(result, Phase6ExperimentReplay)
+        if not isinstance(result, Phase6ExperimentReplay):
+            raise TypeError("Replay experimentu vrátil neplatný typ")
         return result
 
     def _execute(
@@ -283,7 +285,8 @@ class Phase6ExperimentRunner:
             if train_end < 1 or validation_end <= train_end or validation_end >= len(times):
                 raise DatasetInvalid("Každá chronologická část musí obsahovat data")
             definition_row = session.get(UniverseDefinitionRecord, snapshot.universe_id)
-            assert definition_row is not None
+            if definition_row is None:
+                raise RuntimeError("Universe definition pro snapshot nebyla nalezena")
             membership_rows = tuple(
                 session.scalars(
                     select(UniverseMembershipRecord).where(
