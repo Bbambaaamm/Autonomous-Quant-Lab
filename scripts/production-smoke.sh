@@ -128,4 +128,4 @@ test "$(docker inspect -f '{{json .HostConfig.PortBindings}}' "$postgres")" = "{
 test "$(docker inspect -f '{{json .HostConfig.PortBindings}}' "$backend")" = "{}"
 test "$(docker exec "$backend" id -u)" != 0
 test "$(docker exec "$frontend" id -u)" != 0
-! git grep -n -E 'TRADING_MODE=live|LIVE_TRADING_ENABLED=true' -- ':!docs/codex/*'
+! git grep -n -E 'TRADING_MODE=live|LIVE_TRADING_ENABLED=true' -- ':!docs/codex/*' ':!CODEX_MASTER_PROMPT.md' ':!scripts/production-smoke.sh'
