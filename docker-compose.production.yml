@@ -1,0 +1,43 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: quantlab
+      POSTGRES_USER: quantlab_migration
+      POSTGRES_PASSWORD_FILE: /run/secrets/db_password
+    secrets: [db_password]
+    volumes: [quantlab-production-db:/var/lib/postgresql/data]
+    networks: [data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U quantlab_migration -d quantlab"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+  backend:
+    build: {context: ., dockerfile: backend/Dockerfile}
+    env_file: [.env.production]
+    depends_on: {postgres: {condition: service_healthy}}
+    networks: [data, application]
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+  frontend:
+    build: {context: ., dockerfile: frontend/Dockerfile}
+    env_file: [.env.production]
+    depends_on: [backend]
+    networks: [application]
+    ports: ["127.0.0.1:3000:3000"]
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+networks:
+  data: {internal: true}
+  application: {internal: true}
+volumes:
+  quantlab-production-db:
+secrets:
+  db_password: {file: .secrets/db_password}

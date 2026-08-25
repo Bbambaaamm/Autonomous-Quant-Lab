@@ -4,8 +4,8 @@ from pathlib import Path
 from typing import Annotated
 from uuid import uuid4
 
-from fastapi import FastAPI, Header, HTTPException, Query
-from fastapi.responses import RedirectResponse
+from fastapi import FastAPI, Header, HTTPException, Query, Request
+from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
@@ -57,9 +57,24 @@ from quantlab.phase7 import (
     PaperPerformanceSnapshotRecord,
 )
 from quantlab.research_service import ResearchService
+from quantlab.security import current_principal, security_boundary
 
-app = FastAPI(title="Autonomous Quant Lab", version="0.1.0")
 settings = get_settings()
+app = FastAPI(
+    title="Autonomous Quant Lab",
+    version="0.1.0",
+    docs_url=None if settings.app_env == "production" else "/docs",
+    openapi_url=None if settings.app_env == "production" else "/openapi.json",
+)
+
+
+@app.middleware("http")
+async def enforce_security(request: Request, call_next):  # type: ignore[no-untyped-def]
+    if request.headers.get("host", "").split(":", 1)[0] not in settings.allowed_hosts:
+        return JSONResponse({"detail": "Neplatný Host"}, 400)
+    return await security_boundary(request, call_next, settings)
+
+
 repository = RunRepository(
     settings.database_url, bootstrap_test_schema=settings.database_url.startswith("sqlite")
 )
@@ -258,24 +273,40 @@ def _normalize_utc_filter(value: datetime | None) -> datetime | None:
 
 
 @app.post("/operator/risk/halt", response_model=OperatorDocument)
-def operator_halt(request: OperatorAction) -> dict[str, str]:
+def operator_halt(request: OperatorAction, http_request: Request) -> dict[str, str]:
     if request.confirmation != "HALT":
         raise HTTPException(422, "Potvrzení musí být HALT")
+    principal = current_principal(http_request)
     paper_repository.halt(
         "paper-main",
         request.reason,
         str(uuid4()),
         AuditEventType.KILL_SWITCH_MANUAL_HALT,
+        actor={
+            "actor_id": principal.actor_id,
+            "actor_role": principal.role.name,
+            "authentication": "bearer",
+        },
     )
     return {"trading_state": "HALTED"}
 
 
 @app.post("/operator/risk/resume", response_model=OperatorDocument)
-def operator_resume(request: OperatorAction) -> dict[str, str]:
+def operator_resume(request: OperatorAction, http_request: Request) -> dict[str, str]:
     if request.confirmation != "RESUME":
         raise HTTPException(422, "Potvrzení musí být RESUME")
     try:
-        paper_repository.resume("paper-main", str(uuid4()), request.reason)
+        principal = current_principal(http_request)
+        paper_repository.resume(
+            "paper-main",
+            str(uuid4()),
+            request.reason,
+            actor={
+                "actor_id": principal.actor_id,
+                "actor_role": principal.role.name,
+                "authentication": "bearer",
+            },
+        )
     except PermissionError as exc:
         raise HTTPException(409, str(exc)) from exc
     return {"trading_state": "NORMAL"}
@@ -450,6 +481,11 @@ def health() -> dict[str, str]:
     return {"status": "ok", "trading_mode": "paper", "live_trading_enabled": "false"}
 
 
+@app.get("/healthz")
+def healthz() -> dict[str, str]:
+    return {"status": "ok"}
+
+
 @app.get("/health/ready")
 def health_ready() -> dict[str, str]:
     try:
@@ -458,6 +494,12 @@ def health_ready() -> dict[str, str]:
     except Exception as exc:
         raise HTTPException(status_code=503, detail="Databáze není dostupná") from exc
     return {"status": "ready", "database": "ok"}
+
+
+@app.get("/readyz")
+def readyz() -> dict[str, str]:
+    health_ready()
+    return {"status": "ready"}
 
 
 @app.get("/market-data/providers")
@@ -788,18 +830,13 @@ def risk_decisions(
 
 
 @app.post("/risk/halt")
-def risk_halt() -> dict[str, str]:
-    paper_repository.halt("paper-main", "manual API halt", str(datetime.now(UTC).timestamp()))
-    return {"trading_state": "HALTED"}
+def risk_halt(request: OperatorAction, http_request: Request) -> dict[str, str]:
+    return operator_halt(request, http_request)
 
 
 @app.post("/risk/resume")
-def risk_resume() -> dict[str, str]:
-    try:
-        paper_repository.resume("paper-main", str(datetime.now(UTC).timestamp()))
-    except PermissionError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-    return {"trading_state": "NORMAL"}
+def risk_resume(request: OperatorAction, http_request: Request) -> dict[str, str]:
+    return operator_resume(request, http_request)
 
 
 @app.get("/trading/cycles")

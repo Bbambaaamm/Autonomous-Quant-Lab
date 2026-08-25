@@ -321,8 +321,18 @@ class StooqProvider:
 
     @staticmethod
     def _http(url: str, timeout: float) -> tuple[int, dict[str, str], bytes]:
+        parsed = urllib.parse.urlsplit(url)
+        if (
+            parsed.scheme != "https"
+            or parsed.hostname != "stooq.com"
+            or parsed.port is not None
+            or parsed.username is not None
+            or parsed.password is not None
+        ):
+            raise ProviderUnavailable("Transport dovoluje pouze HTTPS endpoint stooq.com")
         try:
-            with urllib.request.urlopen(url, timeout=timeout) as response:
+            # Schéma i host jsou výše uzavřeny na jediný auditovaný provider endpoint.
+            with urllib.request.urlopen(url, timeout=timeout) as response:  # noqa: S310
                 return response.status, dict(response.headers), response.read()
         except urllib.error.HTTPError as exc:
             return exc.code, dict(exc.headers), b""
