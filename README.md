@@ -42,6 +42,36 @@ uv lock --check
 uv sync --locked --all-groups
 ```
 
+Frontend používá Node 24 a přesně `npm 11.17.0`. Autoritativním lockfilem je
+`frontend/package-lock.json`; smí jej generovat pouze skutečné npm. Pokud se dependency graph v
+`package.json` nezměnil, lockfile se nesmí měnit. Po záměrné změně dependency graphu jej
+regenerujte připnutým npm a proveďte úplnou kontrolu:
+
+```bash
+cd frontend
+npm install --package-lock-only
+npm ci
+npm run lint
+npm run typecheck
+npm test
+npm run build
+```
+
+Pro běžnou práci slouží `make frontend-install`, `make frontend-check` a fail-closed
+`make frontend-lock-check`. Poslední target ověří strukturu a přímé závislosti lockfilu,
+regresní scénář root-only placeholderu a čistou reprodukovatelnost přes `npm ci`.
+
+Pokud registry není dostupná, lockfile neměňte ani nevytvářejte minimální náhradu a stav
+označte `BLOCKED BY ENVIRONMENT`. Bezpečná obnova je dostupná přes **Actions → Repair frontend
+lockfile → Run workflow → vyberte `source_ref`**. `source_ref` musí být existující vzdálená větev
+s verzí `package.json`, kterou je třeba opravit; workflow nikdy implicitně nepřejde na `main`.
+Manuální workflow použije skutečné připnuté npm, provede všechny kontroly a vytvoří review branch
+a pull request proti zadanému `source_ref`; pokud oprávnění PR nedovolí, poskytne ověřený lockfile
+jako workflow artifact. npm a repository skripty běží pouze v read-only verification jobu. Oddělený
+publish job získá write token až po úspěšném ověření, zkontroluje checksum artifactu i nezměněné SHA
+`source_ref` a smí commitnout pouze `frontend/package-lock.json`. Nikdy nepushuje přímo do
+`source_ref` ani do `main`.
+
 ## Bezpečnost
 
 Projekt implementuje výhradně `PaperBroker`. Výchozí a demo režim je paper, bez možnosti
