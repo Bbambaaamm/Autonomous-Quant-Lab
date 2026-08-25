@@ -1,5 +1,14 @@
 # Phase 7 — Paper Performance Monitoring and Strategy Lifecycle
 
+## Uzavření finálního audit gate
+
+PostgreSQL auditní sada provádí skutečné execution pokusy pro blokované lifecycle stavy,
+skutečné provider corrections pro baseline i historickou paper evidenci a produkční Phase 5
+monitorovací job včetně idempotentního retry. Samostatné corporate-action E2E důkazy ověřují
+kauzalitu pozdě známé akce, fail-closed delisting a složené splity s dividendou bez dvojího
+zaúčtování. Controlled paper série současně dokazují verdict větve bez automatického retune,
+nového experimentu nebo deploymentu.
+
 ## Finální auditní opravy
 
 Validní enrollment deterministicky přehrává immutable Phase 6 snapshot stejnou authoritative
