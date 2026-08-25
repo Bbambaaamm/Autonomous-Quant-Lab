@@ -1,0 +1,2 @@
+import {login} from "./actions";
+export default async function Login({searchParams}:{searchParams:Promise<{error?:string}>}){const query=await searchParams;return <main><h1>Přihlášení operátora</h1>{query.error?<p role="alert">Neplatné přihlašovací údaje</p>:null}<form action={login}><label>Identita<input name="username" required maxLength={128}/></label><label>Heslo<input name="password" type="password" required maxLength={1024}/></label><button type="submit">Přihlásit</button></form></main>}

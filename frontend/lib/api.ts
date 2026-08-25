@@ -1,9 +1,11 @@
 import "server-only";
+import {backendToken,requireSession} from "./auth";
 const base = process.env.QUANTLAB_API_URL ?? "http://127.0.0.1:8000";
 export class ApiError extends Error {constructor(public status:number,message:string){super(message)}}
 export async function api<T>(path:string):Promise<T>{
   if(!path.startsWith("/operator/")) throw new Error("Endpoint není v operator allowlistu");
-  const response=await fetch(`${base}${path}`,{cache:"no-store",headers:{Accept:"application/json"}});
+  const current=await requireSession();
+  const response=await fetch(`${base}${path}`,{cache:"no-store",headers:{Accept:"application/json",Authorization:`Bearer ${backendToken(current.role)}`}});
   if(!response.ok) throw new ApiError(response.status, response.status===503?"Služba není připravena":`API chyba ${response.status}`);
   return response.json() as Promise<T>;
 }

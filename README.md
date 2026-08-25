@@ -1,11 +1,24 @@
 # Autonomous Quant Lab
 
+## Phase 9 production-like PAPER security
+
+Dashboard a API jsou autentizované. Lokální secrets vytvořte `make generate-dev-secrets`, načtěte
+je ze `.secrets/dev.env` a nikdy je necommitujte. API role jsou VIEWER, OPERATOR (navíc HALT) a
+ADMIN (RESUME a ostatní mutations). Browser backend token nikdy nedostane; Next.js volí
+role-specific server credential. Produkční postup, health/readiness a recovery jsou popsány v
+[`docs/production-deployment.md`](docs/production-deployment.md), threat model v
+[`docs/security.md`](docs/security.md).
+
+Kontroly: `make check`, `make test`, `make frontend-check`, `make security-check`,
+`make frontend-security`, `make production-build` a `make production-smoke`. Backup používejte
+pouze s explicitním `BACKUP=... make db-backup`. Platforma je PAPER-only a neobsahuje live path.
+
 Phase 5 doplňuje PostgreSQL-backed plánování a worker pro bezpečnou automatizaci výhradně
 paper runtime. Worker se spouští `cd backend && uv run quantlab-worker`; výchozí
 `AUTOMATION_ENABLED=false` zabraňuje ekonomickému execution bez explicitního povolení.
 Operator API nabízí `/automation/jobs`, `/automation/runs`, `/operations/workers` a oddělené
-`/health/live` a `/health/ready`. Mutation API zatím nemá autentizaci a nesmí být vystaveno
-do internetu.
+`/health/live` a `/health/ready`. Phase 9 chrání read i mutation API bearer autentizací a
+backend-authoritative RBAC; veřejné zůstávají pouze minimální `/healthz` a `/readyz`.
 
 Auditovatelná research a paper-trading platforma. Aktuální vertical slice načte fixture,
 validuje data, vytvoří moving-average cíle, provede next-open backtest s náklady a slippage,

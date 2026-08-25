@@ -355,6 +355,7 @@ class Phase4Repository:
         reason: str,
         correlation_id: str,
         event_type: AuditEventType = AuditEventType.KILL_SWITCH_TRIGGERED,
+        actor: dict[str, str] | None = None,
     ) -> None:
         with Session(self.engine) as session:
             account = session.get(PaperAccountRecord, account_id)
@@ -372,12 +373,19 @@ class Phase4Repository:
                     correlation_id=correlation_id,
                 )
             )
-            self.audit(
-                session, event_type, "account", account_id, None, correlation_id, {"reason": reason}
-            )
+            payload: dict[str, object] = {"reason": reason}
+            if actor:
+                payload["security_actor"] = actor
+            self.audit(session, event_type, "account", account_id, None, correlation_id, payload)
             session.commit()
 
-    def resume(self, account_id: str, correlation_id: str, reason: str | None = None) -> None:
+    def resume(
+        self,
+        account_id: str,
+        correlation_id: str,
+        reason: str | None = None,
+        actor: dict[str, str] | None = None,
+    ) -> None:
         with Session(self.engine) as session:
             account = session.get(PaperAccountRecord, account_id)
             if account is None or not account.reconciliation_safe:
@@ -391,7 +399,10 @@ class Phase4Repository:
                 account_id,
                 None,
                 correlation_id,
-                {"reason": reason} if reason is not None else None,
+                {
+                    **({"reason": reason} if reason is not None else {}),
+                    **({"security_actor": actor} if actor else {}),
+                },
             )
             session.commit()
 
