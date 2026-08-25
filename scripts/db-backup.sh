@@ -10,4 +10,5 @@ case "$DATABASE_URL" in
   *) database_url=$DATABASE_URL ;;
 esac
 pg_dump --format=custom --no-owner --no-acl --file="$target" "$database_url"
-sha256sum "$target" > "$target.sha256"
+checksum=$(sha256sum "$target" | awk '{print $1}')
+printf '%s  %s\n' "$checksum" "$(basename "$target")" > "$target.sha256"

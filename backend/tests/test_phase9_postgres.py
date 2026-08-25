@@ -80,7 +80,12 @@ def test_production_repository_does_not_create_schema_implicitly() -> None:
             connection.execute(f'DROP DATABASE "{database}" WITH (FORCE)')
 
 
-def _run_postgres_tool(script: str, arguments: list[str], environment: dict[str, str]):
+def _run_postgres_tool(
+    script: str,
+    arguments: list[str],
+    environment: dict[str, str],
+    backup_path: str = "/backup/phase9.dump",
+):
     repository = Path(__file__).parents[2]
     docker_environment = [item for key in environment for item in ("-e", key)]
     return subprocess.run(
@@ -98,7 +103,7 @@ def _run_postgres_tool(script: str, arguments: list[str], environment: dict[str,
             *docker_environment,
             "postgres:17-alpine",
             f"/scripts/{script}",
-            "/backup/phase9.dump",
+            backup_path,
         ],
         check=False,
         capture_output=True,
@@ -115,6 +120,14 @@ def test_backup_checksum_restore_and_fail_closed_inputs(tmp_path: Path) -> None:
     assert (tmp_path / "phase9.dump").is_file()
     assert (tmp_path / "phase9.dump.sha256").is_file()
 
+    relocated = tmp_path / "off-site" / "recovery"
+    relocated.mkdir(parents=True)
+    backup_path = relocated / "phase9.dump"
+    checksum_path = relocated / "phase9.dump.sha256"
+    (tmp_path / "phase9.dump").rename(backup_path)
+    (tmp_path / "phase9.dump.sha256").rename(checksum_path)
+    assert checksum_path.read_text().endswith("  phase9.dump\n")
+
     missing = subprocess.run(
         [str(repository / "scripts/db-restore.sh"), str(tmp_path / "missing.dump")],
         env={
@@ -130,9 +143,9 @@ def test_backup_checksum_restore_and_fail_closed_inputs(tmp_path: Path) -> None:
     )
     assert unconfirmed.returncode != 0
 
-    checksum = tmp_path / "phase9.dump.sha256"
+    checksum = checksum_path
     valid_checksum = checksum.read_text()
-    checksum.write_text("0" * 64 + "  /backup/phase9.dump\n")
+    checksum.write_text("0" * 64 + "  phase9.dump\n")
     corrupt = _run_postgres_tool(
         "db-restore.sh",
         volume,
@@ -140,9 +153,10 @@ def test_backup_checksum_restore_and_fail_closed_inputs(tmp_path: Path) -> None:
             "RESTORE_DATABASE_URL": _dsn("missing"),
             "RESTORE_CONFIRMATION": "RESTORE_EPHEMERAL_DATABASE",
         },
+        "/backup/off-site/recovery/phase9.dump",
     )
     assert corrupt.returncode != 0
-    checksum.write_text(valid_checksum.replace(str(tmp_path), "/backup"))
+    checksum.write_text(valid_checksum)
 
     restored_database = f"phase9_restore_{uuid4().hex[:12]}"
     with psycopg.connect(_dsn(), autocommit=True) as connection:
@@ -155,6 +169,7 @@ def test_backup_checksum_restore_and_fail_closed_inputs(tmp_path: Path) -> None:
                 "RESTORE_DATABASE_URL": _dsn(restored_database),
                 "RESTORE_CONFIRMATION": "RESTORE_EPHEMERAL_DATABASE",
             },
+            "/backup/off-site/recovery/phase9.dump",
         )
         assert restored.returncode == 0, restored.stderr
         with psycopg.connect(_dsn(restored_database)) as connection:
