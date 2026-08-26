@@ -34,6 +34,11 @@ market data
 
 Každý ekonomický příkaz prochází přes `RiskEngine` a `ExecutionEngine`. Strategie nikdy nevolá broker přímo. Signál z close T se může realizovat nejdříve na raw open následující session. Research snapshoty a current paper feed jsou oddělené.
 
+Podporovaný Phase 6 bootstrap je dostupný v autentizovaném ADMIN namespace `/operator`: instrument,
+PIT universe/membership, provider ingest, validovaný snapshot, allowlisted experiment, promotion,
+deployment create/approve a monitoring enrollment. Připraví pouze schválený PAPER deployment;
+worker integration a automatický market-data refresh zatím nejsou součástí této cesty.
+
 ## Požadavky
 
 - Python **3.12+**
