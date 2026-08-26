@@ -21,7 +21,7 @@ dev:
 api:
 	set -a; . .secrets/dev.env; set +a; cd backend && uv run uvicorn quantlab.api:app --app-dir src --host 127.0.0.1 --port 8000
 dashboard:
-	set -a; . .secrets/dev.env; set +a; cd frontend && npm start
+	set -a; . .secrets/dev.env; set +a; cd frontend && if [ "$${CODESPACES:-}" = "true" ] && [ -n "$${CODESPACE_NAME:-}" ] && [ -n "$${GITHUB_CODESPACES_PORT_FORWARDING_DOMAIN:-}" ]; then npm start; else npm run dev; fi
 dashboard-build:
 	set -a; . .secrets/dev.env; set +a; cd frontend && npm run build
 codespaces-setup: install frontend-install
@@ -30,8 +30,7 @@ codespaces-setup: install frontend-install
 	set -a; . .secrets/dev.env; set +a; cd backend && uv run alembic -c ../alembic.ini upgrade head
 	$(MAKE) dashboard-build
 codespaces-reset-credentials:
-	@rm -f .secrets/dev.env
-	@$(MAKE) generate-dev-secrets
+	@./scripts/reset-dev-secrets.sh
 frontend-test:
 	cd frontend && npm run lint && npm run typecheck && npm test && npm run build
 frontend-install:

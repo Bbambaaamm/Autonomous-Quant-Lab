@@ -82,16 +82,18 @@ Po změně frontend kódu nejprve spusťte `make dashboard-build`. Po změně mi
 
 ### Explicitní reset credentials
 
-Reset zneplatní dosavadní login a API tokeny a znovu vypíše jednorázové heslo:
+Nejprve pomocí `Ctrl+C` zastavte **API i dashboard**. Target odmítne reset, pokud port `8000` nebo `3000` stále naslouchá; tím zabrání souběhu procesů se starými a novými credentials. Potom vygenerujte credentials, znovu sestavte dashboard a oba procesy spusťte:
 
 ```bash
 make codespaces-reset-credentials
 make dashboard-build
+make api        # terminál 1
+make dashboard  # terminál 2
 ```
 
 ### Lokální fallback mimo Codespaces
 
-Stejný postup funguje lokálně; generátor použije `http://localhost:3000` a allowlist `localhost,127.0.0.1`. Lokální `docker-compose.yml` vystavuje PostgreSQL pouze na loopback a používá trust auth výhradně pro development. `make codespaces-setup` existující `.secrets/dev.env` nikdy nepřepíše.
+Stejný postup funguje lokálně; generátor použije `http://localhost:3000` a allowlist `localhost,127.0.0.1`. `make dashboard` mimo Codespaces záměrně spustí vývojový Next.js server, protože produkční standalone validace správně vyžaduje HTTPS. Lokální `docker-compose.yml` vystavuje PostgreSQL pouze na loopback a používá trust auth výhradně pro development. `make codespaces-setup` existující `.secrets/dev.env` nikdy nepřepíše.
 
 ## Automatizovaný paper worker
 

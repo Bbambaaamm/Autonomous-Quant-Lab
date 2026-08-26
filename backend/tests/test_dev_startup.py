@@ -1,9 +1,11 @@
 import os
+import socket
 import subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 SECRET_SCRIPT = ROOT / "scripts" / "generate-dev-secrets.sh"
+RESET_SCRIPT = ROOT / "scripts" / "reset-dev-secrets.sh"
 
 
 def generate_environment(tmp_path: Path, environment: dict[str, str]) -> dict[str, str]:
@@ -44,3 +46,27 @@ def test_incomplete_codespaces_environment_uses_localhost(tmp_path: Path) -> Non
     )
     assert values["PUBLIC_BASE_URL"] == "http://localhost:3000"
     assert values["FRONTEND_ALLOWED_HOSTS"] == "localhost,127.0.0.1"
+
+
+def test_credentials_reset_fails_while_dashboard_is_running(tmp_path: Path) -> None:
+    secrets_directory = tmp_path / ".secrets"
+    secrets_directory.mkdir()
+    secret_file = secrets_directory / "dev.env"
+    secret_file.write_text("SENTINEL=unchanged\n")
+    scripts_directory = tmp_path / "scripts"
+    scripts_directory.symlink_to(ROOT / "scripts", target_is_directory=True)
+
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 3000))
+        listener.listen()
+        result = subprocess.run(
+            [str(RESET_SCRIPT)],
+            cwd=tmp_path,
+            env={"PATH": os.environ["PATH"]},
+            capture_output=True,
+            text=True,
+        )
+
+    assert result.returncode != 0
+    assert "zastavte dashboard i API" in result.stderr
+    assert secret_file.read_text() == "SENTINEL=unchanged\n"
