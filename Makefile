@@ -1,4 +1,4 @@
-.PHONY: install setup check test format lint typecheck dev api dashboard frontend-test frontend-install frontend-check frontend-lock-check generate-dev-secrets security-check frontend-security production-build production-up production-down production-smoke db-backup db-restore db-configure-runtime
+.PHONY: install setup check test format lint typecheck dev api dashboard dashboard-build codespaces-setup codespaces-reset-credentials frontend-test frontend-install frontend-check frontend-lock-check generate-dev-secrets security-check frontend-security production-build production-up production-down production-smoke db-backup db-restore db-configure-runtime
 install:
 	cd backend && uv sync --locked --all-groups
 setup: install
@@ -16,12 +16,21 @@ lint:
 typecheck:
 	cd backend && uv run mypy
 dev:
-	cd backend && uv run uvicorn quantlab.api:app --reload
+	cd backend && uv run uvicorn quantlab.api:app --app-dir src --reload
 
 api:
-	cd backend && uv run uvicorn quantlab.api:app --host 127.0.0.1 --port 8000
+	set -a; . .secrets/dev.env; set +a; cd backend && uv run uvicorn quantlab.api:app --app-dir src --host 127.0.0.1 --port 8000
 dashboard:
-	cd frontend && npm run dev
+	set -a; . .secrets/dev.env; set +a; cd frontend && if [ "$${CODESPACES:-}" = "true" ] && [ -n "$${CODESPACE_NAME:-}" ] && [ -n "$${GITHUB_CODESPACES_PORT_FORWARDING_DOMAIN:-}" ]; then npm start; else npm run dev; fi
+dashboard-build:
+	set -a; . .secrets/dev.env; set +a; cd frontend && npm run build
+codespaces-setup: install frontend-install
+	docker compose up -d --wait postgres
+	@test -f .secrets/dev.env || ./scripts/generate-dev-secrets.sh
+	set -a; . .secrets/dev.env; set +a; cd backend && uv run alembic -c ../alembic.ini upgrade head
+	$(MAKE) dashboard-build
+codespaces-reset-credentials:
+	@./scripts/reset-dev-secrets.sh
 frontend-test:
 	cd frontend && npm run lint && npm run typecheck && npm test && npm run build
 frontend-install:
