@@ -679,6 +679,7 @@ def approve_deployment(
             actor=_actor(request),
             reason=body.reason,
             correlation_id=_correlation(request),
+            allow_already_approved=True,
         )
         return {"deployment_id": deployment_id, "status": "APPROVED"}
     except (ValueError, DatasetInvalid) as exc:

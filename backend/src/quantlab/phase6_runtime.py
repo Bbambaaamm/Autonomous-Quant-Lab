@@ -799,13 +799,15 @@ class DeploymentService:
         actor: dict[str, str] | None = None,
         reason: str | None = None,
         correlation_id: str | None = None,
+        allow_already_approved: bool = False,
     ) -> None:
         approved_at = require_utc(approved_at)
         with self._sessions() as session, session.begin():
             row = session.get(StrategyDeploymentRecord, deployment_id, with_for_update=True)
-            if row is not None and row.status == "APPROVED":
-                return
-            if row is None or row.status != "PENDING_REVIEW":
+            already_approved = row is not None and row.status == "APPROVED"
+            if row is None or (
+                row.status != "PENDING_REVIEW" and not (already_approved and allow_already_approved)
+            ):
                 raise ValueError("Deployment neexistuje nebo není čekající na ruční schválení")
             experiment = session.get(ExperimentRecord, row.experiment_id)
             if experiment is None:
@@ -830,6 +832,8 @@ class DeploymentService:
                 raise DatasetInvalid("Deployment timeframe není podporován")
             if self._evidence(row.parameters_json, "deployment parameters") != parameters:
                 raise DatasetInvalid("Deployment parameters neodpovídají experiment evidence")
+            if already_approved:
+                return
             row.status = "APPROVED"
             row.approved_at = approved_at
             if actor is not None and reason is not None:
