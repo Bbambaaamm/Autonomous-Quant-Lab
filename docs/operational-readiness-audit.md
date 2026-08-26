@@ -13,9 +13,9 @@ automation a monitoring. Tyto bloky však v běžícím produktu netvoří jeden
 
 Forenzní trace našel dvě odlišné execution cesty:
 
-1. správnou Phase 6 cestu `Phase6PaperExecutionService`, která rekonstruuje schválený deployment,
+1. zamýšlenou Phase 6 cestu `Phase6PaperExecutionService`, která rekonstruuje schválený deployment,
    vypočítá signál z adjusted close a předá targety Phase 4 risk/execution/broker vrstvě; tato cesta
-   není zapojena do API ani workeru;
+   není zapojena do API ani workeru a navíc retroaktivně používá open dokončené session;
 2. skutečnou cestu workeru `RUN_PAPER_CYCLE`, která načte lokální CSV cestu a uživatelem dodané
    `target_weights`. Nepoužije deployment, experiment, strategy implementation, PIT universe ani
    persistentní current-data feed.
@@ -27,8 +27,9 @@ záměrně read-only. Z čisté databáze proto operátor bez vlastního Python 
 service třídami nedokáže připravit systém k provozu; ani po této ruční přípravě scheduler nespustí
 schválený Phase 6 deployment.
 
-**Souhrn nálezů:** 2 BLOCKER, 3 HIGH, 4 MEDIUM a 3 LOW. PAPER-only, no-lookahead v obou
-samostatných enginech, persistentní risk/ledger a worker concurrency mechanismy jsou PASS.
+**Souhrn nálezů:** 3 BLOCKER, 3 HIGH, 4 MEDIUM a 3 LOW. PAPER-only, chronologická research
+validace, persistentní risk/ledger a worker concurrency mechanismy jsou PASS. Phase 6 paper runtime
+naopak porušuje execution-time kauzalitu popsanou v B3.
 
 ## 2. Auditní metoda a ověřené zdroje
 
@@ -98,8 +99,9 @@ Rozlišení v tabulkách:
 - Phase 6 experiment používá chronologické train/validation/OOS, selection pouze z validation a
   OOS právě jednou. Snapshot replay kontroluje obsahový hash, přesnou strategii, code SHA, seed a
   cost model.
-- Multi-asset a Phase 6 paper service oddělují adjusted close pro signál od raw open pro fill.
-  Historie končí před executable session; close T tedy nemůže obchodovat dříve než next open.
+- Multi-asset research engine odděluje adjusted close pro signál od raw open pro fill a jeho
+  backtestová historie končí před executable session. Toto PASS se nevztahuje na
+  `Phase6PaperExecutionService`, jehož retroaktivní execution timing je BLOCKER B3.
 
 ### Paper safety a účetnictví
 
@@ -158,6 +160,20 @@ nevypočítá strategy signal a nevytvoří `paper_deployment_cycles` lineage.
 nikoli deklarovaný research → promotion → deployment → autonomous strategy tok. Je možné vytvořit
 job, který vypadá jako paper automation, ale ekonomické rozhodnutí pochází z konfiguračního JSON,
 nikoli z auditované strategie.
+
+### B3 — Phase 6 paper service retroaktivně filluje již známý open
+
+**Dopad:** `ValidatedCurrentDataAccessor.latest()` po close vybere právě dokončenou session a
+`Phase6PaperExecutionService.run()` nastaví `execution_time` na open téže session. Služba volaná po
+close tak použije raw open starý několik hodin; před close obdobně vybere předchozí dokončenou
+session a její ještě starší open. Nejde tedy o aktuálně obchodovatelný next open, ale o hindsight
+fill. Existující PostgreSQL E2E test tento stav neodhalí, protože službu volá minutu po close a
+retroaktivní timestamp očekává.
+
+**Proč je to blocker:** paper ledger, fills a PnL mohou vzniknout za cenu, kterou autonomní systém
+v okamžiku rozhodnutí nemohl získat. To porušuje projektový invariant „close signal → nejdříve next
+open“. Oprava execution-time kauzality je nutnou podmínkou před zapojením služby do workeru; nestačí
+pouze propojit stávající implementaci.
 
 ## 6. HIGH findings
 
@@ -276,14 +292,15 @@ hotovými target weights. To je funkční Phase 4 automation demo, nikoli autono
   accepted/rejected orders, raw-bar fills, slippage/commission, cash/positions/PnL a cycle uloží.
   Deployment/experiment/monitoring lineage nevznikne. Market-data DB se neobnoví.
 
-### Co by provedla nezapojená správná Phase 6 služba
+### Co provede nezapojená Phase 6 služba
 
-Ověřila by APPROVED deployment a právě jeden ACTIVE monitoring, immutable experiment lineage,
-PIT USD/XNYS universe a account; aplikovala corporate actions; vyžádala latest completed-session
-raw open a předchozí lookback close data; adjusted close by předala allowlisted strategy; target
-weights by převedla na Phase 4 cyklus. Risk by každý intent schválil nebo odmítl, broker by provedl
-raw-open fills s náklady a služba by cyklus svázala s deployment/monitoringem. Následná performance
-capture/evaluation je samostatný job. Tato cesta funguje v E2E testech, ne v dodaném worker runtime.
+Ověří APPROVED deployment a právě jeden ACTIVE monitoring, immutable experiment lineage, PIT
+USD/XNYS universe a account; aplikuje corporate actions; načte completed-session data a předchozí
+lookback close data; adjusted close předá allowlisted strategy a target weights převede na Phase 4
+cyklus. Risk každý intent schválí nebo odmítne a služba cyklus sváže s deployment/monitoringem.
+Současně však nastaví fill time na open již dokončené session, takže vznikne retroaktivní hindsight
+fill popsaný v B3. E2E test potvrzuje současnou implementaci a lineage, nikoli reálnou
+obchodovatelnost timestampu. Následná performance capture/evaluation je samostatný job.
 
 ## 12. Failure-mode tabletop
 
@@ -298,7 +315,7 @@ capture/evaluation je samostatný job. Tato cesta funguje v E2E testech, ne v do
 | Restart během cycle | economic commit je oddělen; stejný cycle se načte | recoverable, následně reconciliation |
 | Risk odmítne order | decision persistuje, broker order nevznikne | closed a auditovatelné; cycle může dokončit s rejectem |
 | Chybí executable price | Phase 4/6 odmítne chybějící next raw bar/open | closed; důvod v cycle/job failure podle cesty |
-| Market zavřený | správný accessor používá latest completed session; scheduler sám market nezná | service closed, ale schedule není session-aware |
+| Market zavřený | accessor použije latest completed session a service její minulý open | **nefailne closed** proti retroaktivnímu fillu; B3 |
 | Stale data | Phase 6 vyžaduje poslední dokončenou session | closed; worker CSV cesta kontroluje pouze bar po decision time |
 | Neplatný deployment | Phase 6 service odmítne status/lineage/monitoring | closed, avšak standardní worker deployment ignoruje |
 
@@ -322,26 +339,43 @@ neauditovatelný skok přes ručně zadané target weights.
 
 ## 14. Test results
 
-### Backend
+### Původní Codex task runner
 
-- `uv lock --check` — **BLOCKED BY ENVIRONMENT**: runner má `uv 0.7.22`, projekt vyžaduje přesně
-  `0.12.3`; instalace přes PyPI skončila HTTP 403.
-- `uv sync --locked --all-groups` — **BLOCKED BY ENVIRONMENT** ze stejného důvodu.
-- `uv run ruff format --check .`, `uv run ruff check .`, `uv run mypy src/quantlab`,
-  `uv run pytest` — **BLOCKED BY ENVIRONMENT** ještě před spuštěním kvůli uv version gate.
-- PostgreSQL integration, PAPER-only, Phase 6–9, security a production smoke/container testy —
-  **BLOCKED BY ENVIRONMENT**: dependencies nelze synchronizovat a runner nemá Docker binary.
+Lokální omezení původního auditu zůstávají relevantní pouze jako popis daného runneru, nikoli jako
+aktuální autoritativní stav ověření PR:
 
-Blokace test runneru není použita jako důkaz readiness. Kódový audit ověřil, že CI tyto suites
-deklaruje, ale aktuální commit v tomto prostředí nebyl dynamicky potvrzen.
+- `uv lock --check` a `uv sync --locked --all-groups` — **BLOCKED BY ENVIRONMENT**: runner měl
+  `uv 0.7.22`, projekt vyžadoval přesně `0.12.3` a instalace přes PyPI skončila HTTP 403;
+- `uv run ruff format --check .`, `uv run ruff check .`, `uv run mypy src/quantlab` a
+  `uv run pytest` — **BLOCKED BY ENVIRONMENT** před spuštěním kvůli uv version gate;
+- PostgreSQL integration, PAPER-only, Phase 6–9, security, container a production-smoke suites —
+  **BLOCKED BY ENVIRONMENT**, protože dependencies nebylo možné synchronizovat a runner neměl
+  Docker binary;
+- `npm ci` — **BLOCKED BY ENVIRONMENT** kvůli HTTP 403 při stažení locked Next.js tarballu;
+- `npm run lockfile:check` — **PASS** (2/2 Node testy a strukturální kontrola lockfilu);
+- `npm run lint`, `npm run typecheck`, `npm test` a `npm run build` — **BLOCKED BY ENVIRONMENT** po
+  neúspěšném `npm ci`, protože chyběly eslint/next/vitest dependencies.
 
-### Frontend
+### Autoritativní GitHub Actions CI pro PR #52
 
-- `npm ci` — **BLOCKED BY ENVIRONMENT**: registry vrátil HTTP 403 pro locked Next.js tarball;
-  příkaz odstranil předchozí `node_modules`, jak `npm ci` standardně dělá.
-- `npm run lockfile:check` — **PASS** (2/2 node testy, strukturální kontrola package/lockfile).
-- `npm run lint`, `npm run typecheck`, `npm test`, `npm run build` — **BLOCKED BY ENVIRONMENT**,
-  protože neúspěšné `npm ci` nezanechalo eslint/next/vitest dependencies.
+Standardní repository CI následně ověřilo head PR #52 ve vybaveném GitHub Actions prostředí.
+Dokončené joby měly stav `success`:
+
+- **quality — PASS:** locked backend dependencies, Ruff format/check a mypy;
+- **unit-research — PASS:** research, Phase 6/7, XNYS a PAPER-only architecture test selection;
+- **api — PASS:** vertical slice a Phase 7–9 API/security test selection;
+- **integration-postgres — PASS:** Alembic upgrade a PostgreSQL Phase 3–9, concurrency, recovery a
+  end-to-end test selection;
+- **frontend — PASS:** pinned toolchain, lockfile check, `npm ci`, lint, typecheck, test a build;
+- **security — PASS:** Python static/dependency audit, npm audit a repository secret/misconfiguration
+  scan;
+- **container-build — PASS:** backend/frontend build, non-root/minimal-runtime kontroly, blocking
+  HIGH/CRITICAL Trivy scans a CycloneDX SBOM;
+- **production-smoke — PASS:** production-like PAPER smoke test.
+
+Zelené CI potvrzuje testovou konzistenci implementovaného stavu. Nevyvrací B1/B2, které popisují
+chybějící runtime orchestration, ani B3: současný Phase 6 E2E test retroaktivní fill přijímá, takže
+jeho PASS není důkazem execution-time kauzality.
 
 ## 15. Operational readiness verdict
 
@@ -356,23 +390,26 @@ integraci již implementovaných Phase 1–9 schopností.
 
 ## 16. Minimální remediation plan
 
-1. **P0:** definovat jediný versioned `RUN_PAPER_DEPLOYMENT` job contract s `deployment_id` a zapojit
-   worker na `Phase6PaperExecutionService`; odstranit možnost ekonomického rozhodnutí z dodaných
-   `target_weights` z produkčního job contractu.
-2. **P0:** dodat autentizované/RBAC service endpoints nebo podporované CLI pro instrument/universe,
+1. **P0:** opravit Phase 6 paper timing tak, aby close-derived signál vytvořil fill nejdříve na
+   skutečně budoucím/aktuálně obchodovatelném next open; přidat regresní test odmítající
+   retroaktivní fill po close i při zavřeném trhu.
+2. **P0:** definovat jediný versioned `RUN_PAPER_DEPLOYMENT` job contract s `deployment_id` a teprve
+   po opravě B3 zapojit worker na `Phase6PaperExecutionService`; odstranit možnost ekonomického
+   rozhodnutí z dodaných `target_weights` z produkčního job contractu.
+3. **P0:** dodat autentizované/RBAC service endpoints nebo podporované CLI pro instrument/universe,
    ingest, snapshot, Phase 6 experiment, promotion, deployment create/approve a enrollment. Každá
    mutace musí mít actor, reason/idempotency a audit event.
-3. **P0:** přidat data-refresh/data-readiness orchestration před cycle a XNYS session-aware
+4. **P0:** přidat data-refresh/data-readiness orchestration před cycle a XNYS session-aware
    materializaci; provider failure/staleness musí vytvořit viditelný no-action/failure stav.
-4. **P1:** použít provider s auditovatelnými corporate actions (nebo explicitně omezit universe a
+5. **P1:** použít provider s auditovatelnými corporate actions (nebo explicitně omezit universe a
    failnout při chybějící action coverage); přidat split/dividend/delisting provozní alarmy.
-5. **P1:** verzovat a pinovat risk policy, commission a slippage identity v deployment/cycle
+6. **P1:** verzovat a pinovat risk policy, commission a slippage identity v deployment/cycle
    evidence; approval musí dokazovat použitou konfiguraci.
-6. **P1:** vytvořit immutable Phase 6 eligibility/promotion/approval decisions včetně kritérií,
+7. **P1:** vytvořit immutable Phase 6 eligibility/promotion/approval decisions včetně kritérií,
    metrik, actor identity, důvodu a timestampu.
-7. **P2:** doplnit UI actions pro podporovaný workflow, nebo UI jasně odkazovat na autoritativní CLI;
+8. **P2:** doplnit UI actions pro podporovaný workflow, nebo UI jasně odkazovat na autoritativní CLI;
    odlišit uninitialized, stale, incident a legitimní N/A.
-8. **Acceptance gate:** PostgreSQL E2E test musí z prázdné DB provést provider fixture ingest → PIT
+9. **Acceptance gate:** PostgreSQL E2E test musí z prázdné DB provést provider fixture ingest → PIT
    snapshot → multi-parameter experiment → promotion → approval/enrollment → scheduled worker cycle
    → risk/order/fill → monitoring/evidence a musí zahrnout future-data mutation, duplicate/restart,
    stale/missing data a market-closed scénáře. Teprve poté zopakovat všechny quality, security,
