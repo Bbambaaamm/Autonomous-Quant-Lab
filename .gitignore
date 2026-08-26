@@ -8,6 +8,7 @@ __pycache__/
 .env
 node_modules/
 frontend/dist/
+frontend/next-env.d.ts
 .next/
 .secrets/
 backups/
