@@ -435,7 +435,7 @@ def _research_to_paper(factory, engine, *, halted: bool):
             instrument,
             next_session,
             next_session,
-            CALENDAR.session_close(next_session),
+            CALENDAR.session_open(next_session) + timedelta(minutes=1),
         )
         .status
         == "SUCCEEDED"
@@ -449,7 +449,7 @@ def _research_to_paper(factory, engine, *, halted: bool):
     cycle = TradingCycleService(repository, risk)
     service = Phase6PaperExecutionService(factory, ValidatedCurrentDataAccessor(factory), cycle)
     cycle_id = service.run(
-        deployment.deployment_id, CALENDAR.session_close(next_session) + timedelta(minutes=1)
+        deployment.deployment_id, CALENDAR.session_open(next_session) + timedelta(minutes=2)
     )
     return account_id, deployment, experiment, snapshot, cycle_id, instrument, halted
 
@@ -478,6 +478,8 @@ def test_postgres_research_to_paper_authoritative_e2e(factory, engine) -> None:
         assert fill is not None
         # Close-derived signal končí před executable session a fill používá její raw open.
         assert fill.reference_price == Decimal("120")
+        assert fill.timestamp == CALENDAR.session_open(fill.timestamp.date())
+        assert fill.timestamp > session.get(PaperOrderRecord, fill.order_id).submitted_at
         assert (
             session.scalar(
                 select(func.count())
@@ -525,6 +527,10 @@ def test_postgres_research_to_paper_authoritative_e2e(factory, engine) -> None:
     assert set(matching["current_observation_ids"]).isdisjoint(snapshot_ids)
     assert set(matching["signal_observation_ids"]).isdisjoint(matching["current_observation_ids"])
     assert matching["signal_through_session"] < matching["executable_session"]
+    assert datetime.fromisoformat(matching["execution_time"]) > datetime.fromisoformat(
+        matching["decision_time"]
+    )
+    assert matching["raw_open_by_instrument"] == {instrument.instrument_id: "120.00000000"}
 
 
 def test_postgres_halted_approved_deployment_cannot_trade(factory, engine) -> None:

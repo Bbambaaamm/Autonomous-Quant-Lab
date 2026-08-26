@@ -1,5 +1,6 @@
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
+from unittest.mock import Mock
 
 import pytest
 from sqlalchemy import create_engine, select
@@ -176,6 +177,60 @@ def test_phase6_paper_execution_enforces_rebalance_frequency(
     frequency: RebalanceFrequency, previous: date, current: date, expected: bool
 ) -> None:
     assert Phase6PaperExecutionService._rebalance_due(current, previous, frequency) is expected
+
+
+@pytest.mark.parametrize(
+    "now,signal_session,execution_session",
+    [
+        (
+            datetime(2026, 1, 9, 21, 1, tzinfo=UTC),
+            date(2026, 1, 9),
+            date(2026, 1, 12),
+        ),
+        (
+            datetime(2026, 1, 16, 21, 1, tzinfo=UTC),
+            date(2026, 1, 16),
+            date(2026, 1, 20),
+        ),
+        (
+            datetime(2026, 11, 27, 18, 1, tzinfo=UTC),
+            date(2026, 11, 27),
+            date(2026, 11, 30),
+        ),
+    ],
+)
+def test_phase6_execution_timing_uses_next_xnys_session(
+    now: datetime, signal_session: date, execution_session: date
+) -> None:
+    calendar = XNYSCalendar()
+    timing = Phase6PaperExecutionService.execution_timing(calendar, now)
+
+    assert timing.signal_session == signal_session
+    assert timing.decision_time == calendar.session_close(signal_session)
+    assert timing.execution_session == execution_session
+    assert timing.execution_time == calendar.session_open(execution_session)
+    assert timing.execution_time > timing.decision_time
+
+
+@pytest.mark.parametrize("case", ["after_close", "before_next_open"])
+def test_phase6_run_before_next_open_fails_before_any_economic_service(case: str) -> None:
+    calendar = XNYSCalendar()
+    signal_close = calendar.session_close(date(2026, 1, 9))
+    now = (
+        signal_close + timedelta(minutes=1)
+        if case == "after_close"
+        else calendar.session_open(date(2026, 1, 12)) - timedelta(microseconds=1)
+    )
+    sessions = Mock(side_effect=AssertionError("Před open nesmí služba přistoupit k persistence"))
+    trading_cycle = Mock()
+    current_data = Mock(calendar=calendar)
+    service = Phase6PaperExecutionService(sessions, current_data, trading_cycle)
+
+    with pytest.raises(DatasetInvalid, match="executable session nezačala"):
+        service.run("deployment", now)
+
+    trading_cycle.run.assert_not_called()
+    current_data.for_execution_session.assert_not_called()
 
 
 def _approved_candidate(factory):

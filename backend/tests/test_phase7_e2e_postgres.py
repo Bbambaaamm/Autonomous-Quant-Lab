@@ -120,8 +120,9 @@ def _full_multi_session_flow(
     session_day = snapshots[-1].session_date
     for price in prices:
         session_day = CALENDAR.next_session(session_day)
-        observed_at = CALENDAR.session_close(session_day)
-        decision_time = observed_at + timedelta(minutes=1)
+        observed_at = CALENDAR.session_open(session_day) + timedelta(minutes=1)
+        execution_as_of = observed_at + timedelta(minutes=1)
+        capture_as_of = CALENDAR.session_close(session_day) + timedelta(minutes=1)
         provider = MappingProvider(
             f"p7-{instrument.symbol}",
             {instrument.symbol: [daily_bar(session_day, price, f"phase7-{session_day}")]},
@@ -133,10 +134,10 @@ def _full_multi_session_flow(
             .status
             == "SUCCEEDED"
         )
-        execution.run(deployment.deployment_id, decision_time)
-        item = performance.capture(run.monitoring_id, decision_time)
+        execution.run(deployment.deployment_id, execution_as_of)
+        item = performance.capture(run.monitoring_id, capture_as_of)
         snapshots.append(item)
-        evaluations.append(evaluation.evaluate(run.monitoring_id, item.snapshot_id, decision_time))
+        evaluations.append(evaluation.evaluate(run.monitoring_id, item.snapshot_id, capture_as_of))
     return account_id, deployment, experiment, source_snapshot, run, snapshots, evaluations
 
 

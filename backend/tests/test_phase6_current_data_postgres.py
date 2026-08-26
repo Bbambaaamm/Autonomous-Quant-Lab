@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from uuid import uuid4
 
 import pytest
@@ -140,6 +140,33 @@ def test_current_data_accepts_latest_succeeded_revision(factory) -> None:
         [instrument_id], datetime(2026, 1, 6, 22, tzinfo=UTC)
     )
     assert result[0].revision == 2
+
+
+def test_execution_data_requires_started_exact_session(factory) -> None:
+    execution_session = date(2026, 1, 6)
+    instrument_id = _observation(factory, execution_session)
+    accessor = ValidatedCurrentDataAccessor(factory)
+
+    with pytest.raises(DatasetInvalid, match="ještě nezačala"):
+        accessor.for_execution_session(
+            [instrument_id],
+            execution_session,
+            accessor.calendar.session_open(execution_session) - timedelta(microseconds=1),
+        )
+
+
+def test_execution_data_never_falls_back_to_previous_raw_open(factory) -> None:
+    signal_session = date(2026, 1, 5)
+    execution_session = date(2026, 1, 6)
+    instrument_id = _observation(factory, signal_session)
+    accessor = ValidatedCurrentDataAccessor(factory)
+
+    with pytest.raises(DatasetInvalid, match="raw open"):
+        accessor.for_execution_session(
+            [instrument_id],
+            execution_session,
+            accessor.calendar.session_open(execution_session) + timedelta(minutes=1),
+        )
 
 
 @pytest.mark.parametrize("ids", [(), ("duplicate", "duplicate")])
