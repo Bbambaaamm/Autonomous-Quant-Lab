@@ -530,7 +530,10 @@ def test_postgres_research_to_paper_authoritative_e2e(factory, engine) -> None:
     assert datetime.fromisoformat(matching["execution_time"]) > datetime.fromisoformat(
         matching["decision_time"]
     )
-    assert matching["raw_open_by_instrument"] == {instrument.instrument_id: "120.00000000"}
+    assert {
+        instrument_id: Decimal(raw_open)
+        for instrument_id, raw_open in matching["raw_open_by_instrument"].items()
+    } == {instrument.instrument_id: Decimal("120")}
 
 
 def test_postgres_halted_approved_deployment_cannot_trade(factory, engine) -> None:
