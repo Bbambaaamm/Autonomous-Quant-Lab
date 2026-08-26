@@ -7,10 +7,23 @@ RUN uv sync --locked --no-dev --no-install-project
 COPY backend/src ./src
 RUN rm -rf /usr/local/lib/python3.12/site-packages/pip* \
     /usr/local/lib/python3.12/ensurepip \
-    /usr/local/bin/pip*
+    /usr/local/lib/python3.12/lib-dynload/_curses*.so \
+    /usr/local/lib/python3.12/lib-dynload/readline*.so \
+    /usr/local/bin/pip* \
+    /usr/local/bin/uv \
+    && mkdir /runtime-libs \
+    && find /usr/local -type f -exec ldd {} \; 2>/dev/null \
+      | awk '{ for (i = 1; i <= NF; i++) if ($i ~ "^/") print $i }' \
+      | sort -u > /tmp/runtime-libs \
+    && test -s /tmp/runtime-libs \
+    && while IFS= read -r library; do \
+      mkdir -p "/runtime-libs$(dirname "$library")"; \
+      cp -L "$library" "/runtime-libs$library"; \
+    done < /tmp/runtime-libs
 
-FROM gcr.io/distroless/python3-debian13:nonroot
+FROM gcr.io/distroless/static-debian13:nonroot
 WORKDIR /app
+COPY --from=build /runtime-libs/ /
 COPY --from=build /usr/local /usr/local
 COPY --from=build --chown=65532:65532 /app/backend /app/backend
 COPY --chown=65532:65532 alembic.ini /app/alembic.ini

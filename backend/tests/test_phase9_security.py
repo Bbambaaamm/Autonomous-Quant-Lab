@@ -1,10 +1,43 @@
 import json
+import os
+import subprocess
+from pathlib import Path
 
 from fastapi.testclient import TestClient
 
 from quantlab import api
 from quantlab.config import Settings
 from quantlab.security import limiter
+
+
+def test_backup_fails_when_checksum_cannot_be_computed(tmp_path: Path) -> None:
+    repository = Path(__file__).parents[2]
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    pg_dump = tools / "pg_dump"
+    pg_dump.write_text('#!/bin/sh\nprintf "valid dump" > "${4#--file=}"\n')
+    pg_dump.chmod(0o700)
+    sha256sum = tools / "sha256sum"
+    sha256sum.write_text("#!/bin/sh\nexit 74\n")
+    sha256sum.chmod(0o700)
+    backup = tmp_path / "backup.dump"
+
+    result = subprocess.run(
+        [str(repository / "scripts/db-backup.sh"), str(backup)],
+        env={
+            **os.environ,
+            "DATABASE_URL": "postgresql://synthetic.invalid/quantlab",
+            "PATH": f"{tools}:{os.environ['PATH']}",
+        },
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode != 0
+    assert "Výpočet checksumu backupu selhal" in result.stderr
+    assert backup.is_file()
+    assert not backup.with_suffix(".dump.sha256").exists()
 
 
 def client(role: str = "admin") -> TestClient:

@@ -127,5 +127,5 @@ PY
 test "$(docker inspect -f '{{json .HostConfig.PortBindings}}' "$postgres")" = "{}"
 test "$(docker inspect -f '{{json .HostConfig.PortBindings}}' "$backend")" = "{}"
 test "$(docker exec "$backend" python -c 'import os; print(os.getuid())')" != 0
-test "$(docker exec "$frontend" /nodejs/bin/node -e 'console.log(process.getuid())')" != 0
+test "$(docker exec "$frontend" /usr/local/bin/node -e 'console.log(process.getuid())')" != 0
 ! git grep -n -E 'TRADING_MODE=live|LIVE_TRADING_ENABLED=true' -- ':!docs/codex/*' ':!CODEX_MASTER_PROMPT.md' ':!scripts/production-smoke.sh'

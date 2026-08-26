@@ -1,5 +1,8 @@
 # Phase 9 threat model a bezpečnostní architektura
 
+Časově omezené upstream výjimky a jejich mitigace eviduje
+[`security-exceptions.md`](security-exceptions.md); tento registr nemění blocking scanner policy.
+
 Single operator ≠ no authentication. Systém není multi-tenant SaaS, ale production-like PAPER
 control plane je vždy autentizovaný a backend autorizuje každou operaci.
 
