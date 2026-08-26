@@ -1,127 +1,178 @@
-# Implementační plán po Phase 5
+# Aktuální implementation status
 
-**Automation & Operations Foundation Phase 5: COMPLETE v deklarovaném scope.** Persistentní
-interval/daily schedules, misfire policy, logical runs, attempts, PostgreSQL claiming,
-lease/heartbeat/fencing, bounded retry, dead-letter, recovery, operator API a health foundation
-jsou implementované. Mimo scope zůstává auth/RBAC, plný observability stack, deployment a live
-trading; tato položka neoznačuje celý master plán za dokončený.
+Tento dokument popisuje současný stav projektu po dokončení **Phase 1–9**. Historické zadávací specifikace a detailní completion evidence zůstávají v `docs/codex/`; aktuální projektový verdikt je v [`docs/project-audit.md`](project-audit.md).
 
-Phase 4 Production Paper Trading & Risk Foundation je dokončena: persistentní risk, paper broker, idempotentní cycle, reconciliation, audit a API.
+## Souhrnný stav
 
-Stavy níže popisují skutečný stav vůči celému `CODEX_MASTER_PROMPT.md`, nikoli jen vůči
-dílčímu scope dosavadního milníku. Audit Phase 3 skončil **PASS WITH FIXES**: opravil metriku
-expozice, která používala počet fillů místo počtu oceňovacích období, a odstranil zastaralá
-tvrzení o CI, Dockeru, PostgreSQL a Alembicu.
+| Fáze | Oblast | Stav |
+|---|---|---|
+| Phase 1 | Core domain, deterministic vertical slice, backtest foundation | **COMPLETE** |
+| Phase 2 | Research foundation, validation, robustness, experiment evidence | **COMPLETE** |
+| Phase 3 | Production research data platform, registry, PostgreSQL, Alembic | **COMPLETE** |
+| Phase 4 | Persistent paper trading, portfolio risk, broker, reconciliation | **COMPLETE — AUDIT PASSED WITH FIXES** |
+| Phase 5 | Automation & operations, scheduler/worker, leases, fencing, retry | **COMPLETE — AUDIT PASSED WITH FIXES** |
+| Phase 6 | Market data, XNYS, PIT universe, immutable snapshots, multi-asset research | **COMPLETE** |
+| Phase 7 | Paper performance monitoring and strategy lifecycle | **COMPLETE — AUDIT PASSED** |
+| Phase 8 | Operator control plane / Next.js dashboard | **COMPLETE — AUDIT PASSED WITH FIXES** |
+| Phase 9 | Security & production hardening | **COMPLETE — FINAL POST-MERGE VERIFICATION PASSED** |
 
-| Fáze / oblast | Stav | Implementováno | Konkrétní remaining scope |
-|---|---|---|---|
-| 0 Repository bootstrap | PARTIAL | Python package, AGENTS, Makefile, základní konfigurace a commitnutý `uv.lock` | doplnit licence a úplnou cílovou monorepo strukturu |
-| 1 Domain model | PARTIAL | UTC Bar, target, order/fill, risk decision, paper account, cycle, reconciliation a audit | úplné modely quote, market calendar a multi-asset portfolio |
-| 2 Market data | PARTIAL | CSV/Parquet, content hash, quality kontroly, jednoduchý kalendář | reálný provider, quote/metadata API, úplný exchange kalendář, DB quality events a point-in-time universe |
-| 3 Strategy framework | PARTIAL | společný interface/factory, MA, buy-and-hold, Donchian | TSMOM, cross-sectional momentum, mean reversion, pairs, multi-asset context a deklarace podpor |
-| 4 Backtesting | PARTIAL | next-open, raw fill/adjusted signal, FIFO, náklady, slippage, split/dividenda | multi-symbol portfolio, spread, limit/partial fill, další sizing a úplná sada metrik/benchmark statistik |
-| 5 Validation | PARTIAL | chronologický split, walk-forward train/validation/OOS, one-shot OOS | embargo/purge dle potřeby, richer OOS reporty a statistické testy |
-| 6 Research automation | PARTIAL | grid, runner, cost stress, seedované Monte Carlo, stabilita, eligibility | distribuované/background běhy, experiment queue, report artefakty a více strategií/universe |
-| 7 Portfolio & Risk | COMPLETE | konfigurovatelné portfolio a denní limity, decisions, halt | short/multi-asset rozšíření je budoucí scope |
-| 8 Paper Broker | COMPLETE | persistentní MARKET/LIMIT, partial fill, cancel, FIFO, costs a reconciliation | pokročilá mikrostruktura není cílem EOD modelu |
-| 9 Automated trading cycle | COMPLETE | target-vs-actual, DB uniqueness, recovery-safe submission, reconciliation a audit | komplexní scheduler/worker je mimo Phase 4 |
-| 10 REST API | PARTIAL | research plus paper account/portfolio/orders/risk/cycle/audit/reconciliation endpointy | auth, stabilní schemas a rozšířená OpenAPI |
-| 11 Web dashboard | PARTIAL | minimální server-rendered demo stránka | Next.js/React/Tailwind aplikace, grafy a research/paper/risk obrazovky |
-| 12 Observability | PARTIAL | persistentní audit s correlation/cycle/account/order identitou | metrics, alerting a centralizované logování |
-| 13 Security | PARTIAL | žádný live broker, paper-only cesta, bezpečné env defaults, loopback DB | auth/RBAC, secret management, dependency/SAST scan, rate limits a produkční hardening |
-| 14 CI/CD & infrastructure | PARTIAL | GitHub Actions quality/unit/API/PostgreSQL job, locked dependency sync, PostgreSQL Compose healthcheck a Alembic upgrade | aplikační image/service/healthcheck, Redis/worker a deploy pipeline |
-| 15 Dokumentace | PARTIAL | README, architecture, database, risk, paper, live-safety, operations a reproducibility | domain/backtest/strategy/troubleshooting dokumenty |
-| 16 End-to-end verification | PARTIAL | fixture→research, paper-cycle idempotence/concurrency/reconciliation a PostgreSQL CI | dashboard a distribuovaný provozní acceptance |
+## Aktuální autoritativní runtime
 
-## Uzavření Phase 3
+Research a paper runtime jsou oddělené. Autoritativní tok je:
 
-**Phase 3 research data platform: COMPLETE v deklarovaném scope.** Registry obsahuje neměnnou
-dataset/strategy/experiment identitu, normalizované foldy, parameter runy a eligibility checks,
-lineage, comparison a deterministic leaderboard. Alembic initial migration vytváří schema na
-prázdné PostgreSQL DB a CI má samostatný PostgreSQL job. SQLite je pouze testovací adapter.
+```text
+provider
+→ validation / immutable observation revisions
+→ XNYS calendar / corporate actions
+→ PIT universe
+→ immutable dataset snapshot
+→ research experiment
+→ explicit PAPER_CANDIDATE promotion
+→ explicit deployment approval
+→ validated current data
+→ Strategy
+→ Portfolio
+→ RiskEngine
+→ ExecutionEngine
+→ PersistentPaperBroker
+→ reconciliation
+→ immutable performance monitoring
+→ operator control plane
+```
 
-Phase 3 neznamená dokončení celého master plánu. Registry neukládá bary a repository nemá
-worker, Redis, trading scheduler ani aplikační Docker image. Lokální Compose vystavuje
-PostgreSQL pouze na loopback a používá trust autentizaci výhradně pro development.
+Žádný research nebo dashboard komponent neobchází `RiskEngine`, `ExecutionEngine`, persisted `HALTED` stav ani reconciliation gates.
 
-## Verification audit po Phase 3
+## Phase 1–3 — research/data foundation
 
-Audit znovu potvrdil next-open invariant: strategie dostane pouze prefix končící close T a fill
-použije raw open T+1; signály používají adjusted close. Train, validation a OOS jsou chronologické
-a OOS konfigurace se vybírá bez OOS dat. FIFO alokuje vstupní i výstupní komise a split upravuje
-množství i jednotkovou bázi bez vytvoření P&L.
+Implementováno a nadále regresně kryto:
 
-Opravená regrese metrik počítá exposure jako podíl oceňovacích timestampů, ve kterých existuje
-otevřená pozice. Dříve jej odvozovala z počtu fillů, takže pozdní jediný vstup nesprávně vykázal
-100% exposure a scale-in/out měnil jmenovatel bez vztahu k času.
+- UTC-aware domain model a deterministické finanční výpočty;
+- close T → nejdříve raw open následující session;
+- adjusted prices pro signály, raw executable prices pro fills;
+- FIFO accounting, commissions, slippage, split/dividend semantics;
+- chronologický train/validation/OOS proces bez random splitu;
+- robustness, cost stress, Monte Carlo a parameter stability;
+- immutable experiment evidence a structured parameter/eligibility records;
+- dataset/strategy/experiment registry, lineage, leaderboard a comparison;
+- PostgreSQL production target a Alembic-only production schema bootstrap.
 
-## Doporučená Phase 4 – Production Paper Trading & Risk Foundation
+## Phase 4 — production paper trading & risk
 
-Další etapa nemá rozšiřovat research strategie. Přesný doporučený scope je:
+Implementováno:
 
-1. zavést typované `RiskDecision`, `Order`, `PaperAccount`, `TradingCycle` a `AuditEvent`;
-2. rozšířit RiskEngine o portfolio exposure/leverage, concentration, denní loss/drawdown,
-   order-count a daily-notional limity, vždy fail-closed;
-3. odstranit hardcoded portfolio weight a propojit konstrukci s explicitními risk limity;
-4. persistovat paper orders/fills/positions/cash/cycles s FK, immutable identitou a transakcemi;
-5. implementovat idempotency keys, DB/advisory lock jednoho cycle a retry-safe submission;
-6. doplnit PaperBroker lifecycle minimálně pro market order, reject/cancel a deterministický
-   partial-fill model bez jakéhokoli live adapteru;
-7. implementovat trading cycle výhradně v toku Strategy → Portfolio → RiskEngine →
-   ExecutionEngine → PaperBroker, včetně stale-data guardu a restart reconciliation;
-8. přidat unit, SQLite integration, PostgreSQL integration a crash/retry/concurrency E2E testy;
-9. zdokumentovat risk pravidla, paper trading, provoz a live-safety boundary.
+- persistentní paper account, orders, fills, positions a cash;
+- MARKET/LIMIT lifecycle a deterministic partial fills;
+- target-vs-actual portfolio flow;
+- persisted risk decisions, notional/exposure/concentration/daily limits;
+- persistentní HALT/RESUME safety state;
+- idempotentní trading cycles, leases, concurrency protection a recovery-safe submission;
+- reconciliation a immutable audit evidence.
 
-Mimo Phase 4 zůstávají live broker, live credentials, Next.js dashboard a nové strategie.
+Auditní opravy jsou zdokumentovány v [`phase4-audit.md`](phase4-audit.md).
 
-## Phase 6
-Phase 6 je implementována jako provider → validace/immutable revisions → XNYS calendar/corporate actions → PIT universe → immutable snapshot → multi-asset target portfolio. Detailní invariants jsou v `docs/market-data.md` a `docs/strategy-research.md`. Žádná část nevytváří live execution path; automatický data refresh zatím není allowlistovaný job a refresh se provádí odděleně od trading cycle.
+## Phase 5 — automation & operations
 
-## Aktuální Phase 6 completion stav
-Dokončen je persistentní transakční ingestion, DB snapshot builder s PIT coverage, read API, current-data accessor, produkční exchange calendar a experiment/deployment lineage. Aktuální stav se ověřuje Phase 6 unit a PostgreSQL integračními gates v CI.
+Implementováno:
 
-## Phase 6 completion controls
+- persistentní schedules a deterministic occurrence identity;
+- scheduler → `JobRun` materialization bez přímého ekonomického execution;
+- PostgreSQL worker claim přes row locking / `SKIP LOCKED`;
+- lease, heartbeat, fencing token a attempts;
+- bounded retry, dead-letter a restart recovery;
+- safe dispatch pouze do existujících Phase 4 paper služeb;
+- operations API a worker/job health evidence.
 
-Produkční XNYS kalendář používá verzovaný auditovaný schedule včetně explicitních exceptional closures. Exactly-once ingestion/snapshot/experiment je serializována v PostgreSQL. Immutable replay a validation-only parameter selection chrání proti korekcím a OOS leakage. Deployment zůstává explicitní manual paper-only gate do stávající Phase 4 cesty; current data se validují odděleně podle poslední dokončené session a `HALTED` nelze obejít.
+Auditní opravy jsou zdokumentovány v [`phase5-audit.md`](phase5-audit.md).
 
-## Phase 6 finalizace
-Produkční schedule poskytuje `exchange-calendars` 4.13.2 / XNYS s identitou `XNYS:exchange-calendars:4.13.2`, nikoli vlastní holiday seznam. Phase 6 zachovává immutable revision/snapshot correction replay, PIT a corporate-action causality, exactly-once experimenty a OOS isolation. Promotion je pouze ruční; current feed není snapshot replay. Phase 4 zůstá jedinou paper-only ekonomickou cestou, `HALTED` failne uzavřeně a live broker není součástí plánu.
+## Phase 6 — market data, PIT & strategy expansion
 
-### Phase 6 research → paper audit boundary
+Implementováno:
 
-Autoritativní workflow je `COMPLETED/RESEARCH_ONLY` experiment → explicitní
-`Phase6EligibilityService.promote()` → `PAPER_CANDIDATE` → explicitní
-`DeploymentService.create()` → `PENDING_REVIEW` → explicitní `approve()` → `APPROVED` →
-`ValidatedCurrentDataAccessor` → `Phase6PaperExecutionService` → existující Phase 4
-`TradingCycleService` / `ProductionRiskEngine` / `PersistentPaperBroker` → reconciliation.
-Promotion ani deployment nevznikají automaticky a opakovaná promotion je idempotentní.
+- provider abstraction a production current-data provider allowlist;
+- canonical instruments a XNYS calendar přes `exchange-calendars`;
+- append-only market observation revisions;
+- causally-known corporate actions;
+- point-in-time universes a coverage;
+- immutable content-addressed dataset snapshots;
+- multi-asset target portfolios;
+- exactly-once ingestion/snapshot/experiment identities v PostgreSQL;
+- explicit research → paper promotion/deployment boundary;
+- validated current-data accessor oddělený od research replay;
+- PostgreSQL E2E research → approved paper execution coverage.
 
-`PAPER_CANDIDATE` není automatický deployment a `APPROVED` neobchází risk engine ani stav
-`HALTED`. Research snapshot slouží pouze jako immutable lineage; current execution feed pochází z
-nejnovější dokončené XNYS session a přijímá jen nejnovější revizi z úspěšné ingestion. Runtime
-rekonstruuje pouze přesnou allowlisted strategii, verzi, parametry, PIT universe a USD/XNYS/1d
-scope. Live trading path nadále neexistuje.
-## Phase 7 — Paper Performance Monitoring and Strategy Lifecycle
+Detailní invariants jsou v [`market-data.md`](market-data.md) a [`strategy-research.md`](strategy-research.md).
 
-**PHASE 7: COMPLETE · PHASE 7 AUDIT GATE: PASSED.** Schválený paper deployment nyní vyžaduje explicitní
-monitoring enrollment a stav `ACTIVE`. Vrstva ukládá neměnnou policy, OOS baseline lineage,
-denní XNYS valuation snapshots a verzované drift evaluations. Lifecycle je `ACTIVE`, `PAUSED`,
-`SUSPENDED`, `RETIRED`; automatický návrat, retuning, nový experiment, deployment a live cesta
-neexistují. Autoritativní detail je v `docs/codex/phase7-complete.md`.
+## Phase 7 — paper monitoring & lifecycle
 
-## Phase 8 — Operator Control Plane
+Implementováno:
 
-**COMPLETE — AUDIT PASSED WITH FIXES.** Stabilní operator read model/API a český
-Next.js dashboard pokrývají paper portfolio, immutable performance, monitoring, strategies,
-research, risk, XNYS data health, automation a stránkovaný audit. Safety actions používají pouze
-existující service boundaries; live execution path neexistuje. Autoritativní completion record je
-`docs/codex/phase8-complete.md`.
+- explicit monitoring enrollment schváleného deploymentu;
+- immutable OOS baseline lineage;
+- XNYS daily paper performance snapshots;
+- expected-vs-realized drift evaluation;
+- lifecycle `ACTIVE`, `PAUSED`, `SUSPENDED`, `RETIRED`;
+- fail-closed execution gate pro non-active monitoring;
+- corporate-action handling pro paper ledger;
+- žádný auto-retune, auto-experiment ani auto-deployment.
 
-## Phase 9 — Security & Production Hardening
+Autoritativní audit evidence: [`codex/phase7-complete.md`](codex/phase7-complete.md).
 
-Implementace zavádí threat model, bearer auth, backend-authoritative VIEWER/OPERATOR/ADMIN RBAC,
-signed expiring dashboard session, CSRF/Host/CORS boundary, rate limits, actor evidence, container
-hardening, interní production-like síť a checksum backup/restore. Stav zůstává verification
-pending, protože lokální prostředí nemá připnutý uv, Docker ani přístup k advisory/registry API;
-security a container CI gates proto musí dodat autoritativní důkaz před auditem. Phase 10 ani live
-trading nejsou implementovány.
+## Phase 8 — operator control plane
+
+Implementováno:
+
+- typed `OperatorReadModel` a `/operator/*` API;
+- Next.js dashboard pro portfolio, monitoring, strategies, research, risk, data, operations a audit;
+- HALT/RESUME a monitoring actions přes existující service boundaries;
+- stable pagination a UTC-normalized filters;
+- XNYS-aware data health;
+- frontend lockfile guard a production build verification.
+
+Autoritativní audit evidence: [`codex/phase8-complete.md`](codex/phase8-complete.md).
+
+## Phase 9 — security & production hardening
+
+Implementováno a post-merge ověřeno:
+
+- threat model;
+- bearer auth a backend-authoritative VIEWER/OPERATOR/ADMIN RBAC;
+- signed expiring dashboard session a server-only role credentials;
+- CSRF/Origin/Host/CORS boundary;
+- rate limiting pro auth/read/mutation/HALT/RESUME;
+- actor evidence v audit trailu;
+- PostgreSQL 17 password auth a oddělená migrator/runtime role;
+- runtime least privilege bez DDL;
+- distroless non-root backend/frontend images;
+- strict Trivy HIGH/CRITICAL blocking gates bez blanket `--ignore-unfixed`;
+- SBOM generation;
+- portable SHA-256 backup/restore a recovery proof;
+- production-like PAPER smoke test.
+
+PR #47 uzavřel poslední post-merge mezery v runtime image minimalizaci, strict container security a přenositelnosti DB backupu. Následný CI na výsledném `main` prošel všemi osmi GitHub Actions joby.
+
+Autoritativní completion evidence: [`codex/phase9-complete.md`](codex/phase9-complete.md).
+
+## Aktuální omezení / budoucí scope
+
+Tyto body nejsou nedokončenými požadavky Phase 1–9; jsou explicitně mimo jejich deklarovaný scope:
+
+- live trading, live broker, live credentials a live order path nejsou implementovány;
+- process-local rate limiter předpokládá jednu backend repliku;
+- HTTPS ingress je deployment responsibility;
+- off-site backup transport/scheduling není automatizován;
+- další fáze po Phase 9 zatím nemá autoritativní specifikaci.
+
+## Verifikační baseline po Phase 9
+
+Výsledný `main` po merge PR #47 je ověřen GitHub Actions CI s výsledkem PASS pro:
+
+- `quality`
+- `unit-research`
+- `api`
+- `frontend`
+- `security`
+- `integration-postgres`
+- `container-build`
+- `production-smoke`
+
+Container gate provedl backend i frontend build, non-root/minimal-runtime kontroly, strict Trivy HIGH/CRITICAL scans a CycloneDX SBOM. PR #47 měl navíc úspěšný GitGuardian check bez detekovaných secrets.
