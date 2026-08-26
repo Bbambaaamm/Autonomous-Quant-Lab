@@ -200,8 +200,16 @@ jobs:
         with: {persist-credentials: false}
       - run: docker build -f backend/Dockerfile -t quantlab-backend .
       - run: docker build -f frontend/Dockerfile -t quantlab-frontend .
-      - run: test "$(docker run --rm --entrypoint id quantlab-backend -u)" != 0
-      - run: test "$(docker run --rm --entrypoint id quantlab-frontend -u)" != 0
+      - run: test "$(docker run --rm --entrypoint /app/backend/.venv/bin/python quantlab-backend -c 'import os; print(os.getuid())')" != 0
+      - run: test "$(docker run --rm --entrypoint /nodejs/bin/node quantlab-frontend -e 'console.log(process.getuid())')" != 0
+      - name: Verify minimal production runtimes
+        run: |
+          docker run --rm --entrypoint /app/backend/.venv/bin/python quantlab-backend -c \
+            "import pathlib,sys; assert sys.version_info[:2] == (3,12); assert not any(pathlib.Path('/usr/local/bin').glob('pip*'))"
+          docker run --rm --entrypoint /nodejs/bin/node quantlab-frontend -e \
+            "const fs=require('node:fs'); if(process.versions.node.split('.')[0] !== '24' || ['/usr/local/bin/npm','/usr/local/bin/yarn','/bin/sh'].some(fs.existsSync)) process.exit(1)"
+          test "$(docker inspect --format '{{json .Config.Healthcheck.Test}}' quantlab-backend)" != null
+          test "$(docker inspect --format '{{json .Config.Healthcheck.Test}}' quantlab-frontend)" != null
       - run: docker save quantlab-backend --output "$RUNNER_TEMP/backend-image.tar"
       - run: docker save quantlab-frontend --output "$RUNNER_TEMP/frontend-image.tar"
       - run: >-

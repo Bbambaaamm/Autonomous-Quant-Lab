@@ -5,19 +5,19 @@ WORKDIR /app/backend
 COPY backend/pyproject.toml backend/uv.lock ./
 RUN uv sync --locked --no-dev --no-install-project
 COPY backend/src ./src
+RUN rm -rf /usr/local/lib/python3.12/site-packages/pip* \
+    /usr/local/lib/python3.12/ensurepip \
+    /usr/local/bin/pip*
 
-FROM python:3.12.14-slim-trixie
-RUN apt-get update \
-    && apt-get upgrade --yes \
-    && groupadd --system quantlab \
-    && useradd --system --gid quantlab --home /app quantlab \
-    && rm -rf /var/lib/apt/lists/*
+FROM gcr.io/distroless/python3-debian13:nonroot
 WORKDIR /app
-COPY --from=build --chown=quantlab:quantlab /app/backend /app/backend
-COPY --chown=quantlab:quantlab alembic.ini /app/alembic.ini
-COPY --chown=quantlab:quantlab alembic /app/alembic
+COPY --from=build /usr/local /usr/local
+COPY --from=build --chown=65532:65532 /app/backend /app/backend
+COPY --chown=65532:65532 alembic.ini /app/alembic.ini
+COPY --chown=65532:65532 alembic /app/alembic
 ENV PATH=/app/backend/.venv/bin:$PATH PYTHONPATH=/app/backend/src
-USER quantlab
+USER 65532:65532
 EXPOSE 8000
-HEALTHCHECK CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=2)"
-CMD ["uvicorn","quantlab.api:app","--host","0.0.0.0","--port","8000","--workers","1","--no-proxy-headers"]
+HEALTHCHECK CMD ["/app/backend/.venv/bin/python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=2)"]
+ENTRYPOINT []
+CMD ["/app/backend/.venv/bin/python","-m","uvicorn","quantlab.api:app","--host","0.0.0.0","--port","8000","--workers","1","--no-proxy-headers"]
