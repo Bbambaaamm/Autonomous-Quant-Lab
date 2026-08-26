@@ -1,17 +1,25 @@
 from __future__ import annotations
 
+import json
 import os
-from datetime import UTC, date, datetime
+from datetime import date, datetime
 from decimal import Decimal
 from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
 from phase6_audit_helpers import CALENDAR, MappingProvider, daily_bar
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 import quantlab.api as api_module
-from quantlab.persistence import DatasetSnapshotRecord, ExperimentRecord, StrategyDeploymentRecord
+from quantlab.persistence import (
+    DatasetSnapshotRecord,
+    ExperimentRecord,
+    InstrumentRecord,
+    StrategyDeploymentRecord,
+    UniverseMembershipRecord,
+)
 from quantlab.phase7 import PaperMonitoringRunRecord
 
 pytestmark = pytest.mark.skipif(
@@ -182,10 +190,25 @@ def test_supported_b1_control_plane_reaches_active_monitoring(monkeypatch) -> No
         assert snapshot_row is not None
         assert deployment_row.snapshot_id == snapshot.json()["snapshot_id"]
         assert snapshot_row.universe_id == universe_id
-        assert instrument_id in snapshot_row.manifest_json
-        assert all(
-            item["observation_id"] in snapshot_row.manifest_json for item in ingested_observations
+
+        membership_row = session.scalar(
+            select(UniverseMembershipRecord).where(
+                UniverseMembershipRecord.universe_id == universe_id,
+                UniverseMembershipRecord.instrument_id == instrument_id,
+            )
         )
+        assert membership_row is not None
+        assert session.get(InstrumentRecord, membership_row.instrument_id) is not None
+
+        manifest = json.loads(snapshot_row.manifest_json)
+        manifest_observations = {
+            (item["id"], item["revision"], item["hash"]) for item in manifest["observations"]
+        }
+        ingested_lineage = {
+            (item["observation_id"], item["revision"], item["source_hash"])
+            for item in ingested_observations
+        }
+        assert manifest_observations == ingested_lineage
 
 
 def test_control_plane_requires_admin_and_authentication() -> None:
