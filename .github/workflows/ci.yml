@@ -134,6 +134,8 @@ jobs:
           tests/test_phase7_corporate_actions_postgres.py
           tests/test_phase8_postgres.py
           tests/test_phase9_postgres.py
+      - name: B1 control-plane end-to-end acceptance
+        run: uv run pytest -q tests/test_b1_control_plane_postgres.py
 
   frontend:
     runs-on: ubuntu-latest
