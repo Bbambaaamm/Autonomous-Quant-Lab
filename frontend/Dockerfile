@@ -12,14 +12,18 @@ RUN npm run build \
       | sort -u > /tmp/runtime-libs \
     && test -s /tmp/runtime-libs \
     && while IFS= read -r library; do \
-      mkdir -p "/runtime-libs$(dirname "$library")"; \
-      cp -L "$library" "/runtime-libs$library"; \
+      case "$library" in \
+        /lib/*|/lib64/*) destination="/runtime-libs/usr$library" ;; \
+        *) destination="/runtime-libs$library" ;; \
+      esac; \
+      mkdir -p "$(dirname "$destination")"; \
+      cp -L "$library" "$destination"; \
     done < /tmp/runtime-libs
 
 FROM gcr.io/distroless/static-debian13:nonroot
 ENV NODE_ENV=production HOSTNAME=0.0.0.0 PORT=3000 VALIDATE_PRODUCTION_STARTUP=true
 WORKDIR /app
-COPY --from=build /runtime-libs/ /
+COPY --from=build /runtime-libs/usr/ /usr/
 COPY --from=build /usr/local/bin/node /usr/local/bin/node
 COPY --from=build --chown=65532:65532 /app/.next/standalone ./
 COPY --from=build --chown=65532:65532 /app/.next/static ./.next/static

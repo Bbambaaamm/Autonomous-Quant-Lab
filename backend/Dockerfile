@@ -17,13 +17,17 @@ RUN rm -rf /usr/local/lib/python3.12/site-packages/pip* \
       | sort -u > /tmp/runtime-libs \
     && test -s /tmp/runtime-libs \
     && while IFS= read -r library; do \
-      mkdir -p "/runtime-libs$(dirname "$library")"; \
-      cp -L "$library" "/runtime-libs$library"; \
+      case "$library" in \
+        /lib/*|/lib64/*) destination="/runtime-libs/usr$library" ;; \
+        *) destination="/runtime-libs$library" ;; \
+      esac; \
+      mkdir -p "$(dirname "$destination")"; \
+      cp -L "$library" "$destination"; \
     done < /tmp/runtime-libs
 
 FROM gcr.io/distroless/static-debian13:nonroot
 WORKDIR /app
-COPY --from=build /runtime-libs/ /
+COPY --from=build /runtime-libs/usr/ /usr/
 COPY --from=build /usr/local /usr/local
 COPY --from=build --chown=65532:65532 /app/backend /app/backend
 COPY --chown=65532:65532 alembic.ini /app/alembic.ini
