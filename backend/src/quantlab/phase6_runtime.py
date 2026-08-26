@@ -9,6 +9,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from decimal import Decimal
+from uuid import uuid4
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -42,6 +43,7 @@ from quantlab.persistence import (
     UniverseMembershipRecord,
 )
 from quantlab.phase4 import (
+    AuditEventRecord,
     PaperAccountRecord,
     PositionRecord,
     TradingCycleRecord,
@@ -442,6 +444,34 @@ class Phase6ExperimentReplayService:
         return self._runner.replay(request)
 
 
+def _control_plane_audit(
+    session: Session,
+    event_type: str,
+    entity_type: str,
+    entity_id: str,
+    actor: dict[str, str],
+    reason: str,
+    correlation_id: str | None,
+    evidence: dict[str, object],
+) -> None:
+    if not reason.strip():
+        raise ValueError("Audit reason nesmí být prázdný")
+    session.add(
+        AuditEventRecord(
+            id=str(uuid4()),
+            timestamp=datetime.now(UTC),
+            event_type=event_type,
+            entity_type=entity_type,
+            entity_id=entity_id,
+            trading_cycle_id=None,
+            correlation_id=(correlation_id or str(uuid4()))[:64],
+            payload_json=json.dumps(
+                {"actor": actor, "reason": reason, **evidence}, sort_keys=True, default=str
+            ),
+        )
+    )
+
+
 def multi_asset_metrics(result: MultiAssetResult, initial_cash: Decimal) -> MultiAssetMetrics:
     values = [value for _, value in result.equity]
     if not values:
@@ -660,7 +690,14 @@ class Phase6EligibilityService:
     def __init__(self, session_factory: Callable[[], Session]) -> None:
         self._sessions = session_factory
 
-    def promote(self, experiment_id: str) -> ExperimentRecord:
+    def promote(
+        self,
+        experiment_id: str,
+        *,
+        actor: dict[str, str] | None = None,
+        reason: str | None = None,
+        correlation_id: str | None = None,
+    ) -> ExperimentRecord:
         with self._sessions() as session, session.begin():
             row = session.get(ExperimentRecord, experiment_id, with_for_update=True)
             if row is None:
@@ -668,7 +705,19 @@ class Phase6EligibilityService:
             DeploymentService.validate_experiment(session, row)
             if row.decision not in {"RESEARCH_ONLY", "PAPER_CANDIDATE"}:
                 raise DatasetInvalid("Experiment je v nekonzistentním decision state")
+            changed = row.decision == "RESEARCH_ONLY"
             row.decision = "PAPER_CANDIDATE"
+            if changed and actor is not None and reason is not None:
+                _control_plane_audit(
+                    session,
+                    "PHASE6_EXPERIMENT_PROMOTED",
+                    "experiment",
+                    row.id,
+                    actor,
+                    reason,
+                    correlation_id,
+                    {"resulting_decision": row.decision},
+                )
             session.flush()
             session.expunge(row)
             return row
@@ -686,6 +735,9 @@ class DeploymentService:
         currency: str = "USD",
         timeframe: str = "1d",
         created_at: datetime | None = None,
+        actor: dict[str, str] | None = None,
+        reason: str | None = None,
+        correlation_id: str | None = None,
     ) -> StrategyDeploymentRecord:
         created_at = require_utc(created_at or datetime.now(UTC))
         with self._sessions() as session, session.begin():
@@ -724,14 +776,35 @@ class DeploymentService:
                 timeframe=timeframe,
             )
             session.add(row)
+            if actor is not None and reason is not None:
+                _control_plane_audit(
+                    session,
+                    "PHASE6_DEPLOYMENT_CREATED",
+                    "deployment",
+                    row.deployment_id,
+                    actor,
+                    reason,
+                    correlation_id,
+                    {"experiment_id": experiment.id, "status": row.status},
+                )
             session.flush()
             session.expunge(row)
             return row
 
-    def approve(self, deployment_id: str, approved_at: datetime) -> None:
+    def approve(
+        self,
+        deployment_id: str,
+        approved_at: datetime,
+        *,
+        actor: dict[str, str] | None = None,
+        reason: str | None = None,
+        correlation_id: str | None = None,
+    ) -> None:
         approved_at = require_utc(approved_at)
         with self._sessions() as session, session.begin():
             row = session.get(StrategyDeploymentRecord, deployment_id, with_for_update=True)
+            if row is not None and row.status == "APPROVED":
+                return
             if row is None or row.status != "PENDING_REVIEW":
                 raise ValueError("Deployment neexistuje nebo není čekající na ruční schválení")
             experiment = session.get(ExperimentRecord, row.experiment_id)
@@ -759,6 +832,17 @@ class DeploymentService:
                 raise DatasetInvalid("Deployment parameters neodpovídají experiment evidence")
             row.status = "APPROVED"
             row.approved_at = approved_at
+            if actor is not None and reason is not None:
+                _control_plane_audit(
+                    session,
+                    "PHASE6_DEPLOYMENT_APPROVED",
+                    "deployment",
+                    row.deployment_id,
+                    actor,
+                    reason,
+                    correlation_id,
+                    {"experiment_id": row.experiment_id, "status": row.status},
+                )
 
     @classmethod
     def validate_experiment(

@@ -56,6 +56,13 @@ aplikují dostupné security aktualizace. Nejde o blanket potlačení reportu.
 
 | Method | Path | Permission |
 |---|---|---|
+| POST | `/operator/instruments` | ADMIN |
+| POST | `/operator/universes` a `/{id}/memberships` | ADMIN |
+| POST | `/operator/market-data/ingestions` | ADMIN |
+| POST | `/operator/datasets` | ADMIN |
+| POST | `/operator/research/experiments` a `/{id}/promote` | ADMIN |
+| POST | `/operator/deployments` a `/{id}/approve` | ADMIN |
+| POST | `/operator/monitoring/policies` a `/enrollments` | ADMIN |
 | POST | `/operator/risk/halt` | OPERATOR/ADMIN |
 | POST | `/operator/risk/resume` | ADMIN |
 | POST | `/paper/monitoring/policies` | ADMIN |
@@ -71,8 +78,7 @@ aplikují dostupné security aktualizace. Nejde o blanket potlačení reportu.
 | POST | `/automation/runs/{run_id}/retry` | ADMIN |
 | POST | `/risk/halt` | OPERATOR/ADMIN |
 | POST | `/risk/resume` | ADMIN |
-| POST | `/trading/cycles/run-paper` | ADMIN |
+| POST | `/demo/trading/cycles/run-paper` | ADMIN |
 | POST | `/reconciliation/run` | ADMIN |
 | POST | `/api/backtests/demo` | ADMIN |
-| POST | `/research/experiments` | ADMIN |
-| POST | `/api/research/experiments` | ADMIN |
+| POST | `/demo/research/experiments` | ADMIN |

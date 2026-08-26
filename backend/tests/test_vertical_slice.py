@@ -77,7 +77,7 @@ def test_api_and_dashboard() -> None:
 
 def test_research_api_persists_experiment_and_exposes_report() -> None:
     client = TestClient(app)
-    created = client.post("/research/experiments")
+    created = client.post("/demo/research/experiments")
     assert created.status_code == 200
     experiment_id = created.json()["id"]
     fetched = client.get(f"/research/experiments/{experiment_id}")

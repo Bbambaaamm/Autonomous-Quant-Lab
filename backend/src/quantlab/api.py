@@ -1,3 +1,5 @@
+import hashlib
+import json
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -24,9 +26,11 @@ from quantlab.automation import (
 )
 from quantlab.backtest import serialize_result
 from quantlab.config import get_settings
+from quantlab.control_plane import ControlPlaneRegistryService
 from quantlab.demo import load_fixture, run_demo
 from quantlab.domain import AuditEventType
-from quantlab.market_data import StooqProvider, XNYSCalendar
+from quantlab.market_data import AssetType, DatasetInvalid, Instrument, StooqProvider, XNYSCalendar
+from quantlab.market_data_service import DatasetSnapshotService, PersistentMarketDataService
 from quantlab.multi_asset import STRATEGY_REGISTRY
 from quantlab.operator_read_model import OperatorReadModel
 from quantlab.persistence import (
@@ -48,6 +52,12 @@ from quantlab.phase4 import (
     TradingCycleRecord,
     TradingCycleService,
 )
+from quantlab.phase6_runtime import (
+    DeploymentService,
+    Phase6EligibilityService,
+    Phase6ExperimentRequest,
+    Phase6ExperimentRunner,
+)
 from quantlab.phase7 import (
     DEFAULT_POLICY,
     MonitoringState,
@@ -58,6 +68,7 @@ from quantlab.phase7 import (
 )
 from quantlab.research_service import ResearchService
 from quantlab.security import current_principal, security_boundary
+from quantlab.universe import UniverseDefinition, UniverseKind, UniverseMembership
 
 settings = get_settings()
 app = FastAPI(
@@ -91,6 +102,18 @@ monitoring_service = PaperMonitoringService(lambda: Session(paper_repository.eng
 operator_read_model = OperatorReadModel(lambda: Session(paper_repository.engine), settings)
 
 
+def session_factory() -> Session:
+    return Session(paper_repository.engine)
+
+
+control_plane_registry = ControlPlaneRegistryService(session_factory)
+market_data_service = PersistentMarketDataService(session_factory)
+dataset_snapshot_service = DatasetSnapshotService(session_factory)
+phase6_runner = Phase6ExperimentRunner(session_factory)
+eligibility_service = Phase6EligibilityService(session_factory)
+deployment_service = DeploymentService(session_factory)
+
+
 class JobCreate(BaseModel):
     job_type: JobType
     account_id: str = "paper-main"
@@ -116,8 +139,87 @@ class MonitoringPolicyCreate(BaseModel):
     config: dict[str, object] = DEFAULT_POLICY.copy()
 
 
+class OperatorMonitoringPolicyCreate(MonitoringPolicyCreate):
+    reason: str = Field(min_length=3, max_length=1000)
+
+
 class MonitoringTransition(BaseModel):
     reason: str = Field(min_length=1, max_length=1000)
+
+
+class ReasonedMutation(BaseModel):
+    reason: str = Field(min_length=3, max_length=1000)
+
+
+class InstrumentCreate(BaseModel):
+    instrument_id: str = Field(min_length=1, max_length=64)
+    symbol: str = Field(min_length=1, max_length=32)
+    exchange: str = "XNYS"
+    calendar: str = "XNYS"
+    currency: str = "USD"
+    asset_type: AssetType = AssetType.EQUITY
+    active_from: date
+    active_to: date | None = None
+    reason: str = Field(min_length=3, max_length=1000)
+
+
+class UniverseCreate(BaseModel):
+    universe_id: str = Field(min_length=1, max_length=64)
+    name: str = Field(min_length=1, max_length=100)
+    kind: UniverseKind = UniverseKind.POINT_IN_TIME_MEMBERSHIP
+    reason: str = Field(min_length=3, max_length=1000)
+
+
+class MembershipCreate(BaseModel):
+    instrument_id: str = Field(min_length=1, max_length=64)
+    valid_from: datetime
+    valid_to: datetime | None = None
+    known_at: datetime
+    reason: str = Field(min_length=3, max_length=1000)
+
+
+class IngestionCreate(BaseModel):
+    provider: str = "stooq"
+    instrument_id: str = Field(min_length=1, max_length=64)
+    start: date
+    end: date
+    reason: str = Field(min_length=3, max_length=1000)
+
+
+class SnapshotCreate(BaseModel):
+    provider: str = Field(min_length=1, max_length=40)
+    universe_id: str = Field(min_length=1, max_length=64)
+    start: date
+    end: date
+    as_of: datetime
+    minimum_coverage: Decimal = Field(Decimal("0.8"), ge=0, le=1)
+    reason: str = Field(min_length=3, max_length=1000)
+
+
+class ExperimentCreate(BaseModel):
+    snapshot_id: str = Field(min_length=1, max_length=64)
+    strategy_name: str = Field(min_length=1, max_length=100)
+    strategy_version: str = Field(min_length=1, max_length=50)
+    parameter_configs: list[dict[str, object]] = Field(min_length=1, max_length=50)
+    train_fraction: Decimal = Decimal("0.6")
+    validation_fraction: Decimal = Decimal("0.2")
+    initial_cash: Decimal = Field(Decimal("100000"), gt=0)
+    commission_bps: Decimal = Field(Decimal("1"), ge=0)
+    seed: int = 42
+    code_sha: str = Field(min_length=40, max_length=40)
+    reason: str = Field(min_length=3, max_length=1000)
+
+
+class DeploymentCreate(BaseModel):
+    experiment_id: str = Field(min_length=1, max_length=64)
+    paper_account_id: str = "paper-main"
+    reason: str = Field(min_length=3, max_length=1000)
+
+
+class MonitoringEnrollment(BaseModel):
+    deployment_id: str = Field(min_length=1, max_length=64)
+    policy_id: str = Field(min_length=1, max_length=64)
+    reason: str = Field(min_length=3, max_length=1000)
 
 
 class OperatorAction(BaseModel):
@@ -316,12 +418,317 @@ def _row(row: object) -> dict[str, object]:
     return {key: value for key, value in vars(row).items() if not key.startswith("_")}
 
 
+def _actor(request: Request) -> dict[str, str]:
+    principal = current_principal(request)
+    return {
+        "actor_id": principal.actor_id,
+        "actor_role": principal.role.name,
+        "authentication": "bearer",
+    }
+
+
+def _correlation(request: Request) -> str:
+    return request.headers.get("x-correlation-id", str(uuid4()))[:64]
+
+
+def _audit_control_mutation(
+    event_type: str,
+    entity_type: str,
+    entity_id: str,
+    actor: dict[str, str],
+    reason: str,
+    correlation_id: str,
+) -> None:
+    identity = hashlib.sha256(
+        json.dumps(
+            [event_type, entity_type, entity_id, actor["actor_id"], reason],
+            sort_keys=True,
+        ).encode()
+    ).hexdigest()
+    with session_factory() as session, session.begin():
+        if session.get(AuditEventRecord, identity) is None:
+            session.add(
+                AuditEventRecord(
+                    id=identity,
+                    timestamp=datetime.now(UTC),
+                    event_type=event_type,
+                    entity_type=entity_type,
+                    entity_id=entity_id,
+                    trading_cycle_id=None,
+                    correlation_id=correlation_id,
+                    payload_json=json.dumps({"actor": actor, "reason": reason}, sort_keys=True),
+                )
+            )
+
+
+@app.post("/operator/instruments")
+def create_instrument(body: InstrumentCreate, request: Request) -> dict[str, object]:
+    try:
+        row = control_plane_registry.register_instrument(
+            Instrument(
+                body.instrument_id,
+                body.symbol.strip().upper(),
+                body.exchange,
+                body.calendar,
+                body.currency,
+                body.asset_type,
+                body.active_from,
+                body.active_to,
+                datetime.now(UTC),
+            )
+        )
+        _audit_control_mutation(
+            "CONTROL_INSTRUMENT_REGISTERED",
+            "instrument",
+            row.instrument_id,
+            _actor(request),
+            body.reason,
+            _correlation(request),
+        )
+        return _row(row)
+    except (ValueError, DatasetInvalid) as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@app.post("/operator/universes")
+def create_universe(body: UniverseCreate, request: Request) -> dict[str, object]:
+    try:
+        row = control_plane_registry.create_universe(
+            UniverseDefinition(body.universe_id, body.name, body.kind, datetime.now(UTC))
+        )
+        _audit_control_mutation(
+            "CONTROL_UNIVERSE_CREATED",
+            "universe",
+            row.universe_id,
+            _actor(request),
+            body.reason,
+            _correlation(request),
+        )
+        return _row(row)
+    except (ValueError, DatasetInvalid) as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@app.post("/operator/universes/{universe_id}/memberships")
+def add_universe_membership(
+    universe_id: str, body: MembershipCreate, request: Request
+) -> dict[str, object]:
+    try:
+        row = control_plane_registry.add_membership(
+            UniverseMembership(
+                universe_id, body.instrument_id, body.valid_from, body.valid_to, body.known_at
+            )
+        )
+        evidence_id = f"{universe_id}:{body.instrument_id}:{body.valid_from.isoformat()}"
+        _audit_control_mutation(
+            "CONTROL_MEMBERSHIP_ADDED",
+            "universe_membership",
+            evidence_id[:64],
+            _actor(request),
+            body.reason,
+            _correlation(request),
+        )
+        return _row(row)
+    except (ValueError, DatasetInvalid) as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@app.post("/operator/market-data/ingestions")
+def ingest_market_data(body: IngestionCreate, request: Request) -> dict[str, object]:
+    if body.provider != "stooq":
+        raise HTTPException(422, "Provider není v production allowlistu")
+    with session_factory() as session:
+        persisted = session.get(InstrumentRecord, body.instrument_id)
+        if persisted is None:
+            raise HTTPException(404, "Instrument neexistuje")
+        instrument = Instrument(
+            persisted.instrument_id,
+            persisted.symbol,
+            persisted.exchange,
+            persisted.calendar,
+            persisted.currency,
+            AssetType(persisted.asset_type),
+            persisted.active_from.date(),
+            persisted.active_to.date() if persisted.active_to else None,
+            persisted.created_at,
+        )
+    result = market_data_service.ingest(
+        StooqProvider(), instrument, body.start, body.end, datetime.now(UTC)
+    )
+    _audit_control_mutation(
+        "CONTROL_MARKET_DATA_INGESTED",
+        "market_data_ingestion",
+        result.ingestion_id,
+        _actor(request),
+        body.reason,
+        _correlation(request),
+    )
+    payload = vars(result)
+    if result.status != "SUCCEEDED":
+        raise HTTPException(502, payload)
+    return payload
+
+
+@app.post("/operator/datasets")
+def build_dataset(body: SnapshotCreate, request: Request) -> dict[str, object]:
+    try:
+        snapshot = dataset_snapshot_service.build(
+            as_of=body.as_of,
+            provider=body.provider,
+            universe_id=body.universe_id,
+            start=body.start,
+            end=body.end,
+            minimum_coverage=body.minimum_coverage,
+        )
+        _audit_control_mutation(
+            "CONTROL_DATASET_BUILT",
+            "dataset_snapshot",
+            snapshot.snapshot_id,
+            _actor(request),
+            body.reason,
+            _correlation(request),
+        )
+        if snapshot.status != "VALID":
+            raise HTTPException(
+                409,
+                {
+                    "snapshot_id": snapshot.snapshot_id,
+                    "status": snapshot.status,
+                    "coverage": str(snapshot.coverage),
+                },
+            )
+        return vars(snapshot)
+    except DatasetInvalid as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@app.post("/operator/research/experiments")
+def run_phase6_experiment(body: ExperimentCreate, request: Request) -> dict[str, object]:
+    try:
+        control_plane_registry.ensure_strategy(
+            body.strategy_name, body.strategy_version, datetime.now(UTC)
+        )
+        row = phase6_runner.run(
+            Phase6ExperimentRequest(
+                body.snapshot_id,
+                body.strategy_name,
+                body.strategy_version,
+                tuple(body.parameter_configs),
+                body.train_fraction,
+                body.validation_fraction,
+                body.initial_cash,
+                body.commission_bps,
+                body.seed,
+                body.code_sha,
+            )
+        )
+        _audit_control_mutation(
+            "CONTROL_PHASE6_EXPERIMENT_COMPLETED",
+            "experiment",
+            row.id,
+            _actor(request),
+            body.reason,
+            _correlation(request),
+        )
+        return _row(row)
+    except (ValueError, DatasetInvalid) as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@app.post("/operator/research/experiments/{experiment_id}/promote")
+def promote_phase6_experiment(
+    experiment_id: str, body: ReasonedMutation, request: Request
+) -> dict[str, object]:
+    try:
+        return _row(
+            eligibility_service.promote(
+                experiment_id,
+                actor=_actor(request),
+                reason=body.reason,
+                correlation_id=_correlation(request),
+            )
+        )
+    except (ValueError, DatasetInvalid) as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@app.post("/operator/deployments")
+def create_deployment(body: DeploymentCreate, request: Request) -> dict[str, object]:
+    try:
+        return _row(
+            deployment_service.create(
+                body.experiment_id,
+                body.paper_account_id,
+                actor=_actor(request),
+                reason=body.reason,
+                correlation_id=_correlation(request),
+            )
+        )
+    except (ValueError, DatasetInvalid) as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@app.post("/operator/deployments/{deployment_id}/approve")
+def approve_deployment(
+    deployment_id: str, body: ReasonedMutation, request: Request
+) -> dict[str, str]:
+    try:
+        deployment_service.approve(
+            deployment_id,
+            datetime.now(UTC),
+            actor=_actor(request),
+            reason=body.reason,
+            correlation_id=_correlation(request),
+        )
+        return {"deployment_id": deployment_id, "status": "APPROVED"}
+    except (ValueError, DatasetInvalid) as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@app.post("/operator/monitoring/enrollments")
+def operator_monitoring_enrollment(
+    body: MonitoringEnrollment, request: Request
+) -> dict[str, object]:
+    try:
+        row = monitoring_service.enroll(body.deployment_id, body.policy_id, datetime.now(UTC))
+        _audit_control_mutation(
+            "CONTROL_MONITORING_ENROLLED",
+            "monitoring",
+            row.monitoring_id,
+            _actor(request),
+            body.reason,
+            _correlation(request),
+        )
+        return _row(row)
+    except (ValueError, RuntimeError, DatasetInvalid) as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
 @app.post("/paper/monitoring/policies")
 def create_monitoring_policy(request: MonitoringPolicyCreate) -> dict[str, object]:
     try:
         return _row(
             monitoring_service.create_policy(request.name, request.config, datetime.now(UTC))
         )
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@app.post("/operator/monitoring/policies")
+def create_operator_monitoring_policy(
+    body: OperatorMonitoringPolicyCreate, request: Request
+) -> dict[str, object]:
+    try:
+        row = monitoring_service.create_policy(body.name, body.config, datetime.now(UTC))
+        _audit_control_mutation(
+            "CONTROL_MONITORING_POLICY_CREATED",
+            "monitoring_policy",
+            row.policy_id,
+            _actor(request),
+            body.reason,
+            _correlation(request),
+        )
+        return _row(row)
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
 
@@ -855,7 +1262,7 @@ def trading_cycle(cycle_id: str) -> dict[str, object]:
     return _row(row)
 
 
-@app.post("/trading/cycles/run-paper")
+@app.post("/demo/trading/cycles/run-paper")
 def run_paper_cycle() -> dict[str, str]:
     bars = load_fixture(fixture)
     cycle_id = trading_service.run(
@@ -900,8 +1307,7 @@ def backtests() -> list[dict[str, object]]:
     return repository.list()
 
 
-@app.post("/research/experiments")
-@app.post("/api/research/experiments")
+@app.post("/demo/research/experiments")
 def create_research_experiment() -> dict[str, object]:
     return research_service.create_demo_experiment(fixture)
 

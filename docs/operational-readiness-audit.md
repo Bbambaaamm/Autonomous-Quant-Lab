@@ -135,18 +135,16 @@ Rozlišení v tabulkách:
 
 ## 5. BLOCKER findings
 
-### B1 — Phase 6 workflow není provozně dosažitelný
+### B1 — RESOLVED — podporovaný Phase 6 control plane
 
-**Dopad:** Z čistého vstupu nelze dodaným produktem vytvořit instrument/universe, ingestovat data,
-sestavit snapshot, spustit Phase 6 experiment, provést promotion a vytvořit/schválit deployment.
-API pro tyto entity nabízí převážně GET. POST `/research/experiments` volá
-`ResearchService.create_demo_experiment()` nad `tests/fixtures/sample_market_data.csv`; POST
-`/trading/cycles/run-paper` rovněž používá fixture a pevné SPY targety. Správné Phase 6 služby jsou
-volány pouze testy nebo by je musel operátor ručně importovat ve vlastním Python skriptu.
+Původní příčinou byla absence mutation orchestrace nad existujícími Phase 6 službami. Nový
+autentizovaný ADMIN control plane pokrývá canonical instrument, PIT universe a membership, skutečný
+provider ingest, validovaný snapshot, allowlisted multi-parameter experiment, explicitní promotion,
+deployment create/approve a monitoring policy/enrollment. Actor a reason se ukládají do audit
+evidence a domain identity zajišťují bezpečné retry. Podrobnosti a PostgreSQL důkaz jsou v
+[`operational-readiness-remediation-b1.md`](operational-readiness-remediation-b1.md).
 
-**Proč je to blocker:** autonomní laboratoř nelze bootstrapovat ani auditovatelně ovládat bez
-nezdokumentovaného programování nebo přímé manipulace aplikačními službami. DB insert není přijatelný
-workflow a obchází validační/actor hranice.
+Tato změna **nemění celkový verdikt NOT READY**. Zejména B2, H1, H2, H3 a M1 zůstávají otevřené.
 
 ### B2 — Worker neprovádí schválený deployment ani strategii
 
