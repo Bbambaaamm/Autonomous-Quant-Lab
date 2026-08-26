@@ -9,7 +9,7 @@ import pytest
 from phase6_audit_helpers import MappingProvider, daily_bar
 from sqlalchemy import func, select
 from sqlalchemy.orm import sessionmaker
-from test_phase6_e2e_postgres import CALENDAR, _research_to_paper
+from test_phase6_e2e_postgres import CALENDAR, _research_to_paper, _seed_opening_observation
 
 from quantlab.market_data import AssetType, DatasetInvalid, Instrument
 from quantlab.market_data_service import PersistentMarketDataService
@@ -121,7 +121,7 @@ def _full_multi_session_flow(
     for price in prices:
         session_day = CALENDAR.next_session(session_day)
         observed_at = CALENDAR.session_open(session_day) + timedelta(minutes=1)
-        execution_as_of = observed_at + timedelta(minutes=1)
+        execution_as_of = CALENDAR.session_open(session_day)
         capture_as_of = CALENDAR.session_close(session_day) + timedelta(minutes=1)
         provider = MappingProvider(
             f"p7-{instrument.symbol}",
@@ -134,6 +134,7 @@ def _full_multi_session_flow(
             .status
             == "SUCCEEDED"
         )
+        _seed_opening_observation(factory, instrument.instrument_id, session_day, price)
         execution.run(deployment.deployment_id, execution_as_of)
         item = performance.capture(run.monitoring_id, capture_as_of)
         snapshots.append(item)

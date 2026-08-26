@@ -571,6 +571,9 @@ class ValidatedCurrentDataAccessor:
                         MarketObservationRecord.instrument_id.in_(instrument_ids),
                         MarketObservationRecord.session_date
                         == datetime.combine(session_date, datetime.min.time(), UTC),
+                        MarketObservationRecord.timeframe == "open",
+                        MarketObservationRecord.timestamp
+                        == self.calendar.session_open(session_date),
                         MarketObservationRecord.observed_at <= knowledge_cutoff,
                     )
                     .order_by(
@@ -886,8 +889,12 @@ class Phase6PaperExecutionService:
         timing = self.execution_timing(self.current_data.calendar, as_of)
         executable_session = timing.execution_session
         execution_time = timing.execution_time
-        if as_of < execution_time:
-            raise DatasetInvalid("Signal je připraven, ale následující executable session nezačala")
+        if as_of != execution_time:
+            state = "ještě nezačala" if as_of < execution_time else "už začala"
+            raise DatasetInvalid(
+                f"Signal je připraven, ale následující executable session {state}; "
+                "bez persistentního intentu nelze zpětně fillovat její open"
+            )
         decision_time = timing.decision_time
         with self._sessions() as session:
             # Phase 7 je samostatná observation/control brána. Import je lokální, aby

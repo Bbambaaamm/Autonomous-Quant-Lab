@@ -212,21 +212,23 @@ def test_phase6_execution_timing_uses_next_xnys_session(
     assert timing.execution_time > timing.decision_time
 
 
-@pytest.mark.parametrize("case", ["after_close", "before_next_open"])
-def test_phase6_run_before_next_open_fails_before_any_economic_service(case: str) -> None:
+@pytest.mark.parametrize("case", ["after_close", "before_next_open", "after_next_open"])
+def test_phase6_run_outside_next_open_fails_before_any_economic_service(case: str) -> None:
     calendar = XNYSCalendar()
     signal_close = calendar.session_close(date(2026, 1, 9))
-    now = (
-        signal_close + timedelta(minutes=1)
-        if case == "after_close"
-        else calendar.session_open(date(2026, 1, 12)) - timedelta(microseconds=1)
-    )
+    execution_open = calendar.session_open(date(2026, 1, 12))
+    if case == "after_close":
+        now = signal_close + timedelta(minutes=1)
+    elif case == "before_next_open":
+        now = execution_open - timedelta(microseconds=1)
+    else:
+        now = execution_open + timedelta(microseconds=1)
     sessions = Mock(side_effect=AssertionError("Před open nesmí služba přistoupit k persistence"))
     trading_cycle = Mock()
     current_data = Mock(calendar=calendar)
     service = Phase6PaperExecutionService(sessions, current_data, trading_cycle)
 
-    with pytest.raises(DatasetInvalid, match="executable session nezačala"):
+    with pytest.raises(DatasetInvalid, match="nelze zpětně fillovat"):
         service.run("deployment", now)
 
     trading_cycle.run.assert_not_called()

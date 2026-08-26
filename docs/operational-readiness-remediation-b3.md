@@ -21,9 +21,14 @@ Pro každý run se explicitně určí:
 - `execution_time`: skutečný XNYS open execution session.
 
 Kalendářová navigace používá `exchange-calendars`, a proto respektuje víkendy, svátky, DST i
-early close. Pokud execution session ještě nezačala, služba skončí před přístupem k persistence a
-nevytvoří cycle, order, fill ani jiný ekonomický side effect. Pokud přesný raw open execution
-session není v úspěšné ingestion a nebyl pozorován do času runu, služba rovněž failne closed.
+early close. Bez persistentního pending intentu smí služba běžet pouze přesně v execution open;
+pozdější run nesmí zpětně vytvořit lifecycle s ranním timestampem. Před open i po něm služba skončí
+před přístupem k persistence a nevytvoří cycle, order, fill ani jiný ekonomický side effect.
+
+Executable data musí být samostatná observation s timeframe `open`, timestampem skutečného open a
+úspěšnou ingestion. Close-stamped daily OHLCV bar není opening feed: obsahuje budoucí high, low,
+close a full-day volume, a proto jej accessor pro execution odmítne i tehdy, pokud má chybně časné
+`observed_at`.
 
 Strategy historie končí signal session T a adjusted close vstupuje pouze do výpočtu targetů. Raw
 observation execution session T+1 je načtena odděleně a její open vstupuje pouze do stávající cesty

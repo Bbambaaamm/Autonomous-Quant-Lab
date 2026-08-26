@@ -26,6 +26,7 @@ from quantlab.persistence import (
     CorporateActionRecord,
     DatasetSnapshotRecord,
     ExperimentRecord,
+    MarketDataIngestionRecord,
     MarketObservationRecord,
     StrategyRecord,
     UniverseDefinitionRecord,
@@ -395,6 +396,49 @@ def test_postgres_corporate_actions_are_persistent_immutable_and_causal(factory)
     assert portfolio.cash == Decimal("110")
 
 
+def _seed_opening_observation(
+    factory, instrument_id: str, session_day: date, price: Decimal
+) -> None:
+    suffix = uuid4().hex
+    opened_at = CALENDAR.session_open(session_day)
+    ingestion_id = f"open-{suffix}"
+    with factory() as session, session.begin():
+        session.add(
+            MarketDataIngestionRecord(
+                id=ingestion_id,
+                provider="opening-fixture",
+                scope_hash=suffix.ljust(64, "0"),
+                started_at=opened_at,
+                finished_at=opened_at,
+                status="SUCCEEDED",
+                requested_start=opened_at,
+                requested_end=opened_at,
+                instrument_count=1,
+                row_count=1,
+            )
+        )
+        session.add(
+            MarketObservationRecord(
+                observation_id=f"opening-{suffix}",
+                instrument_id=instrument_id,
+                ingestion_id=ingestion_id,
+                provider="opening-fixture",
+                timeframe="open",
+                session_date=datetime.combine(session_day, datetime.min.time(), UTC),
+                timestamp=opened_at,
+                open=str(price),
+                high=str(price),
+                low=str(price),
+                close=str(price),
+                volume="10000",
+                observed_at=opened_at,
+                source_id=suffix,
+                source_hash=suffix.ljust(64, "0"),
+                revision=1,
+            )
+        )
+
+
 def _research_to_paper(factory, engine, *, halted: bool):
     suffix = uuid4().hex
     instrument, provider, sessions, snapshot, request = seed_phase6_snapshot(factory, suffix=suffix)
@@ -440,6 +484,7 @@ def _research_to_paper(factory, engine, *, halted: bool):
         .status
         == "SUCCEEDED"
     )
+    _seed_opening_observation(factory, instrument.instrument_id, next_session, Decimal("120"))
     risk = ProductionRiskConfig(
         max_position_pct=Decimal("1"),
         max_single_order_pct=Decimal("1"),
@@ -448,9 +493,7 @@ def _research_to_paper(factory, engine, *, halted: bool):
     )
     cycle = TradingCycleService(repository, risk)
     service = Phase6PaperExecutionService(factory, ValidatedCurrentDataAccessor(factory), cycle)
-    cycle_id = service.run(
-        deployment.deployment_id, CALENDAR.session_open(next_session) + timedelta(minutes=2)
-    )
+    cycle_id = service.run(deployment.deployment_id, CALENDAR.session_open(next_session))
     return account_id, deployment, experiment, snapshot, cycle_id, instrument, halted
 
 
