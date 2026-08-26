@@ -84,7 +84,6 @@ def test_supported_b1_control_plane_reaches_active_monitoring(monkeypatch) -> No
         client.post(f"/operator/universes/{universe_id}/memberships", json=invalid).status_code
         == 409
     )
-    observed_at = datetime.now(UTC)
     ingestion = client.post(
         "/operator/market-data/ingestions",
         json={
@@ -95,6 +94,11 @@ def test_supported_b1_control_plane_reaches_active_monitoring(monkeypatch) -> No
         },
     )
     assert ingestion.status_code == 200, ingestion.text
+    ingested_observations = ingestion.json()["observations"]
+    assert ingested_observations
+    observed_at = max(
+        datetime.fromisoformat(item["observed_at"]) for item in ingested_observations
+    )
     snapshot = client.post(
         "/operator/datasets",
         json={
@@ -183,7 +187,7 @@ def test_supported_b1_control_plane_reaches_active_monitoring(monkeypatch) -> No
         assert instrument_id in snapshot_row.manifest_json
         assert all(
             item["observation_id"] in snapshot_row.manifest_json
-            for item in ingestion.json()["observations"]
+            for item in ingested_observations
         )
 
 
