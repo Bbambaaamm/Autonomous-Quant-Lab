@@ -10,6 +10,10 @@ Production-like PAPER provoz vyžaduje explicitní migration step, strong secret
 
 Diagnostika používá risk events/decisions, orders, audit a reconciliation status. Po crashi spusťte stejný logical cycle: DB identity obnoví existující stav namísto nového obchodu. Testy: `uv run pytest -q`.
 
+Backup skript ukládá vedle dumpu SHA-256 manifest s relativním názvem souboru. Dump a jeho
+`.sha256` proto lze společně přesunout do off-site úložiště nebo recovery adresáře; restore vždy
+přepočítá a porovná obsah skutečně předaného dumpu před prvním destruktivním databázovým krokem.
+
 PostgreSQL Phase 5 acceptance suite je v `tests/test_phase5_postgres.py` a používá oddělené
 enginy, sessions a souběžná vlákna. Ověřuje race schedulerů, race worker claimů včetně lease a
 fencing tokenu, restart po ekonomickém commitu Phase 4 a account lock mezi paper cycle a

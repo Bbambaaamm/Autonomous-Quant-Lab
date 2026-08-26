@@ -5,30 +5,32 @@ RUN npm install --global npm@11.17.0 && npm ci --ignore-scripts
 COPY frontend/ ./
 ARG PUBLIC_BASE_URL=https://localhost
 ENV PUBLIC_BASE_URL=$PUBLIC_BASE_URL
-RUN npm run build
+RUN npm run build \
+    && mkdir /runtime-libs \
+    && find /usr/local/bin/node /app/.next/standalone -type f -exec ldd {} \; 2>/dev/null \
+      | awk '{ for (i = 1; i <= NF; i++) if ($i ~ "^/") print $i }' \
+      | sort -u > /tmp/runtime-libs \
+    && test -s /tmp/runtime-libs \
+    && while IFS= read -r library; do \
+      case "$library" in \
+        /lib/*|/lib64/*) destination="/runtime-libs/usr$library" ;; \
+        *) destination="/runtime-libs$library" ;; \
+      esac; \
+      mkdir -p "$(dirname "$destination")"; \
+      cp -L "$library" "$destination"; \
+    done < /tmp/runtime-libs
 
-FROM node:24.18.1-trixie-slim
+FROM gcr.io/distroless/static-debian13:nonroot
 ENV NODE_ENV=production HOSTNAME=0.0.0.0 PORT=3000 VALIDATE_PRODUCTION_STARTUP=true
-RUN apt-get update \
-    && apt-get upgrade --yes \
-    && rm -rf /usr/local/lib/node_modules/npm \
-        /usr/local/lib/node_modules/corepack \
-        /usr/local/bin/corepack \
-        /usr/local/bin/npm \
-        /usr/local/bin/npx \
-        /usr/local/bin/pnpm \
-        /usr/local/bin/pnpx \
-        /usr/local/bin/yarn \
-        /usr/local/bin/yarnpkg \
-    && groupadd --system quantlab \
-    && useradd --system --gid quantlab --home /app quantlab \
-    && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
-COPY --from=build --chown=quantlab:quantlab /app/.next/standalone ./
-COPY --from=build --chown=quantlab:quantlab /app/.next/static ./.next/static
-COPY --from=build --chown=quantlab:quantlab /app/public ./public
-USER quantlab
+COPY --from=build /runtime-libs/usr/ /usr/
+COPY --from=build /usr/local/bin/node /usr/local/bin/node
+COPY --from=build --chown=65532:65532 /app/.next/standalone ./
+COPY --from=build --chown=65532:65532 /app/.next/static ./.next/static
+COPY --from=build --chown=65532:65532 /app/public ./public
+USER 65532:65532
 EXPOSE 3000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-  CMD node -e "fetch('http://127.0.0.1:3000/login').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"
-CMD ["node","server.js"]
+  CMD ["/usr/local/bin/node", "-e", "fetch('http://127.0.0.1:3000/login').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+ENTRYPOINT []
+CMD ["/usr/local/bin/node","server.js"]

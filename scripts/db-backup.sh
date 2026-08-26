@@ -10,4 +10,9 @@ case "$DATABASE_URL" in
   *) database_url=$DATABASE_URL ;;
 esac
 pg_dump --format=custom --no-owner --no-acl --file="$target" "$database_url"
-sha256sum "$target" > "$target.sha256"
+if ! checksum_output=$(sha256sum "$target"); then
+  echo "Výpočet checksumu backupu selhal" >&2
+  exit 1
+fi
+checksum=${checksum_output%% *}
+printf '%s  %s\n' "$checksum" "$(basename "$target")" > "$target.sha256"

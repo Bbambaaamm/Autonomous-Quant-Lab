@@ -1,5 +1,10 @@
 # Production-like PAPER deployment
 
+Produkční backend a frontend používají distroless `static` Debian 13 runtime, do kterého build
+kopíruje jen aplikační interpreter a jeho dynamické knihovny. Runtime neobsahuje shell ani
+systémový package manager. Diagnostiku a non-root kontroly proto provádějte přes aplikační Python
+nebo Node runtime, nikoli pomocí `sh`, `id`, `apt` či `npm` uvnitř běžícího kontejneru.
+
 1. `make generate-dev-secrets` použijte jen pro lokální credentials a bezpečně provisionujte
    ekvivalentní production secrets. Veřejný ingress musí ukončovat HTTPS.
 2. Vytvořte oddělené PostgreSQL migration/runtime role; migration credential použijte pouze pro
