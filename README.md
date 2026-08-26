@@ -164,6 +164,7 @@ Známá omezení po Phase 9:
 ## Dokumentace
 
 - [Aktuální projektový audit](docs/project-audit.md)
+- [Audit a údržba závislostí](docs/dependency-maintenance.md)
 - [Architektura](docs/architecture.md)
 - [Databáze a migrace](docs/database.md)
 - [Market data](docs/market-data.md)
