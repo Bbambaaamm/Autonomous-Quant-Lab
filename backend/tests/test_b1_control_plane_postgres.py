@@ -96,9 +96,7 @@ def test_supported_b1_control_plane_reaches_active_monitoring(monkeypatch) -> No
     assert ingestion.status_code == 200, ingestion.text
     ingested_observations = ingestion.json()["observations"]
     assert ingested_observations
-    observed_at = max(
-        datetime.fromisoformat(item["observed_at"]) for item in ingested_observations
-    )
+    observed_at = max(datetime.fromisoformat(item["observed_at"]) for item in ingested_observations)
     snapshot = client.post(
         "/operator/datasets",
         json={
@@ -186,8 +184,7 @@ def test_supported_b1_control_plane_reaches_active_monitoring(monkeypatch) -> No
         assert snapshot_row.universe_id == universe_id
         assert instrument_id in snapshot_row.manifest_json
         assert all(
-            item["observation_id"] in snapshot_row.manifest_json
-            for item in ingested_observations
+            item["observation_id"] in snapshot_row.manifest_json for item in ingested_observations
         )
 
 
