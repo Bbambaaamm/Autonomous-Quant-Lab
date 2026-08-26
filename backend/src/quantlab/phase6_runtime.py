@@ -99,6 +99,16 @@ class Phase6ExperimentReplay:
     oos_sessions: tuple[datetime, ...]
 
 
+@dataclass(frozen=True)
+class PaperExecutionTiming:
+    """Auditovatelná hranice close-derived rozhodnutí a následujícího open."""
+
+    signal_session: date
+    decision_time: datetime
+    execution_session: date
+    execution_time: datetime
+
+
 class Phase6ExperimentRunner:
     """Snapshot-only Phase 6 runner s persistentní, exactly-once OOS identitou."""
 
@@ -538,6 +548,63 @@ class ValidatedCurrentDataAccessor:
             raise DatasetInvalid("Nejnovější current data nepocházejí z úspěšné ingestion")
         return tuple(_observation(latest[item]) for item in sorted(latest))
 
+    def for_execution_session(
+        self, instrument_ids: Sequence[str], session_date: date, now: datetime
+    ) -> tuple[Observation, ...]:
+        """Vrátí raw data přesně určené session, pouze pokud už byla pozorována."""
+        knowledge_cutoff = require_utc(now)
+        if not instrument_ids or len(set(instrument_ids)) != len(instrument_ids):
+            raise DatasetInvalid("Požadavek na current data musí obsahovat unikátní instrumenty")
+        if not self.calendar.is_session(session_date):
+            raise DatasetInvalid("Executable session není platná XNYS session")
+        if knowledge_cutoff < self.calendar.session_open(session_date):
+            raise DatasetInvalid("Executable session ještě nezačala")
+        with self._sessions() as session:
+            rows = tuple(
+                session.scalars(
+                    select(MarketObservationRecord)
+                    .join(
+                        MarketDataIngestionRecord,
+                        MarketObservationRecord.ingestion_id == MarketDataIngestionRecord.id,
+                    )
+                    .where(
+                        MarketObservationRecord.instrument_id.in_(instrument_ids),
+                        MarketObservationRecord.session_date
+                        == datetime.combine(session_date, datetime.min.time(), UTC),
+                        MarketObservationRecord.timeframe == "open",
+                        MarketObservationRecord.timestamp
+                        == self.calendar.session_open(session_date),
+                        MarketObservationRecord.observed_at <= knowledge_cutoff,
+                    )
+                    .order_by(
+                        MarketObservationRecord.instrument_id,
+                        MarketObservationRecord.observed_at.desc(),
+                        MarketObservationRecord.revision.desc(),
+                    )
+                )
+            )
+        latest: dict[str, MarketObservationRecord] = {}
+        for row in rows:
+            latest.setdefault(row.instrument_id, row)
+        if set(latest) != set(instrument_ids):
+            raise DatasetInvalid(
+                "Executable session nemá dostupný raw open pro všechny instrumenty"
+            )
+        with self._sessions() as session:
+            ingestion_statuses = {
+                item.id: item.status
+                for item in session.scalars(
+                    select(MarketDataIngestionRecord).where(
+                        MarketDataIngestionRecord.id.in_(
+                            row.ingestion_id for row in latest.values()
+                        )
+                    )
+                )
+            }
+        if any(ingestion_statuses.get(row.ingestion_id) != "SUCCEEDED" for row in latest.values()):
+            raise DatasetInvalid("Executable data nepocházejí z úspěšné ingestion")
+        return tuple(_observation(latest[item]) for item in sorted(latest))
+
     def history(
         self,
         instrument_ids: Sequence[str],
@@ -818,7 +885,17 @@ class Phase6PaperExecutionService:
             )
 
     def run(self, deployment_id: str, now: datetime) -> str:
-        decision_time = require_utc(now)
+        as_of = require_utc(now)
+        timing = self.execution_timing(self.current_data.calendar, as_of)
+        executable_session = timing.execution_session
+        execution_time = timing.execution_time
+        if as_of != execution_time:
+            state = "ještě nezačala" if as_of < execution_time else "už začala"
+            raise DatasetInvalid(
+                f"Signal je připraven, ale následující executable session {state}; "
+                "bez persistentního intentu nelze zpětně fillovat její open"
+            )
+        decision_time = timing.decision_time
         with self._sessions() as session:
             # Phase 7 je samostatná observation/control brána. Import je lokální, aby
             # monitoring mohl znovu použít validační Phase 6 služby bez importního cyklu.
@@ -857,13 +934,6 @@ class Phase6PaperExecutionService:
                 or snapshot.timeframe != "1d"
             ):
                 raise DatasetInvalid("Approved deployment evidence se od schválení změnila")
-            from quantlab.phase7 import PaperCorporateActionService
-
-            PaperCorporateActionService(self._sessions).apply(account.id, decision_time)
-            session.expire_all()
-            monitoring = session.get(PaperMonitoringRunRecord, monitoring.monitoring_id)
-            if monitoring is None or monitoring.state != "ACTIVE":
-                raise DatasetInvalid("Corporate action zablokovala paper execution")
             definition = session.get(UniverseDefinitionRecord, deployment.universe_id)
             if definition is None or definition.kind != UniverseKind.POINT_IN_TIME_MEMBERSHIP:
                 raise DatasetInvalid("Paper execution vyžaduje podporovaný PIT universe")
@@ -935,9 +1005,9 @@ class Phase6PaperExecutionService:
             or strategy.name != deployment.strategy_name
         ):
             raise DatasetInvalid("Runtime strategy identity neodpovídá deploymentu")
-        latest = self.current_data.latest(execution_instruments, decision_time)
-        executable_session = latest[0].session_date
-        execution_time = self.current_data.calendar.session_open(executable_session)
+        latest = self.current_data.for_execution_session(
+            execution_instruments, executable_session, as_of
+        )
         expected_sessions: list[date] = []
         history_session = executable_session
         for _ in range(strategy.required_lookback):
@@ -998,7 +1068,7 @@ class Phase6PaperExecutionService:
                 deployment.deployment_id,
                 previous_cycle.id,
                 previous_cycle.session_date,
-                decision_time,
+                as_of,
             )
             return previous_cycle.id
         if previous_cycle is not None and not self._rebalance_due(
@@ -1015,7 +1085,7 @@ class Phase6PaperExecutionService:
         bars = [
             Bar(
                 item.instrument_id,
-                item.timestamp,
+                execution_time,
                 item.open,
                 item.high,
                 item.low,
@@ -1031,20 +1101,27 @@ class Phase6PaperExecutionService:
         ]
         target_weights = {instrument: Decimal("0") for instrument in held}
         target_weights.update(dict(target.weights))
+        from quantlab.phase7 import PaperCorporateActionService
+
+        PaperCorporateActionService(self._sessions).apply(account.id, as_of)
+        with self._sessions() as session:
+            monitoring = session.get(PaperMonitoringRunRecord, monitoring.monitoring_id)
+            if monitoring is None or monitoring.state != "ACTIVE":
+                raise DatasetInvalid("Corporate action zablokovala paper execution")
         cycle_id = self.trading_cycle.run(
             deployment.paper_account_id,
             strategy_id,
             bars,
             target_weights,
-            latest[0].session_date,
-            execution_time,
+            executable_session,
+            decision_time,
         )
         self._ensure_cycle_lineage(
             monitoring.monitoring_id,
             deployment.deployment_id,
             cycle_id,
-            latest[0].session_date,
-            decision_time,
+            executable_session,
+            as_of,
         )
         with Session(self.trading_cycle.repository.engine) as session, session.begin():
             self.trading_cycle.repository.audit(
@@ -1061,12 +1138,29 @@ class Phase6PaperExecutionService:
                     "signal_observation_ids": [
                         item.observation_id for values in history.values() for item in values
                     ],
+                    "decision_time": decision_time.isoformat(),
                     "signal_through_session": expected_sessions[-1].isoformat(),
                     "executable_session": executable_session.isoformat(),
+                    "execution_time": execution_time.isoformat(),
                     "current_observation_ids": [item.observation_id for item in latest],
+                    "raw_open_by_instrument": {
+                        item.instrument_id: str(item.open) for item in latest
+                    },
                 },
             )
         return cycle_id
+
+    @staticmethod
+    def execution_timing(calendar: XNYSCalendar, now: datetime) -> PaperExecutionTiming:
+        as_of = require_utc(now)
+        signal_session = calendar.latest_completed_session(as_of)
+        execution_session = calendar.next_session(signal_session)
+        return PaperExecutionTiming(
+            signal_session,
+            calendar.session_close(signal_session),
+            execution_session,
+            calendar.session_open(execution_session),
+        )
 
     @staticmethod
     def _rebalance_due(current: date, previous: date, frequency: RebalanceFrequency) -> bool:

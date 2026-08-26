@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from uuid import uuid4
 
 import pytest
@@ -34,11 +34,14 @@ def _observation(
     status: str = "SUCCEEDED",
     revision: int = 1,
     instrument_id: str | None = None,
+    opening: bool = False,
 ) -> str:
     suffix = uuid4().hex
     instrument_id = instrument_id or f"current-{suffix}"
     ingestion_id = f"ingestion-{suffix}"
-    timestamp = CALENDAR.session_close(session_day)
+    timestamp = (
+        CALENDAR.session_open(session_day) if opening else CALENDAR.session_close(session_day)
+    )
     with factory() as session, session.begin():
         if session.get(InstrumentRecord, instrument_id) is None:
             session.add(
@@ -74,15 +77,15 @@ def _observation(
                 instrument_id=instrument_id,
                 ingestion_id=ingestion_id,
                 provider="current-fixture",
-                timeframe="1d",
+                timeframe="open" if opening else "1d",
                 session_date=datetime.combine(session_day, datetime.min.time(), UTC),
                 timestamp=timestamp,
                 open="100",
-                high="101",
-                low="99",
+                high="100" if opening else "101",
+                low="100" if opening else "99",
                 close="100",
                 volume="1000",
-                observed_at=timestamp.replace(microsecond=revision),
+                observed_at=timestamp if opening else timestamp.replace(microsecond=revision),
                 source_id=suffix,
                 source_hash=suffix.ljust(64, "0"),
                 revision=revision,
@@ -140,6 +143,52 @@ def test_current_data_accepts_latest_succeeded_revision(factory) -> None:
         [instrument_id], datetime(2026, 1, 6, 22, tzinfo=UTC)
     )
     assert result[0].revision == 2
+
+
+def test_execution_data_requires_started_exact_session(factory) -> None:
+    execution_session = date(2026, 1, 6)
+    instrument_id = _observation(factory, execution_session)
+    accessor = ValidatedCurrentDataAccessor(factory)
+
+    with pytest.raises(DatasetInvalid, match="ještě nezačala"):
+        accessor.for_execution_session(
+            [instrument_id],
+            execution_session,
+            accessor.calendar.session_open(execution_session) - timedelta(microseconds=1),
+        )
+
+    with pytest.raises(DatasetInvalid, match="raw open"):
+        accessor.for_execution_session(
+            [instrument_id],
+            execution_session,
+            accessor.calendar.session_open(execution_session),
+        )
+
+
+def test_execution_data_never_falls_back_to_previous_raw_open(factory) -> None:
+    signal_session = date(2026, 1, 5)
+    execution_session = date(2026, 1, 6)
+    instrument_id = _observation(factory, signal_session)
+    accessor = ValidatedCurrentDataAccessor(factory)
+
+    with pytest.raises(DatasetInvalid, match="raw open"):
+        accessor.for_execution_session(
+            [instrument_id],
+            execution_session,
+            accessor.calendar.session_open(execution_session) + timedelta(minutes=1),
+        )
+
+
+def test_execution_data_accepts_only_opening_observation_at_actual_open(factory) -> None:
+    execution_session = date(2026, 1, 6)
+    instrument_id = _observation(factory, execution_session, opening=True)
+    accessor = ValidatedCurrentDataAccessor(factory)
+    execution_open = accessor.calendar.session_open(execution_session)
+
+    result = accessor.for_execution_session([instrument_id], execution_session, execution_open)
+
+    assert result[0].timestamp == execution_open
+    assert result[0].timeframe == "open"
 
 
 @pytest.mark.parametrize("ids", [(), ("duplicate", "duplicate")])
