@@ -44,51 +44,54 @@ Každý ekonomický příkaz prochází přes `RiskEngine` a `ExecutionEngine`. 
 
 Autoritativní lockfiles jsou `backend/uv.lock` a `frontend/package-lock.json`. Neupravují se ručně.
 
-## Lokální spuštění
+## Doporučené spuštění v GitHub Codespaces
 
-### 1. Instalace a vývojová DB
+Codespaces je doporučené vývojové prostředí. Startup používá PostgreSQL z `docker-compose.yml`, paper-only backend a produkční standalone dashboard se striktním CSP. Forwardovaný port `3000` nastavte v Codespaces jako **Private**; generátor odvodí konkrétní HTTPS URL bez wildcard origins.
+
+### První spuštění
 
 ```bash
-make install
-docker compose up -d postgres
-export DATABASE_URL='postgresql+psycopg://quantlab@127.0.0.1:5432/quantlab'
-cd backend && uv run alembic -c ../alembic.ini upgrade head && cd ..
+make codespaces-setup
 ```
 
-Lokální `docker-compose.yml` vystavuje PostgreSQL pouze na loopback a používá trust auth výhradně pro development.
+Target nainstaluje uzamčené backend/frontend dependency, spustí PostgreSQL, vytvoří `.secrets/dev.env` pouze pokud ještě neexistuje, provede Alembic migrace a sestaví standalone dashboard. Generátor vypíše jednorázové heslo pro uživatele `operator`; bezpečně si je uložte. Soubor `.secrets/dev.env` ani heslo necommitujte.
 
-### 2. Vygenerování lokálních credentials
-
-```bash
-make generate-dev-secrets
-set -a
-. .secrets/dev.env
-set +a
-```
-
-Příkaz vypíše jednorázové heslo. Výchozí uživatel dashboardu je `operator`; heslo ani `.secrets/dev.env` necommitujte.
-
-### 3. Backend
+Potom spusťte dva terminály (Makefile načte uloženou konfiguraci automaticky):
 
 ```bash
+# terminál 1
 make api
-```
 
-API běží na `http://127.0.0.1:8000`.
-
-### 4. Dashboard
-
-V druhém terminálu načtěte stejné secrets a spusťte:
-
-```bash
-set -a
-. .secrets/dev.env
-set +a
-make frontend-install
+# terminál 2
 make dashboard
 ```
 
-Dashboard běží na `http://127.0.0.1:3000`.
+API naslouchá na `127.0.0.1:8000`. Dashboard naslouchá na portu `3000` a otevře se přes privátní Codespaces HTTPS URL.
+
+### Běžné spuštění po restartu Codespace
+
+Není nutné znovu generovat credentials ani ručně exportovat proměnné:
+
+```bash
+docker compose up -d --wait postgres
+make api        # terminál 1
+make dashboard  # terminál 2
+```
+
+Po změně frontend kódu nejprve spusťte `make dashboard-build`. Po změně migrací spusťte `make codespaces-setup`; existující `.secrets/dev.env` zůstane zachován.
+
+### Explicitní reset credentials
+
+Reset zneplatní dosavadní login a API tokeny a znovu vypíše jednorázové heslo:
+
+```bash
+make codespaces-reset-credentials
+make dashboard-build
+```
+
+### Lokální fallback mimo Codespaces
+
+Stejný postup funguje lokálně; generátor použije `http://localhost:3000` a allowlist `localhost,127.0.0.1`. Lokální `docker-compose.yml` vystavuje PostgreSQL pouze na loopback a používá trust auth výhradně pro development. `make codespaces-setup` existující `.secrets/dev.env` nikdy nepřepíše.
 
 ## Automatizovaný paper worker
 

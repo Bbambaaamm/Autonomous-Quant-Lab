@@ -36,6 +36,8 @@ describe("Phase 9 security boundary", () => {
   it("produkční responses deklarují obranné headers", () => {
     const config = fs.readFileSync(path.join(process.cwd(), "next.config.ts"), "utf8");
     for (const header of ["Content-Security-Policy", "X-Content-Type-Options", "Referrer-Policy", "Permissions-Policy", "X-Frame-Options"]) expect(config).toContain(header);
+    expect(config).not.toContain("unsafe-eval");
+    expect(config).not.toMatch(/allowedOrigins[^;]*["']\*["']/s);
   });
 
   it("dev helper vytváří obě strany role credentials a login identitu", () => {
