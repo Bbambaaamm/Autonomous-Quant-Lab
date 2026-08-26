@@ -7,7 +7,7 @@ ARG PUBLIC_BASE_URL=https://localhost
 ENV PUBLIC_BASE_URL=$PUBLIC_BASE_URL
 RUN npm run build \
     && mkdir /runtime-libs \
-    && ldd /usr/local/bin/node \
+    && find /usr/local/bin/node /app/.next/standalone -type f -exec ldd {} \; 2>/dev/null \
       | awk '{ for (i = 1; i <= NF; i++) if ($i ~ "^/") print $i }' \
       | sort -u > /tmp/runtime-libs \
     && test -s /tmp/runtime-libs \

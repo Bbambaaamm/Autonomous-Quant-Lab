@@ -205,7 +205,7 @@ jobs:
       - name: Verify minimal production runtimes
         run: |
           docker run --rm --entrypoint /app/backend/.venv/bin/python quantlab-backend -c \
-            "import pathlib,sys; assert sys.version_info[:2] == (3,12); assert not any(pathlib.Path('/usr/local/bin').glob('pip*')); assert not pathlib.Path('/usr/local/bin/uv').exists()"
+            "import ctypes,numpy,pandas,pathlib,psycopg,pydantic_core,pyarrow,sys; ctypes.CDLL('libgcc_s.so.1'); assert sys.version_info[:2] == (3,12); assert not any(pathlib.Path('/usr/local/bin').glob('pip*')); assert not pathlib.Path('/usr/local/bin/uv').exists()"
           docker run --rm --entrypoint /usr/local/bin/node quantlab-frontend -e \
             "const fs=require('node:fs'); if(process.versions.node.split('.')[0] !== '24' || ['/usr/local/bin/npm','/usr/local/bin/yarn','/bin/sh'].some(fs.existsSync)) process.exit(1)"
           test "$(docker inspect --format '{{json .Config.Healthcheck.Test}}' quantlab-backend)" != null

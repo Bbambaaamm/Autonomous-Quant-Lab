@@ -12,7 +12,7 @@ RUN rm -rf /usr/local/lib/python3.12/site-packages/pip* \
     /usr/local/bin/pip* \
     /usr/local/bin/uv \
     && mkdir /runtime-libs \
-    && find /usr/local -type f -exec ldd {} \; 2>/dev/null \
+    && find /usr/local /app/backend/.venv -type f -exec ldd {} \; 2>/dev/null \
       | awk '{ for (i = 1; i <= NF; i++) if ($i ~ "^/") print $i }' \
       | sort -u > /tmp/runtime-libs \
     && test -s /tmp/runtime-libs \
