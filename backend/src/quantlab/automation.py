@@ -929,7 +929,7 @@ class JobExecutor:
     def _run_paper_deployment(
         self, account_id: str, payload: dict[str, Any], run: JobRun
     ) -> dict[str, str | None]:
-        from quantlab.market_data import DatasetInvalid
+        from quantlab.market_data import DatasetInvalid, StooqProvider
         from quantlab.persistence import StrategyDeploymentRecord
         from quantlab.phase6_runtime import (
             Phase6PaperExecutionService,
@@ -1016,11 +1016,13 @@ class JobExecutor:
                     "outcome": "BLOCKED_BY_LIFECYCLE",
                     "no_action_reason": f"MONITORING_{monitoring.state}",
                 }
+        provider = self.provider_factory() if self.provider_factory else StooqProvider()
         service = Phase6PaperExecutionService(
             sessions,
             ValidatedCurrentDataAccessor(sessions),
             self.trading,
             require_corporate_action_readiness=True,
+            corporate_action_provider_identity=(provider.metadata.name, provider.metadata.version),
         )
         try:
             cycle_id = service.run(

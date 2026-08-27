@@ -103,7 +103,11 @@ def _full_multi_session_flow(
         instrument_allowlist=frozenset({instrument.instrument_id}),
     )
     execution = Phase6PaperExecutionService(
-        factory, ValidatedCurrentDataAccessor(factory), TradingCycleService(repository, risk)
+        factory,
+        ValidatedCurrentDataAccessor(factory),
+        TradingCycleService(repository, risk),
+        require_corporate_action_readiness=True,
+        corporate_action_provider_identity=(f"p7-{instrument.symbol}", "1"),
     )
     performance = PaperPerformanceService(factory, ValidatedCurrentDataAccessor(factory))
     evaluation = PaperPerformanceEvaluationService(factory)
@@ -133,6 +137,16 @@ def _full_multi_session_flow(
             .ingest(provider, instrument, session_day, session_day, observed_at)
             .status
             == "SUCCEEDED"
+        )
+        signal_session = CALENDAR.previous_session(session_day)
+        PersistentMarketDataService(
+            factory, clock=lambda execution_as_of=execution_as_of: execution_as_of
+        ).verify_corporate_action_readiness(
+            provider,
+            instrument,
+            source_snapshot.start_at.date(),
+            signal_session,
+            CALENDAR.session_close(signal_session),
         )
         _seed_opening_observation(factory, instrument.instrument_id, session_day, price)
         execution.run(deployment.deployment_id, execution_as_of)

@@ -47,7 +47,9 @@ execution run se nematerializuje.
 `Phase6PaperExecutionService` důkaz kontroluje znovu před strategií, aplikací corporate actions a
 trading cycle. Vyžaduje `COMPLETE`, capable evidence pro každý executable instrument, pokrytí
 požadovaného intervalu, přesný decision-time cutoff a kontrolu provedenou nejpozději v execution
-čase. Scheduler/worker race ani přímé obejití prepare brány proto nemůže mít ekonomický efekt.
+čase. Evidence se navíc musí shodovat se jménem i verzí provideru, které production executor
+získal ze stejné provider factory; complete evidence jiného provideru proto gate neodemkne.
+Scheduler/worker race ani přímé obejití prepare brány proto nemůže mít ekonomický efekt.
 
 `PaperCorporateActionService` zůstává jedinou cestou, která mění paper quantity, cost basis nebo
 dividend cash. Nová readiness evidence nic neúčtuje a nevytváří paralelní ledger.
