@@ -1017,7 +1017,10 @@ class JobExecutor:
                     "no_action_reason": f"MONITORING_{monitoring.state}",
                 }
         service = Phase6PaperExecutionService(
-            sessions, ValidatedCurrentDataAccessor(sessions), self.trading
+            sessions,
+            ValidatedCurrentDataAccessor(sessions),
+            self.trading,
+            require_corporate_action_readiness=True,
         )
         try:
             cycle_id = service.run(
