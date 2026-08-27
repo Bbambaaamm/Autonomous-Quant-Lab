@@ -62,6 +62,7 @@ aplikují dostupné security aktualizace. Nejde o blanket potlačení reportu.
 | POST | `/operator/datasets` | ADMIN |
 | POST | `/operator/research/experiments` a `/{id}/promote` | ADMIN |
 | POST | `/operator/deployments` a `/{id}/approve` | ADMIN |
+| POST | `/operator/deployments/{id}/jobs` | ADMIN |
 | POST | `/operator/monitoring/policies` a `/enrollments` | ADMIN |
 | POST | `/operator/risk/halt` | OPERATOR/ADMIN |
 | POST | `/operator/risk/resume` | ADMIN |

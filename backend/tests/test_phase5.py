@@ -20,13 +20,12 @@ from quantlab.automation import (
     RunStatus,
     SchedulerService,
     ScheduleType,
-    TransientJobError,
     WorkerHeartbeat,
     WorkerService,
     next_occurrence,
 )
 from quantlab.config import Settings
-from quantlab.phase4 import Phase4Repository, TradingCycleRecord
+from quantlab.phase4 import Phase4Repository
 
 
 def test_migration_revisions_own_only_their_tables() -> None:
@@ -374,7 +373,7 @@ def test_manual_run_rejects_disabled_job_at_service_boundary(tmp_path) -> None: 
         SchedulerService(repository).run_now(job.id, "disabled", now)
 
 
-def test_executor_uses_only_first_bar_after_decision_and_rejects_incomplete_cycle(tmp_path) -> None:  # type: ignore[no-untyped-def]
+def test_executor_rejects_legacy_paper_cycle_even_with_fixture_payload(tmp_path) -> None:  # type: ignore[no-untyped-def]
     repository, _ = setup(tmp_path)
     csv_path = tmp_path / "bars.csv"
     csv_path.write_text(
@@ -399,34 +398,5 @@ def test_executor_uses_only_first_bar_after_decision_and_rejects_incomplete_cycl
         run = session.get(JobRun, run_id)
         assert run is not None
         session.expunge(run)
-    executor = JobExecutor(repository)
-    observed_timestamps: list[datetime] = []
-
-    def incomplete_run(
-        account_id, strategy_id, bars, target_weights, session_date, supplied_decision_time
-    ):  # type: ignore[no-untyped-def]
-        observed_timestamps.extend(bar.timestamp for bar in bars)
-        cycle_id = "incomplete-cycle"
-        with Session(repository.engine) as session:
-            session.add(
-                TradingCycleRecord(
-                    id=cycle_id,
-                    cycle_key=cycle_id,
-                    account_id=account_id,
-                    strategy_id=strategy_id,
-                    session_date=session_date,
-                    started_at=decision_time,
-                    status="RUNNING",
-                    correlation_id=cycle_id,
-                    data_fingerprint="test",
-                    lease_owner="phase4-worker",
-                    lease_expires_at=decision_time + timedelta(minutes=5),
-                )
-            )
-            session.commit()
-        return cycle_id
-
-    executor.trading.run = incomplete_run  # type: ignore[method-assign]
-    with pytest.raises(TransientJobError, match="stále RUNNING"):
-        executor(job, run)
-    assert observed_timestamps == [decision_time, decision_time + timedelta(days=1)]
+    with pytest.raises(PermanentJobError, match="legacy demo contract"):
+        JobExecutor(repository)(job, run)

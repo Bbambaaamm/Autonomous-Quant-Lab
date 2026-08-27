@@ -1,5 +1,17 @@
 # Automation & Operations Phase 5
 
+## B2 production paper contract
+
+Autonomní produkční paper execution používá výhradně `RUN_PAPER_DEPLOYMENT` s immutable config
+`{"deployment_id": "..."}`. Job se vytváří přes
+`POST /operator/deployments/{deployment_id}/jobs`; account, strategie, parametry, snapshot,
+PIT universe a monitoring se vždy odvozují z persistentní approved lineage. Worker volá
+`Phase6PaperExecutionService` a nikdy nepřijímá target weights, symbol, cenu ani filesystem path.
+
+Historický `RUN_PAPER_CYCLE` zůstává rozpoznatelný pro staré snapshoty, ale produkční mutation jej
+nevytvoří a worker jej permanentně odmítne. Scheduler zůstává wall-clock; market-session scheduling
+a automatický data refresh patří do samostatných H1/M3 remediation.
+
 `scheduled_jobs → job_runs → job_attempts` oddělují schedule, logical execution a fyzický pokus.
 Occurrence `(job, scheduled_for)` nebo `(job, manual idempotency key)` je unikátní. Run drží
 neměnný config snapshot včetně accountu, typu jobu a strategie, scheduled decision time a

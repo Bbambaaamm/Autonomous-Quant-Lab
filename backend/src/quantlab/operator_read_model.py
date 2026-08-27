@@ -129,7 +129,10 @@ class OperatorReadModel:
             )
             next_job = session.scalar(
                 select(ScheduledJob.next_run_at)
-                .where(ScheduledJob.enabled.is_(True), ScheduledJob.job_type == "RUN_PAPER_CYCLE")
+                .where(
+                    ScheduledJob.enabled.is_(True),
+                    ScheduledJob.job_type == "RUN_PAPER_DEPLOYMENT",
+                )
                 .order_by(ScheduledJob.next_run_at)
                 .limit(1)
             )
