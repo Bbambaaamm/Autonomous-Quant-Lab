@@ -709,6 +709,7 @@ class JobExecutor:
         signal_close = calendar.session_close(signal_session)
         execution_session = calendar.next_session(signal_session)
         execution_open = calendar.session_open(execution_session)
+        execution_cutoff = calendar.executable_open_cutoff(execution_session)
 
         def sessions() -> Session:
             return Session(self.trading.repository.engine)
@@ -829,7 +830,7 @@ class JobExecutor:
                     )
             if now < execution_open:
                 continue
-            if now > execution_open:
+            if now >= execution_cutoff:
                 continue
             open_result = PersistentMarketDataService(
                 sessions, calendar, clock=lambda: utc(self.clock())
@@ -848,7 +849,7 @@ class JobExecutor:
                         == datetime.combine(execution_session, time(), UTC),
                         MarketObservationRecord.timeframe == "open",
                         MarketObservationRecord.timestamp == execution_open,
-                        MarketObservationRecord.observed_at <= now,
+                        MarketObservationRecord.observed_at < execution_cutoff,
                         MarketDataIngestionRecord.status == "SUCCEEDED",
                     )
                 )
@@ -864,7 +865,8 @@ class JobExecutor:
                 "no_action_reason": "EXECUTION_SESSION_NOT_OPEN",
                 "ingestion_ids": ",".join(ingestions),
             }
-        if now > execution_open:
+        execution_now = utc(self.clock())
+        if execution_now >= execution_cutoff:
             return {
                 "deployment_id": deployment_id,
                 "monitoring_id": monitoring.monitoring_id,
@@ -879,7 +881,7 @@ class JobExecutor:
             account_id=account_id,
             execution_session=execution_session,
             execution_time=execution_open,
-            created_at=now,
+            created_at=execution_now,
         )
         return {
             "deployment_id": deployment_id,
@@ -918,7 +920,7 @@ class JobExecutor:
                 raise PermanentJobError("Execution occurrence má neplatnou XNYS session") from exc
             calendar = XNYSCalendar()
             pinned_open = calendar.session_open(pinned_session)
-            if execution_now != pinned_open:
+            if not calendar.is_executable_open_time(pinned_session, execution_now):
                 return {
                     "deployment_id": deployment_id,
                     "monitoring_id": None,

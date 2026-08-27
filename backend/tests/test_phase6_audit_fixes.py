@@ -239,7 +239,7 @@ def test_phase6_run_outside_next_open_fails_before_any_economic_service(case: st
     "offset,reason",
     [
         (-timedelta(microseconds=1), "EXECUTION_SESSION_NOT_OPEN"),
-        (timedelta(microseconds=1), "MISSED_EXECUTION_OPEN"),
+        (timedelta(seconds=1), "MISSED_EXECUTION_OPEN"),
         (timedelta(minutes=5), "MISSED_EXECUTION_OPEN"),
     ],
 )

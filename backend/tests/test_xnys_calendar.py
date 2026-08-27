@@ -1,4 +1,4 @@
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from importlib.metadata import version
 
@@ -39,6 +39,19 @@ def test_navigation_and_historical_exceptional_closure() -> None:
 
 def test_identity_pins_maintained_calendar_version() -> None:
     assert CALENDAR.identity == f"XNYS:exchange-calendars:{version('exchange-calendars')}"
+
+
+@pytest.mark.parametrize("session_day", [date(2026, 3, 6), date(2026, 3, 9), date(2026, 11, 27)])
+def test_executable_open_window_is_derived_from_calendar_open(session_day: date) -> None:
+    opened = CALENDAR.session_open(session_day)
+
+    assert CALENDAR.is_executable_open_time(session_day, opened)
+    assert CALENDAR.is_executable_open_time(
+        session_day, opened + CALENDAR.executable_open_window - timedelta(microseconds=1)
+    )
+    assert not CALENDAR.is_executable_open_time(
+        session_day, opened + CALENDAR.executable_open_window
+    )
 
 
 def test_calendar_bounds_are_explicit_and_fail_closed() -> None:

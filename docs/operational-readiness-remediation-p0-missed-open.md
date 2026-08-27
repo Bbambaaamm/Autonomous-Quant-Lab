@@ -9,10 +9,12 @@ Persistentní intent chránil kalendářovou session, nikoli obchodovatelnost ce
 
 ## Execution window
 
-Současný daily/open provider nedokládá průběžnou quote. Bez falešné přesnosti je proto povolen pouze
-konzervativní bodový window: worker decision, provider response knowledge time a XNYS session open
-musí být totožný timezone-aware UTC instant. Před open je výsledek `EXECUTION_SESSION_NOT_OPEN`; po
-open je terminální `NO_ACTION` s `MISSED_EXECUTION_OPEN`. Hranicí nikdy není session close.
+Současný daily/open provider nedokládá průběžnou quote. Bez falešné přesnosti je proto povoleno
+konzervativní půlotevřené window `[XNYS open, XNYS open + 1 sekunda)`: request, worker decision i
+provider response knowledge time v něm musí skutečně ležet. Provider tedy smí dokončit kauzálně
+zahájené volání po přesném open, ale několik sekund či minut starý open už použít nelze. Před open je
+výsledek `EXECUTION_SESSION_NOT_OPEN`; po cutoff terminální `NO_ACTION` s
+`MISSED_EXECUTION_OPEN`. Hranicí nikdy není session close.
 
 XNYS open pochází z `exchange-calendars`, takže se nepoužívá fixní UTC hodina. Stejná semantics
 zachovává Friday/holiday mapping, DST i early-close session (early close nemění její open).
@@ -21,14 +23,15 @@ zachovává Friday/holiday mapping, DST i early-close session (early close nemě
 
 `timestamp` raw observation je tržní čas session open. `observed_at` je okamžik, kdy provider
 response systém skutečně získal; ingestion jej nesmí přepsat historickým open. Pro executable open
-accessor vyžaduje `timestamp == observed_at == execution open`. Obecné daily observations si dále
-zachovávají vlastní market timestamp a point-in-time knowledge cutoff.
+accessor vyžaduje `timestamp == execution open` a skutečný `observed_at` uvnitř povoleného window,
+nejpozději v execution `as_of`. Obecné daily observations si dále zachovávají vlastní market
+timestamp a point-in-time knowledge cutoff.
 
 ## Fail-closed vrstvy a retry
 
 Orchestrator po zmeškaném open nevolá open ingest ani nematerializuje nový economic intent a vrací
 auditovatelný důvod. Worker kontroluje pinned occurrence ještě před deployment persistence. Poslední
-autoritou zůstává `Phase6PaperExecutionService`, která persistentní intent mimo přesný open odmítne
+autoritou zůstává `Phase6PaperExecutionService`, která persistentní intent mimo open window odmítne
 před current-data accessor i Phase 4 ekonomickou cestou.
 
 Provider retry, který uspěje až po open, tedy nemůže persistovat pozdní observation jako executable
@@ -38,7 +41,7 @@ stejné deployment/session identity jej neoživí.
 
 ## Důkazy
 
-- unit testy ověřují pre-open, mikrosekundu i pět minut po open a že fail-closed guard nevolá
+- unit testy ověřují pre-open, exkluzivní sekundový cutoff i pět minut po open a že fail-closed guard nevolá
   persistence ani ekonomickou službu;
 - PostgreSQL accessor testy oddělují market timestamp od pozdního `observed_at`;
 - PostgreSQL ingestion test ověřuje exact-open response a odmítnutí response získané o pět minut

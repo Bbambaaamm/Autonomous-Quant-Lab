@@ -162,8 +162,8 @@ B2 resolution **nemění celkový verdikt NOT READY**. H1, M3 a další P1/P2 fi
 
 ### B3 / P0-A — RESOLVED — retroaktivní missed-open fill
 
-Phase 6, worker i Stage C orchestrace nyní fail-closed povolují raw daily open pouze v přesném XNYS
-open instantu a pouze s `observed_at` rovným tomuto knowledge cutoff. Pozdní provider retry ani
+Phase 6, worker i Stage C orchestrace nyní fail-closed povolují raw daily open pouze v kauzálním
+jednosekundovém XNYS open window a pouze s `observed_at` uvnitř tohoto knowledge cutoff. Pozdní provider retry ani
 restart workeru nemohou historický open použít; JobRun končí auditovatelným `NO_ACTION` a
 `MISSED_EXECUTION_OPEN` bez ekonomické změny. PostgreSQL CI vede regresi přes skutečný worker claim.
 Podrobnosti jsou v

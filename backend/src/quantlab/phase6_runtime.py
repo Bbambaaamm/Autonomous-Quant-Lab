@@ -590,7 +590,7 @@ class ValidatedCurrentDataAccessor:
         execution_open = self.calendar.session_open(session_date)
         if knowledge_cutoff < execution_open:
             raise DatasetInvalid("Executable session ještě nezačala")
-        if knowledge_cutoff > execution_open:
+        if not self.calendar.is_executable_open_time(session_date, knowledge_cutoff):
             raise DatasetInvalid("MISSED_EXECUTION_OPEN: raw open už není obchodovatelný")
         with self._sessions() as session:
             rows = tuple(
@@ -606,7 +606,10 @@ class ValidatedCurrentDataAccessor:
                         == datetime.combine(session_date, datetime.min.time(), UTC),
                         MarketObservationRecord.timeframe == "open",
                         MarketObservationRecord.timestamp == execution_open,
-                        MarketObservationRecord.observed_at == execution_open,
+                        MarketObservationRecord.observed_at >= execution_open,
+                        MarketObservationRecord.observed_at
+                        < self.calendar.executable_open_cutoff(session_date),
+                        MarketObservationRecord.observed_at <= knowledge_cutoff,
                     )
                     .order_by(
                         MarketObservationRecord.instrument_id,
@@ -1007,7 +1010,10 @@ class Phase6PaperExecutionService:
                 f"Signal je připraven, ale následující executable session {state}; "
                 "bez persistentního intentu nelze zpětně fillovat její open"
             )
-        if execution_intent_time is not None and as_of != execution_time:
+        if (
+            execution_intent_time is not None
+            and not self.current_data.calendar.is_executable_open_time(executable_session, as_of)
+        ):
             reason = (
                 "EXECUTION_SESSION_NOT_OPEN" if as_of < execution_time else "MISSED_EXECUTION_OPEN"
             )

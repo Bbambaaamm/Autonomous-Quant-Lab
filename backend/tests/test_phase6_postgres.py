@@ -115,25 +115,24 @@ def test_persistent_ingest_publishes_causal_raw_open(engine) -> None:
             return []
 
     factory = sessionmaker(engine, expire_on_commit=False)
-    service = PersistentMarketDataService(factory, calendar, clock=lambda: opened_at)
+    response_time = opened_at + timedelta(milliseconds=500)
+    service = PersistentMarketDataService(factory, calendar, clock=lambda: response_time)
     observed_at = opened_at
     result = service.ingest_open(OpenProvider(), instrument, session_day, observed_at)
 
     assert result.status == "SUCCEEDED"
     observation = ValidatedCurrentDataAccessor(factory, calendar).for_execution_session(
-        [instrument.instrument_id], session_day, observed_at
+        [instrument.instrument_id], session_day, response_time
     )[0]
     assert observation.timestamp == opened_at
-    assert observation.observed_at == observed_at
+    assert observation.observed_at == response_time
     assert observation.timeframe == "open"
     assert observation.open == Decimal("101")
 
     late_service = PersistentMarketDataService(
         factory, calendar, clock=lambda: opened_at + timedelta(minutes=5)
     )
-    late = late_service.ingest_open(
-        OpenProvider(), instrument, session_day, opened_at + timedelta(minutes=5)
-    )
+    late = late_service.ingest_open(OpenProvider(), instrument, session_day, opened_at)
     assert late.status == "FAILED"
     assert late.error is not None and "MISSED_EXECUTION_OPEN" in late.error
 
