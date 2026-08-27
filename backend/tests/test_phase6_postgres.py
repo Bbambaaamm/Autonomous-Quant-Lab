@@ -1,7 +1,7 @@
 import os
 import threading
 from concurrent.futures import ThreadPoolExecutor
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from uuid import uuid4
 
@@ -115,8 +115,8 @@ def test_persistent_ingest_publishes_causal_raw_open(engine) -> None:
             return []
 
     factory = sessionmaker(engine, expire_on_commit=False)
-    service = PersistentMarketDataService(factory, calendar)
-    observed_at = opened_at.replace(microsecond=1)
+    service = PersistentMarketDataService(factory, calendar, clock=lambda: opened_at)
+    observed_at = opened_at
     result = service.ingest_open(OpenProvider(), instrument, session_day, observed_at)
 
     assert result.status == "SUCCEEDED"
@@ -127,6 +127,15 @@ def test_persistent_ingest_publishes_causal_raw_open(engine) -> None:
     assert observation.observed_at == observed_at
     assert observation.timeframe == "open"
     assert observation.open == Decimal("101")
+
+    late_service = PersistentMarketDataService(
+        factory, calendar, clock=lambda: opened_at + timedelta(minutes=5)
+    )
+    late = late_service.ingest_open(
+        OpenProvider(), instrument, session_day, opened_at + timedelta(minutes=5)
+    )
+    assert late.status == "FAILED"
+    assert late.error is not None and "MISSED_EXECUTION_OPEN" in late.error
 
 
 def test_phase6_constraints_snapshot_and_pit_query(engine):

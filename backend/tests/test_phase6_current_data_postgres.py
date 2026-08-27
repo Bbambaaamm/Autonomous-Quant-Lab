@@ -171,11 +171,29 @@ def test_execution_data_never_falls_back_to_previous_raw_open(factory) -> None:
     instrument_id = _observation(factory, signal_session)
     accessor = ValidatedCurrentDataAccessor(factory)
 
-    with pytest.raises(DatasetInvalid, match="raw open"):
+    with pytest.raises(DatasetInvalid, match="MISSED_EXECUTION_OPEN"):
         accessor.for_execution_session(
             [instrument_id],
             execution_session,
             accessor.calendar.session_open(execution_session) + timedelta(minutes=1),
+        )
+
+
+def test_execution_data_rejects_open_observed_after_market_open(factory) -> None:
+    execution_session = date(2026, 1, 6)
+    instrument_id = _observation(factory, execution_session, opening=True)
+    execution_open = CALENDAR.session_open(execution_session)
+    with factory() as session, session.begin():
+        observation = (
+            session.query(MarketObservationRecord)
+            .filter_by(instrument_id=instrument_id, timeframe="open")
+            .one()
+        )
+        observation.observed_at = execution_open + timedelta(microseconds=1)
+
+    with pytest.raises(DatasetInvalid, match="raw open"):
+        ValidatedCurrentDataAccessor(factory).for_execution_session(
+            [instrument_id], execution_session, execution_open
         )
 
 

@@ -76,10 +76,14 @@ class PersistentMarketDataService:
     """Transakční produkční ingestion; provider je jediná část mimo DB transakci."""
 
     def __init__(
-        self, session_factory: Callable[[], Session], calendar: XNYSCalendar | None = None
+        self,
+        session_factory: Callable[[], Session],
+        calendar: XNYSCalendar | None = None,
+        clock: Callable[[], datetime] | None = None,
     ) -> None:
         self._sessions = session_factory
         self.calendar = calendar or XNYSCalendar()
+        self.clock = clock or (lambda: datetime.now(UTC))
 
     def ingest(
         self,
@@ -161,9 +165,14 @@ class PersistentMarketDataService:
         try:
             bars = provider.historical_daily(instrument.symbol, start, end)
             actions = provider.corporate_actions(instrument.symbol, start, end)
+            knowledge_time = require_utc(self.clock()) if executable_open else observed_at
+            if executable_open and knowledge_time != self.calendar.session_open(start):
+                raise DatasetInvalid(
+                    "MISSED_EXECUTION_OPEN: provider response nebyla získána přesně v XNYS open"
+                )
             normalized = [
                 self._normalize_open(
-                    bar, instrument, provider.metadata.name, observed_at, ingestion_id
+                    bar, instrument, provider.metadata.name, knowledge_time, ingestion_id
                 )
                 if executable_open
                 else normalize_bar(

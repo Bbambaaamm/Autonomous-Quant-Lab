@@ -829,9 +829,11 @@ class JobExecutor:
                     )
             if now < execution_open:
                 continue
-            open_result = PersistentMarketDataService(sessions, calendar).ingest_open(
-                provider, instrument, execution_session, now
-            )
+            if now > execution_open:
+                continue
+            open_result = PersistentMarketDataService(
+                sessions, calendar, clock=lambda: utc(self.clock())
+            ).ingest_open(provider, instrument, execution_session, now)
             ingestions.append(open_result.ingestion_id)
             if open_result.status != "SUCCEEDED":
                 raise TransientJobError(open_result.error or "Raw executable open refresh selhal")
@@ -860,6 +862,16 @@ class JobExecutor:
                 "reconciliation_id": None,
                 "outcome": "WAITING_FOR_EXECUTION_OPEN",
                 "no_action_reason": "EXECUTION_SESSION_NOT_OPEN",
+                "ingestion_ids": ",".join(ingestions),
+            }
+        if now > execution_open:
+            return {
+                "deployment_id": deployment_id,
+                "monitoring_id": monitoring.monitoring_id,
+                "trading_cycle_id": None,
+                "reconciliation_id": None,
+                "outcome": "NO_ACTION",
+                "no_action_reason": "MISSED_EXECUTION_OPEN",
                 "ingestion_ids": ",".join(ingestions),
             }
         run_id = self.repository.materialize_execution_session(
@@ -904,7 +916,20 @@ class JobExecutor:
                 pinned_session = date.fromisoformat(run.occurrence_key.removeprefix("xnys:"))
             except ValueError as exc:
                 raise PermanentJobError("Execution occurrence má neplatnou XNYS session") from exc
-            timing = Phase6PaperExecutionService.execution_timing(XNYSCalendar(), execution_now)
+            calendar = XNYSCalendar()
+            pinned_open = calendar.session_open(pinned_session)
+            if execution_now != pinned_open:
+                return {
+                    "deployment_id": deployment_id,
+                    "monitoring_id": None,
+                    "trading_cycle_id": None,
+                    "reconciliation_id": None,
+                    "outcome": "NO_ACTION",
+                    "no_action_reason": "EXECUTION_SESSION_NOT_OPEN"
+                    if execution_now < pinned_open
+                    else "MISSED_EXECUTION_OPEN",
+                }
+            timing = Phase6PaperExecutionService.execution_timing(calendar, execution_now)
             if timing.execution_session != pinned_session:
                 return {
                     "deployment_id": deployment_id,
