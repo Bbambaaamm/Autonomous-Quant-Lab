@@ -552,8 +552,7 @@ class JobExecutor:
                 raise PermanentJobError(
                     "RUN_PAPER_CYCLE je legacy demo contract a production worker jej nespouští"
                 )
-            if job_type != JobType.RUN_PAPER_CYCLE:
-                raise PermanentJobError("Neznámý job type")
+            raise PermanentJobError("Neznámý job type")
         finally:
             if advisory_lock_acquired:
                 connection.execute(select(func.pg_advisory_unlock(func.hashtext(account_id))))
@@ -631,20 +630,20 @@ class JobExecutor:
                 raise TransientJobError(message) from exc
             raise PermanentJobError(message) from exc
         with sessions() as session:
-            monitoring = session.scalar(
+            persisted_monitoring = session.scalar(
                 select(PaperMonitoringRunRecord).where(
                     PaperMonitoringRunRecord.deployment_id == deployment_id,
                     PaperMonitoringRunRecord.state == "ACTIVE",
                 )
             )
             cycle = session.get(TradingCycleRecord, cycle_id)
-            if monitoring is None or cycle is None:
+            if persisted_monitoring is None or cycle is None:
                 raise TransientJobError("Execution lineage po Phase 6 execution chybí")
             if cycle.account_id != account_id:
                 raise PermanentJobError("Job account neodpovídá deployment lineage")
         return {
             "deployment_id": deployment_id,
-            "monitoring_id": monitoring.monitoring_id,
+            "monitoring_id": persisted_monitoring.monitoring_id,
             "trading_cycle_id": cycle_id,
             "reconciliation_id": None,
             "outcome": "EXECUTED",

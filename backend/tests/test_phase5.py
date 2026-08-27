@@ -47,6 +47,61 @@ def test_migration_revisions_own_only_their_tables() -> None:
     assert "paper_accounts" not in initial.INITIAL_TABLES
 
 
+def test_b2_migration_accepts_columns_created_by_phase5_metadata(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    root = Path(__file__).parents[2]
+    spec = spec_from_file_location(
+        "b2_worker_lineage_migration",
+        root / "alembic/versions/20260826_01_b2_worker_lineage.py",
+    )
+    assert spec is not None and spec.loader is not None
+    migration = module_from_spec(spec)
+    spec.loader.exec_module(migration)
+
+    class ExistingPhase5Schema:
+        @staticmethod
+        def get_columns(_table: str) -> list[dict[str, str]]:
+            return [{"name": "deployment_id"}, {"name": "monitoring_id"}]
+
+        @staticmethod
+        def get_indexes(_table: str) -> list[dict[str, str]]:
+            return [
+                {"name": "ix_job_runs_deployment_id"},
+                {"name": "ix_job_runs_monitoring_id"},
+            ]
+
+        @staticmethod
+        def get_foreign_keys(_table: str) -> list[dict[str, str]]:
+            return []
+
+    added_columns: list[str] = []
+    added_indexes: list[str] = []
+    added_foreign_keys: list[str] = []
+    monkeypatch.setattr(migration.op, "get_bind", lambda: object())
+    monkeypatch.setattr(migration.sa, "inspect", lambda _bind: ExistingPhase5Schema())
+    monkeypatch.setattr(
+        migration.op, "add_column", lambda _table, column: added_columns.append(column.name)
+    )
+    monkeypatch.setattr(
+        migration.op,
+        "create_index",
+        lambda name, _table, _columns: added_indexes.append(name),
+    )
+    monkeypatch.setattr(
+        migration.op,
+        "create_foreign_key",
+        lambda name, *_args, **_kwargs: added_foreign_keys.append(name),
+    )
+
+    migration.upgrade()
+
+    assert added_columns == []
+    assert added_indexes == []
+    assert added_foreign_keys == [
+        "fk_job_runs_deployment_id",
+        "fk_job_runs_monitoring_id",
+    ]
+
+
 def test_legacy_snapshot_migration_separates_config_from_execution_identity() -> None:
     root = Path(__file__).parents[2]
     spec = spec_from_file_location(
