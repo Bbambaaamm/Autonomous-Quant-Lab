@@ -46,6 +46,7 @@ from quantlab.phase4 import (
     AuditEventRecord,
     PaperAccountRecord,
     PositionRecord,
+    ProductionRiskConfig,
     TradingCycleRecord,
     TradingCycleService,
 )
@@ -56,6 +57,7 @@ from quantlab.runtime_identity import (
     components_from_manifest,
     manifest_hash,
 )
+from quantlab.trading import CostModel, FixedBpsSlippage
 from quantlab.universe import (
     PointInTimeUniverse,
     UniverseDefinition,
@@ -750,6 +752,10 @@ class DeploymentService:
         actor: dict[str, str] | None = None,
         reason: str | None = None,
         correlation_id: str | None = None,
+        risk_config: ProductionRiskConfig | None = None,
+        costs: CostModel | None = None,
+        slippage: FixedBpsSlippage | None = None,
+        volume_fraction: Decimal = Decimal("0.10"),
     ) -> StrategyDeploymentRecord:
         created_at = require_utc(created_at or datetime.now(UTC))
         with self._sessions() as session, session.begin():
@@ -758,7 +764,13 @@ class DeploymentService:
                 raise DatasetInvalid("Deployment lze vytvořit pouze z PAPER_CANDIDATE")
             snapshot, _, _ = self.validate_experiment(session, experiment)
             parameters = self._evidence(experiment.selected_parameters_json, "parameters")
-            manifest = build_runtime_manifest(code_sha=experiment.code_sha)
+            manifest = build_runtime_manifest(
+                risk=risk_config,
+                costs=costs,
+                slippage=slippage,
+                volume_fraction=volume_fraction,
+                code_sha=experiment.code_sha,
+            )
             runtime_hash = manifest_hash(manifest)
             identity = hashlib.sha256(
                 self._canonical(

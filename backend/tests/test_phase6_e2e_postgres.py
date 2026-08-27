@@ -454,8 +454,14 @@ def _research_to_paper(factory, engine, *, halted: bool):
     repository.seed_account(account_id, Decimal("100000"))
     if halted:
         repository.halt(account_id, "audit-test", f"halt-{suffix}")
+    approved_risk = ProductionRiskConfig(
+        max_position_pct=Decimal("1"),
+        max_single_order_pct=Decimal("1"),
+        max_single_order_notional=Decimal("200000"),
+        instrument_allowlist=frozenset({instrument.instrument_id}),
+    )
     deployment_service = DeploymentService(factory)
-    deployment = deployment_service.create(experiment.id, account_id)
+    deployment = deployment_service.create(experiment.id, account_id, risk_config=approved_risk)
     assert deployment.status == "PENDING_REVIEW"
     deployment_service.approve(deployment.deployment_id, datetime.now(UTC))
     monitoring_service = PaperMonitoringService(factory)
@@ -485,13 +491,9 @@ def _research_to_paper(factory, engine, *, halted: bool):
         == "SUCCEEDED"
     )
     _seed_opening_observation(factory, instrument.instrument_id, next_session, Decimal("120"))
-    risk = ProductionRiskConfig(
-        max_position_pct=Decimal("1"),
-        max_single_order_pct=Decimal("1"),
-        max_single_order_notional=Decimal("200000"),
-        instrument_allowlist=frozenset({instrument.instrument_id}),
-    )
-    cycle = TradingCycleService(repository, risk)
+    # Procesní default záměrně neumožňuje instrument. Deployment musí použít approved manifest.
+    drifted_runtime_risk = ProductionRiskConfig(instrument_allowlist=frozenset())
+    cycle = TradingCycleService(repository, drifted_runtime_risk)
     service = Phase6PaperExecutionService(factory, ValidatedCurrentDataAccessor(factory), cycle)
     cycle_id = service.run(deployment.deployment_id, CALENDAR.session_open(next_session))
     return account_id, deployment, experiment, snapshot, cycle_id, instrument, halted

@@ -7,7 +7,7 @@ import json
 from dataclasses import dataclass
 from datetime import timedelta
 from decimal import Decimal
-from typing import Any
+from typing import Any, cast
 
 from quantlab.phase4 import ProductionRiskConfig
 from quantlab.trading import CostModel, FixedBpsSlippage
@@ -117,9 +117,11 @@ def components_from_manifest(manifest: dict[str, Any]) -> RuntimeComponents:
         isinstance(item, dict) for item in (risk, portfolio, commission, slippage, execution)
     ):
         raise ValueError("RUNTIME_CONFIG_INVALID")
-    assert isinstance(risk, dict) and isinstance(portfolio, dict)
-    assert isinstance(commission, dict) and isinstance(slippage, dict)
-    assert isinstance(execution, dict)
+    risk = cast(dict[str, Any], risk)
+    portfolio = cast(dict[str, Any], portfolio)
+    commission = cast(dict[str, Any], commission)
+    slippage = cast(dict[str, Any], slippage)
+    execution = cast(dict[str, Any], execution)
     expected = build_runtime_manifest(
         code_sha=(manifest.get("artifact") or {}).get("experiment_code_sha")
     )
