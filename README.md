@@ -36,9 +36,9 @@ Každý ekonomický příkaz prochází přes `RiskEngine` a `ExecutionEngine`. 
 
 Podporovaný Phase 6 bootstrap je dostupný v autentizovaném ADMIN namespace `/operator`: instrument,
 PIT universe/membership, provider ingest, validovaný snapshot, allowlisted experiment, promotion,
-deployment create/approve, monitoring enrollment a explicitní naplánování approved deploymentu.
-Worker provádí pouze immutable `RUN_PAPER_DEPLOYMENT`; automatický market-data refresh zatím není
-součástí této cesty.
+deployment create/approve, monitoring enrollment a explicitní opt-in autonomní orchestrace.
+`PREPARE_PAPER_SESSION` obnovuje provider data z PIT scope a materializuje session-identitní
+`RUN_PAPER_DEPLOYMENT`; worker nadále provádí obchod pouze přes Phase 6 paper runtime.
 
 ## Požadavky
 

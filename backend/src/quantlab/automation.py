@@ -6,7 +6,7 @@ import os
 import signal
 import socket
 from collections.abc import Callable
-from datetime import UTC, datetime, time, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from enum import StrEnum
 from threading import Event, Thread
 from typing import Any
@@ -41,6 +41,7 @@ from quantlab.phase4 import ReconciliationService, TradingCycleRecord, TradingCy
 class JobType(StrEnum):
     RUN_PAPER_CYCLE = "RUN_PAPER_CYCLE"
     RUN_PAPER_DEPLOYMENT = "RUN_PAPER_DEPLOYMENT"
+    PREPARE_PAPER_SESSION = "PREPARE_PAPER_SESSION"
     RUN_RECONCILIATION = "RUN_RECONCILIATION"
     MONITOR_PAPER_DEPLOYMENT = "MONITOR_PAPER_DEPLOYMENT"
 
@@ -269,6 +270,11 @@ class AutomationRepository:
                 raise ValueError("Deployment job přijímá pouze deployment_id")
             if not isinstance(config["deployment_id"], str) or not config["deployment_id"]:
                 raise ValueError("Deployment job vyžaduje platné deployment_id")
+        if job_type == JobType.PREPARE_PAPER_SESSION:
+            if strategy_id is not None or set(config) != {"deployment_id"}:
+                raise ValueError("Session orchestration přijímá pouze deployment_id")
+            if not isinstance(config["deployment_id"], str) or not config["deployment_id"]:
+                raise ValueError("Session orchestration vyžaduje platné deployment_id")
         if job_type == JobType.MONITOR_PAPER_DEPLOYMENT and set(config) != {"monitoring_id"}:
             raise ValueError("Monitoring job přijímá pouze monitoring_id")
         if schedule_type == ScheduleType.INTERVAL and (
@@ -345,6 +351,109 @@ class AutomationRepository:
             job_id=hashlib.sha256(f"paper-deployment:{deployment_id}".encode()).hexdigest(),
             **schedule,
         )
+
+    def set_autonomous_deployment(
+        self, *, deployment_id: str, enabled: bool, now: datetime | None = None
+    ) -> ScheduledJob:
+        """Idempotentně zapne nebo vypne explicitně opt-in XNYS orchestrace deploymentu."""
+        from quantlab.persistence import StrategyDeploymentRecord
+        from quantlab.phase7 import PaperMonitoringRunRecord
+
+        now = utc(now or datetime.now(UTC))
+        job_id = hashlib.sha256(f"paper-session:{deployment_id}".encode()).hexdigest()
+        with Session(self.engine) as session:
+            deployment = session.get(StrategyDeploymentRecord, deployment_id)
+            if deployment is None:
+                raise KeyError(deployment_id)
+            if deployment.status != "APPROVED":
+                raise ValueError("Autonomous orchestrace vyžaduje APPROVED deployment")
+            active = session.scalar(
+                select(PaperMonitoringRunRecord).where(
+                    PaperMonitoringRunRecord.deployment_id == deployment_id,
+                    PaperMonitoringRunRecord.state == "ACTIVE",
+                )
+            )
+            if enabled and active is None:
+                raise ValueError("Autonomous orchestrace vyžaduje ACTIVE monitoring")
+            existing = session.get(ScheduledJob, job_id)
+            if existing is not None:
+                existing.enabled = enabled
+                if enabled:
+                    existing.next_run_at = now
+                existing.updated_at = now
+                session.commit()
+                session.refresh(existing)
+                session.expunge(existing)
+                return existing
+            account_id = deployment.paper_account_id
+        return self.create_job(
+            job_type=JobType.PREPARE_PAPER_SESSION,
+            account_id=account_id,
+            schedule_type=ScheduleType.INTERVAL,
+            interval_seconds=300,
+            next_run_at=now,
+            misfire_policy=MisfirePolicy.RUN_ONCE_IF_MISSED,
+            misfire_grace_seconds=900,
+            max_attempts=5,
+            config={"deployment_id": deployment_id},
+            enabled=enabled,
+            job_id=job_id,
+        )
+
+    def materialize_execution_session(
+        self,
+        *,
+        deployment_id: str,
+        account_id: str,
+        execution_session: date,
+        execution_time: datetime,
+        created_at: datetime,
+    ) -> str:
+        """Vytvoří nejvýše jednu execution occurrence pro deployment a XNYS session."""
+        job_id = hashlib.sha256(f"paper-deployment:{deployment_id}".encode()).hexdigest()
+        with Session(self.engine) as session, session.begin():
+            job = session.get(ScheduledJob, job_id)
+            if job is None:
+                job = ScheduledJob(
+                    id=job_id,
+                    job_type=JobType.RUN_PAPER_DEPLOYMENT,
+                    account_id=account_id,
+                    strategy_id=None,
+                    enabled=False,
+                    schedule_type=ScheduleType.INTERVAL,
+                    interval_seconds=86400,
+                    daily_time=None,
+                    timezone="UTC",
+                    misfire_policy=MisfirePolicy.SKIP_IF_TOO_OLD,
+                    misfire_grace_seconds=0,
+                    next_run_at=utc(execution_time),
+                    max_attempts=5,
+                    config_json=json.dumps({"deployment_id": deployment_id}, sort_keys=True),
+                    correlation_metadata_json="{}",
+                    created_at=utc(created_at),
+                    updated_at=utc(created_at),
+                )
+                session.add(job)
+                session.flush()
+            occurrence = f"xnys:{execution_session.isoformat()}"
+            run_id = hashlib.sha256(f"{job_id}|{occurrence}".encode()).hexdigest()
+            if session.get(JobRun, run_id) is None:
+                session.add(
+                    JobRun(
+                        id=run_id,
+                        scheduled_job_id=job_id,
+                        occurrence_key=occurrence,
+                        scheduled_for=utc(execution_time),
+                        status=RunStatus.PENDING,
+                        attempt_count=0,
+                        fencing_token=0,
+                        config_snapshot_json=SchedulerService._snapshot(job),
+                        correlation_id=run_id,
+                        deployment_id=deployment_id,
+                        created_at=utc(created_at),
+                    )
+                )
+        return run_id
 
     def page(self, model: type[Any], limit: int = 50, offset: int = 0) -> list[Any]:
         order_column = model.created_at if hasattr(model, "created_at") else model.last_heartbeat_at
@@ -479,7 +588,13 @@ class TransientJobError(RuntimeError):
 
 
 class JobExecutor:
-    def __init__(self, repository: AutomationRepository) -> None:
+    def __init__(
+        self,
+        repository: AutomationRepository,
+        *,
+        provider_factory: Callable[[], Any] | None = None,
+        clock: Callable[[], datetime] | None = None,
+    ) -> None:
         from quantlab.phase4 import Phase4Repository
 
         phase4 = Phase4Repository(
@@ -488,6 +603,9 @@ class JobExecutor:
         )
         self.trading = TradingCycleService(phase4)
         self.reconciliation = ReconciliationService(phase4)
+        self.repository = repository
+        self.provider_factory = provider_factory
+        self.clock = clock or (lambda: datetime.now(UTC))
 
     def __call__(self, job: ScheduledJob, run: JobRun) -> dict[str, str | None]:
         snapshot = json.loads(run.config_snapshot_json)
@@ -534,7 +652,9 @@ class JobExecutor:
                 "outcome": evaluation.verdict,
             }
         if job_type == JobType.RUN_PAPER_DEPLOYMENT:
-            return self._run_paper_deployment(account_id, payload)
+            return self._run_paper_deployment(account_id, payload, run)
+        if job_type == JobType.PREPARE_PAPER_SESSION:
+            return self._prepare_paper_session(account_id, payload)
         connection = self.trading.repository.engine.connect()
         advisory_lock_acquired = False
         try:
@@ -558,8 +678,146 @@ class JobExecutor:
                 connection.execute(select(func.pg_advisory_unlock(func.hashtext(account_id))))
             connection.close()
 
-    def _run_paper_deployment(
+    def _prepare_paper_session(
         self, account_id: str, payload: dict[str, Any]
+    ) -> dict[str, str | None]:
+        """Obnoví PIT scope po close a připraví pouze next-session execution occurrence."""
+        from quantlab.market_data import (
+            AssetType,
+            Instrument,
+            ProviderError,
+            StooqProvider,
+            XNYSCalendar,
+        )
+        from quantlab.market_data_service import PersistentMarketDataService
+        from quantlab.persistence import (
+            InstrumentRecord,
+            MarketObservationRecord,
+            StrategyDeploymentRecord,
+            UniverseMembershipRecord,
+        )
+        from quantlab.phase7 import PaperMonitoringRunRecord
+
+        if set(payload) != {"deployment_id"} or not isinstance(payload["deployment_id"], str):
+            raise PermanentJobError("PREPARE_PAPER_SESSION přijímá pouze deployment_id")
+        deployment_id = payload["deployment_id"]
+        now = utc(self.clock())
+        calendar = XNYSCalendar()
+        signal_session = calendar.latest_completed_session(now)
+        signal_close = calendar.session_close(signal_session)
+        execution_session = calendar.next_session(signal_session)
+        execution_open = calendar.session_open(execution_session)
+
+        def sessions() -> Session:
+            return Session(self.trading.repository.engine)
+
+        with sessions() as session:
+            deployment = session.get(StrategyDeploymentRecord, deployment_id)
+            if deployment is None or deployment.status != "APPROVED":
+                raise PermanentJobError("Orchestrace vyžaduje APPROVED deployment")
+            if deployment.paper_account_id != account_id:
+                raise PermanentJobError("Orchestration account neodpovídá deployment lineage")
+            monitoring = session.scalar(
+                select(PaperMonitoringRunRecord).where(
+                    PaperMonitoringRunRecord.deployment_id == deployment_id,
+                    PaperMonitoringRunRecord.state == "ACTIVE",
+                )
+            )
+            if monitoring is None:
+                return {
+                    "deployment_id": deployment_id,
+                    "trading_cycle_id": None,
+                    "reconciliation_id": None,
+                    "outcome": "BLOCKED_BY_LIFECYCLE",
+                    "no_action_reason": "MONITORING_NOT_ACTIVE",
+                }
+            memberships = tuple(
+                session.scalars(
+                    select(UniverseMembershipRecord).where(
+                        UniverseMembershipRecord.universe_id == deployment.universe_id,
+                        UniverseMembershipRecord.known_at <= signal_close,
+                        UniverseMembershipRecord.valid_from <= signal_close,
+                        or_(
+                            UniverseMembershipRecord.valid_to.is_(None),
+                            UniverseMembershipRecord.valid_to > signal_close,
+                        ),
+                    )
+                )
+            )
+            instrument_ids = tuple(sorted({item.instrument_id for item in memberships}))
+            rows = (
+                tuple(
+                    session.scalars(
+                        select(InstrumentRecord).where(
+                            InstrumentRecord.instrument_id.in_(instrument_ids)
+                        )
+                    )
+                )
+                if instrument_ids
+                else ()
+            )
+        if not rows or len(rows) != len(instrument_ids):
+            raise PermanentJobError("PIT universe scope je prázdný nebo nekonzistentní")
+        provider = self.provider_factory() if self.provider_factory else StooqProvider()
+        ingestions: list[str] = []
+        for row in sorted(rows, key=lambda item: item.instrument_id):
+            instrument = Instrument(
+                row.instrument_id,
+                row.symbol,
+                row.exchange,
+                row.calendar,
+                row.currency,
+                AssetType(row.asset_type),
+                row.active_from.date(),
+                row.active_to.date() if row.active_to else None,
+                utc(row.created_at),
+            )
+            try:
+                result = PersistentMarketDataService(sessions, calendar).ingest(
+                    provider,
+                    instrument,
+                    signal_session,
+                    execution_session if now >= execution_open else signal_session,
+                    now,
+                )
+            except ProviderError as exc:
+                raise TransientJobError(str(exc)) from exc
+            ingestions.append(result.ingestion_id)
+            if result.status != "SUCCEEDED":
+                raise TransientJobError(result.error or "Market-data refresh selhal")
+            with sessions() as session:
+                ready = session.scalar(
+                    select(func.count())
+                    .select_from(MarketObservationRecord)
+                    .where(
+                        MarketObservationRecord.instrument_id == row.instrument_id,
+                        MarketObservationRecord.session_date
+                        == datetime.combine(signal_session, time(), UTC),
+                        MarketObservationRecord.observed_at <= now,
+                    )
+                )
+            if not ready:
+                raise TransientJobError("STALE_DATA: provider nevrátil completed signal session")
+        run_id = self.repository.materialize_execution_session(
+            deployment_id=deployment_id,
+            account_id=account_id,
+            execution_session=execution_session,
+            execution_time=execution_open,
+            created_at=now,
+        )
+        return {
+            "deployment_id": deployment_id,
+            "monitoring_id": monitoring.monitoring_id,
+            "trading_cycle_id": None,
+            "reconciliation_id": None,
+            "outcome": "DATA_READY",
+            "no_action_reason": None,
+            "execution_run_id": run_id,
+            "ingestion_ids": ",".join(ingestions),
+        }
+
+    def _run_paper_deployment(
+        self, account_id: str, payload: dict[str, Any], run: JobRun
     ) -> dict[str, str | None]:
         from quantlab.market_data import DatasetInvalid
         from quantlab.persistence import StrategyDeploymentRecord
@@ -572,6 +830,25 @@ class JobExecutor:
         if set(payload) != {"deployment_id"} or not isinstance(payload["deployment_id"], str):
             raise PermanentJobError("RUN_PAPER_DEPLOYMENT přijímá pouze deployment_id")
         deployment_id = payload["deployment_id"]
+
+        if run.occurrence_key.startswith("xnys:"):
+            from quantlab.market_data import XNYSCalendar
+            from quantlab.phase6_runtime import Phase6PaperExecutionService
+
+            try:
+                pinned_session = date.fromisoformat(run.occurrence_key.removeprefix("xnys:"))
+            except ValueError as exc:
+                raise PermanentJobError("Execution occurrence má neplatnou XNYS session") from exc
+            timing = Phase6PaperExecutionService.execution_timing(XNYSCalendar(), self.clock())
+            if timing.execution_session != pinned_session:
+                return {
+                    "deployment_id": deployment_id,
+                    "monitoring_id": None,
+                    "trading_cycle_id": None,
+                    "reconciliation_id": None,
+                    "outcome": "NO_ACTION",
+                    "no_action_reason": "MISSED_EXECUTION_SESSION",
+                }
 
         def sessions() -> Session:
             return Session(self.trading.repository.engine)
@@ -619,7 +896,7 @@ class JobExecutor:
             sessions, ValidatedCurrentDataAccessor(sessions), self.trading
         )
         try:
-            cycle_id = service.run(deployment_id, datetime.now(UTC))
+            cycle_id = service.run(deployment_id, self.clock())
         except DatasetInvalid as exc:
             message = str(exc)
             if (
@@ -705,6 +982,7 @@ class WorkerService:
             query = (
                 select(JobRun)
                 .where(
+                    JobRun.scheduled_for <= now,
                     or_(
                         and_(
                             JobRun.status.in_([RunStatus.PENDING, RunStatus.RETRY_SCHEDULED]),
@@ -714,7 +992,7 @@ class WorkerService:
                             JobRun.status.in_([RunStatus.CLAIMED, RunStatus.RUNNING]),
                             JobRun.lease_expires_at <= now,
                         ),
-                    )
+                    ),
                 )
                 .order_by(JobRun.scheduled_for, JobRun.created_at, JobRun.id)
                 .limit(1)
