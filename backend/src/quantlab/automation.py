@@ -6,10 +6,8 @@ import os
 import signal
 import socket
 from collections.abc import Callable
-from datetime import UTC, date, datetime, time, timedelta
-from decimal import Decimal
+from datetime import UTC, datetime, time, timedelta
 from enum import StrEnum
-from pathlib import Path
 from threading import Event, Thread
 from typing import Any
 from uuid import uuid4
@@ -36,14 +34,13 @@ from sqlalchemy.exc import DBAPIError, IntegrityError, OperationalError
 from sqlalchemy.orm import Mapped, Session, mapped_column
 
 from quantlab.config import Settings
-from quantlab.data import CSVMarketDataProvider
-from quantlab.domain import TradingCycleStatus
 from quantlab.persistence import Base, _sqlite_fk
 from quantlab.phase4 import ReconciliationService, TradingCycleRecord, TradingCycleService
 
 
 class JobType(StrEnum):
     RUN_PAPER_CYCLE = "RUN_PAPER_CYCLE"
+    RUN_PAPER_DEPLOYMENT = "RUN_PAPER_DEPLOYMENT"
     RUN_RECONCILIATION = "RUN_RECONCILIATION"
     MONITOR_PAPER_DEPLOYMENT = "MONITOR_PAPER_DEPLOYMENT"
 
@@ -136,6 +133,8 @@ class JobRun(Base):
     config_snapshot_json: Mapped[str] = mapped_column(Text, nullable=False)
     correlation_id: Mapped[str] = mapped_column(String(64), nullable=False)
     trading_cycle_id: Mapped[str | None] = mapped_column(String(64))
+    deployment_id: Mapped[str | None] = mapped_column(String(64), index=True)
+    monitoring_id: Mapped[str | None] = mapped_column(String(64), index=True)
     reconciliation_id: Mapped[str | None] = mapped_column(String(64))
     outcome: Mapped[str | None] = mapped_column(String(40))
     no_action_reason: Mapped[str | None] = mapped_column(String(100))
@@ -258,12 +257,18 @@ class AutomationRepository:
         max_attempts: int = 5,
         config: dict[str, Any] | None = None,
         enabled: bool = True,
+        job_id: str | None = None,
     ) -> ScheduledJob:
         config = config or {}
         validate_payload(config)
         ZoneInfo(timezone)
         if job_type == JobType.RUN_PAPER_CYCLE and not strategy_id:
             raise ValueError("Paper cycle vyžaduje strategy_id")
+        if job_type == JobType.RUN_PAPER_DEPLOYMENT:
+            if strategy_id is not None or set(config) != {"deployment_id"}:
+                raise ValueError("Deployment job přijímá pouze deployment_id")
+            if not isinstance(config["deployment_id"], str) or not config["deployment_id"]:
+                raise ValueError("Deployment job vyžaduje platné deployment_id")
         if job_type == JobType.MONITOR_PAPER_DEPLOYMENT and set(config) != {"monitoring_id"}:
             raise ValueError("Monitoring job přijímá pouze monitoring_id")
         if schedule_type == ScheduleType.INTERVAL and (
@@ -276,7 +281,7 @@ class AutomationRepository:
             parse_daily_time(daily_time)
         now = datetime.now(UTC)
         row = ScheduledJob(
-            id=str(uuid4()),
+            id=job_id or str(uuid4()),
             job_type=job_type,
             account_id=account_id,
             strategy_id=strategy_id,
@@ -296,10 +301,50 @@ class AutomationRepository:
         )
         with Session(self.engine) as session:
             session.add(row)
-            session.commit()
+            try:
+                session.commit()
+            except IntegrityError:
+                session.rollback()
+                if job_id is None:
+                    raise
+                concurrent = session.get(ScheduledJob, job_id)
+                if concurrent is None:
+                    raise
+                session.expunge(concurrent)
+                return concurrent
             session.refresh(row)
             session.expunge(row)
         return row
+
+    def create_deployment_job(self, *, deployment_id: str, **schedule: Any) -> ScheduledJob:
+        """Vytvoří idempotentní job pouze z ověřené persistentní deployment lineage."""
+        from quantlab.persistence import StrategyDeploymentRecord
+
+        with Session(self.engine) as session:
+            deployment = session.get(StrategyDeploymentRecord, deployment_id)
+            if deployment is None:
+                raise KeyError(deployment_id)
+            if deployment.status != "APPROVED":
+                raise ValueError("Deployment job vyžaduje APPROVED deployment")
+            existing = session.scalar(
+                select(ScheduledJob).where(
+                    ScheduledJob.job_type == JobType.RUN_PAPER_DEPLOYMENT,
+                    ScheduledJob.config_json
+                    == json.dumps({"deployment_id": deployment_id}, sort_keys=True),
+                )
+            )
+            if existing is not None:
+                session.expunge(existing)
+                return existing
+            account_id = deployment.paper_account_id
+        return self.create_job(
+            job_type=JobType.RUN_PAPER_DEPLOYMENT,
+            account_id=account_id,
+            strategy_id=None,
+            config={"deployment_id": deployment_id},
+            job_id=hashlib.sha256(f"paper-deployment:{deployment_id}".encode()).hexdigest(),
+            **schedule,
+        )
 
     def page(self, model: type[Any], limit: int = 50, offset: int = 0) -> list[Any]:
         order_column = model.created_at if hasattr(model, "created_at") else model.last_heartbeat_at
@@ -488,6 +533,8 @@ class JobExecutor:
                 "reconciliation_id": None,
                 "outcome": evaluation.verdict,
             }
+        if job_type == JobType.RUN_PAPER_DEPLOYMENT:
+            return self._run_paper_deployment(account_id, payload)
         connection = self.trading.repository.engine.connect()
         advisory_lock_acquired = False
         try:
@@ -501,52 +548,107 @@ class JobExecutor:
                     "outcome": result.status,
                     "trading_cycle_id": None,
                 }
-            if job_type != JobType.RUN_PAPER_CYCLE:
-                raise PermanentJobError("Neznámý job type")
-            try:
-                path = payload["dataset_path"]
-                targets = {k: Decimal(str(v)) for k, v in payload["target_weights"].items()}
-            except (KeyError, TypeError, ValueError) as exc:
-                raise PermanentJobError("Neplatná konfigurace paper cycle") from exc
-            symbol = str(payload.get("symbol", "SPY"))
-            decision_time = utc(run.scheduled_for)
-            available_bars = CSVMarketDataProvider(Path(path)).load(symbol)
-            execution_index = next(
-                (
-                    index
-                    for index, bar in enumerate(available_bars)
-                    if bar.timestamp > decision_time
-                ),
-                None,
-            )
-            if execution_index == 0:
-                raise PermanentJobError("K decision time nejsou dostupná žádná market data")
-            if execution_index is None:
-                raise PermanentJobError("Po decision time chybí následující executable bar")
-            # Close-derived rozhodnutí smí použít pouze historii k decision time a první
-            # následující bar pro fill; pozdější bary do cycle vstupů nepatří.
-            bars = available_bars[: execution_index + 1]
-            cycle_id = self.trading.run(
-                account_id,
-                str(strategy_id or ""),
-                bars,
-                targets,
-                date.fromisoformat(payload.get("session_date", decision_time.date().isoformat())),
-                decision_time,
-            )
-            with Session(self.trading.repository.engine) as session:
-                cycle = session.get(TradingCycleRecord, cycle_id)
-                if cycle is None:
-                    raise TransientJobError("Phase 4 cycle po execution chybí")
-                if cycle.status == TradingCycleStatus.RUNNING:
-                    raise TransientJobError("Phase 4 cycle je stále RUNNING")
-                if cycle.status != TradingCycleStatus.COMPLETED:
-                    raise PermanentJobError(f"Phase 4 cycle skončil stavem {cycle.status}")
-            return {"trading_cycle_id": cycle_id, "reconciliation_id": None, "outcome": "PROCESSED"}
+            if job_type == JobType.RUN_PAPER_CYCLE:
+                raise PermanentJobError(
+                    "RUN_PAPER_CYCLE je legacy demo contract a production worker jej nespouští"
+                )
+            raise PermanentJobError("Neznámý job type")
         finally:
             if advisory_lock_acquired:
                 connection.execute(select(func.pg_advisory_unlock(func.hashtext(account_id))))
             connection.close()
+
+    def _run_paper_deployment(
+        self, account_id: str, payload: dict[str, Any]
+    ) -> dict[str, str | None]:
+        from quantlab.market_data import DatasetInvalid
+        from quantlab.persistence import StrategyDeploymentRecord
+        from quantlab.phase6_runtime import (
+            Phase6PaperExecutionService,
+            ValidatedCurrentDataAccessor,
+        )
+        from quantlab.phase7 import PaperMonitoringRunRecord
+
+        if set(payload) != {"deployment_id"} or not isinstance(payload["deployment_id"], str):
+            raise PermanentJobError("RUN_PAPER_DEPLOYMENT přijímá pouze deployment_id")
+        deployment_id = payload["deployment_id"]
+
+        def sessions() -> Session:
+            return Session(self.trading.repository.engine)
+
+        with sessions() as session:
+            deployment = session.get(StrategyDeploymentRecord, deployment_id)
+            if deployment is None:
+                raise PermanentJobError("Deployment neexistuje")
+            if deployment.status != "APPROVED":
+                raise PermanentJobError("Paper execution vyžaduje APPROVED deployment")
+            if deployment.paper_account_id != account_id:
+                raise PermanentJobError("Job account neodpovídá deployment lineage")
+            monitoring_runs = list(
+                session.scalars(
+                    select(PaperMonitoringRunRecord)
+                    .where(PaperMonitoringRunRecord.deployment_id == deployment_id)
+                    .order_by(PaperMonitoringRunRecord.started_at.desc())
+                )
+            )
+            open_monitoring = [
+                item for item in monitoring_runs if item.state in {"ACTIVE", "PAUSED", "SUSPENDED"}
+            ]
+            if len(open_monitoring) != 1:
+                if monitoring_runs and monitoring_runs[0].state == "RETIRED":
+                    return {
+                        "deployment_id": deployment_id,
+                        "monitoring_id": monitoring_runs[0].monitoring_id,
+                        "trading_cycle_id": None,
+                        "reconciliation_id": None,
+                        "outcome": "BLOCKED_BY_LIFECYCLE",
+                        "no_action_reason": "MONITORING_RETIRED",
+                    }
+                raise PermanentJobError("Paper execution vyžaduje právě jeden monitoring context")
+            monitoring = open_monitoring[0]
+            if monitoring.state != "ACTIVE":
+                return {
+                    "deployment_id": deployment_id,
+                    "monitoring_id": monitoring.monitoring_id,
+                    "trading_cycle_id": None,
+                    "reconciliation_id": None,
+                    "outcome": "BLOCKED_BY_LIFECYCLE",
+                    "no_action_reason": f"MONITORING_{monitoring.state}",
+                }
+        service = Phase6PaperExecutionService(
+            sessions, ValidatedCurrentDataAccessor(sessions), self.trading
+        )
+        try:
+            cycle_id = service.run(deployment_id, datetime.now(UTC))
+        except DatasetInvalid as exc:
+            message = str(exc)
+            if (
+                "executable session" in message
+                or "Current data" in message
+                or "observation" in message
+            ):
+                raise TransientJobError(message) from exc
+            raise PermanentJobError(message) from exc
+        with sessions() as session:
+            persisted_monitoring = session.scalar(
+                select(PaperMonitoringRunRecord).where(
+                    PaperMonitoringRunRecord.deployment_id == deployment_id,
+                    PaperMonitoringRunRecord.state == "ACTIVE",
+                )
+            )
+            cycle = session.get(TradingCycleRecord, cycle_id)
+            if persisted_monitoring is None or cycle is None:
+                raise TransientJobError("Execution lineage po Phase 6 execution chybí")
+            if cycle.account_id != account_id:
+                raise PermanentJobError("Job account neodpovídá deployment lineage")
+        return {
+            "deployment_id": deployment_id,
+            "monitoring_id": persisted_monitoring.monitoring_id,
+            "trading_cycle_id": cycle_id,
+            "reconciliation_id": None,
+            "outcome": "EXECUTED",
+            "no_action_reason": None,
+        }
 
 
 class WorkerService:
@@ -686,7 +788,10 @@ class WorkerService:
             run.finished_at = now
             run.outcome = result.get("outcome")
             run.trading_cycle_id = result.get("trading_cycle_id")
+            run.deployment_id = result.get("deployment_id")
+            run.monitoring_id = result.get("monitoring_id")
             run.reconciliation_id = result.get("reconciliation_id")
+            run.no_action_reason = result.get("no_action_reason")
             run.lease_owner = None
             run.lease_expires_at = None
             attempt.status = AttemptStatus.SUCCEEDED

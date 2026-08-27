@@ -140,6 +140,8 @@ jobs:
           uv run alembic -c ../alembic.ini upgrade head
       - name: B1 control-plane end-to-end acceptance
         run: uv run pytest -q tests/test_b1_control_plane_postgres.py
+      - name: B2 approved-deployment worker end-to-end acceptance
+        run: uv run pytest -q tests/test_b2_worker_postgres.py
 
   frontend:
     runs-on: ubuntu-latest

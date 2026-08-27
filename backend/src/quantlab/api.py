@@ -134,6 +134,18 @@ class JobPatch(BaseModel):
     next_run_at: datetime | None = None
 
 
+class DeploymentJobCreate(BaseModel):
+    reason: str = Field(min_length=3, max_length=1000)
+    schedule_type: ScheduleType
+    next_run_at: datetime
+    interval_seconds: int | None = Field(None, gt=0)
+    daily_time: str | None = None
+    timezone: str = "UTC"
+    misfire_policy: MisfirePolicy = MisfirePolicy.RUN_ONCE_IF_MISSED
+    misfire_grace_seconds: int = Field(3600, ge=0)
+    max_attempts: int = Field(5, ge=1, le=100)
+
+
 class MonitoringPolicyCreate(BaseModel):
     name: str = Field(min_length=1, max_length=100)
     config: dict[str, object] = DEFAULT_POLICY.copy()
@@ -686,6 +698,30 @@ def approve_deployment(
         raise HTTPException(409, str(exc)) from exc
 
 
+@app.post("/operator/deployments/{deployment_id}/jobs")
+def schedule_deployment_job(
+    deployment_id: str, body: DeploymentJobCreate, request: Request
+) -> dict[str, object]:
+    try:
+        job = automation_repository.create_deployment_job(
+            deployment_id=deployment_id,
+            **body.model_dump(exclude={"reason"}),
+        )
+        _audit_control_mutation(
+            "CONTROL_PAPER_DEPLOYMENT_JOB_SCHEDULED",
+            "scheduled_job",
+            job.id,
+            _actor(request),
+            body.reason,
+            _correlation(request),
+        )
+        return _row(job)
+    except KeyError as exc:
+        raise HTTPException(404, "Deployment neexistuje") from exc
+    except (ValueError, DatasetInvalid) as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
 @app.post("/operator/monitoring/enrollments")
 def operator_monitoring_enrollment(
     body: MonitoringEnrollment, request: Request
@@ -1056,6 +1092,11 @@ def universe(universe_id: str) -> dict[str, object]:
 
 @app.post("/automation/jobs")
 def create_automation_job(request: JobCreate) -> dict[str, object]:
+    if request.job_type in {JobType.RUN_PAPER_CYCLE, JobType.RUN_PAPER_DEPLOYMENT}:
+        raise HTTPException(
+            status_code=422,
+            detail="Paper deployment lze plánovat pouze podporovanou operator deployment mutation",
+        )
     try:
         return _row(automation_repository.create_job(**request.model_dump()))
     except (ValueError, KeyError) as exc:

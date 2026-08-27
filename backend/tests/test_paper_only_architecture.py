@@ -67,3 +67,20 @@ def test_phase6_services_preserve_the_single_phase4_economic_boundary() -> None:
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
     ]
     assert all(node.func.attr not in {"submit", "fill", "process"} for node in calls)
+
+
+def test_production_worker_has_no_csv_or_target_weight_contract() -> None:
+    tree = ast.parse((SOURCE_ROOT / "automation.py").read_text())
+    executor = next(
+        node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "JobExecutor"
+    )
+    referenced_names = {node.id for node in ast.walk(executor) if isinstance(node, ast.Name)}
+    string_literals = {
+        node.value
+        for node in ast.walk(executor)
+        if isinstance(node, ast.Constant) and isinstance(node.value, str)
+    }
+    assert "CSVMarketDataProvider" not in referenced_names
+    assert "dataset_path" not in string_literals
+    assert "target_weights" not in string_literals
+    assert "Phase6PaperExecutionService" in referenced_names

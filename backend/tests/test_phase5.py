@@ -20,13 +20,12 @@ from quantlab.automation import (
     RunStatus,
     SchedulerService,
     ScheduleType,
-    TransientJobError,
     WorkerHeartbeat,
     WorkerService,
     next_occurrence,
 )
 from quantlab.config import Settings
-from quantlab.phase4 import Phase4Repository, TradingCycleRecord
+from quantlab.phase4 import Phase4Repository
 
 
 def test_migration_revisions_own_only_their_tables() -> None:
@@ -46,6 +45,61 @@ def test_migration_revisions_own_only_their_tables() -> None:
     assert initial.INITIAL_TABLES.isdisjoint(phase5.TABLES)
     assert "scheduled_jobs" not in initial.INITIAL_TABLES
     assert "paper_accounts" not in initial.INITIAL_TABLES
+
+
+def test_b2_migration_accepts_columns_created_by_phase5_metadata(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    root = Path(__file__).parents[2]
+    spec = spec_from_file_location(
+        "b2_worker_lineage_migration",
+        root / "alembic/versions/20260826_01_b2_worker_lineage.py",
+    )
+    assert spec is not None and spec.loader is not None
+    migration = module_from_spec(spec)
+    spec.loader.exec_module(migration)
+
+    class ExistingPhase5Schema:
+        @staticmethod
+        def get_columns(_table: str) -> list[dict[str, str]]:
+            return [{"name": "deployment_id"}, {"name": "monitoring_id"}]
+
+        @staticmethod
+        def get_indexes(_table: str) -> list[dict[str, str]]:
+            return [
+                {"name": "ix_job_runs_deployment_id"},
+                {"name": "ix_job_runs_monitoring_id"},
+            ]
+
+        @staticmethod
+        def get_foreign_keys(_table: str) -> list[dict[str, str]]:
+            return []
+
+    added_columns: list[str] = []
+    added_indexes: list[str] = []
+    added_foreign_keys: list[str] = []
+    monkeypatch.setattr(migration.op, "get_bind", lambda: object())
+    monkeypatch.setattr(migration.sa, "inspect", lambda _bind: ExistingPhase5Schema())
+    monkeypatch.setattr(
+        migration.op, "add_column", lambda _table, column: added_columns.append(column.name)
+    )
+    monkeypatch.setattr(
+        migration.op,
+        "create_index",
+        lambda name, _table, _columns: added_indexes.append(name),
+    )
+    monkeypatch.setattr(
+        migration.op,
+        "create_foreign_key",
+        lambda name, *_args, **_kwargs: added_foreign_keys.append(name),
+    )
+
+    migration.upgrade()
+
+    assert added_columns == []
+    assert added_indexes == []
+    assert added_foreign_keys == [
+        "fk_job_runs_deployment_id",
+        "fk_job_runs_monitoring_id",
+    ]
 
 
 def test_legacy_snapshot_migration_separates_config_from_execution_identity() -> None:
@@ -374,7 +428,7 @@ def test_manual_run_rejects_disabled_job_at_service_boundary(tmp_path) -> None: 
         SchedulerService(repository).run_now(job.id, "disabled", now)
 
 
-def test_executor_uses_only_first_bar_after_decision_and_rejects_incomplete_cycle(tmp_path) -> None:  # type: ignore[no-untyped-def]
+def test_executor_rejects_legacy_paper_cycle_even_with_fixture_payload(tmp_path) -> None:  # type: ignore[no-untyped-def]
     repository, _ = setup(tmp_path)
     csv_path = tmp_path / "bars.csv"
     csv_path.write_text(
@@ -399,34 +453,5 @@ def test_executor_uses_only_first_bar_after_decision_and_rejects_incomplete_cycl
         run = session.get(JobRun, run_id)
         assert run is not None
         session.expunge(run)
-    executor = JobExecutor(repository)
-    observed_timestamps: list[datetime] = []
-
-    def incomplete_run(
-        account_id, strategy_id, bars, target_weights, session_date, supplied_decision_time
-    ):  # type: ignore[no-untyped-def]
-        observed_timestamps.extend(bar.timestamp for bar in bars)
-        cycle_id = "incomplete-cycle"
-        with Session(repository.engine) as session:
-            session.add(
-                TradingCycleRecord(
-                    id=cycle_id,
-                    cycle_key=cycle_id,
-                    account_id=account_id,
-                    strategy_id=strategy_id,
-                    session_date=session_date,
-                    started_at=decision_time,
-                    status="RUNNING",
-                    correlation_id=cycle_id,
-                    data_fingerprint="test",
-                    lease_owner="phase4-worker",
-                    lease_expires_at=decision_time + timedelta(minutes=5),
-                )
-            )
-            session.commit()
-        return cycle_id
-
-    executor.trading.run = incomplete_run  # type: ignore[method-assign]
-    with pytest.raises(TransientJobError, match="stále RUNNING"):
-        executor(job, run)
-    assert observed_timestamps == [decision_time, decision_time + timedelta(days=1)]
+    with pytest.raises(PermanentJobError, match="legacy demo contract"):
+        JobExecutor(repository)(job, run)

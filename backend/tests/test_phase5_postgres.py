@@ -1,6 +1,8 @@
+import json
 import os
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from pathlib import Path
 from threading import Barrier, Event
 from uuid import uuid4
@@ -21,8 +23,11 @@ from quantlab.automation import (
     SchedulerService,
     ScheduleType,
     WorkerService,
+    utc,
 )
 from quantlab.config import Settings
+from quantlab.data import CSVMarketDataProvider
+from quantlab.domain import TradingCycleStatus
 from quantlab.phase4 import (
     PaperAccountRecord,
     PaperFillRecord,
@@ -206,6 +211,50 @@ def paper_job(repo: AutomationRepository, account_id: str, path: Path, now: date
     return job, run
 
 
+class LegacyPaperCycleFixtureExecutor(JobExecutor):
+    """Výhradně testovací executor pro historické Phase 5 recovery důkazy."""
+
+    def __call__(self, job: ScheduledJob, run: JobRun) -> dict[str, str | None]:
+        snapshot = json.loads(run.config_snapshot_json)
+        identity = snapshot["identity"]
+        payload = snapshot["config"]
+        if identity["job_type"] != JobType.RUN_PAPER_CYCLE:
+            return super().__call__(job, run)
+        account_id = str(identity["account_id"])
+        strategy_id = str(identity["strategy_id"])
+        connection = self.trading.repository.engine.connect()
+        advisory_lock_acquired = False
+        try:
+            if connection.dialect.name == "postgresql":
+                connection.execute(select(func.pg_advisory_lock(func.hashtext(account_id))))
+                advisory_lock_acquired = True
+            bars = CSVMarketDataProvider(Path(payload["dataset_path"])).load(str(payload["symbol"]))
+            decision_time = utc(run.scheduled_for)
+            targets = {
+                symbol: Decimal(str(weight)) for symbol, weight in payload["target_weights"].items()
+            }
+            cycle_id = self.trading.run(
+                account_id,
+                strategy_id,
+                bars,
+                targets,
+                datetime.fromisoformat(payload["session_date"]).date(),
+                decision_time,
+            )
+            with Session(self.trading.repository.engine) as session:
+                cycle = session.get(TradingCycleRecord, cycle_id)
+                assert cycle is not None and cycle.status == TradingCycleStatus.COMPLETED
+            return {
+                "trading_cycle_id": cycle_id,
+                "reconciliation_id": None,
+                "outcome": "PROCESSED",
+            }
+        finally:
+            if advisory_lock_acquired:
+                connection.execute(select(func.pg_advisory_unlock(func.hashtext(account_id))))
+            connection.close()
+
+
 def test_postgres_recovers_crash_after_economic_commit(tmp_path: Path) -> None:
     repo, settings, account_id = repository()
     now = datetime.now(UTC).replace(microsecond=0)
@@ -214,11 +263,14 @@ def test_postgres_recovers_crash_after_economic_commit(tmp_path: Path) -> None:
     job, detached_run = paper_job(repo, account_id, path, now)
     crashed = WorkerService(repo, settings, worker_id="crashed-worker")
     assert crashed.claim(now) == (detached_run.id, 1)
-    economic_result = JobExecutor(repo)(job, detached_run)
+    economic_result = LegacyPaperCycleFixtureExecutor(repo)(job, detached_run)
     assert economic_result["trading_cycle_id"] is not None
     # Simulace pádu: ekonomický commit proběhl, finish JobRun nikoli.
     recovered = WorkerService(
-        AutomationRepository(_connection_url(repo)), settings, worker_id="recovered-worker"
+        AutomationRepository(_connection_url(repo)),
+        settings,
+        executor=LegacyPaperCycleFixtureExecutor(AutomationRepository(_connection_url(repo))),
+        worker_id="recovered-worker",
     )
     assert recovered.execute_one(now + timedelta(seconds=3)) == detached_run.id
     with Session(repo.engine) as session:
@@ -310,7 +362,7 @@ def test_postgres_account_lock_serializes_cycle_and_reconciliation(tmp_path: Pat
         reconciliation_run = session.get(JobRun, reconciliation_id)
         assert reconciliation_run is not None
         session.expunge(reconciliation_run)
-    executor_a = JobExecutor(AutomationRepository(_connection_url(repo)))
+    executor_a = LegacyPaperCycleFixtureExecutor(AutomationRepository(_connection_url(repo)))
     executor_b = JobExecutor(AutomationRepository(_connection_url(repo)))
     cycle_entered = Event()
     release_cycle = Event()

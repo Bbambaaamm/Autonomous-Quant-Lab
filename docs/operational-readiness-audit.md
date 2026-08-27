@@ -146,18 +146,17 @@ evidence a domain identity zajišťují bezpečné retry. Podrobnosti a PostgreS
 
 Tato změna **nemění celkový verdikt NOT READY**. Zejména B2, H1, H2, H3 a M1 zůstávají otevřené.
 
-### B2 — Worker neprovádí schválený deployment ani strategii
+### B2 — RESOLVED — worker provádí schválený deployment a strategii
 
-**Dopad:** `RUN_PAPER_CYCLE` snapshotuje a čte `dataset_path`, `symbol`, `target_weights` a
-`session_date`; načte lokální CSV přes `CSVMarketDataProvider` a předá hotové targety přímo
-`TradingCycleService`. `strategy_id` je jen volný řetězec. Worker nikdy nevytvoří
-`Phase6PaperExecutionService`, neověří APPROVED deployment/ACTIVE monitoring, nečte PIT universe,
-nevypočítá strategy signal a nevytvoří `paper_deployment_cycles` lineage.
+Původní `RUN_PAPER_CYCLE` cesta přijímala lokální CSV a caller-supplied target weights. Nový
+produkční contract `RUN_PAPER_DEPLOYMENT` snapshotuje pouze `deployment_id`; worker rekonstruuje
+approved deployment a ACTIVE monitoring lineage a volá výhradně `Phase6PaperExecutionService`.
+Legacy contract produkční API nevytvoří a executor jej fail-closed odmítá. JobRun persistuje
+`deployment_id`, `monitoring_id` a `trading_cycle_id`; occurrence a Phase 4 cycle identity zachovávají
+idempotenci. B3 next-open authority se nemění. Podrobnosti jsou v
+[`operational-readiness-remediation-b2.md`](operational-readiness-remediation-b2.md).
 
-**Proč je to blocker:** unattended worker může bezpečně provést pouze legacy předpočítaný cyklus,
-nikoli deklarovaný research → promotion → deployment → autonomous strategy tok. Je možné vytvořit
-job, který vypadá jako paper automation, ale ekonomické rozhodnutí pochází z konfiguračního JSON,
-nikoli z auditované strategie.
+B2 resolution **nemění celkový verdikt NOT READY**. H1, M3 a další P1/P2 findings zůstávají otevřené.
 
 ### B3 — Phase 6 paper service retroaktivně filluje již známý open
 
