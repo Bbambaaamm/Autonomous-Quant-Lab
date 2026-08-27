@@ -684,6 +684,7 @@ class JobExecutor:
         """Obnoví PIT scope po close a připraví pouze next-session execution occurrence."""
         from quantlab.market_data import (
             AssetType,
+            DatasetInvalid,
             Instrument,
             ProviderError,
             StooqProvider,
@@ -691,6 +692,7 @@ class JobExecutor:
         )
         from quantlab.market_data_service import PersistentMarketDataService
         from quantlab.persistence import (
+            DatasetSnapshotRecord,
             InstrumentRecord,
             MarketDataIngestionRecord,
             MarketObservationRecord,
@@ -720,6 +722,9 @@ class JobExecutor:
                 raise PermanentJobError("Orchestrace vyžaduje APPROVED deployment")
             if deployment.paper_account_id != account_id:
                 raise PermanentJobError("Orchestration account neodpovídá deployment lineage")
+            snapshot = session.get(DatasetSnapshotRecord, deployment.snapshot_id)
+            if snapshot is None:
+                raise PermanentJobError("Deployment snapshot neexistuje")
             monitoring = session.scalar(
                 select(PaperMonitoringRunRecord).where(
                     PaperMonitoringRunRecord.deployment_id == deployment_id,
@@ -773,6 +778,7 @@ class JobExecutor:
             raise PermanentJobError("PIT universe scope je prázdný nebo nekonzistentní")
         provider = self.provider_factory() if self.provider_factory else StooqProvider()
         ingestions: list[str] = []
+        action_evidence: list[str] = []
         for row in sorted(rows, key=lambda item: item.instrument_id):
             instrument = Instrument(
                 row.instrument_id,
@@ -785,6 +791,31 @@ class JobExecutor:
                 row.active_to.date() if row.active_to else None,
                 utc(row.created_at),
             )
+            if instrument.asset_type == AssetType.EQUITY:
+                try:
+                    action_evidence.append(
+                        PersistentMarketDataService(
+                            sessions, calendar, clock=lambda: now
+                        ).verify_corporate_action_readiness(
+                            provider,
+                            instrument,
+                            snapshot.start_at.date(),
+                            signal_session,
+                            signal_close,
+                        )
+                    )
+                except DatasetInvalid as exc:
+                    return {
+                        "deployment_id": deployment_id,
+                        "monitoring_id": monitoring.monitoring_id,
+                        "trading_cycle_id": None,
+                        "reconciliation_id": None,
+                        "outcome": "NOT_READY",
+                        "no_action_reason": str(exc),
+                        "corporate_action_evidence_ids": ",".join(action_evidence),
+                    }
+                except ProviderError as exc:
+                    raise TransientJobError("CORPORATE_ACTIONS_UNAVAILABLE") from exc
             if row.instrument_id in eligible_ids:
                 with sessions() as session:
                     signal_ready = session.scalar(
@@ -892,12 +923,13 @@ class JobExecutor:
             "no_action_reason": None,
             "execution_run_id": run_id,
             "ingestion_ids": ",".join(ingestions),
+            "corporate_action_evidence_ids": ",".join(action_evidence),
         }
 
     def _run_paper_deployment(
         self, account_id: str, payload: dict[str, Any], run: JobRun
     ) -> dict[str, str | None]:
-        from quantlab.market_data import DatasetInvalid
+        from quantlab.market_data import DatasetInvalid, StooqProvider
         from quantlab.persistence import StrategyDeploymentRecord
         from quantlab.phase6_runtime import (
             Phase6PaperExecutionService,
@@ -984,8 +1016,13 @@ class JobExecutor:
                     "outcome": "BLOCKED_BY_LIFECYCLE",
                     "no_action_reason": f"MONITORING_{monitoring.state}",
                 }
+        provider = self.provider_factory() if self.provider_factory else StooqProvider()
         service = Phase6PaperExecutionService(
-            sessions, ValidatedCurrentDataAccessor(sessions), self.trading
+            sessions,
+            ValidatedCurrentDataAccessor(sessions),
+            self.trading,
+            require_corporate_action_readiness=True,
+            corporate_action_provider_identity=(provider.metadata.name, provider.metadata.version),
         )
         try:
             cycle_id = service.run(

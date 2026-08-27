@@ -17,6 +17,12 @@ Snapshot ukládá `as_of`, provider, calendar identity, PIT universe, rozsah, co
 ## Persistentní runtime a známé omezení
 Produkční `PersistentMarketDataService` zapisuje ingestion, immutable revisions a corporate actions v jedné DB transakci. Deterministický scope identifikátor dělá restart stejného požadavku idempotentní; PostgreSQL advisory transaction lock serializuje stejný scope. Selhání se audituje jako `FAILED` bez observation řádků. In-memory adapter je pouze testovací/reference adapter.
 
+Úspěšný price ingestion není důkazem úplnosti corporate actions. Samostatná immutable
+`corporate_action_readiness` evidence rozlišuje `COMPLETE`, `UNSUPPORTED` a `FAILED` pro provider,
+instrument, interval a knowledge cutoff. Prázdný seznam je complete pouze po úspěšném volání
+provideru s `supports_actions=True`; podrobnosti popisuje
+[`operational-readiness-remediation-h2-corporate-action-gate.md`](operational-readiness-remediation-h2-corporate-action-gate.md).
+
 `DatasetSnapshotService` vybírá přes SQL window autoritativní revision známou k `as_of`. Coverage denominator je průnik session, active intervalu instrumentu a membership intervalu známého k `as_of`, nikoli kartézský součin. Prázdný nebo nedostatečně pokrytý snapshot je `INVALID`.
 
 Kalendář zachovává interní XNYS adapter, ale autoritativní schedule poskytuje zamknutá maintained knihovna `exchange-calendars`.

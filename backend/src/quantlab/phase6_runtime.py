@@ -7,7 +7,7 @@ import shutil
 import subprocess
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, time
 from decimal import Decimal
 from uuid import uuid4
 
@@ -935,10 +935,15 @@ class Phase6PaperExecutionService:
         session_factory: Callable[[], Session],
         current_data: ValidatedCurrentDataAccessor,
         trading_cycle: TradingCycleService,
+        *,
+        require_corporate_action_readiness: bool = False,
+        corporate_action_provider_identity: tuple[str, str] | None = None,
     ) -> None:
         self._sessions = session_factory
         self.current_data = current_data
         self.trading_cycle = trading_cycle
+        self.require_corporate_action_readiness = require_corporate_action_readiness
+        self.corporate_action_provider_identity = corporate_action_provider_identity
 
     def _ensure_cycle_lineage(
         self,
@@ -1108,6 +1113,31 @@ class Phase6PaperExecutionService:
                 for item in instruments.values()
             ):
                 raise DatasetInvalid("Current universe není podporovaný USD/XNYS equity scope")
+            from quantlab.persistence import CorporateActionReadinessRecord
+
+            if self.require_corporate_action_readiness:
+                if self.corporate_action_provider_identity is None:
+                    raise DatasetInvalid("CORPORATE_ACTION_PROVIDER_IDENTITY_MISSING")
+                provider_name, provider_version = self.corporate_action_provider_identity
+                readiness = tuple(
+                    session.scalars(
+                        select(CorporateActionReadinessRecord).where(
+                            CorporateActionReadinessRecord.instrument_id.in_(execution_instruments),
+                            CorporateActionReadinessRecord.provider == provider_name,
+                            CorporateActionReadinessRecord.provider_version == provider_version,
+                            CorporateActionReadinessRecord.requested_start <= snapshot.start_at,
+                            CorporateActionReadinessRecord.requested_end
+                            >= datetime.combine(timing.signal_session, time(), UTC),
+                            CorporateActionReadinessRecord.knowledge_cutoff == decision_time,
+                            CorporateActionReadinessRecord.checked_at <= as_of,
+                            CorporateActionReadinessRecord.supports_actions == 1,
+                            CorporateActionReadinessRecord.status == "COMPLETE",
+                        )
+                    )
+                )
+                ready_instruments = {item.instrument_id for item in readiness}
+                if ready_instruments != set(execution_instruments):
+                    raise DatasetInvalid("CORPORATE_ACTIONS_NOT_READY")
             action_rows = tuple(
                 session.scalars(
                     select(CorporateActionRecord).where(
