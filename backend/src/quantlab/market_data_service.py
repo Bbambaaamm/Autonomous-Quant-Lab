@@ -19,6 +19,7 @@ from quantlab.market_data import (
     Instrument,
     MarketDataProvider,
     Observation,
+    ProviderBar,
     XNYSCalendar,
     normalize_bar,
 )
@@ -88,12 +89,48 @@ class PersistentMarketDataService:
         end: date,
         observed_at: datetime,
     ) -> IngestionResult:
+        return self._ingest(provider, instrument, start, end, observed_at, executable_open=False)
+
+    def ingest_open(
+        self,
+        provider: MarketDataProvider,
+        instrument: Instrument,
+        session_date: date,
+        observed_at: datetime,
+    ) -> IngestionResult:
+        """Persistuje raw open pouze poté, co session skutečně začala."""
+        observed_at = require_utc(observed_at)
+        if observed_at < self.calendar.session_open(session_date):
+            raise DatasetInvalid("Raw open nelze ingestovat před začátkem XNYS session")
+        return self._ingest(
+            provider,
+            instrument,
+            session_date,
+            session_date,
+            observed_at,
+            executable_open=True,
+        )
+
+    def _ingest(
+        self,
+        provider: MarketDataProvider,
+        instrument: Instrument,
+        start: date,
+        end: date,
+        observed_at: datetime,
+        *,
+        executable_open: bool,
+    ) -> IngestionResult:
         observed_at = require_utc(observed_at)
         if len(provider.metadata.name) > 40:
             raise DatasetInvalid("Provider identity překračuje persistentní limit 40 znaků")
-        scope = hashlib.sha256(
-            f"{provider.metadata.name}|{instrument.instrument_id}|{start}|{end}|{observed_at.isoformat()}".encode()
-        ).hexdigest()
+        scope_identity = (
+            f"{provider.metadata.name}|{instrument.instrument_id}|{start}|{end}|"
+            f"{observed_at.isoformat()}"
+        )
+        if executable_open:
+            scope_identity += "|open"
+        scope = hashlib.sha256(scope_identity.encode()).hexdigest()
         ingestion_id = scope
         with self._sessions() as session, session.begin():
             _lock(session, f"ingestion:{scope}")
@@ -125,7 +162,11 @@ class PersistentMarketDataService:
             bars = provider.historical_daily(instrument.symbol, start, end)
             actions = provider.corporate_actions(instrument.symbol, start, end)
             normalized = [
-                normalize_bar(
+                self._normalize_open(
+                    bar, instrument, provider.metadata.name, observed_at, ingestion_id
+                )
+                if executable_open
+                else normalize_bar(
                     bar,
                     instrument,
                     provider.metadata.name,
@@ -172,7 +213,10 @@ class PersistentMarketDataService:
                             .with_for_update()
                         )
                     )
-                    if versions and versions[-1].source_hash == incoming.source_hash:
+                    same_timeframe = [
+                        item for item in versions if item.timeframe == incoming.timeframe
+                    ]
+                    if same_timeframe and same_timeframe[-1].source_hash == incoming.source_hash:
                         continue
                     item = replace(incoming, revision=len(versions) + 1)
                     session.add(
@@ -211,6 +255,57 @@ class PersistentMarketDataService:
                     row.status = "FAILED"
                     row.error_summary = str(exc)[:1000]
             return IngestionResult(ingestion_id, start, end, "FAILED", (), str(exc))
+
+    def _normalize_open(
+        self,
+        bar: ProviderBar,
+        instrument: Instrument,
+        provider: str,
+        observed_at: datetime,
+        ingestion_id: str,
+    ) -> Observation:
+        if not self.calendar.is_session(bar.session_date):
+            raise DatasetInvalid("Provider open neleží v platné XNYS session")
+        if (
+            not bar.open.is_finite()
+            or bar.open <= 0
+            or not bar.volume.is_finite()
+            or bar.volume < 0
+        ):
+            raise DatasetInvalid("Provider vrátil neplatnou raw open cenu")
+        timeframe = "open"
+        source_id = f"{bar.source_id}:open"
+        payload = "|".join(
+            map(
+                str,
+                (
+                    instrument.instrument_id,
+                    provider,
+                    timeframe,
+                    bar.session_date,
+                    bar.open,
+                    source_id,
+                ),
+            )
+        )
+        digest = hashlib.sha256(payload.encode()).hexdigest()
+        return Observation(
+            digest,
+            instrument.instrument_id,
+            provider,
+            timeframe,
+            bar.session_date,
+            self.calendar.session_open(bar.session_date),
+            bar.open,
+            bar.open,
+            bar.open,
+            bar.open,
+            bar.volume,
+            observed_at,
+            source_id,
+            digest,
+            ingestion_id,
+        )
 
     @staticmethod
     def _action_record(action: CorporateAction) -> CorporateActionRecord:

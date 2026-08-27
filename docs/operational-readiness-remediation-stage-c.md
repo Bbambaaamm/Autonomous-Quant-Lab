@@ -9,8 +9,8 @@ Tato změna přidává explicitně opt-in `PREPARE_PAPER_SESSION` do stejné Pha
 ## Bezpečnost, readiness a recovery
 
 - Approval sama nic nespouští. Nutné jsou globální automation flag a auditované enable pro deployment.
-- Refresh a execution jsou oddělené joby. Execution occurrence má identitu deployment + XNYS execution session a databázovou uniqueness; scheduler/worker restart proto nevytvoří druhý cyklus.
-- Pending run nelze claimnout před `scheduled_for`, které je přesný `session_open` z kalendáře.
+- Refresh a execution jsou oddělené joby. Execution occurrence vznikne až po persistenci signal dat i kauzálně pozorovaného raw open; má identitu deployment + XNYS execution session a databázovou uniqueness, takže restart nevytvoří druhý cyklus.
+- Pending session run nelze claimnout před `scheduled_for`, které je přesný `session_open` z kalendáře; pozdější worker zpracuje tento persistentní intent pouze během stejné session.
 - Provider failure, chybějící completed bar a stale data jsou retryable; Phase 5 uplatní omezený exponential backoff a po vyčerpání dead-letter. Lineage/config chyby jsou permanentní.
 - `Phase6PaperExecutionService` zůstává finální autoritou pro ACTIVE lifecycle, current observation timing, adjusted-close signal, raw-open execution a no-lookahead. Missed open se nepřepisuje; služba vždy znovu odvodí current completed signal a next session.
 - Weekend, holiday, early close a DST nejsou v orchestru počítány ručně. Jedinou autoritou je auditovatelná identita `XNYSCalendar`.

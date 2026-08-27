@@ -16,6 +16,7 @@ from quantlab.market_data import (
     Instrument,
     ProviderBar,
     ProviderMetadata,
+    XNYSCalendar,
 )
 from quantlab.market_data_service import DatasetSnapshotService, PersistentMarketDataService
 from quantlab.persistence import (
@@ -26,6 +27,7 @@ from quantlab.persistence import (
     UniverseDefinitionRecord,
     UniverseMembershipRecord,
 )
+from quantlab.phase6_runtime import ValidatedCurrentDataAccessor
 
 pytestmark = pytest.mark.skipif(
     os.getenv("RUN_POSTGRES_TESTS") != "1", reason="vyžaduje PostgreSQL"
@@ -74,6 +76,57 @@ def seed(session):
             )
         )
     session.commit()
+
+
+def test_persistent_ingest_publishes_causal_raw_open(engine) -> None:
+    session_day = date(2026, 1, 6)
+    calendar = XNYSCalendar()
+    opened_at = calendar.session_open(session_day)
+    instrument = Instrument(
+        f"open-{uuid4().hex[:20]}",
+        f"O{uuid4().hex[:7]}",
+        "XNYS",
+        "XNYS",
+        "USD",
+        AssetType.EQUITY,
+        date(2020, 1, 1),
+    )
+
+    class OpenProvider:
+        metadata = ProviderMetadata("open-fixture", "1", False, False)
+
+        def resolve(self, symbol: str) -> dict[str, str]:
+            return {"symbol": symbol}
+
+        def historical_daily(self, symbol: str, start: date, end: date) -> list[ProviderBar]:
+            return [
+                ProviderBar(
+                    session_day,
+                    Decimal("101"),
+                    Decimal("102"),
+                    Decimal("100"),
+                    Decimal("101.5"),
+                    Decimal("1000"),
+                    f"{symbol}:{session_day}",
+                )
+            ]
+
+        def corporate_actions(self, symbol: str, start: date, end: date) -> list[CorporateAction]:
+            return []
+
+    factory = sessionmaker(engine, expire_on_commit=False)
+    service = PersistentMarketDataService(factory, calendar)
+    observed_at = opened_at.replace(microsecond=1)
+    result = service.ingest_open(OpenProvider(), instrument, session_day, observed_at)
+
+    assert result.status == "SUCCEEDED"
+    observation = ValidatedCurrentDataAccessor(factory, calendar).for_execution_session(
+        [instrument.instrument_id], session_day, observed_at
+    )[0]
+    assert observation.timestamp == opened_at
+    assert observation.observed_at == observed_at
+    assert observation.timeframe == "open"
+    assert observation.open == Decimal("101")
 
 
 def test_phase6_constraints_snapshot_and_pit_query(engine):

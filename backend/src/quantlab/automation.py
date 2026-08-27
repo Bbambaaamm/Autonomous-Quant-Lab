@@ -692,10 +692,12 @@ class JobExecutor:
         from quantlab.market_data_service import PersistentMarketDataService
         from quantlab.persistence import (
             InstrumentRecord,
+            MarketDataIngestionRecord,
             MarketObservationRecord,
             StrategyDeploymentRecord,
             UniverseMembershipRecord,
         )
+        from quantlab.phase4 import PositionRecord
         from quantlab.phase7 import PaperMonitoringRunRecord
 
         if set(payload) != {"deployment_id"} or not isinstance(payload["deployment_id"], str):
@@ -744,7 +746,17 @@ class JobExecutor:
                     )
                 )
             )
-            instrument_ids = tuple(sorted({item.instrument_id for item in memberships}))
+            eligible_ids = {item.instrument_id for item in memberships}
+            held_ids = {
+                item.instrument_id
+                for item in session.scalars(
+                    select(PositionRecord).where(
+                        PositionRecord.account_id == account_id,
+                        PositionRecord.quantity > 0,
+                    )
+                )
+            }
+            instrument_ids = tuple(sorted(eligible_ids | held_ids))
             rows = (
                 tuple(
                     session.scalars(
@@ -772,32 +784,84 @@ class JobExecutor:
                 row.active_to.date() if row.active_to else None,
                 utc(row.created_at),
             )
-            try:
-                result = PersistentMarketDataService(sessions, calendar).ingest(
-                    provider,
-                    instrument,
-                    signal_session,
-                    execution_session if now >= execution_open else signal_session,
-                    now,
-                )
-            except ProviderError as exc:
-                raise TransientJobError(str(exc)) from exc
-            ingestions.append(result.ingestion_id)
-            if result.status != "SUCCEEDED":
-                raise TransientJobError(result.error or "Market-data refresh selhal")
+            if row.instrument_id in eligible_ids:
+                with sessions() as session:
+                    signal_ready = session.scalar(
+                        select(func.count())
+                        .select_from(MarketObservationRecord)
+                        .join(MarketDataIngestionRecord)
+                        .where(
+                            MarketObservationRecord.instrument_id == row.instrument_id,
+                            MarketObservationRecord.session_date
+                            == datetime.combine(signal_session, time(), UTC),
+                            MarketObservationRecord.timeframe == "1d",
+                            MarketObservationRecord.observed_at <= now,
+                            MarketDataIngestionRecord.status == "SUCCEEDED",
+                        )
+                    )
+                if not signal_ready:
+                    try:
+                        result = PersistentMarketDataService(sessions, calendar).ingest(
+                            provider, instrument, signal_session, signal_session, now
+                        )
+                    except ProviderError as exc:
+                        raise TransientJobError(str(exc)) from exc
+                    ingestions.append(result.ingestion_id)
+                    if result.status != "SUCCEEDED":
+                        raise TransientJobError(result.error or "Market-data refresh selhal")
+                with sessions() as session:
+                    signal_ready = session.scalar(
+                        select(func.count())
+                        .select_from(MarketObservationRecord)
+                        .join(MarketDataIngestionRecord)
+                        .where(
+                            MarketObservationRecord.instrument_id == row.instrument_id,
+                            MarketObservationRecord.session_date
+                            == datetime.combine(signal_session, time(), UTC),
+                            MarketObservationRecord.timeframe == "1d",
+                            MarketObservationRecord.observed_at <= now,
+                            MarketDataIngestionRecord.status == "SUCCEEDED",
+                        )
+                    )
+                if not signal_ready:
+                    raise TransientJobError(
+                        "STALE_DATA: provider nevrátil completed signal session"
+                    )
+            if now < execution_open:
+                continue
+            open_result = PersistentMarketDataService(sessions, calendar).ingest_open(
+                provider, instrument, execution_session, now
+            )
+            ingestions.append(open_result.ingestion_id)
+            if open_result.status != "SUCCEEDED":
+                raise TransientJobError(open_result.error or "Raw executable open refresh selhal")
             with sessions() as session:
-                ready = session.scalar(
+                open_ready = session.scalar(
                     select(func.count())
                     .select_from(MarketObservationRecord)
+                    .join(MarketDataIngestionRecord)
                     .where(
                         MarketObservationRecord.instrument_id == row.instrument_id,
                         MarketObservationRecord.session_date
-                        == datetime.combine(signal_session, time(), UTC),
+                        == datetime.combine(execution_session, time(), UTC),
+                        MarketObservationRecord.timeframe == "open",
+                        MarketObservationRecord.timestamp == execution_open,
                         MarketObservationRecord.observed_at <= now,
+                        MarketDataIngestionRecord.status == "SUCCEEDED",
                     )
                 )
-            if not ready:
-                raise TransientJobError("STALE_DATA: provider nevrátil completed signal session")
+            if not open_ready:
+                raise TransientJobError("DATA_NOT_READY: provider nevrátil raw executable open")
+        if now < execution_open:
+            return {
+                "deployment_id": deployment_id,
+                "monitoring_id": monitoring.monitoring_id,
+                "trading_cycle_id": None,
+                "reconciliation_id": None,
+                "outcome": "WAITING_FOR_EXECUTION_OPEN",
+                "no_action_reason": "EXECUTION_SESSION_NOT_OPEN",
+                "ingestion_ids": ",".join(ingestions),
+            }
         run_id = self.repository.materialize_execution_session(
             deployment_id=deployment_id,
             account_id=account_id,
@@ -830,6 +894,7 @@ class JobExecutor:
         if set(payload) != {"deployment_id"} or not isinstance(payload["deployment_id"], str):
             raise PermanentJobError("RUN_PAPER_DEPLOYMENT přijímá pouze deployment_id")
         deployment_id = payload["deployment_id"]
+        execution_now = utc(self.clock())
 
         if run.occurrence_key.startswith("xnys:"):
             from quantlab.market_data import XNYSCalendar
@@ -839,7 +904,7 @@ class JobExecutor:
                 pinned_session = date.fromisoformat(run.occurrence_key.removeprefix("xnys:"))
             except ValueError as exc:
                 raise PermanentJobError("Execution occurrence má neplatnou XNYS session") from exc
-            timing = Phase6PaperExecutionService.execution_timing(XNYSCalendar(), self.clock())
+            timing = Phase6PaperExecutionService.execution_timing(XNYSCalendar(), execution_now)
             if timing.execution_session != pinned_session:
                 return {
                     "deployment_id": deployment_id,
@@ -896,7 +961,13 @@ class JobExecutor:
             sessions, ValidatedCurrentDataAccessor(sessions), self.trading
         )
         try:
-            cycle_id = service.run(deployment_id, self.clock())
+            cycle_id = service.run(
+                deployment_id,
+                execution_now,
+                execution_intent_time=run.scheduled_for
+                if run.occurrence_key.startswith("xnys:")
+                else None,
+            )
         except DatasetInvalid as exc:
             message = str(exc)
             if (

@@ -460,7 +460,7 @@ def test_executor_rejects_legacy_paper_cycle_even_with_fixture_payload(tmp_path)
 def test_manual_run_is_immediately_claimable_but_scheduled_run_waits(
     tmp_path,
 ) -> None:  # type: ignore[no-untyped-def]
-    repository, settings = setup(tmp_path / "manual")
+    repository, settings = setup(tmp_path)
     now = datetime(2026, 1, 2, 12, tzinfo=UTC)
     future = now + timedelta(hours=1)
     job = repository.create_job(
@@ -468,7 +468,7 @@ def test_manual_run_is_immediately_claimable_but_scheduled_run_waits(
         account_id="paper-main",
         schedule_type=ScheduleType.INTERVAL,
         interval_seconds=3600,
-        next_run_at=future,
+        next_run_at=future + timedelta(days=1),
     )
     manual_run = SchedulerService(repository).run_now(job.id, "future-logical-time", future)
 
@@ -477,23 +477,22 @@ def test_manual_run_is_immediately_claimable_but_scheduled_run_waits(
 
     assert claimed is not None and claimed[0] == manual_run
 
-    scheduled_repository, scheduled_settings = setup(tmp_path / "scheduled")
-    scheduled_job = scheduled_repository.create_job(
+    scheduled_job = repository.create_job(
         job_type=JobType.RUN_RECONCILIATION,
         account_id="paper-main",
         schedule_type=ScheduleType.INTERVAL,
         interval_seconds=3600,
         next_run_at=future,
     )
-    scheduled_runs = SchedulerService(scheduled_repository).tick(future)
+    scheduled_runs = SchedulerService(repository).tick(future)
     assert len(scheduled_runs) == 1
     scheduled_worker = WorkerService(
-        scheduled_repository,
-        scheduled_settings,
+        repository,
+        settings,
         executor=lambda *_: {},
         worker_id="scheduled-worker",
     )
     assert scheduled_worker.claim(now) is None
-    with Session(scheduled_repository.engine) as session:
+    with Session(repository.engine) as session:
         stored = session.get(JobRun, scheduled_runs[0])
         assert stored is not None and stored.scheduled_job_id == scheduled_job.id
