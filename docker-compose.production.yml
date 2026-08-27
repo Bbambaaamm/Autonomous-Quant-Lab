@@ -16,10 +16,29 @@ services:
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
   backend:
+    image: quantlab-backend
     build: {context: ., dockerfile: backend/Dockerfile}
     env_file: [.env.production]
+    environment:
+      AUTOMATION_ENABLED: "true"
     depends_on: {postgres: {condition: service_healthy}}
     networks: [data, application]
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+  worker:
+    image: quantlab-backend
+    env_file: [.env.production]
+    environment:
+      AUTOMATION_ENABLED: "true"
+      WORKER_REQUIRE_PRODUCTION: "true"
+      WORKER_ID_PREFIX: "${WORKER_ID_PREFIX:-production-worker}"
+    command: ["/app/backend/.venv/bin/quantlab-worker"]
+    healthcheck: {disable: true}
+    depends_on: {postgres: {condition: service_healthy}}
+    networks: [data]
+    restart: unless-stopped
     read_only: true
     tmpfs: [/tmp]
     cap_drop: [ALL]

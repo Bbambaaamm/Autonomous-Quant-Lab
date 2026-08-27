@@ -18,6 +18,8 @@ class Settings(BaseSettings):
     retry_base_delay: float = 5.0
     retry_max_delay: float = 300.0
     worker_batch_size: int = 1
+    worker_id_prefix: str = "quantlab-worker"
+    worker_require_production: bool = False
     market_data_provider: str = "stooq"
     market_data_timeout: float = 10.0
     market_data_max_attempts: int = 3
@@ -71,6 +73,19 @@ class Settings(BaseSettings):
         elif any(not token for token in tokens) or len(set(tokens)) != 3:
             raise ValueError("Všechny tři API role musí mít unikátní credentials")
         return self
+
+    def validate_worker_runtime(self) -> None:
+        """Odmítne neúplnou nebo omylem vypnutou produkční konfiguraci workeru."""
+        if self.worker_require_production and self.app_env != "production":
+            raise ValueError("Production worker vyžaduje APP_ENV=production")
+        if self.app_env == "production" and not self.database_url.startswith(
+            ("postgresql://", "postgresql+psycopg://")
+        ):
+            raise ValueError("Production worker vyžaduje PostgreSQL DATABASE_URL")
+        if not self.automation_enabled:
+            raise ValueError("Production worker vyžaduje AUTOMATION_ENABLED=true")
+        if not self.worker_id_prefix.strip() or len(self.worker_id_prefix) > 64:
+            raise ValueError("WORKER_ID_PREFIX musí mít 1 až 64 znaků")
 
     @property
     def allowed_hosts(self) -> tuple[str, ...]:

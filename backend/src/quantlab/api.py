@@ -253,6 +253,8 @@ class OperatorOverview(BaseModel):
     live_trading_enabled: bool
     api_health: str
     readiness: str
+    autonomous_readiness: str
+    autonomous_workload_enabled: bool
     paper_account_id: str | None
     trading_state: str | None
     reconciliation_safe: bool | None

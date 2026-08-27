@@ -14,6 +14,8 @@ export function Status({ value }: { value: unknown }) {
     "FAILED",
     "DEAD_LETTER",
     "STALE",
+    "UNAVAILABLE",
+    "DISABLED",
     "MISSING_SESSION_DATA",
     "UNSAFE",
   ].includes(text);

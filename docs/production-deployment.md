@@ -11,9 +11,20 @@ nebo Node runtime, nikoli pomocí `sh`, `id`, `apt` či `npm` uvnitř běžící
    `alembic upgrade head`, runtime roli udělte jen SELECT/INSERT/UPDATE a potřebné sequences.
 3. Nastavte `APP_ENV=production`, PostgreSQL `DATABASE_URL`, unikátní API tokeny, silný
    `SESSION_SECRET`, scrypt hash hesla, HTTPS `PUBLIC_BASE_URL` a explicitní hosts.
-4. Spusťte explicitní migration job, pak `make production-up`. Frontend na loopbacku je jediný
-   publikovaný port; backend a PostgreSQL nemají host port.
+4. Spusťte explicitní migration job, pak `make production-up`. Compose automaticky spustí také
+   samostatný `worker` příkazem `/app/backend/.venv/bin/quantlab-worker`; používá tentýž hardened
+   backend image a čeká na PostgreSQL healthcheck, nikoli na API. Frontend na loopbacku je jediný
+   publikovaný port; backend, worker a PostgreSQL nemají host port.
+   Compose nastavuje `AUTOMATION_ENABLED=true` shodně pro API i worker; jde pouze o globální engine
+   a jednotlivé deploymenty nadále vyžadují samostatný explicitní autonomous opt-in.
 5. `GET /healthz` je liveness a `GET /readyz` ověřuje DB bez citlivých detailů.
+
+Worker má `restart: unless-stopped`, read-only filesystem, non-root UID a pouze interní datovou
+síť. `WORKER_ID_PREFIX` označuje deployment a hostname/PID/UUID zachovávají unikátní identitu po
+restartu. Deklarovaná topology má jednu worker repliku; databázové occurrence, lease a fencing
+zůstávají autoritou pro restart safety. Worker vypíná zděděný API HTTP healthcheck, protože
+neposlouchá na HTTP portu, a záměrně jej nenahrazuje process-only kontrolou: funkční stav poskytuje
+DB-backed operator read model z čerstvého heartbeat i scheduler heartbeat.
 
 Backup vytvoří `BACKUP=backups/name.dump make db-backup`. Restore vyžaduje jinou explicitní
 `RESTORE_DATABASE_URL`, správný checksum a `RESTORE_CONFIRMATION=RESTORE_EPHEMERAL_DATABASE`.

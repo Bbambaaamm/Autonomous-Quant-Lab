@@ -141,17 +141,53 @@ class OperatorReadModel:
                 session.scalar(
                     select(func.count())
                     .select_from(WorkerHeartbeat)
-                    .where(WorkerHeartbeat.last_heartbeat_at >= worker_cutoff)
+                    .where(
+                        WorkerHeartbeat.last_heartbeat_at >= worker_cutoff,
+                        WorkerHeartbeat.stopped_at.is_(None),
+                    )
                 )
                 or 0
             )
             workers = session.scalar(select(func.count()).select_from(WorkerHeartbeat)) or 0
+            scheduler_healthy = (
+                session.scalar(
+                    select(func.count())
+                    .select_from(WorkerHeartbeat)
+                    .where(
+                        WorkerHeartbeat.last_heartbeat_at >= worker_cutoff,
+                        WorkerHeartbeat.scheduler_heartbeat_at >= worker_cutoff,
+                        WorkerHeartbeat.stopped_at.is_(None),
+                    )
+                )
+                or 0
+            )
+            autonomous_jobs = (
+                session.scalar(
+                    select(func.count())
+                    .select_from(ScheduledJob)
+                    .where(
+                        ScheduledJob.enabled.is_(True),
+                        ScheduledJob.job_type == "PREPARE_PAPER_SESSION",
+                    )
+                )
+                or 0
+            )
+            if not self._settings.automation_enabled:
+                autonomous_readiness = "DISABLED"
+            elif scheduler_healthy:
+                autonomous_readiness = "HEALTHY"
+            elif workers:
+                autonomous_readiness = "STALE"
+            else:
+                autonomous_readiness = "UNAVAILABLE"
             return {
                 "server_time_utc": now,
                 "trading_mode": "PAPER",
                 "live_trading_enabled": False,
                 "api_health": "ok",
                 "readiness": "ready",
+                "autonomous_readiness": autonomous_readiness,
+                "autonomous_workload_enabled": autonomous_jobs > 0,
                 "paper_account_id": account.id if account else None,
                 "trading_state": account.trading_state if account else None,
                 "reconciliation_safe": account.reconciliation_safe if account else None,

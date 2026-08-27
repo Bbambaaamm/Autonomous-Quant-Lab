@@ -1037,11 +1037,18 @@ class WorkerService:
         self.repository = repository
         self.settings = settings
         self.executor = executor or JobExecutor(repository)
-        self.worker_id = worker_id or f"{socket.gethostname()}:{os.getpid()}:{uuid4()}"
+        self.worker_id = worker_id or (
+            f"{settings.worker_id_prefix}:{socket.gethostname()}:{os.getpid()}:{uuid4()}"
+        )
         self.stop_event = Event()
 
     def heartbeat(
-        self, run_id: str | None = None, token: int | None = None, now: datetime | None = None
+        self,
+        run_id: str | None = None,
+        token: int | None = None,
+        now: datetime | None = None,
+        *,
+        scheduler_ticked: bool = False,
     ) -> bool:
         now = utc(now or datetime.now(UTC))
         expires = now + timedelta(seconds=self.settings.worker_lease_timeout)
@@ -1053,6 +1060,9 @@ class WorkerService:
                 )
                 session.add(heartbeat)
             heartbeat.last_heartbeat_at = now
+            heartbeat.stopped_at = None
+            if scheduler_ticked:
+                heartbeat.scheduler_heartbeat_at = now
             heartbeat.active_run_id = run_id
             renewed = True
             if run_id and token is not None:
@@ -1294,6 +1304,15 @@ class WorkerService:
 
     def request_stop(self) -> None:
         self.stop_event.set()
+
+    def mark_stopped(self, now: datetime | None = None) -> None:
+        now = utc(now or datetime.now(UTC))
+        with Session(self.repository.engine) as session:
+            heartbeat = session.get(WorkerHeartbeat, self.worker_id)
+            if heartbeat is not None:
+                heartbeat.stopped_at = now
+                heartbeat.active_run_id = None
+                session.commit()
 
     def install_signal_handlers(self) -> None:
         signal.signal(signal.SIGTERM, lambda *_: self.request_stop())
