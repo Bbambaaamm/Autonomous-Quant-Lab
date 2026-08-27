@@ -144,7 +144,7 @@ def _full_multi_session_flow(
         ).verify_corporate_action_readiness(
             provider,
             instrument,
-            source_snapshot.start_at.date(),
+            source_snapshot.start,
             signal_session,
             CALENDAR.session_close(signal_session),
         )
