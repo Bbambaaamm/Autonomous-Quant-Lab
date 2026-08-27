@@ -982,7 +982,10 @@ class WorkerService:
             query = (
                 select(JobRun)
                 .where(
-                    JobRun.scheduled_for <= now,
+                    or_(
+                        JobRun.scheduled_for <= now,
+                        JobRun.occurrence_key.like("manual:%"),
+                    ),
                     or_(
                         and_(
                             JobRun.status.in_([RunStatus.PENDING, RunStatus.RETRY_SCHEDULED]),
