@@ -49,6 +49,13 @@ from quantlab.phase4 import (
     TradingCycleRecord,
     TradingCycleService,
 )
+from quantlab.runtime_identity import (
+    RUNTIME_MANIFEST_VERSION,
+    build_runtime_manifest,
+    canonical_json,
+    components_from_manifest,
+    manifest_hash,
+)
 from quantlab.universe import (
     PointInTimeUniverse,
     UniverseDefinition,
@@ -751,6 +758,8 @@ class DeploymentService:
                 raise DatasetInvalid("Deployment lze vytvořit pouze z PAPER_CANDIDATE")
             snapshot, _, _ = self.validate_experiment(session, experiment)
             parameters = self._evidence(experiment.selected_parameters_json, "parameters")
+            manifest = build_runtime_manifest(code_sha=experiment.code_sha)
+            runtime_hash = manifest_hash(manifest)
             identity = hashlib.sha256(
                 self._canonical(
                     {
@@ -758,6 +767,7 @@ class DeploymentService:
                         "account_id": paper_account_id,
                         "currency": currency,
                         "timeframe": timeframe,
+                        "runtime_manifest_hash": runtime_hash,
                     }
                 ).encode()
             ).hexdigest()
@@ -779,6 +789,9 @@ class DeploymentService:
                 snapshot_id=snapshot.snapshot_id,
                 currency=currency,
                 timeframe=timeframe,
+                runtime_manifest_json=canonical_json(manifest),
+                runtime_manifest_hash=runtime_hash,
+                runtime_manifest_version=RUNTIME_MANIFEST_VERSION,
             )
             session.add(row)
             if actor is not None and reason is not None:
@@ -790,7 +803,12 @@ class DeploymentService:
                     actor,
                     reason,
                     correlation_id,
-                    {"experiment_id": experiment.id, "status": row.status},
+                    {
+                        "experiment_id": experiment.id,
+                        "status": row.status,
+                        "runtime_manifest_hash": runtime_hash,
+                        "runtime_manifest_version": RUNTIME_MANIFEST_VERSION,
+                    },
                 )
             session.flush()
             session.expunge(row)
@@ -817,6 +835,13 @@ class DeploymentService:
             experiment = session.get(ExperimentRecord, row.experiment_id)
             if experiment is None:
                 raise DatasetInvalid("Deployment experiment neexistuje")
+            manifest = self._validated_runtime_manifest(row)
+            artifact = manifest.get("artifact")
+            if (
+                not isinstance(artifact, dict)
+                or artifact.get("experiment_code_sha") != experiment.code_sha
+            ):
+                raise DatasetInvalid("RUNTIME_CONFIG_ARTIFACT_MISMATCH")
             snapshot, strategy, parameters = self.validate_experiment(session, experiment)
             if experiment.decision != "PAPER_CANDIDATE":
                 raise DatasetInvalid("Deployment vyžaduje dokončený PAPER_CANDIDATE experiment")
@@ -850,8 +875,51 @@ class DeploymentService:
                     actor,
                     reason,
                     correlation_id,
-                    {"experiment_id": row.experiment_id, "status": row.status},
+                    {
+                        "experiment_id": row.experiment_id,
+                        "status": row.status,
+                        "runtime_manifest_hash": row.runtime_manifest_hash,
+                        "runtime_manifest_version": row.runtime_manifest_version,
+                    },
                 )
+
+    @staticmethod
+    def _validated_runtime_manifest(row: StrategyDeploymentRecord) -> dict[str, object]:
+        if (
+            row.runtime_manifest_json is None
+            or row.runtime_manifest_hash is None
+            or row.runtime_manifest_version is None
+        ):
+            raise DatasetInvalid("RUNTIME_CONFIG_IDENTITY_MISSING")
+        try:
+            manifest = json.loads(row.runtime_manifest_json)
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise DatasetInvalid("RUNTIME_CONFIG_INVALID") from exc
+        if not isinstance(manifest, dict):
+            raise DatasetInvalid("RUNTIME_CONFIG_INVALID")
+        if (
+            manifest.get("runtime_manifest_version") != row.runtime_manifest_version
+            or manifest_hash(manifest) != row.runtime_manifest_hash
+        ):
+            raise DatasetInvalid("RUNTIME_CONFIG_MISMATCH")
+        expected_identity = hashlib.sha256(
+            DeploymentService._canonical(
+                {
+                    "experiment_id": row.experiment_id,
+                    "account_id": row.paper_account_id,
+                    "currency": row.currency,
+                    "timeframe": row.timeframe,
+                    "runtime_manifest_hash": row.runtime_manifest_hash,
+                }
+            ).encode()
+        ).hexdigest()
+        if expected_identity != row.deployment_id:
+            raise DatasetInvalid("RUNTIME_CONFIG_DEPLOYMENT_IDENTITY_MISMATCH")
+        try:
+            components_from_manifest(manifest)
+        except (KeyError, TypeError, ValueError) as exc:
+            raise DatasetInvalid(str(exc)) from exc
+        return manifest
 
     @classmethod
     def validate_experiment(
@@ -1032,6 +1100,7 @@ class Phase6PaperExecutionService:
             deployment = session.get(StrategyDeploymentRecord, deployment_id)
             if deployment is None or deployment.status != "APPROVED":
                 raise DatasetInvalid("Paper execution vyžaduje APPROVED deployment")
+            manifest = DeploymentService._validated_runtime_manifest(deployment)
             monitoring = session.scalar(
                 select(PaperMonitoringRunRecord).where(
                     PaperMonitoringRunRecord.deployment_id == deployment_id,
@@ -1043,6 +1112,12 @@ class Phase6PaperExecutionService:
             experiment = session.get(ExperimentRecord, deployment.experiment_id)
             if experiment is None:
                 raise DatasetInvalid("Deployment experiment neexistuje")
+            artifact = manifest.get("artifact")
+            if (
+                not isinstance(artifact, dict)
+                or artifact.get("experiment_code_sha") != experiment.code_sha
+            ):
+                raise DatasetInvalid("RUNTIME_CONFIG_ARTIFACT_MISMATCH")
             snapshot, strategy_row, selected = DeploymentService.validate_experiment(
                 session, experiment
             )
@@ -1261,7 +1336,16 @@ class Phase6PaperExecutionService:
             monitoring = session.get(PaperMonitoringRunRecord, monitoring.monitoring_id)
             if monitoring is None or monitoring.state != "ACTIVE":
                 raise DatasetInvalid("Corporate action zablokovala paper execution")
-        cycle_id = self.trading_cycle.run(
+        components = components_from_manifest(manifest)
+        approved_cycle = TradingCycleService(
+            self.trading_cycle.repository,
+            components.risk,
+            components.costs,
+            components.slippage,
+            components.volume_fraction,
+            self.trading_cycle.lease_duration,
+        )
+        cycle_id = approved_cycle.run(
             deployment.paper_account_id,
             strategy_id,
             bars,
@@ -1286,6 +1370,12 @@ class Phase6PaperExecutionService:
                 cycle_id,
                 {
                     "deployment_id": deployment.deployment_id,
+                    "runtime_manifest_hash": deployment.runtime_manifest_hash,
+                    "runtime_manifest_version": deployment.runtime_manifest_version,
+                    "risk_identity": manifest["risk"],
+                    "commission_identity": manifest["commission"],
+                    "slippage_identity": manifest["slippage"],
+                    "execution_identity": manifest["execution"],
                     "experiment_id": deployment.experiment_id,
                     "snapshot_id": deployment.snapshot_id,
                     "signal_observation_ids": [

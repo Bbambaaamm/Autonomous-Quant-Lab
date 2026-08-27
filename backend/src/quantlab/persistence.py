@@ -306,6 +306,9 @@ class StrategyDeploymentRecord(Base):
     )
     currency: Mapped[str] = mapped_column(String(3), nullable=False)
     timeframe: Mapped[str] = mapped_column(String(10), nullable=False)
+    runtime_manifest_json: Mapped[str | None] = mapped_column(Text)
+    runtime_manifest_hash: Mapped[str | None] = mapped_column(String(64), index=True)
+    runtime_manifest_version: Mapped[int | None] = mapped_column(Integer)
 
 
 class ExperimentFoldRecord(Base):

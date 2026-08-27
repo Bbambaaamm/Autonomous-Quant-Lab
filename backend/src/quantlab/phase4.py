@@ -1115,11 +1115,14 @@ class TradingCycleService:
         self,
         repository: Phase4Repository,
         risk_config: ProductionRiskConfig | None = None,
+        costs: CostModel | None = None,
+        slippage: FixedBpsSlippage | None = None,
+        volume_fraction: Decimal = Decimal("0.10"),
         lease_duration: timedelta = timedelta(minutes=5),
     ):
         self.repository = repository
         self.risk = ProductionRiskEngine(risk_config or ProductionRiskConfig())
-        self.broker = PersistentPaperBroker(repository)
+        self.broker = PersistentPaperBroker(repository, costs, slippage, volume_fraction)
         self.execution = PersistentExecutionEngine(self.broker)
         self.reconciliation = ReconciliationService(repository)
         self.lease_duration = lease_duration
