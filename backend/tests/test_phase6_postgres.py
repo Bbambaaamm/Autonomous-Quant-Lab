@@ -93,7 +93,8 @@ def test_persistent_ingest_publishes_causal_raw_open(engine) -> None:
     )
 
     class OpenProvider:
-        metadata = ProviderMetadata("open-fixture", "1", False, False)
+        def __init__(self, name: str = "open-fixture") -> None:
+            self.metadata = ProviderMetadata(name, "1", False, False)
 
         def resolve(self, symbol: str) -> dict[str, str]:
             return {"symbol": symbol}
@@ -129,10 +130,25 @@ def test_persistent_ingest_publishes_causal_raw_open(engine) -> None:
     assert observation.timeframe == "open"
     assert observation.open == Decimal("101")
 
+    # Úspěšný scope je immutable a jeho idempotentní replay nesmí znovu volat provider.
+    def unexpected_clock() -> datetime:
+        raise AssertionError("Idempotentní replay nesmí znovu číst provider response time")
+
+    replay = PersistentMarketDataService(
+        factory,
+        calendar,
+        clock=unexpected_clock,
+    ).ingest_open(OpenProvider(), instrument, session_day, opened_at)
+    assert replay.status == "SUCCEEDED"
+    assert replay.ingestion_id == result.ingestion_id
+
     late_service = PersistentMarketDataService(
         factory, calendar, clock=lambda: opened_at + timedelta(minutes=5)
     )
-    late = late_service.ingest_open(OpenProvider(), instrument, session_day, opened_at)
+    # Jiný scope simuluje nový provider request; nesmí se zaměnit za replay úspěšné ingestion.
+    late = late_service.ingest_open(
+        OpenProvider("late-open-fixture"), instrument, session_day, opened_at
+    )
     assert late.status == "FAILED"
     assert late.error is not None and "MISSED_EXECUTION_OPEN" in late.error
 
