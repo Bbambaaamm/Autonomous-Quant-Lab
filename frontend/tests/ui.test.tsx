@@ -7,3 +7,15 @@ describe("kritické data statusy", () => {
     expect(screen.getByText("MISSING_SESSION_DATA")).toHaveClass("unsafe");
   });
 });
+
+describe("autonomous worker readiness", () => {
+  it("nedostupný worker není zobrazen jako bezpečný", () => {
+    render(<Status value="UNAVAILABLE" />);
+    expect(screen.getByText("UNAVAILABLE")).toHaveClass("unsafe");
+  });
+
+  it("globálně vypnutý runtime není zobrazen jako ready", () => {
+    render(<Status value="DISABLED" />);
+    expect(screen.getByText("DISABLED")).toHaveClass("unsafe");
+  });
+});

@@ -5,6 +5,7 @@ WORKDIR /app/backend
 COPY backend/pyproject.toml backend/uv.lock ./
 RUN uv sync --locked --no-dev --no-install-project
 COPY backend/src ./src
+RUN uv sync --locked --no-dev
 RUN rm -rf /usr/local/lib/python3.12/site-packages/pip* \
     /usr/local/lib/python3.12/ensurepip \
     /usr/local/lib/python3.12/lib-dynload/_curses*.so \

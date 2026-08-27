@@ -15,6 +15,8 @@ nebo Node runtime, nikoli pomocí `sh`, `id`, `apt` či `npm` uvnitř běžící
    samostatný `worker` příkazem `/app/backend/.venv/bin/quantlab-worker`; používá tentýž hardened
    backend image a čeká na PostgreSQL healthcheck, nikoli na API. Frontend na loopbacku je jediný
    publikovaný port; backend, worker a PostgreSQL nemají host port.
+   Compose nastavuje `AUTOMATION_ENABLED=true` shodně pro API i worker; jde pouze o globální engine
+   a jednotlivé deploymenty nadále vyžadují samostatný explicitní autonomous opt-in.
 5. `GET /healthz` je liveness a `GET /readyz` ověřuje DB bez citlivých detailů.
 
 Worker má `restart: unless-stopped`, read-only filesystem, non-root UID a pouze interní datovou

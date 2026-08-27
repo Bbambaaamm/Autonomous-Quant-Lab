@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import pytest
+from sqlalchemy import update
 from sqlalchemy.orm import Session
 
 from quantlab.automation import (
@@ -14,6 +15,7 @@ from quantlab.automation import (
     JobRun,
     JobType,
     RunStatus,
+    ScheduledJob,
     SchedulerService,
     ScheduleType,
     WorkerHeartbeat,
@@ -39,6 +41,10 @@ def _settings() -> Settings:
 def test_p0b_scheduler_worker_heartbeat_claim_and_restart_are_persistent() -> None:
     repository = AutomationRepository(os.environ["DATABASE_URL"])
     now = datetime.now(UTC)
+    # Acceptance kroky sdílejí databázi; starší enabled schedules nesmí ovlivnit tento důkaz.
+    with Session(repository.engine) as session:
+        session.execute(update(ScheduledJob).values(enabled=False, updated_at=now))
+        session.commit()
     job = repository.create_job(
         job_id=f"p0b-{uuid4()}",
         job_type=JobType.RUN_RECONCILIATION,

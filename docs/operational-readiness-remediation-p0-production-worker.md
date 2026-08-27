@@ -11,8 +11,9 @@ image a skutečný `/app/backend/.venv/bin/quantlab-worker` entrypoint.
 ## Safety a provozní důkaz
 
 Worker fail-closed vyžaduje `APP_ENV=production`, PostgreSQL `DATABASE_URL`, platné existující
-production secrets a `AUTOMATION_ENABLED=true`. Compose mu neposkytuje live credential, URL,
-mode ani flag. Globální engine pouze tickuje; obchodní deployment nadále potřebuje explicitní
+production secrets a `AUTOMATION_ENABLED=true`. Compose nastavuje globální automation shodně pro
+API i worker, takže control plane nezobrazuje stav odporující běžícímu enginu. Neposkytuje mu live
+credential, URL, mode ani flag. Globální engine pouze tickuje; obchodní deployment nadále potřebuje explicitní
 autonomous opt-in, APPROVED stav, ACTIVE monitoring a všechny B1/B2/P0-A gates. Exekuce zůstává
 Strategy → Portfolio → RiskEngine → ExecutionEngine → PersistentPaperBroker.
 
