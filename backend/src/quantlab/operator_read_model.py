@@ -530,10 +530,41 @@ class OperatorReadModel:
                     )
                 )
             )
+            deployment_views: list[dict[str, Any]] = []
+            calendar = XNYSCalendar()
+            now = datetime.now(UTC)
+            signal_session = calendar.latest_completed_session(now)
+            execution_session = calendar.next_session(signal_session)
+            for deployment in deployments:
+                config = json.dumps({"deployment_id": deployment.deployment_id}, sort_keys=True)
+                autonomous = session.scalar(
+                    select(ScheduledJob).where(
+                        ScheduledJob.job_type == "PREPARE_PAPER_SESSION",
+                        ScheduledJob.config_json == config,
+                    )
+                )
+                last_run = session.scalar(
+                    select(JobRun)
+                    .where(JobRun.deployment_id == deployment.deployment_id)
+                    .order_by(JobRun.created_at.desc())
+                    .limit(1)
+                )
+                deployment_views.append(
+                    {
+                        **_row(deployment),
+                        "autonomous_scheduling": bool(autonomous and autonomous.enabled),
+                        "next_signal_session": signal_session,
+                        "next_execution_session": execution_session,
+                        "next_expected_refresh": autonomous.next_run_at
+                        if autonomous and autonomous.enabled
+                        else None,
+                        "last_job_run": _row(last_run) if last_run else None,
+                    }
+                )
             return {
                 **_row(row),
                 "experiments": [_row(x) for x in experiments],
-                "deployments": [_row(x) for x in deployments],
+                "deployments": deployment_views,
             }
 
     def experiments(self, limit: int, offset: int) -> dict[str, Any]:

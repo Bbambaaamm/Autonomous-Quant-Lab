@@ -146,6 +146,10 @@ class DeploymentJobCreate(BaseModel):
     max_attempts: int = Field(5, ge=1, le=100)
 
 
+class AutonomousScheduleMutation(BaseModel):
+    reason: str = Field(min_length=3, max_length=1000)
+
+
 class MonitoringPolicyCreate(BaseModel):
     name: str = Field(min_length=1, max_length=100)
     config: dict[str, object] = DEFAULT_POLICY.copy()
@@ -709,6 +713,47 @@ def schedule_deployment_job(
         )
         _audit_control_mutation(
             "CONTROL_PAPER_DEPLOYMENT_JOB_SCHEDULED",
+            "scheduled_job",
+            job.id,
+            _actor(request),
+            body.reason,
+            _correlation(request),
+        )
+        return _row(job)
+    except KeyError as exc:
+        raise HTTPException(404, "Deployment neexistuje") from exc
+    except (ValueError, DatasetInvalid) as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@app.post("/operator/deployments/{deployment_id}/autonomous/enable")
+def enable_autonomous_deployment(
+    deployment_id: str, body: AutonomousScheduleMutation, request: Request
+) -> dict[str, object]:
+    return _set_autonomous_deployment(deployment_id, body, request, True)
+
+
+@app.post("/operator/deployments/{deployment_id}/autonomous/disable")
+def disable_autonomous_deployment(
+    deployment_id: str, body: AutonomousScheduleMutation, request: Request
+) -> dict[str, object]:
+    return _set_autonomous_deployment(deployment_id, body, request, False)
+
+
+def _set_autonomous_deployment(
+    deployment_id: str,
+    body: AutonomousScheduleMutation,
+    request: Request,
+    enabled: bool,
+) -> dict[str, object]:
+    try:
+        job = automation_repository.set_autonomous_deployment(
+            deployment_id=deployment_id, enabled=enabled
+        )
+        _audit_control_mutation(
+            "CONTROL_AUTONOMOUS_SCHEDULE_ENABLED"
+            if enabled
+            else "CONTROL_AUTONOMOUS_SCHEDULE_DISABLED",
             "scheduled_job",
             job.id,
             _actor(request),

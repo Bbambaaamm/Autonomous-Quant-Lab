@@ -972,17 +972,44 @@ class Phase6PaperExecutionService:
                 )
             )
 
-    def run(self, deployment_id: str, now: datetime) -> str:
+    def run(
+        self,
+        deployment_id: str,
+        now: datetime,
+        *,
+        execution_intent_time: datetime | None = None,
+    ) -> str:
         as_of = require_utc(now)
-        timing = self.execution_timing(self.current_data.calendar, as_of)
+        if execution_intent_time is None:
+            timing = self.execution_timing(self.current_data.calendar, as_of)
+        else:
+            intended_open = require_utc(execution_intent_time)
+            intended_session = self.current_data.calendar.session_for_timestamp(intended_open)
+            if (
+                intended_session is None
+                or self.current_data.calendar.session_open(intended_session) != intended_open
+            ):
+                raise DatasetInvalid("Persistent execution intent nemá platný XNYS open")
+            signal_session = self.current_data.calendar.previous_session(intended_session)
+            timing = PaperExecutionTiming(
+                signal_session,
+                self.current_data.calendar.session_close(signal_session),
+                intended_session,
+                intended_open,
+            )
         executable_session = timing.execution_session
         execution_time = timing.execution_time
-        if as_of != execution_time:
+        if execution_intent_time is None and as_of != execution_time:
             state = "ještě nezačala" if as_of < execution_time else "už začala"
             raise DatasetInvalid(
                 f"Signal je připraven, ale následující executable session {state}; "
                 "bez persistentního intentu nelze zpětně fillovat její open"
             )
+        if execution_intent_time is not None and (
+            as_of < execution_time
+            or as_of >= self.current_data.calendar.session_close(executable_session)
+        ):
+            raise DatasetInvalid("Persistent execution intent je před open nebo již missed")
         decision_time = timing.decision_time
         with self._sessions() as session:
             # Phase 7 je samostatná observation/control brána. Import je lokální, aby

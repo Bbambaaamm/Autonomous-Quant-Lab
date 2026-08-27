@@ -55,7 +55,7 @@ jeden run a next time posune do budoucnosti. Historie se automaticky nemaže.
 Phase 6 je implementována jako provider → validace/immutable revisions → XNYS calendar/corporate actions → PIT universe → immutable snapshot → multi-asset target portfolio. Detailní invariants jsou v `docs/market-data.md` a `docs/strategy-research.md`. Žádná část nevytváří live execution path; automatický data refresh zatím není allowlistovaný job a refresh se provádí odděleně od trading cycle.
 
 ### Phase 6 operator workflow
-Refresh se nepřidává do Phase 5 workeru, dokud není dokončen produkční calendar a PostgreSQL master E2E. Operátor používá pouze allowlistovaný provider, zkontroluje ingestion stav přes read API a až potom sestaví snapshot. Refresh nikdy nespouští trading. Paper accessor používá oddělený pohled poslední dokončené session a odmítne missing nebo neúspěšně ingestovaná data.
+Autonomní provoz je dvojitý opt-in: globální `AUTOMATION_ENABLED=true` a explicitní `POST /operator/deployments/{id}/autonomous/enable` s auditním důvodem pro APPROVED deployment s ACTIVE monitoringem. Pětiminutový persistentní job používá XNYS close/open, obnoví PIT membership i držené instrumenty přes Stooq a `PersistentMarketDataService` a vytvoří stabilní execution occurrence. Disable zastaví další materializaci; již persistovaný run se bezpečně dokončí. Provider absence je transientní a používá bounded Phase 5 retry/dead-letter. Paper accessor je i nadále finální fail-closed autorita pro adjusted signal historii a raw executable open.
 
 ## Phase 6 paper deployment operations
 
