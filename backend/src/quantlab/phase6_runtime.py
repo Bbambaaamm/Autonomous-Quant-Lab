@@ -587,8 +587,11 @@ class ValidatedCurrentDataAccessor:
             raise DatasetInvalid("Požadavek na current data musí obsahovat unikátní instrumenty")
         if not self.calendar.is_session(session_date):
             raise DatasetInvalid("Executable session není platná XNYS session")
-        if knowledge_cutoff < self.calendar.session_open(session_date):
+        execution_open = self.calendar.session_open(session_date)
+        if knowledge_cutoff < execution_open:
             raise DatasetInvalid("Executable session ještě nezačala")
+        if not self.calendar.is_executable_open_time(session_date, knowledge_cutoff):
+            raise DatasetInvalid("MISSED_EXECUTION_OPEN: raw open už není obchodovatelný")
         with self._sessions() as session:
             rows = tuple(
                 session.scalars(
@@ -602,8 +605,10 @@ class ValidatedCurrentDataAccessor:
                         MarketObservationRecord.session_date
                         == datetime.combine(session_date, datetime.min.time(), UTC),
                         MarketObservationRecord.timeframe == "open",
-                        MarketObservationRecord.timestamp
-                        == self.calendar.session_open(session_date),
+                        MarketObservationRecord.timestamp == execution_open,
+                        MarketObservationRecord.observed_at >= execution_open,
+                        MarketObservationRecord.observed_at
+                        < self.calendar.executable_open_cutoff(session_date),
                         MarketObservationRecord.observed_at <= knowledge_cutoff,
                     )
                     .order_by(
@@ -1005,11 +1010,14 @@ class Phase6PaperExecutionService:
                 f"Signal je připraven, ale následující executable session {state}; "
                 "bez persistentního intentu nelze zpětně fillovat její open"
             )
-        if execution_intent_time is not None and (
-            as_of < execution_time
-            or as_of >= self.current_data.calendar.session_close(executable_session)
+        if (
+            execution_intent_time is not None
+            and not self.current_data.calendar.is_executable_open_time(executable_session, as_of)
         ):
-            raise DatasetInvalid("Persistent execution intent je před open nebo již missed")
+            reason = (
+                "EXECUTION_SESSION_NOT_OPEN" if as_of < execution_time else "MISSED_EXECUTION_OPEN"
+            )
+            raise DatasetInvalid(f"{reason}: persistent execution intent není prováděn v open")
         decision_time = timing.decision_time
         with self._sessions() as session:
             # Phase 7 je samostatná observation/control brána. Import je lokální, aby

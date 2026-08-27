@@ -142,6 +142,8 @@ jobs:
         run: uv run pytest -q tests/test_b1_control_plane_postgres.py
       - name: B2 approved-deployment worker end-to-end acceptance
         run: uv run pytest -q tests/test_b2_worker_postgres.py
+      - name: P0 missed-open causality regression
+        run: uv run pytest -q tests/test_p0_missed_open_postgres.py
       - name: Stage C autonomous market-data/session orchestration acceptance
         run: uv run pytest -q tests/test_stage_c_autonomous_session_postgres.py
 

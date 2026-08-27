@@ -76,10 +76,14 @@ class PersistentMarketDataService:
     """Transakční produkční ingestion; provider je jediná část mimo DB transakci."""
 
     def __init__(
-        self, session_factory: Callable[[], Session], calendar: XNYSCalendar | None = None
+        self,
+        session_factory: Callable[[], Session],
+        calendar: XNYSCalendar | None = None,
+        clock: Callable[[], datetime] | None = None,
     ) -> None:
         self._sessions = session_factory
         self.calendar = calendar or XNYSCalendar()
+        self.clock = clock or (lambda: datetime.now(UTC))
 
     def ingest(
         self,
@@ -100,8 +104,13 @@ class PersistentMarketDataService:
     ) -> IngestionResult:
         """Persistuje raw open pouze poté, co session skutečně začala."""
         observed_at = require_utc(observed_at)
-        if observed_at < self.calendar.session_open(session_date):
-            raise DatasetInvalid("Raw open nelze ingestovat před začátkem XNYS session")
+        if not self.calendar.is_executable_open_time(session_date, observed_at):
+            reason = (
+                "EXECUTION_SESSION_NOT_OPEN"
+                if observed_at < self.calendar.session_open(session_date)
+                else "MISSED_EXECUTION_OPEN"
+            )
+            raise DatasetInvalid(f"{reason}: raw open request nezačal v XNYS open okně")
         return self._ingest(
             provider,
             instrument,
@@ -161,9 +170,14 @@ class PersistentMarketDataService:
         try:
             bars = provider.historical_daily(instrument.symbol, start, end)
             actions = provider.corporate_actions(instrument.symbol, start, end)
+            knowledge_time = require_utc(self.clock()) if executable_open else observed_at
+            if executable_open and not self.calendar.is_executable_open_time(start, knowledge_time):
+                raise DatasetInvalid(
+                    "MISSED_EXECUTION_OPEN: provider response nebyla získána v XNYS open okně"
+                )
             normalized = [
                 self._normalize_open(
-                    bar, instrument, provider.metadata.name, observed_at, ingestion_id
+                    bar, instrument, provider.metadata.name, knowledge_time, ingestion_id
                 )
                 if executable_open
                 else normalize_bar(

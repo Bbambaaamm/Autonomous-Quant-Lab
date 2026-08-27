@@ -709,6 +709,7 @@ class JobExecutor:
         signal_close = calendar.session_close(signal_session)
         execution_session = calendar.next_session(signal_session)
         execution_open = calendar.session_open(execution_session)
+        execution_cutoff = calendar.executable_open_cutoff(execution_session)
 
         def sessions() -> Session:
             return Session(self.trading.repository.engine)
@@ -829,9 +830,11 @@ class JobExecutor:
                     )
             if now < execution_open:
                 continue
-            open_result = PersistentMarketDataService(sessions, calendar).ingest_open(
-                provider, instrument, execution_session, now
-            )
+            if now >= execution_cutoff:
+                continue
+            open_result = PersistentMarketDataService(
+                sessions, calendar, clock=lambda: utc(self.clock())
+            ).ingest_open(provider, instrument, execution_session, now)
             ingestions.append(open_result.ingestion_id)
             if open_result.status != "SUCCEEDED":
                 raise TransientJobError(open_result.error or "Raw executable open refresh selhal")
@@ -846,7 +849,7 @@ class JobExecutor:
                         == datetime.combine(execution_session, time(), UTC),
                         MarketObservationRecord.timeframe == "open",
                         MarketObservationRecord.timestamp == execution_open,
-                        MarketObservationRecord.observed_at <= now,
+                        MarketObservationRecord.observed_at < execution_cutoff,
                         MarketDataIngestionRecord.status == "SUCCEEDED",
                     )
                 )
@@ -862,12 +865,23 @@ class JobExecutor:
                 "no_action_reason": "EXECUTION_SESSION_NOT_OPEN",
                 "ingestion_ids": ",".join(ingestions),
             }
+        execution_now = utc(self.clock())
+        if execution_now >= execution_cutoff:
+            return {
+                "deployment_id": deployment_id,
+                "monitoring_id": monitoring.monitoring_id,
+                "trading_cycle_id": None,
+                "reconciliation_id": None,
+                "outcome": "NO_ACTION",
+                "no_action_reason": "MISSED_EXECUTION_OPEN",
+                "ingestion_ids": ",".join(ingestions),
+            }
         run_id = self.repository.materialize_execution_session(
             deployment_id=deployment_id,
             account_id=account_id,
             execution_session=execution_session,
             execution_time=execution_open,
-            created_at=now,
+            created_at=execution_now,
         )
         return {
             "deployment_id": deployment_id,
@@ -904,7 +918,20 @@ class JobExecutor:
                 pinned_session = date.fromisoformat(run.occurrence_key.removeprefix("xnys:"))
             except ValueError as exc:
                 raise PermanentJobError("Execution occurrence má neplatnou XNYS session") from exc
-            timing = Phase6PaperExecutionService.execution_timing(XNYSCalendar(), execution_now)
+            calendar = XNYSCalendar()
+            pinned_open = calendar.session_open(pinned_session)
+            if not calendar.is_executable_open_time(pinned_session, execution_now):
+                return {
+                    "deployment_id": deployment_id,
+                    "monitoring_id": None,
+                    "trading_cycle_id": None,
+                    "reconciliation_id": None,
+                    "outcome": "NO_ACTION",
+                    "no_action_reason": "EXECUTION_SESSION_NOT_OPEN"
+                    if execution_now < pinned_open
+                    else "MISSED_EXECUTION_OPEN",
+                }
+            timing = Phase6PaperExecutionService.execution_timing(calendar, execution_now)
             if timing.execution_session != pinned_session:
                 return {
                     "deployment_id": deployment_id,

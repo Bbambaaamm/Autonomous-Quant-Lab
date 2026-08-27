@@ -235,6 +235,30 @@ def test_phase6_run_outside_next_open_fails_before_any_economic_service(case: st
     current_data.for_execution_session.assert_not_called()
 
 
+@pytest.mark.parametrize(
+    "offset,reason",
+    [
+        (-timedelta(microseconds=1), "EXECUTION_SESSION_NOT_OPEN"),
+        (timedelta(seconds=1), "MISSED_EXECUTION_OPEN"),
+        (timedelta(minutes=5), "MISSED_EXECUTION_OPEN"),
+    ],
+)
+def test_persistent_intent_fails_closed_outside_exact_open(offset, reason: str) -> None:
+    calendar = XNYSCalendar()
+    execution_open = calendar.session_open(date(2026, 1, 12))
+    sessions = Mock(side_effect=AssertionError("Mimo open nesmí služba přistoupit k persistence"))
+    trading_cycle = Mock()
+    current_data = Mock(calendar=calendar)
+
+    with pytest.raises(DatasetInvalid, match=reason):
+        Phase6PaperExecutionService(sessions, current_data, trading_cycle).run(
+            "deployment", execution_open + offset, execution_intent_time=execution_open
+        )
+
+    trading_cycle.run.assert_not_called()
+    current_data.for_execution_session.assert_not_called()
+
+
 def _approved_candidate(factory):
     Phase6EligibilityService(factory).promote("e")
     return DeploymentService(factory).create("e", "paper")

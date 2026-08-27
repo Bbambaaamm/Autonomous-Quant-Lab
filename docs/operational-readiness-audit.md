@@ -15,7 +15,8 @@ Forenzní trace našel dvě odlišné execution cesty:
 
 1. zamýšlenou Phase 6 cestu `Phase6PaperExecutionService`, která rekonstruuje schválený deployment,
    vypočítá signál z adjusted close a předá targety Phase 4 risk/execution/broker vrstvě; tato cesta
-   není zapojena do API ani workeru a navíc retroaktivně používá open dokončené session;
+   v auditovaném commitu nebyla zapojena do API ani workeru a retroaktivně používala open
+   dokončené session; konkrétní timing blocker je nyní vyřešen v P0-A níže;
 2. skutečnou cestu workeru `RUN_PAPER_CYCLE`, která načte lokální CSV cestu a uživatelem dodané
    `target_weights`. Nepoužije deployment, experiment, strategy implementation, PIT universe ani
    persistentní current-data feed.
@@ -29,7 +30,8 @@ schválený Phase 6 deployment.
 
 **Souhrn nálezů:** 3 BLOCKER, 3 HIGH, 4 MEDIUM a 3 LOW. PAPER-only, chronologická research
 validace, persistentní risk/ledger a worker concurrency mechanismy jsou PASS. Phase 6 paper runtime
-naopak porušuje execution-time kauzalitu popsanou v B3.
+v auditovaném commitu porušoval execution-time kauzalitu popsanou v B3; P0-A tento konkrétní nález
+nyní řeší bez změny celkového verdiktu.
 
 ## 2. Auditní metoda a ověřené zdroje
 
@@ -101,7 +103,7 @@ Rozlišení v tabulkách:
   cost model.
 - Multi-asset research engine odděluje adjusted close pro signál od raw open pro fill a jeho
   backtestová historie končí před executable session. Toto PASS se nevztahuje na
-  `Phase6PaperExecutionService`, jehož retroaktivní execution timing je BLOCKER B3.
+  `Phase6PaperExecutionService`; jeho tehdejší retroaktivní timing je nyní RESOLVED jako P0-A.
 
 ### Paper safety a účetnictví
 
@@ -158,19 +160,17 @@ idempotenci. B3 next-open authority se nemění. Podrobnosti jsou v
 
 B2 resolution **nemění celkový verdikt NOT READY**. H1, M3 a další P1/P2 findings zůstávají otevřené.
 
-### B3 — Phase 6 paper service retroaktivně filluje již známý open
+### B3 / P0-A — RESOLVED — retroaktivní missed-open fill
 
-**Dopad:** `ValidatedCurrentDataAccessor.latest()` po close vybere právě dokončenou session a
-`Phase6PaperExecutionService.run()` nastaví `execution_time` na open téže session. Služba volaná po
-close tak použije raw open starý několik hodin; před close obdobně vybere předchozí dokončenou
-session a její ještě starší open. Nejde tedy o aktuálně obchodovatelný next open, ale o hindsight
-fill. Existující PostgreSQL E2E test tento stav neodhalí, protože službu volá minutu po close a
-retroaktivní timestamp očekává.
+Phase 6, worker i Stage C orchestrace nyní fail-closed povolují raw daily open pouze v kauzálním
+jednosekundovém XNYS open window a pouze s `observed_at` uvnitř tohoto knowledge cutoff. Pozdní provider retry ani
+restart workeru nemohou historický open použít; JobRun končí auditovatelným `NO_ACTION` a
+`MISSED_EXECUTION_OPEN` bez ekonomické změny. PostgreSQL CI vede regresi přes skutečný worker claim.
+Podrobnosti jsou v
+[`operational-readiness-remediation-p0-missed-open.md`](operational-readiness-remediation-p0-missed-open.md).
 
-**Proč je to blocker:** paper ledger, fills a PnL mohou vzniknout za cenu, kterou autonomní systém
-v okamžiku rozhodnutí nemohl získat. To porušuje projektový invariant „close signal → nejdříve next
-open“. Oprava execution-time kauzality je nutnou podmínkou před zapojením služby do workeru; nestačí
-pouze propojit stávající implementaci.
+Tato konkrétní resolution **nemění celkový verdikt NOT READY**. Zejména chybějící production worker
+service zůstává samostatným P0 blockerem.
 
 ## 6. HIGH findings
 
@@ -295,9 +295,9 @@ Ověří APPROVED deployment a právě jeden ACTIVE monitoring, immutable experi
 USD/XNYS universe a account; aplikuje corporate actions; načte completed-session data a předchozí
 lookback close data; adjusted close předá allowlisted strategy a target weights převede na Phase 4
 cyklus. Risk každý intent schválí nebo odmítne a služba cyklus sváže s deployment/monitoringem.
-Současně však nastaví fill time na open již dokončené session, takže vznikne retroaktivní hindsight
-fill popsaný v B3. E2E test potvrzuje současnou implementaci a lineage, nikoli reálnou
-obchodovatelnost timestampu. Následná performance capture/evaluation je samostatný job.
+V auditovaném commitu současně nastavovala fill time na již zmeškaný open. P0-A nyní tento stav
+odmítá podle skutečného run a knowledge time; následná performance capture/evaluation zůstává
+samostatný job.
 
 ## 12. Failure-mode tabletop
 
@@ -312,7 +312,7 @@ obchodovatelnost timestampu. Následná performance capture/evaluation je samost
 | Restart během cycle | economic commit je oddělen; stejný cycle se načte | recoverable, následně reconciliation |
 | Risk odmítne order | decision persistuje, broker order nevznikne | closed a auditovatelné; cycle může dokončit s rejectem |
 | Chybí executable price | Phase 4/6 odmítne chybějící next raw bar/open | closed; důvod v cycle/job failure podle cesty |
-| Market zavřený | accessor použije latest completed session a service její minulý open | **nefailne closed** proti retroaktivnímu fillu; B3 |
+| Market zavřený / open zmeškaný | worker a Phase 6 vrátí `MISSED_EXECUTION_OPEN` | closed; bez orderu, fillu a ledger změny; P0-A |
 | Stale data | Phase 6 vyžaduje poslední dokončenou session | closed; worker CSV cesta kontroluje pouze bar po decision time |
 | Neplatný deployment | Phase 6 service odmítne status/lineage/monitoring | closed, avšak standardní worker deployment ignoruje |
 
@@ -370,9 +370,8 @@ Dokončené joby měly stav `success`:
   HIGH/CRITICAL Trivy scans a CycloneDX SBOM;
 - **production-smoke — PASS:** production-like PAPER smoke test.
 
-Zelené CI potvrzuje testovou konzistenci implementovaného stavu. Nevyvrací B1/B2, které popisují
-chybějící runtime orchestration, ani B3: současný Phase 6 E2E test retroaktivní fill přijímá, takže
-jeho PASS není důkazem execution-time kauzality.
+Původní zelené CI potvrzovalo pouze tehdejší implementovaný stav. P0-A proto přidává samostatný
+PostgreSQL worker-path causality krok; celkový verdikt nadále závisí i na ostatních blockerech.
 
 ## 15. Operational readiness verdict
 
@@ -387,9 +386,9 @@ integraci již implementovaných Phase 1–9 schopností.
 
 ## 16. Minimální remediation plan
 
-1. **P0:** opravit Phase 6 paper timing tak, aby close-derived signál vytvořil fill nejdříve na
-   skutečně budoucím/aktuálně obchodovatelném next open; přidat regresní test odmítající
-   retroaktivní fill po close i při zavřeném trhu.
+1. **P0-A — RESOLVED:** Phase 6 paper timing dovolí fill pouze v prokazatelném XNYS open knowledge
+   instantu; worker-path regrese odmítá pozdní provider response, retry i restart bez ekonomické
+   změny.
 2. **P0:** definovat jediný versioned `RUN_PAPER_DEPLOYMENT` job contract s `deployment_id` a teprve
    po opravě B3 zapojit worker na `Phase6PaperExecutionService`; odstranit možnost ekonomického
    rozhodnutí z dodaných `target_weights` z produkčního job contractu.

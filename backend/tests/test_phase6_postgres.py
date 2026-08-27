@@ -1,7 +1,7 @@
 import os
 import threading
 from concurrent.futures import ThreadPoolExecutor
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from uuid import uuid4
 
@@ -93,7 +93,8 @@ def test_persistent_ingest_publishes_causal_raw_open(engine) -> None:
     )
 
     class OpenProvider:
-        metadata = ProviderMetadata("open-fixture", "1", False, False)
+        def __init__(self, name: str = "open-fixture") -> None:
+            self.metadata = ProviderMetadata(name, "1", False, False)
 
         def resolve(self, symbol: str) -> dict[str, str]:
             return {"symbol": symbol}
@@ -115,18 +116,41 @@ def test_persistent_ingest_publishes_causal_raw_open(engine) -> None:
             return []
 
     factory = sessionmaker(engine, expire_on_commit=False)
-    service = PersistentMarketDataService(factory, calendar)
-    observed_at = opened_at.replace(microsecond=1)
+    response_time = opened_at + timedelta(milliseconds=500)
+    service = PersistentMarketDataService(factory, calendar, clock=lambda: response_time)
+    observed_at = opened_at
     result = service.ingest_open(OpenProvider(), instrument, session_day, observed_at)
 
     assert result.status == "SUCCEEDED"
     observation = ValidatedCurrentDataAccessor(factory, calendar).for_execution_session(
-        [instrument.instrument_id], session_day, observed_at
+        [instrument.instrument_id], session_day, response_time
     )[0]
     assert observation.timestamp == opened_at
-    assert observation.observed_at == observed_at
+    assert observation.observed_at == response_time
     assert observation.timeframe == "open"
     assert observation.open == Decimal("101")
+
+    # Úspěšný scope je immutable a jeho idempotentní replay nesmí znovu volat provider.
+    def unexpected_clock() -> datetime:
+        raise AssertionError("Idempotentní replay nesmí znovu číst provider response time")
+
+    replay = PersistentMarketDataService(
+        factory,
+        calendar,
+        clock=unexpected_clock,
+    ).ingest_open(OpenProvider(), instrument, session_day, opened_at)
+    assert replay.status == "SUCCEEDED"
+    assert replay.ingestion_id == result.ingestion_id
+
+    late_service = PersistentMarketDataService(
+        factory, calendar, clock=lambda: opened_at + timedelta(minutes=5)
+    )
+    # Jiný scope simuluje nový provider request; nesmí se zaměnit za replay úspěšné ingestion.
+    late = late_service.ingest_open(
+        OpenProvider("late-open-fixture"), instrument, session_day, opened_at
+    )
+    assert late.status == "FAILED"
+    assert late.error is not None and "MISSED_EXECUTION_OPEN" in late.error
 
 
 def test_phase6_constraints_snapshot_and_pit_query(engine):

@@ -112,6 +112,7 @@ class XNYSCalendar:
     audited_start = date(1970, 1, 1)
     audited_end = date(2100, 12, 31)
     timezone = ZoneInfo("America/New_York")
+    executable_open_window = timedelta(seconds=1)
 
     def __init__(self) -> None:
         library_version = version("exchange-calendars")
@@ -139,6 +140,15 @@ class XNYSCalendar:
             raise ValueError("Datum není burzovní session")
         closed = self._calendar.session_close(day.isoformat()).to_pydatetime().astimezone(UTC)
         return cast(datetime, closed)
+
+    def executable_open_cutoff(self, day: date) -> datetime:
+        """Vrátí exkluzivní konec krátkého okna pro kauzální raw-open execution."""
+        return self.session_open(day) + self.executable_open_window
+
+    def is_executable_open_time(self, day: date, timestamp: datetime) -> bool:
+        """Ověří, že skutečný knowledge/run čas leží v krátkém XNYS open okně."""
+        value = require_utc(timestamp)
+        return self.session_open(day) <= value < self.executable_open_cutoff(day)
 
     def session_for_timestamp(self, timestamp: datetime) -> date | None:
         value = require_utc(timestamp)
