@@ -6,9 +6,10 @@ ingress_network="quantlab-phase9-smoke-ingress-$$"
 postgres="quantlab-phase9-postgres-$$"
 backend="quantlab-phase9-backend-$$"
 frontend="quantlab-phase9-frontend-$$"
+worker="quantlab-phase9-worker-$$"
 
 cleanup() {
-  docker rm -f "$frontend" "$backend" "$postgres" >/dev/null 2>&1 || true
+  docker rm -f "$frontend" "$worker" "$backend" "$postgres" >/dev/null 2>&1 || true
   docker network rm "$ingress_network" "$network" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
@@ -73,6 +74,81 @@ done
 docker exec "$backend" python -c \
   "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/readyz')" >/dev/null
 
+# Skutečný production entrypoint musí fail-closed odmítnout vypnutou automation.
+if docker run --rm --network "$network" \
+  -e APP_ENV=production -e DATABASE_URL="$runtime_url" \
+  -e TRUSTED_HOSTS="$backend,127.0.0.1,localhost" \
+  -e API_VIEWER_TOKEN="$VIEWER_TOKEN" -e API_OPERATOR_TOKEN="$OPERATOR_TOKEN" \
+  -e API_ADMIN_TOKEN="$ADMIN_TOKEN" -e AUTOMATION_ENABLED=false \
+  -e WORKER_REQUIRE_PRODUCTION=true \
+  quantlab-backend /app/backend/.venv/bin/quantlab-worker >/dev/null 2>&1; then
+  echo "Worker přijal AUTOMATION_ENABLED=false" >&2
+  exit 1
+fi
+
+docker run -d --name "$worker" --network "$network" --read-only --tmpfs /tmp \
+  --restart unless-stopped --cap-drop ALL --security-opt no-new-privileges:true \
+  -e APP_ENV=production -e DATABASE_URL="$runtime_url" \
+  -e TRUSTED_HOSTS="$backend,127.0.0.1,localhost" \
+  -e API_VIEWER_TOKEN="$VIEWER_TOKEN" -e API_OPERATOR_TOKEN="$OPERATOR_TOKEN" \
+  -e API_ADMIN_TOKEN="$ADMIN_TOKEN" -e AUTOMATION_ENABLED=true \
+  -e WORKER_REQUIRE_PRODUCTION=true \
+  -e WORKER_POLL_INTERVAL=1 -e WORKER_HEARTBEAT_INTERVAL=2 \
+  -e WORKER_ID_PREFIX=production-smoke quantlab-backend \
+  /app/backend/.venv/bin/quantlab-worker >/dev/null
+
+# V izolované smoke DB vytvoříme pouze bezpečný reconciliation schedule; run vytváří scheduler.
+docker exec -i "$backend" python - <<'PY'
+from datetime import UTC, datetime
+from quantlab.automation import AutomationRepository, JobType, ScheduleType
+from quantlab.config import get_settings
+
+repo = AutomationRepository(get_settings().database_url)
+repo.create_job(
+    job_id="p0b-production-smoke",
+    job_type=JobType.RUN_RECONCILIATION,
+    account_id="paper-main",
+    schedule_type=ScheduleType.INTERVAL,
+    interval_seconds=3600,
+    next_run_at=datetime.now(UTC),
+)
+PY
+
+for _ in $(seq 1 30); do
+  if docker exec "$backend" python - <<'PY' >/dev/null 2>&1
+from datetime import UTC, datetime, timedelta
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+from quantlab.automation import AutomationRepository, JobRun, RunStatus, WorkerHeartbeat
+from quantlab.config import get_settings
+
+repo = AutomationRepository(get_settings().database_url)
+with Session(repo.engine) as session:
+    heartbeat = session.scalar(select(WorkerHeartbeat).order_by(WorkerHeartbeat.last_heartbeat_at.desc()))
+    run = session.scalar(select(JobRun).where(JobRun.scheduled_job_id == "p0b-production-smoke"))
+    assert heartbeat is not None and heartbeat.stopped_at is None
+    assert heartbeat.last_heartbeat_at.replace(tzinfo=UTC) >= datetime.now(UTC) - timedelta(seconds=60)
+    assert heartbeat.scheduler_heartbeat_at is not None
+    assert run is not None and run.status == RunStatus.SUCCEEDED and run.attempt_count == 1
+PY
+  then break; fi
+  sleep 1
+done
+docker exec "$backend" python - <<'PY'
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+from quantlab.automation import AutomationRepository, JobRun, RunStatus, WorkerHeartbeat
+from quantlab.config import get_settings
+
+repo = AutomationRepository(get_settings().database_url)
+with Session(repo.engine) as session:
+    heartbeat = session.scalar(select(WorkerHeartbeat).order_by(WorkerHeartbeat.last_heartbeat_at.desc()))
+    run = session.scalar(select(JobRun).where(JobRun.scheduled_job_id == "p0b-production-smoke"))
+    assert heartbeat is not None and heartbeat.scheduler_heartbeat_at is not None
+    assert run is not None and run.status == RunStatus.SUCCEEDED and run.attempt_count == 1
+PY
+test "$(docker inspect -f '{{.State.Running}}' "$worker")" = "true"
+
 docker run -d --name "$frontend" --network "$network" -p 127.0.0.1:3000:3000 \
   --read-only --tmpfs /tmp --cap-drop ALL --security-opt no-new-privileges:true \
   -e QUANTLAB_API_URL="http://${backend}:8000" \
@@ -127,5 +203,6 @@ PY
 test "$(docker inspect -f '{{json .HostConfig.PortBindings}}' "$postgres")" = "{}"
 test "$(docker inspect -f '{{json .HostConfig.PortBindings}}' "$backend")" = "{}"
 test "$(docker exec "$backend" python -c 'import os; print(os.getuid())')" != 0
+test "$(docker exec "$worker" python -c 'import os; print(os.getuid())')" != 0
 test "$(docker exec "$frontend" /usr/local/bin/node -e 'console.log(process.getuid())')" != 0
 ! git grep -n -E 'TRADING_MODE=live|LIVE_TRADING_ENABLED=true' -- ':!docs/codex/*' ':!CODEX_MASTER_PROMPT.md' ':!scripts/production-smoke.sh'

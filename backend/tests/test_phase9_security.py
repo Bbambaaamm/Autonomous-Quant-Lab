@@ -3,6 +3,7 @@ import os
 import subprocess
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 from quantlab import api
@@ -123,3 +124,24 @@ def test_rate_limit_http_boundary_has_retry_after() -> None:
     finally:
         api.settings.api_read_limit = original
         limiter.events.clear()
+
+
+def test_production_worker_configuration_requires_enabled_postgres_runtime() -> None:
+    secret = "x" * 48
+    base = {
+        "app_env": "production",
+        "database_url": "postgresql+psycopg://runtime@db/quantlab",
+        "trusted_hosts": "worker",
+        "api_viewer_token": "v" + secret,
+        "api_operator_token": "o" + secret,
+        "api_admin_token": "a" + secret,
+        "worker_require_production": True,
+    }
+    with pytest.raises(ValueError, match="AUTOMATION_ENABLED"):
+        Settings(**base).validate_worker_runtime()
+    with pytest.raises(ValueError, match="APP_ENV=production"):
+        Settings(
+            **(base | {"app_env": "development"}), automation_enabled=True
+        ).validate_worker_runtime()
+    configured = Settings(**base, automation_enabled=True)
+    configured.validate_worker_runtime()

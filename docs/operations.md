@@ -27,8 +27,9 @@ expiraci může retry cycle atomicky převzít a pokračovat idempotentně z per
 
 ## Automation worker a runbook
 
-Po Alembic upgradu vytvořte schedule přes `POST /automation/jobs`, nastavte
-`AUTOMATION_ENABLED=true` a spusťte `cd backend && uv run quantlab-worker`. SIGTERM/SIGINT zastaví
+Po Alembic upgradu vytvořte schedule přes `POST /automation/jobs`. V podporované production
+topology `make production-up` automaticky spouští worker s `AUTOMATION_ENABLED=true`; ruční
+`uv run quantlab-worker` je pouze lokální vývojová cesta. SIGTERM/SIGINT zastaví
 nové claimy. Job deaktivujte přes `POST /automation/jobs/{id}/disable`; běžící ekonomická
 transakce se tím neruší. Runy a attempts kontrolujte přes `/automation/runs/{id}`, worker přes
 `/operations/workers`, backlog přes `/operations/summary`; dead-letter ručně obnovte
@@ -36,6 +37,9 @@ transakce se tím neruší. Runy a attempts kontrolujte přes `/automation/runs/
 `POST /automation/jobs/{id}/run-now`.
 Deaktivovaný job nelze spustit ani přes `run-now`; globálně vypnutá automation neclaimuje a
 nepovolí manual retry. Již běžící pokus se pouze bezpečně dokončí nebo nechá expirovat.
+Přehled rozlišuje API readiness od `autonomous_readiness`: `HEALTHY` vyžaduje čerstvý worker i
+scheduler heartbeat, `STALE` označuje zestárlý/ukončený worker, `UNAVAILABLE` chybějící worker a
+`DISABLED` globálně vypnutý engine. Freshness používá stejný `worker_lease_timeout` jako lease.
 
 * **Worker neheartbeatuje / DB outage:** nevynucujte paralelní běh; obnovte DB, ověřte readiness
   a nechte nový worker převzít pouze expirovaný lease.

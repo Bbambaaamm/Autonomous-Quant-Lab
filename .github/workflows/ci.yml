@@ -144,6 +144,8 @@ jobs:
         run: uv run pytest -q tests/test_b2_worker_postgres.py
       - name: P0 missed-open causality regression
         run: uv run pytest -q tests/test_p0_missed_open_postgres.py
+      - name: P0 production worker runtime acceptance
+        run: uv run pytest -q tests/test_p0b_worker_runtime_postgres.py
       - name: Stage C autonomous market-data/session orchestration acceptance
         run: uv run pytest -q tests/test_stage_c_autonomous_session_postgres.py
 
@@ -213,6 +215,9 @@ jobs:
       - run: docker build -f backend/Dockerfile -t quantlab-backend .
       - run: docker build -f frontend/Dockerfile -t quantlab-frontend .
       - run: test "$(docker run --rm --entrypoint /app/backend/.venv/bin/python quantlab-backend -c 'import os; print(os.getuid())')" != 0
+      - run: >-
+          docker run --rm --entrypoint /app/backend/.venv/bin/python quantlab-backend -c
+          "import os; path='/app/backend/.venv/bin/quantlab-worker'; assert os.path.isfile(path) and os.access(path, os.X_OK)"
       - run: test "$(docker run --rm --entrypoint /usr/local/bin/node quantlab-frontend -e 'console.log(process.getuid())')" != 0
       - name: Verify minimal production runtimes
         run: |

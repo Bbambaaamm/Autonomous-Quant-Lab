@@ -145,6 +145,11 @@ make production-build
 make production-up
 ```
 
+Tento příkaz spustí PostgreSQL, API, dashboard i samostatný `quantlab-worker`; worker se po
+standardním production startupu nespouští ručně. Globální engine běží s
+`AUTOMATION_ENABLED=true`, ale žádný deployment nezíská autonomii bez samostatného explicitního
+opt-in po APPROVED a ACTIVE monitoring gate.
+
 Produkční postup vyžaduje explicitní PostgreSQL migration/runtime credentials, silné secrets, HTTPS ingress a `APP_ENV=production`. Detailní postup je v [`docs/production-deployment.md`](docs/production-deployment.md).
 
 Backup a restore:
