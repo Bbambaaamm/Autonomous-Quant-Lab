@@ -22,8 +22,9 @@ nebo Node runtime, nikoli pomocí `sh`, `id`, `apt` či `npm` uvnitř běžící
 Worker má `restart: unless-stopped`, read-only filesystem, non-root UID a pouze interní datovou
 síť. `WORKER_ID_PREFIX` označuje deployment a hostname/PID/UUID zachovávají unikátní identitu po
 restartu. Deklarovaná topology má jednu worker repliku; databázové occurrence, lease a fencing
-zůstávají autoritou pro restart safety. Docker healthcheck workeru záměrně není process-only:
-funkční stav poskytuje DB-backed operator read model z čerstvého heartbeat i scheduler heartbeat.
+zůstávají autoritou pro restart safety. Worker vypíná zděděný API HTTP healthcheck, protože
+neposlouchá na HTTP portu, a záměrně jej nenahrazuje process-only kontrolou: funkční stav poskytuje
+DB-backed operator read model z čerstvého heartbeat i scheduler heartbeat.
 
 Backup vytvoří `BACKUP=backups/name.dump make db-backup`. Restore vyžaduje jinou explicitní
 `RESTORE_DATABASE_URL`, správný checksum a `RESTORE_CONFIRMATION=RESTORE_EPHEMERAL_DATABASE`.

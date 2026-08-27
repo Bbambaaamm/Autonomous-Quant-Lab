@@ -29,7 +29,8 @@ ověřuje čerstvý worker/scheduler heartbeat, živý non-root worker proces a 
 automation. PostgreSQL P0-B acceptance navíc ověřuje restart bez duplicate completion. P0-A test
 nadále vyžaduje pozdní start jako `NO_ACTION/MISSED_EXECUTION_OPEN` bez orderu či fillu.
 
-Worker nemá triviální Docker healthcheck typu `ps`; Docker restartuje mrtvý proces a autoritativní
+Worker vypíná zděděný API HTTP healthcheck stejného image, protože worker neposlouchá na HTTP
+portu. Nenahrazuje jej triviálním checkem typu `ps`; Docker restartuje mrtvý proces a autoritativní
 funkční readiness je DB-backed. Backend image proto zůstává pod stávající Trivy a SBOM gate a CI
 navíc ověřuje přítomnost spustitelného `quantlab-worker`.
 

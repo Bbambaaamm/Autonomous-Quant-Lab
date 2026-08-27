@@ -1,0 +1,4 @@
+#!/app/backend/.venv/bin/python
+from quantlab.worker import main
+
+main()

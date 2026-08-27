@@ -60,7 +60,7 @@ SQL
 runtime_url="postgresql+psycopg://quantlab_runtime:phase9-runtime-password@${postgres}:5432/quantlab"
 docker run -d --name "$backend" --network "$network" --read-only --tmpfs /tmp \
   --cap-drop ALL --security-opt no-new-privileges:true \
-  -e APP_ENV=production -e DATABASE_URL="$runtime_url" \
+  -e APP_ENV=production -e DATABASE_URL="$runtime_url" -e AUTOMATION_ENABLED=true \
   -e TRUSTED_HOSTS="$backend,127.0.0.1,localhost" \
   -e API_VIEWER_TOKEN="$VIEWER_TOKEN" -e API_OPERATOR_TOKEN="$OPERATOR_TOKEN" \
   -e API_ADMIN_TOKEN="$ADMIN_TOKEN" quantlab-backend >/dev/null

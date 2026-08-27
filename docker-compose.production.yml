@@ -35,6 +35,7 @@ services:
       WORKER_REQUIRE_PRODUCTION: "true"
       WORKER_ID_PREFIX: "${WORKER_ID_PREFIX:-production-worker}"
     command: ["/app/backend/.venv/bin/quantlab-worker"]
+    healthcheck: {disable: true}
     depends_on: {postgres: {condition: service_healthy}}
     networks: [data]
     restart: unless-stopped
