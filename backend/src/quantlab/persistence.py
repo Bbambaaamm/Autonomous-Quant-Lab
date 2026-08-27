@@ -114,6 +114,36 @@ class CorporateActionRecord(Base):
     new_symbol: Mapped[str | None] = mapped_column(String(32))
 
 
+class CorporateActionReadinessRecord(Base):
+    """Neměnný důkaz, že provider prověřil konkrétní interval akcí."""
+
+    __tablename__ = "corporate_action_readiness"
+    evidence_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    provider: Mapped[str] = mapped_column(String(40), nullable=False, index=True)
+    provider_version: Mapped[str] = mapped_column(String(40), nullable=False)
+    instrument_id: Mapped[str] = mapped_column(
+        ForeignKey("instruments.instrument_id", ondelete="RESTRICT"), index=True
+    )
+    requested_start: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    requested_end: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    knowledge_cutoff: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    checked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    supports_actions: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False)
+    blocking_reason: Mapped[str | None] = mapped_column(String(80))
+    action_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    __table_args__ = (
+        Index(
+            "ix_action_readiness_scope",
+            "instrument_id",
+            "provider",
+            "requested_start",
+            "requested_end",
+            "knowledge_cutoff",
+        ),
+    )
+
+
 class UniverseDefinitionRecord(Base):
     __tablename__ = "universe_definitions"
     universe_id: Mapped[str] = mapped_column(String(64), primary_key=True)

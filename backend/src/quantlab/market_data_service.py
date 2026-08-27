@@ -24,6 +24,7 @@ from quantlab.market_data import (
     normalize_bar,
 )
 from quantlab.persistence import (
+    CorporateActionReadinessRecord,
     CorporateActionRecord,
     DatasetSnapshotRecord,
     InstrumentRecord,
@@ -120,6 +121,86 @@ class PersistentMarketDataService:
             executable_open=True,
         )
 
+    def verify_corporate_action_readiness(
+        self,
+        provider: MarketDataProvider,
+        instrument: Instrument,
+        start: date,
+        end: date,
+        knowledge_cutoff: datetime,
+    ) -> str:
+        """Připne úplnost intervalu; prázdný výsledek je úplný jen u capable provideru."""
+        cutoff = require_utc(knowledge_cutoff)
+        identity = "|".join(
+            (
+                provider.metadata.name,
+                provider.metadata.version,
+                instrument.instrument_id,
+                start.isoformat(),
+                end.isoformat(),
+                cutoff.isoformat(),
+            )
+        )
+        with self._sessions() as session:
+            existing = session.scalar(
+                select(CorporateActionReadinessRecord).where(
+                    CorporateActionReadinessRecord.provider == provider.metadata.name,
+                    CorporateActionReadinessRecord.provider_version == provider.metadata.version,
+                    CorporateActionReadinessRecord.instrument_id == instrument.instrument_id,
+                    CorporateActionReadinessRecord.requested_start == _instant(start),
+                    CorporateActionReadinessRecord.requested_end == _instant(end),
+                    CorporateActionReadinessRecord.knowledge_cutoff == cutoff,
+                    CorporateActionReadinessRecord.status == "COMPLETE",
+                )
+            )
+            if existing is not None:
+                return existing.evidence_id
+
+        status = "UNSUPPORTED"
+        reason: str | None = "CORPORATE_ACTIONS_UNSUPPORTED"
+        actions: list[CorporateAction] = []
+        error: Exception | None = None
+        if provider.metadata.supports_actions:
+            try:
+                actions = provider.corporate_actions(instrument.symbol, start, end)
+                if any(action.instrument_id != instrument.instrument_id for action in actions):
+                    raise DatasetInvalid("Corporate action neodpovídá požadovanému instrumentu")
+                if any(require_utc(action.known_at) > cutoff for action in actions):
+                    raise DatasetInvalid("Corporate action porušuje knowledge cutoff")
+                status, reason = "COMPLETE", None
+            except Exception as exc:
+                status, reason, error = "FAILED", "CORPORATE_ACTIONS_UNAVAILABLE", exc
+        evidence_payload = "|".join(sorted(action.action_id for action in actions))
+        evidence_id = hashlib.sha256(f"{identity}|{status}|{evidence_payload}".encode()).hexdigest()
+        checked_at = require_utc(self.clock())
+        with self._sessions() as session, session.begin():
+            _lock(session, f"action-readiness:{evidence_id}")
+            if session.get(CorporateActionReadinessRecord, evidence_id) is None:
+                session.add(
+                    CorporateActionReadinessRecord(
+                        evidence_id=evidence_id,
+                        provider=provider.metadata.name,
+                        provider_version=provider.metadata.version,
+                        instrument_id=instrument.instrument_id,
+                        requested_start=_instant(start),
+                        requested_end=_instant(end),
+                        knowledge_cutoff=cutoff,
+                        checked_at=checked_at,
+                        supports_actions=int(provider.metadata.supports_actions),
+                        status=status,
+                        blocking_reason=reason,
+                        action_count=len(actions),
+                    )
+                )
+                for action in actions:
+                    if session.get(CorporateActionRecord, action.action_id) is None:
+                        session.add(self._action_record(action))
+        if status != "COMPLETE":
+            if error is not None:
+                raise error
+            raise DatasetInvalid(reason or "CORPORATE_ACTIONS_NOT_READY")
+        return evidence_id
+
     def _ingest(
         self,
         provider: MarketDataProvider,
@@ -169,7 +250,11 @@ class PersistentMarketDataService:
                 )
         try:
             bars = provider.historical_daily(instrument.symbol, start, end)
-            actions = provider.corporate_actions(instrument.symbol, start, end)
+            actions = (
+                provider.corporate_actions(instrument.symbol, start, end)
+                if provider.metadata.supports_actions
+                else []
+            )
             knowledge_time = require_utc(self.clock()) if executable_open else observed_at
             if executable_open and not self.calendar.is_executable_open_time(start, knowledge_time):
                 raise DatasetInvalid(

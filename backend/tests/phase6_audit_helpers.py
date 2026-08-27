@@ -33,7 +33,7 @@ class MappingProvider:
 
     @property
     def metadata(self) -> ProviderMetadata:
-        return ProviderMetadata(self.name, "1", False, False)
+        return ProviderMetadata(self.name, "1", True, False)
 
     def resolve(self, symbol: str) -> dict[str, str]:
         return {"symbol": symbol}
@@ -97,6 +97,9 @@ def seed_phase6_snapshot(
             min(observed_at, CALENDAR.session_close(day)),
         )
         assert result.status == "SUCCEEDED"
+    market_data.verify_corporate_action_readiness(
+        provider, instrument, sessions[0], sessions[-1], observed_at
+    )
     universe_id = f"universe-{suffix}"
     with factory() as session, session.begin():
         session.add(
