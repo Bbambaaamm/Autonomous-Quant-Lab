@@ -38,6 +38,7 @@ from quantlab.persistence import (
     InstrumentRecord,
     MarketDataIngestionRecord,
     RunRepository,
+    StrategyDeploymentRecord,
     UniverseDefinitionRecord,
     UniverseMembershipRecord,
 )
@@ -187,7 +188,7 @@ class InstrumentCreate(BaseModel):
 
 
 class UniverseCreate(BaseModel):
-    universe_id: str = Field(min_length=1, max_length=64)
+    universe_id: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9._~-]+$")
     name: str = Field(min_length=1, max_length=100)
     kind: UniverseKind = UniverseKind.POINT_IN_TIME_MEMBERSHIP
     reason: str = Field(min_length=3, max_length=1000)
@@ -326,6 +327,13 @@ def operator_strategies() -> list[dict[str, object]]:
     return operator_read_model.strategies()
 
 
+@app.get("/operator/deployments/summary", response_model=list[OperatorDocument])
+def operator_deployments_summary(
+    limit: int = Query(50, ge=1, le=100),
+) -> list[dict[str, object]]:
+    return operator_read_model.deployments(limit)
+
+
 @app.get("/operator/strategies/{strategy_identity}", response_model=OperatorDocument)
 def operator_strategy(strategy_identity: str) -> dict[str, object]:
     result = operator_read_model.strategy(strategy_identity)
@@ -355,8 +363,13 @@ def operator_risk() -> dict[str, object]:
 
 
 @app.get("/operator/data-health", response_model=OperatorDocument)
-def operator_data_health() -> dict[str, object]:
-    return operator_read_model.data_health(datetime.now(UTC))
+def operator_data_health(
+    membership_limit: int = Query(100, ge=1, le=500),
+    membership_offset: int = Query(0, ge=0),
+) -> dict[str, object]:
+    return operator_read_model.data_health(
+        datetime.now(UTC), membership_limit=membership_limit, membership_offset=membership_offset
+    )
 
 
 @app.get("/operator/automation", response_model=OperatorDocument)
@@ -466,7 +479,14 @@ def _audit_control_mutation(
 ) -> None:
     identity = hashlib.sha256(
         json.dumps(
-            [event_type, entity_type, entity_id, actor["actor_id"], reason],
+            [
+                event_type,
+                entity_type,
+                entity_id,
+                actor["actor_id"],
+                reason,
+                correlation_id,
+            ],
             sort_keys=True,
         ).encode()
     ).hexdigest()
@@ -484,6 +504,21 @@ def _audit_control_mutation(
                     payload_json=json.dumps({"actor": actor, "reason": reason}, sort_keys=True),
                 )
             )
+
+
+@app.post("/operator/reconciliation/run", response_model=OperatorDocument)
+def operator_reconciliation(body: ReasonedMutation, request: Request) -> dict[str, object]:
+    correlation_id = _correlation(request)
+    result = reconciliation_service.reconcile("paper-main", correlation_id=correlation_id)
+    _audit_control_mutation(
+        "CONTROL_RECONCILIATION_RUN",
+        "reconciliation",
+        result.id,
+        _actor(request),
+        body.reason,
+        correlation_id,
+    )
+    return vars(result)
 
 
 @app.post("/operator/instruments")
@@ -809,16 +844,51 @@ def operator_monitoring_enrollment(
     body: MonitoringEnrollment, request: Request
 ) -> dict[str, object]:
     try:
-        row = monitoring_service.enroll(body.deployment_id, body.policy_id, datetime.now(UTC))
+        now = datetime.now(UTC)
+        row = monitoring_service.enroll(body.deployment_id, body.policy_id, now)
+        with session_factory() as session:
+            deployment = session.get(StrategyDeploymentRecord, row.deployment_id)
+            if deployment is None:
+                raise DatasetInvalid("Monitoring deployment lineage neexistuje")
+            account_id = deployment.paper_account_id
+        monitoring_job_id = hashlib.sha256(
+            f"monitor-paper-deployment:{row.monitoring_id}".encode()
+        ).hexdigest()
+        monitoring_job = automation_repository.create_job(
+            job_type=JobType.MONITOR_PAPER_DEPLOYMENT,
+            account_id=account_id,
+            strategy_id=None,
+            schedule_type=ScheduleType.INTERVAL,
+            next_run_at=now,
+            interval_seconds=3600,
+            timezone="UTC",
+            misfire_policy=MisfirePolicy.RUN_ONCE_IF_MISSED,
+            misfire_grace_seconds=3600,
+            max_attempts=5,
+            config={"monitoring_id": row.monitoring_id},
+            enabled=True,
+            job_id=monitoring_job_id,
+        )
+        correlation_id = _correlation(request)
         _audit_control_mutation(
             "CONTROL_MONITORING_ENROLLED",
             "monitoring",
             row.monitoring_id,
             _actor(request),
             body.reason,
-            _correlation(request),
+            correlation_id,
         )
-        return _row(row)
+        _audit_control_mutation(
+            "CONTROL_MONITORING_JOB_ENSURED",
+            "scheduled_job",
+            monitoring_job.id,
+            _actor(request),
+            body.reason,
+            correlation_id,
+        )
+        result = _row(row)
+        result["monitoring_job"] = _row(monitoring_job)
+        return result
     except (ValueError, RuntimeError, DatasetInvalid) as exc:
         raise HTTPException(409, str(exc)) from exc
 
