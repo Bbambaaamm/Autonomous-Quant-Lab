@@ -3,11 +3,11 @@ import json
 import pytest
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
+from test_phase6_audit_fixes import _seed
 
 from quantlab.market_data import DatasetInvalid
 from quantlab.persistence import Base, ExperimentRecord, Phase6EligibilityDecisionRecord
 from quantlab.phase6_runtime import EligibilityPolicy, Phase6EligibilityService
-from tests.test_phase6_audit_fixes import _seed
 
 
 def _factory():
