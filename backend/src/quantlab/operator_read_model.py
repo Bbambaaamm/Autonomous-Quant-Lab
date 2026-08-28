@@ -371,7 +371,12 @@ class OperatorReadModel:
                 ],
             }
 
-    def data_health(self, now: datetime) -> dict[str, Any]:
+    def data_health(
+        self,
+        now: datetime,
+        membership_limit: int = 100,
+        membership_offset: int = 0,
+    ) -> dict[str, Any]:
         completed = XNYSCalendar().latest_completed_session(now)
         session_start = datetime.combine(completed, datetime.min.time(), tzinfo=UTC)
         session_end = session_start + timedelta(days=1)
@@ -430,6 +435,21 @@ class OperatorReadModel:
                 )
                 .where(MarketDataIngestionRecord.status == "SUCCEEDED")
             )
+            membership_total = (
+                session.scalar(select(func.count()).select_from(UniverseMembershipRecord)) or 0
+            )
+            memberships = list(
+                session.scalars(
+                    select(UniverseMembershipRecord)
+                    .order_by(
+                        UniverseMembershipRecord.universe_id,
+                        UniverseMembershipRecord.instrument_id,
+                        UniverseMembershipRecord.valid_from,
+                    )
+                    .limit(membership_limit)
+                    .offset(membership_offset)
+                )
+            )
             return {
                 "provider": {
                     "name": "stooq",
@@ -462,16 +482,12 @@ class OperatorReadModel:
                         )
                     )
                 ],
-                "memberships": [
-                    _row(x)
-                    for x in session.scalars(
-                        select(UniverseMembershipRecord).order_by(
-                            UniverseMembershipRecord.universe_id,
-                            UniverseMembershipRecord.instrument_id,
-                            UniverseMembershipRecord.valid_from,
-                        )
-                    )
-                ],
+                "memberships": [_row(x) for x in memberships],
+                "membership_page": {
+                    "total": membership_total,
+                    "limit": membership_limit,
+                    "offset": membership_offset,
+                },
                 "corporate_action_readiness": [
                     _row(x)
                     for x in session.scalars(
@@ -572,6 +588,21 @@ class OperatorReadModel:
                     select(StrategyRecord).order_by(
                         StrategyRecord.strategy_name, StrategyRecord.strategy_version
                     )
+                )
+            ]
+
+    def deployments(self, limit: int = 50) -> list[dict[str, Any]]:
+        """Bounded dashboard projection; never fans out one read per strategy."""
+        with self._session_factory() as session:
+            return [
+                _row(x)
+                for x in session.scalars(
+                    select(StrategyDeploymentRecord)
+                    .order_by(
+                        StrategyDeploymentRecord.created_at.desc(),
+                        StrategyDeploymentRecord.deployment_id.desc(),
+                    )
+                    .limit(limit)
                 )
             ]
 
