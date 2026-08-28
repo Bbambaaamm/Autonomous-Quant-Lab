@@ -353,6 +353,7 @@ class Phase6EligibilityDecisionRecord(Base):
     strategy_identity: Mapped[str] = mapped_column(String(64), nullable=False)
     strategy_version: Mapped[str] = mapped_column(String(50), nullable=False)
     code_sha: Mapped[str] = mapped_column(String(64), nullable=False)
+    seed: Mapped[int] = mapped_column(Integer, nullable=False)
     policy_id: Mapped[str] = mapped_column(String(80), nullable=False)
     policy_version: Mapped[int] = mapped_column(Integer, nullable=False)
     policy_json: Mapped[str] = mapped_column(Text, nullable=False)

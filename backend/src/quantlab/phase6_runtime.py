@@ -705,17 +705,29 @@ class EligibilityPolicy:
 
     policy_id: str = "phase6-paper-candidate"
     version: int = 1
-    minimum_trades: int = 1
     minimum_total_return: float = 0.0
     minimum_sharpe: float = 0.0
     maximum_drawdown: float = 0.25
+
+    def __post_init__(self) -> None:
+        thresholds = (
+            self.minimum_total_return,
+            self.minimum_sharpe,
+            self.maximum_drawdown,
+        )
+        if (
+            not self.policy_id.strip()
+            or self.version < 1
+            or any(not math.isfinite(value) for value in thresholds)
+            or self.maximum_drawdown < 0
+        ):
+            raise ValueError("Eligibility policy obsahuje neplatnou identitu nebo threshold")
 
     def document(self) -> dict[str, object]:
         return {
             "policy_id": self.policy_id,
             "version": self.version,
             "rules": {
-                "trade_count": {"operator": ">=", "threshold": self.minimum_trades},
                 "total_return": {"operator": ">=", "threshold": self.minimum_total_return},
                 "sharpe": {"operator": ">=", "threshold": self.minimum_sharpe},
                 "max_drawdown_abs": {
@@ -748,6 +760,7 @@ class Phase6EligibilityService:
             "strategy_identity": row.strategy_identity,
             "strategy_version": row.strategy_version,
             "code_sha": row.code_sha,
+            "seed": row.seed,
             "policy": json.loads(row.policy_json),
             "metrics": json.loads(row.metrics_json),
             "rules": json.loads(row.rules_json),
@@ -778,27 +791,30 @@ class Phase6EligibilityService:
             if experiment is None:
                 raise DatasetInvalid("Experiment neexistuje")
             DeploymentService.validate_experiment(session, experiment)
-            metrics = {
-                "trade_count": experiment.trade_count,
-                "total_return": experiment.total_return,
-                "sharpe": experiment.sharpe,
-                "max_drawdown": experiment.max_drawdown,
-            }
-            if any(
-                value is None
-                or isinstance(value, bool)
-                or (isinstance(value, float) and not math.isfinite(value))
-                for value in metrics.values()
+            trade_count = experiment.trade_count
+            total_return = experiment.total_return
+            sharpe = experiment.sharpe
+            max_drawdown = experiment.max_drawdown
+            seed = experiment.seed
+            if (
+                trade_count is None
+                or isinstance(trade_count, bool)
+                or total_return is None
+                or not math.isfinite(total_return)
+                or sharpe is None
+                or not math.isfinite(sharpe)
+                or max_drawdown is None
+                or not math.isfinite(max_drawdown)
+                or seed is None
             ):
                 raise DatasetInvalid("Eligibility vyžaduje úplné konečné OOS metriky")
+            metrics: dict[str, int | float] = {
+                "trade_count": trade_count,
+                "total_return": total_return,
+                "sharpe": sharpe,
+                "max_drawdown": max_drawdown,
+            }
             rules = [
-                {
-                    "name": "trade_count",
-                    "actual": metrics["trade_count"],
-                    "operator": ">=",
-                    "threshold": policy.minimum_trades,
-                    "passed": metrics["trade_count"] >= policy.minimum_trades,
-                },
                 {
                     "name": "total_return",
                     "actual": metrics["total_return"],
@@ -829,7 +845,9 @@ class Phase6EligibilityService:
                     "experiment_id": experiment.id,
                     "snapshot_id": experiment.snapshot_id,
                     "strategy_identity": experiment.strategy_identity,
+                    "strategy_version": experiment.strategy_version,
                     "code_sha": experiment.code_sha,
+                    "seed": seed,
                     "policy": json.loads(policy_json),
                     "metrics": metrics,
                 }
@@ -853,6 +871,7 @@ class Phase6EligibilityService:
                 strategy_identity=experiment.strategy_identity or "",
                 strategy_version=experiment.strategy_version or "",
                 code_sha=experiment.code_sha or "",
+                seed=seed,
                 policy_id=policy.policy_id,
                 policy_version=policy.version,
                 policy_json=policy_json,
@@ -942,7 +961,14 @@ class Phase6EligibilityService:
                 decision.strategy_identity,
                 decision.strategy_version,
                 decision.code_sha,
-            ) != (row.snapshot_id, row.strategy_identity, row.strategy_version, row.code_sha):
+                decision.seed,
+            ) != (
+                row.snapshot_id,
+                row.strategy_identity,
+                row.strategy_version,
+                row.code_sha,
+                row.seed,
+            ):
                 raise DatasetInvalid("Eligibility decision neodpovídá immutable lineage")
             try:
                 decided_metrics = json.loads(decision.metrics_json)

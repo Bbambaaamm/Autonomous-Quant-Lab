@@ -11,7 +11,9 @@ pro Phase 6 promotion.
 ## Policy a autoritativní data
 
 Jediná podporovaná policy `phase6-paper-candidate` verze 1 vyhodnocuje persistentní OOS sloupce
-`trade_count >= 1`, `total_return >= 0`, `sharpe >= 0` a `abs(max_drawdown) <= 0.25`.
+`total_return >= 0`, `sharpe >= 0` a `abs(max_drawdown) <= 0.25`. `trade_count` zůstává povinnou
+auditní hodnotou a součástí identity, ale současný model nemá odborně podložený minimální počet
+obchodů, proto z něj verze 1 nevytváří falešný výkonnostní threshold.
 Hranice jsou inkluzivní. Minimální policy záměrně nepředstírá robustnost, kterou současný Phase 6
 model nepersistuje; verze a celý dokument s operátory a thresholdy jsou součástí každého recordu.
 Chybějící, NaN nebo nekonečná metrika ukončí evaluaci fail-closed bez rozhodnutí.
@@ -19,7 +21,7 @@ Chybějící, NaN nebo nekonečná metrika ukončí evaluaci fail-closed bez roz
 ## Decision record a deterministická identita
 
 `phase6_eligibility_decisions` je append-only autorita. Obsahuje experiment, snapshot, strategii,
-code SHA, policy, vstupní metriky, výsledky pravidel, `ELIGIBLE`/`INELIGIBLE`, serverový actor,
+code SHA, seed, policy, vstupní metriky, výsledky pravidel, `ELIGIBLE`/`INELIGIBLE`, serverový actor,
 povinný reason, UTC timestamp, correlation ID a SHA-256 integrity hash. Deterministické
 `decision_id` je hash experimentu, lineage, přesné policy a metrik. Unikátní klíč
 `(experiment_id, policy_id, policy_version)` dělá retry idempotentní; odlišný payload pod stejnou

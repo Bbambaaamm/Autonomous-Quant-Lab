@@ -79,6 +79,7 @@ def _seed(factory, *, decision="RESEARCH_ONLY") -> None:
                 sharpe=1.0,
                 max_drawdown=-0.1,
                 trade_count=10,
+                seed=42,
                 code_sha="b" * 40,
                 cost_model_json="{}",
                 selected_parameters_json='{"fast": 2, "slow": 3}',

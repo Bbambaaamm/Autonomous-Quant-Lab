@@ -20,9 +20,7 @@ def test_policy_boundaries_and_deterministic_retry() -> None:
     factory = _factory()
     _seed(factory)
     service = Phase6EligibilityService(factory)
-    policy = EligibilityPolicy(
-        minimum_trades=10, minimum_total_return=0.1, minimum_sharpe=1.0, maximum_drawdown=0.1
-    )
+    policy = EligibilityPolicy(minimum_total_return=0.1, minimum_sharpe=1.0, maximum_drawdown=0.1)
     first = service.evaluate_eligibility(
         "e", actor={"id": "admin"}, reason="boundary evidence", policy=policy
     )
@@ -40,7 +38,7 @@ def test_policy_fail_and_promotion_is_fail_closed() -> None:
         "e",
         actor={"id": "admin"},
         reason="strict policy",
-        policy=EligibilityPolicy(minimum_trades=11),
+        policy=EligibilityPolicy(minimum_total_return=0.2),
     )
     assert decision.status == "INELIGIBLE"
     with pytest.raises(DatasetInvalid, match="ELIGIBLE"):
@@ -60,6 +58,19 @@ def test_missing_decision_and_tampering_are_rejected() -> None:
         row.integrity_hash = "0" * 64
     with pytest.raises(DatasetInvalid, match="ELIGIBLE"):
         service.promote("e", actor={"id": "test"}, reason="test promotion")
+
+
+def test_seed_lineage_change_is_rejected() -> None:
+    factory = _factory()
+    _seed(factory)
+    service = Phase6EligibilityService(factory)
+    service.evaluate_eligibility("e", actor={"id": "admin"}, reason="valid evidence")
+    with factory() as session, session.begin():
+        experiment = session.get(ExperimentRecord, "e")
+        assert experiment is not None
+        experiment.seed = 43
+    with pytest.raises(DatasetInvalid, match="lineage"):
+        service.promote("e", actor={"id": "admin"}, reason="changed lineage")
 
 
 @pytest.mark.parametrize("value", [None, float("nan"), float("inf")])
@@ -92,3 +103,16 @@ def test_policy_version_and_threshold_change_identity() -> None:
     )
     assert first.decision_id != second.decision_id
     assert json.loads(second.policy_json)["version"] == 2
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"version": 0},
+        {"maximum_drawdown": -0.1},
+        {"minimum_sharpe": float("nan")},
+    ],
+)
+def test_invalid_policy_fails_closed(kwargs: dict[str, int | float]) -> None:
+    with pytest.raises(ValueError, match="policy"):
+        EligibilityPolicy(**kwargs)

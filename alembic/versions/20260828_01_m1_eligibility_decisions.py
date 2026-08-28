@@ -27,6 +27,7 @@ def upgrade() -> None:
         sa.Column("strategy_identity", sa.String(64), nullable=False),
         sa.Column("strategy_version", sa.String(50), nullable=False),
         sa.Column("code_sha", sa.String(64), nullable=False),
+        sa.Column("seed", sa.Integer, nullable=False),
         sa.Column("policy_id", sa.String(80), nullable=False),
         sa.Column("policy_version", sa.Integer, nullable=False),
         sa.Column("policy_json", sa.Text, nullable=False),
