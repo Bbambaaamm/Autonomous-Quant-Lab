@@ -163,6 +163,13 @@ class MonitoringTransition(BaseModel):
     reason: str = Field(min_length=1, max_length=1000)
 
 
+class EligibilityMutation(BaseModel):
+    model_config = {"extra": "forbid"}
+    reason: str = Field(min_length=3, max_length=1000)
+    policy_id: str = Field("phase6-paper-candidate", pattern="^phase6-paper-candidate$")
+    policy_version: int = Field(1, ge=1, le=1)
+
+
 class ReasonedMutation(BaseModel):
     reason: str = Field(min_length=3, max_length=1000)
 
@@ -651,6 +658,34 @@ def run_phase6_experiment(body: ExperimentCreate, request: Request) -> dict[str,
         return _row(row)
     except (ValueError, DatasetInvalid) as exc:
         raise HTTPException(409, str(exc)) from exc
+
+
+@app.post("/operator/research/experiments/{experiment_id}/eligibility")
+def evaluate_phase6_eligibility(
+    experiment_id: str, body: EligibilityMutation, request: Request
+) -> dict[str, object]:
+    try:
+        return _row(
+            eligibility_service.evaluate_eligibility(
+                experiment_id,
+                actor=_actor(request),
+                reason=body.reason,
+                correlation_id=_correlation(request),
+            )
+        )
+    except (ValueError, DatasetInvalid) as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@app.get("/operator/research/experiments/{experiment_id}/eligibility")
+def phase6_eligibility(experiment_id: str) -> dict[str, object]:
+    row = eligibility_service.get(experiment_id)
+    if row is None:
+        raise HTTPException(404, "Eligibility rozhodnutí neexistuje")
+    result = _row(row)
+    for name in ("policy_json", "metrics_json", "rules_json", "actor_json"):
+        result[name.removesuffix("_json")] = json.loads(str(result.pop(name)))
+    return result
 
 
 @app.post("/operator/research/experiments/{experiment_id}/promote")

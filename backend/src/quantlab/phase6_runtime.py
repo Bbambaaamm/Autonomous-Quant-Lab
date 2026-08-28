@@ -37,6 +37,7 @@ from quantlab.persistence import (
     InstrumentRecord,
     MarketDataIngestionRecord,
     MarketObservationRecord,
+    Phase6EligibilityDecisionRecord,
     StrategyDeploymentRecord,
     StrategyRecord,
     UniverseDefinitionRecord,
@@ -698,18 +699,222 @@ class ValidatedCurrentDataAccessor:
         return {key: tuple(reversed(value)) for key, value in selected.items()}
 
 
+@dataclass(frozen=True)
+class EligibilityPolicy:
+    """Verzovaná minimální policy nad autoritativními OOS metrikami Phase 6."""
+
+    policy_id: str = "phase6-paper-candidate"
+    version: int = 1
+    minimum_trades: int = 1
+    minimum_total_return: float = 0.0
+    minimum_sharpe: float = 0.0
+    maximum_drawdown: float = 0.25
+
+    def document(self) -> dict[str, object]:
+        return {
+            "policy_id": self.policy_id,
+            "version": self.version,
+            "rules": {
+                "trade_count": {"operator": ">=", "threshold": self.minimum_trades},
+                "total_return": {"operator": ">=", "threshold": self.minimum_total_return},
+                "sharpe": {"operator": ">=", "threshold": self.minimum_sharpe},
+                "max_drawdown_abs": {
+                    "operator": "<=",
+                    "threshold": self.maximum_drawdown,
+                },
+            },
+        }
+
+
+DEFAULT_ELIGIBILITY_POLICY = EligibilityPolicy()
+
+
 class Phase6EligibilityService:
-    """Explicitní strukturální eligibility gate; nikdy se nespouští z research runneru."""
+    """Samostatná evaluace a promotion proti jediné persistentní autoritě."""
 
     def __init__(self, session_factory: Callable[[], Session]) -> None:
         self._sessions = session_factory
+
+    @staticmethod
+    def _canonical(value: object) -> str:
+        return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False)
+
+    @classmethod
+    def _integrity_payload(cls, row: Phase6EligibilityDecisionRecord) -> dict[str, object]:
+        return {
+            "decision_id": row.decision_id,
+            "experiment_id": row.experiment_id,
+            "snapshot_id": row.snapshot_id,
+            "strategy_identity": row.strategy_identity,
+            "strategy_version": row.strategy_version,
+            "code_sha": row.code_sha,
+            "policy": json.loads(row.policy_json),
+            "metrics": json.loads(row.metrics_json),
+            "rules": json.loads(row.rules_json),
+            "status": row.status,
+            "evaluated_at": _database_utc(row.evaluated_at).isoformat(),
+            "actor": json.loads(row.actor_json),
+            "reason": row.reason,
+            "correlation_id": row.correlation_id,
+        }
+
+    @classmethod
+    def _hash(cls, value: object) -> str:
+        return hashlib.sha256(cls._canonical(value).encode()).hexdigest()
+
+    def evaluate_eligibility(
+        self,
+        experiment_id: str,
+        *,
+        actor: dict[str, str],
+        reason: str,
+        correlation_id: str | None = None,
+        policy: EligibilityPolicy = DEFAULT_ELIGIBILITY_POLICY,
+    ) -> Phase6EligibilityDecisionRecord:
+        if not reason.strip():
+            raise ValueError("Eligibility reason nesmí být prázdný")
+        with self._sessions() as session, session.begin():
+            experiment = session.get(ExperimentRecord, experiment_id, with_for_update=True)
+            if experiment is None:
+                raise DatasetInvalid("Experiment neexistuje")
+            DeploymentService.validate_experiment(session, experiment)
+            metrics = {
+                "trade_count": experiment.trade_count,
+                "total_return": experiment.total_return,
+                "sharpe": experiment.sharpe,
+                "max_drawdown": experiment.max_drawdown,
+            }
+            if any(
+                value is None
+                or isinstance(value, bool)
+                or (isinstance(value, float) and not math.isfinite(value))
+                for value in metrics.values()
+            ):
+                raise DatasetInvalid("Eligibility vyžaduje úplné konečné OOS metriky")
+            rules = [
+                {
+                    "name": "trade_count",
+                    "actual": metrics["trade_count"],
+                    "operator": ">=",
+                    "threshold": policy.minimum_trades,
+                    "passed": metrics["trade_count"] >= policy.minimum_trades,
+                },
+                {
+                    "name": "total_return",
+                    "actual": metrics["total_return"],
+                    "operator": ">=",
+                    "threshold": policy.minimum_total_return,
+                    "passed": metrics["total_return"] >= policy.minimum_total_return,
+                },
+                {
+                    "name": "sharpe",
+                    "actual": metrics["sharpe"],
+                    "operator": ">=",
+                    "threshold": policy.minimum_sharpe,
+                    "passed": metrics["sharpe"] >= policy.minimum_sharpe,
+                },
+                {
+                    "name": "max_drawdown_abs",
+                    "actual": abs(metrics["max_drawdown"]),
+                    "operator": "<=",
+                    "threshold": policy.maximum_drawdown,
+                    "passed": abs(metrics["max_drawdown"]) <= policy.maximum_drawdown,
+                },
+            ]
+            policy_json = self._canonical(policy.document())
+            metrics_json = self._canonical(metrics)
+            rules_json = self._canonical(rules)
+            identity = self._hash(
+                {
+                    "experiment_id": experiment.id,
+                    "snapshot_id": experiment.snapshot_id,
+                    "strategy_identity": experiment.strategy_identity,
+                    "code_sha": experiment.code_sha,
+                    "policy": json.loads(policy_json),
+                    "metrics": metrics,
+                }
+            )
+            existing = session.scalar(
+                select(Phase6EligibilityDecisionRecord).where(
+                    Phase6EligibilityDecisionRecord.experiment_id == experiment.id,
+                    Phase6EligibilityDecisionRecord.policy_id == policy.policy_id,
+                    Phase6EligibilityDecisionRecord.policy_version == policy.version,
+                )
+            )
+            if existing is not None:
+                if existing.decision_id != identity or not self._valid_integrity(existing):
+                    raise DatasetInvalid("Konfliktní nebo poškozený eligibility retry")
+                session.expunge(existing)
+                return existing
+            row = Phase6EligibilityDecisionRecord(
+                decision_id=identity,
+                experiment_id=experiment.id,
+                snapshot_id=experiment.snapshot_id or "",
+                strategy_identity=experiment.strategy_identity or "",
+                strategy_version=experiment.strategy_version or "",
+                code_sha=experiment.code_sha or "",
+                policy_id=policy.policy_id,
+                policy_version=policy.version,
+                policy_json=policy_json,
+                metrics_json=metrics_json,
+                rules_json=rules_json,
+                status="ELIGIBLE" if all(rule["passed"] for rule in rules) else "INELIGIBLE",
+                evaluated_at=datetime.now(UTC),
+                actor_json=self._canonical(actor),
+                reason=reason.strip(),
+                correlation_id=correlation_id,
+                integrity_hash="",
+            )
+            row.integrity_hash = self._hash(self._integrity_payload(row))
+            session.add(row)
+            _control_plane_audit(
+                session,
+                "PHASE6_ELIGIBILITY_EVALUATED",
+                "eligibility_decision",
+                row.decision_id,
+                actor,
+                reason,
+                correlation_id,
+                {
+                    "experiment_id": experiment.id,
+                    "policy_id": policy.policy_id,
+                    "policy_version": policy.version,
+                    "status": row.status,
+                    "integrity_hash": row.integrity_hash,
+                },
+            )
+            session.flush()
+            session.expunge(row)
+            return row
+
+    @classmethod
+    def _valid_integrity(cls, row: Phase6EligibilityDecisionRecord) -> bool:
+        try:
+            return row.integrity_hash == cls._hash(cls._integrity_payload(row))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return False
+
+    def get(self, experiment_id: str) -> Phase6EligibilityDecisionRecord | None:
+        with self._sessions() as session:
+            row = session.scalar(
+                select(Phase6EligibilityDecisionRecord).where(
+                    Phase6EligibilityDecisionRecord.experiment_id == experiment_id,
+                    Phase6EligibilityDecisionRecord.policy_id
+                    == DEFAULT_ELIGIBILITY_POLICY.policy_id,
+                    Phase6EligibilityDecisionRecord.policy_version
+                    == DEFAULT_ELIGIBILITY_POLICY.version,
+                )
+            )
+            if row is not None:
+                session.expunge(row)
+            return row
 
     def promote(
         self,
         experiment_id: str,
         *,
-        actor: dict[str, str] | None = None,
-        reason: str | None = None,
+        actor: dict[str, str],
+        reason: str,
         correlation_id: str | None = None,
     ) -> ExperimentRecord:
         with self._sessions() as session, session.begin():
@@ -717,11 +922,44 @@ class Phase6EligibilityService:
             if row is None:
                 raise DatasetInvalid("Experiment neexistuje")
             DeploymentService.validate_experiment(session, row)
+            decision = session.scalar(
+                select(Phase6EligibilityDecisionRecord).where(
+                    Phase6EligibilityDecisionRecord.experiment_id == row.id,
+                    Phase6EligibilityDecisionRecord.policy_id
+                    == DEFAULT_ELIGIBILITY_POLICY.policy_id,
+                    Phase6EligibilityDecisionRecord.policy_version
+                    == DEFAULT_ELIGIBILITY_POLICY.version,
+                )
+            )
+            if (
+                decision is None
+                or decision.status != "ELIGIBLE"
+                or not self._valid_integrity(decision)
+            ):
+                raise DatasetInvalid("Promotion vyžaduje platné ELIGIBLE rozhodnutí")
+            if (
+                decision.snapshot_id,
+                decision.strategy_identity,
+                decision.strategy_version,
+                decision.code_sha,
+            ) != (row.snapshot_id, row.strategy_identity, row.strategy_version, row.code_sha):
+                raise DatasetInvalid("Eligibility decision neodpovídá immutable lineage")
+            try:
+                decided_metrics = json.loads(decision.metrics_json)
+            except json.JSONDecodeError as exc:
+                raise DatasetInvalid("Eligibility decision má poškozené metriky") from exc
+            if decided_metrics != {
+                "trade_count": row.trade_count,
+                "total_return": row.total_return,
+                "sharpe": row.sharpe,
+                "max_drawdown": row.max_drawdown,
+            }:
+                raise DatasetInvalid("Eligibility decision neodpovídá OOS metrikám")
             if row.decision not in {"RESEARCH_ONLY", "PAPER_CANDIDATE"}:
                 raise DatasetInvalid("Experiment je v nekonzistentním decision state")
             changed = row.decision == "RESEARCH_ONLY"
             row.decision = "PAPER_CANDIDATE"
-            if changed and actor is not None and reason is not None:
+            if changed:
                 _control_plane_audit(
                     session,
                     "PHASE6_EXPERIMENT_PROMOTED",

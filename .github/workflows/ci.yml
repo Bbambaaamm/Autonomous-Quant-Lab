@@ -152,6 +152,8 @@ jobs:
         run: uv run pytest -q tests/test_h2_corporate_action_readiness_postgres.py
       - name: H3 approved runtime-config identity acceptance
         run: uv run pytest -q tests/test_h3_runtime_identity_postgres.py
+      - name: M1 Phase6 eligibility decision acceptance
+        run: uv run pytest -q tests/test_b1_control_plane_postgres.py tests/test_m1_eligibility.py
 
   frontend:
     runs-on: ubuntu-latest

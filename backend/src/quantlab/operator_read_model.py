@@ -16,6 +16,7 @@ from quantlab.persistence import (
     InstrumentRecord,
     MarketDataIngestionRecord,
     MarketObservationRecord,
+    Phase6EligibilityDecisionRecord,
     StrategyDeploymentRecord,
     StrategyRecord,
 )
@@ -621,7 +622,27 @@ class OperatorReadModel:
     def experiment(self, experiment_id: str) -> dict[str, Any] | None:
         with self._session_factory() as session:
             row = session.get(ExperimentRecord, experiment_id)
-            return _row(row) if row else None
+            if row is None:
+                return None
+            decision = session.scalar(
+                select(Phase6EligibilityDecisionRecord).where(
+                    Phase6EligibilityDecisionRecord.experiment_id == experiment_id
+                )
+            )
+            return {
+                **_row(row),
+                "eligibility": (
+                    {
+                        **_row(decision),
+                        "policy": _json(decision.policy_json),
+                        "metrics": _json(decision.metrics_json),
+                        "rules": _json(decision.rules_json),
+                        "actor": _json(decision.actor_json),
+                    }
+                    if decision
+                    else None
+                ),
+            }
 
     def comparison(self, monitoring_id: str) -> dict[str, Any] | None:
         with self._session_factory() as session:

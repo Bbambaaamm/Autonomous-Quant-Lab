@@ -9,7 +9,8 @@ from uuid import uuid4
 import pytest
 from fastapi.testclient import TestClient
 from phase6_audit_helpers import CALENDAR, MappingProvider, daily_bar
-from sqlalchemy import select
+from sqlalchemy import select, text
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session
 
 import quantlab.api as api_module
@@ -132,6 +133,20 @@ def test_supported_b1_control_plane_reaches_active_monitoring(monkeypatch) -> No
     assert experiment.status_code == 200, experiment.text
     assert experiment.json()["status"] == "COMPLETED"
     experiment_id = experiment.json()["id"]
+    forged = client.post(
+        f"/operator/research/experiments/{experiment_id}/eligibility",
+        json={"reason": reason, "metrics": {"total_return": 999}},
+    )
+    assert forged.status_code == 422
+    eligibility = client.post(
+        f"/operator/research/experiments/{experiment_id}/eligibility",
+        json={"reason": reason},
+    )
+    assert eligibility.status_code == 200, eligibility.text
+    assert eligibility.json()["status"] == "ELIGIBLE"
+    evidence = client.get(f"/operator/research/experiments/{experiment_id}/eligibility")
+    assert evidence.status_code == 200
+    assert evidence.json()["actor"]["actor_id"] == "api-admin"
     assert (
         client.post(
             f"/operator/research/experiments/{experiment_id}/promote", json={"reason": reason}
@@ -209,6 +224,16 @@ def test_supported_b1_control_plane_reaches_active_monitoring(monkeypatch) -> No
             for item in ingested_observations
         }
         assert manifest_observations == ingested_lineage
+
+    with pytest.raises(DBAPIError), Session(api_module.paper_repository.engine) as session:
+        session.execute(
+            text(
+                "UPDATE phase6_eligibility_decisions SET status='INELIGIBLE' "
+                "WHERE experiment_id=:experiment_id"
+            ),
+            {"experiment_id": experiment_id},
+        )
+        session.commit()
 
 
 def test_control_plane_requires_admin_and_authentication() -> None:
