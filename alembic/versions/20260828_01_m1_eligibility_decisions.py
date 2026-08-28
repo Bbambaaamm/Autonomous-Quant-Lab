@@ -60,7 +60,7 @@ def upgrade() -> None:
     )
     if op.get_bind().dialect.name == "postgresql":
         op.execute(
-            """CREATE FUNCTION reject_phase6_eligibility_mutation() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'phase6 eligibility decisions are immutable'; END $$"""
+            """CREATE FUNCTION reject_phase6_eligibility_mutation() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'phase6 eligibility decisions are immutable'; END; $$"""
         )
         op.execute(
             """CREATE TRIGGER phase6_eligibility_immutable BEFORE UPDATE OR DELETE ON phase6_eligibility_decisions FOR EACH ROW EXECUTE FUNCTION reject_phase6_eligibility_mutation()"""

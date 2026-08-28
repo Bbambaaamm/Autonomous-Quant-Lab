@@ -814,7 +814,7 @@ class Phase6EligibilityService:
                 "sharpe": sharpe,
                 "max_drawdown": max_drawdown,
             }
-            rules = [
+            rules: list[dict[str, object]] = [
                 {
                     "name": "total_return",
                     "actual": metrics["total_return"],
@@ -877,7 +877,9 @@ class Phase6EligibilityService:
                 policy_json=policy_json,
                 metrics_json=metrics_json,
                 rules_json=rules_json,
-                status="ELIGIBLE" if all(rule["passed"] for rule in rules) else "INELIGIBLE",
+                status=(
+                    "ELIGIBLE" if all(rule["passed"] is True for rule in rules) else "INELIGIBLE"
+                ),
                 evaluated_at=datetime.now(UTC),
                 actor_json=self._canonical(actor),
                 reason=reason.strip(),
