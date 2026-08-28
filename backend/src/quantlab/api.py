@@ -27,7 +27,7 @@ from quantlab.automation import (
 from quantlab.backtest import serialize_result
 from quantlab.config import get_settings
 from quantlab.control_plane import ControlPlaneRegistryService
-from quantlab.demo import load_fixture, run_demo
+from quantlab.demo import run_demo
 from quantlab.domain import AuditEventType
 from quantlab.market_data import AssetType, DatasetInvalid, Instrument, StooqProvider, XNYSCalendar
 from quantlab.market_data_service import DatasetSnapshotService, PersistentMarketDataService
@@ -1479,20 +1479,6 @@ def trading_cycle(cycle_id: str) -> dict[str, object]:
     if row is None:
         raise HTTPException(status_code=404, detail="Cycle nebyl nalezen")
     return _row(row)
-
-
-@app.post("/demo/trading/cycles/run-paper")
-def run_paper_cycle() -> dict[str, str]:
-    bars = load_fixture(fixture)
-    cycle_id = trading_service.run(
-        "paper-main",
-        "moving_average:1.0.0",
-        bars[-2:],
-        {"SPY": Decimal("0.10")},
-        bars[-1].timestamp.date(),
-        bars[-2].timestamp,
-    )
-    return {"id": cycle_id, "mode": "paper"}
 
 
 @app.get("/audit")
