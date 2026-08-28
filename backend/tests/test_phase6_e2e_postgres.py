@@ -445,7 +445,12 @@ def _research_to_paper(factory, engine, *, halted: bool):
     runner = Phase6ExperimentRunner(factory)
     experiment = runner.run(request)
     assert experiment.decision == "RESEARCH_ONLY"
-    promoted = Phase6EligibilityService(factory).promote(experiment.id)
+    eligibility = Phase6EligibilityService(factory)
+    decision = eligibility.evaluate_eligibility(
+        experiment.id, actor={"id": "acceptance"}, reason="M1 acceptance"
+    )
+    assert decision.status == "ELIGIBLE"
+    promoted = eligibility.promote(experiment.id, actor={"id": "acceptance"}, reason="M1 promotion")
     assert promoted.decision == "PAPER_CANDIDATE"
     account_id = f"paper-{suffix}"
     repository = Phase4Repository(

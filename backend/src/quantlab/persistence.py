@@ -9,6 +9,7 @@ from enum import StrEnum
 from typing import Any, cast
 
 from sqlalchemy import (
+    CheckConstraint,
     DateTime,
     Float,
     ForeignKey,
@@ -338,6 +339,36 @@ class EligibilityCheckRecord(Base):
     observed_value: Mapped[float | None] = mapped_column(Float)
     threshold: Mapped[float | None] = mapped_column(Float)
     reason: Mapped[str | None] = mapped_column(String(200))
+
+
+class Phase6EligibilityDecisionRecord(Base):
+    """Append-only autorita pro Phase 6 promotion; legacy checks nejsou autorizační."""
+
+    __tablename__ = "phase6_eligibility_decisions"
+    decision_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    experiment_id: Mapped[str] = mapped_column(
+        ForeignKey("research_experiments.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    snapshot_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    strategy_identity: Mapped[str] = mapped_column(String(64), nullable=False)
+    strategy_version: Mapped[str] = mapped_column(String(50), nullable=False)
+    code_sha: Mapped[str] = mapped_column(String(64), nullable=False)
+    seed: Mapped[int] = mapped_column(Integer, nullable=False)
+    policy_id: Mapped[str] = mapped_column(String(80), nullable=False)
+    policy_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    policy_json: Mapped[str] = mapped_column(Text, nullable=False)
+    metrics_json: Mapped[str] = mapped_column(Text, nullable=False)
+    rules_json: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
+    evaluated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    actor_json: Mapped[str] = mapped_column(Text, nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    correlation_id: Mapped[str | None] = mapped_column(String(128))
+    integrity_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    __table_args__ = (
+        UniqueConstraint("experiment_id", "policy_id", "policy_version"),
+        CheckConstraint("status IN ('ELIGIBLE', 'INELIGIBLE')"),
+    )
 
 
 class ParameterRunRecord(Base):

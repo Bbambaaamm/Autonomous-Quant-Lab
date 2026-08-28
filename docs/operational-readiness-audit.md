@@ -146,7 +146,7 @@ deployment create/approve a monitoring policy/enrollment. Actor a reason se ukl�
 evidence a domain identity zajišťují bezpečné retry. Podrobnosti a PostgreSQL důkaz jsou v
 [`operational-readiness-remediation-b1.md`](operational-readiness-remediation-b1.md).
 
-Tato změna **nemění celkový verdikt NOT READY**. Zejména B2, H1, H2, H3 a M1 zůstávají otevřené.
+Tato změna **nemění celkový verdikt NOT READY**. M1 je implementováno a čeká na autoritativní CI acceptance; celkový verdikt se tím nemění.
 
 ### B2 — RESOLVED — worker provádí schválený deployment a strategii
 
@@ -201,9 +201,11 @@ fail-closed. Podrobnosti a test evidence jsou v
 
 ### M1 — Eligibility je pouze strukturální a bez samostatného rozhodnutí
 
-Phase 6 promotion kontroluje COMPLETED/OOS/lineage/strategy evidence, ale nemá explicitní metrická
-kritéria, approver reason ani immutable eligibility decision record. Legacy research vrstva tabulku
-`research_eligibility_checks` má, Phase 6 promotion však pouze změní `research_experiments.decision`.
+**M1 — IMPLEMENTOVÁNO, ČEKÁ NA AUTORITATIVNÍ CI ACCEPTANCE.** Phase 6 má verzovanou policy,
+append-only `phase6_eligibility_decisions`, server-side actor/reason audit a samostatnou evaluaci.
+Promotion nyní fail-closed vyžaduje integritně platný `ELIGIBLE` record se shodnou lineage a OOS
+metrikami. Legacy `research_eligibility_checks` je explicitně neautoritativní. Stav nebude označen
+`RESOLVED`, dokud nový PostgreSQL acceptance krok a standardní CI skutečně neprojdou.
 
 ### M2 — Promotion a deployment approval nemají úplný audit event/actor trail
 

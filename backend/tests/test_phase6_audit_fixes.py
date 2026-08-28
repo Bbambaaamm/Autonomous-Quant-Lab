@@ -75,6 +75,11 @@ def _seed(factory, *, decision="RESEARCH_ONLY") -> None:
                 strategy_name="multi_asset_trend",
                 strategy_version="1.0.0",
                 decision=decision,
+                total_return=0.1,
+                sharpe=1.0,
+                max_drawdown=-0.1,
+                trade_count=10,
+                seed=42,
                 code_sha="b" * 40,
                 cost_model_json="{}",
                 selected_parameters_json='{"fast": 2, "slow": 3}',
@@ -108,8 +113,10 @@ def test_explicit_promotion_is_required_and_idempotent() -> None:
         assert session.scalar(select(ExperimentRecord.decision)) == "RESEARCH_ONLY"
         assert session.scalar(select(StrategyDeploymentRecord)) is None
     service = Phase6EligibilityService(factory)
-    first = service.promote("e")
-    second = service.promote("e")
+    decision = service.evaluate_eligibility("e", actor={"id": "test"}, reason="test eligibility")
+    assert decision.status == "ELIGIBLE"
+    first = service.promote("e", actor={"id": "test"}, reason="test promotion")
+    second = service.promote("e", actor={"id": "test"}, reason="test promotion")
     assert first.id == second.id == "e"
     assert second.decision == "PAPER_CANDIDATE"
 
@@ -117,7 +124,9 @@ def test_explicit_promotion_is_required_and_idempotent() -> None:
 def test_explicit_deployment_creation_and_approval() -> None:
     factory = _factory()
     _seed(factory)
-    Phase6EligibilityService(factory).promote("e")
+    service = Phase6EligibilityService(factory)
+    service.evaluate_eligibility("e", actor={"id": "test"}, reason="test eligibility")
+    service.promote("e", actor={"id": "test"}, reason="test promotion")
     service = DeploymentService(factory)
     deployment = service.create("e", "paper")
     assert deployment.status == "PENDING_REVIEW"
@@ -145,7 +154,8 @@ def test_promotion_fails_closed_on_missing_or_malformed_evidence(
     with factory() as session, session.begin():
         setattr(session.get(ExperimentRecord, "e"), field, value)
     with pytest.raises(DatasetInvalid):
-        Phase6EligibilityService(factory).promote("e")
+        service = Phase6EligibilityService(factory)
+        service.evaluate_eligibility("e", actor={"id": "test"}, reason="test eligibility")
 
 
 def test_xnys_session_for_timestamp_checks_open_and_close() -> None:
@@ -260,7 +270,9 @@ def test_persistent_intent_fails_closed_outside_exact_open(offset, reason: str) 
 
 
 def _approved_candidate(factory):
-    Phase6EligibilityService(factory).promote("e")
+    service = Phase6EligibilityService(factory)
+    service.evaluate_eligibility("e", actor={"id": "test"}, reason="test eligibility")
+    service.promote("e", actor={"id": "test"}, reason="test promotion")
     return DeploymentService(factory).create("e", "paper")
 
 
