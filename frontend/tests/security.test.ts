@@ -14,7 +14,7 @@ describe("paper-only hranice", () => {
   it("akce vyžadují serverovou odpověď a explicitní potvrzení", () => {
     const actions = fs.readFileSync(path.join(process.cwd(), "app/actions.ts"), "utf8");
     expect(actions).toContain("confirmation");
-    expect(actions).toContain("if(!r.ok)");
+    expect(actions).toContain("if (!response.ok)");
   });
 });
 

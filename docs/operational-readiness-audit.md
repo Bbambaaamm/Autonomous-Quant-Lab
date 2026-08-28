@@ -218,12 +218,9 @@ Schedule podporuje interval nebo daily wall-clock s timezone a misfire policy. N
 podle XNYS session close/open, nečeká na ingest readiness a neváže cycle na očekávanou session.
 Kalendářová kontrola je až ve správném Phase 6 accessor, který worker nepoužívá.
 
-### M4 — Control plane nedokončí operational workflow
+### M4 — RESOLVED: kompletní PAPER-only operator workflow
 
-`/data`, `/research`, `/strategies`, `/paper` a `/operations` jsou pro bootstrap/deployment/jobs
-read-only. UI umí HALT/RESUME, reconciliation a lifecycle pause/resume/retire, ale neumí ingest,
-universe/snapshot, experiment, promotion, deployment/approval/enrollment ani schedule create/edit,
-enable/disable/retry. Operations stránka výslovně říká, že je read-only.
+Control Center a navazující Data, Research, Strategy, Monitoring a Operations stránky nyní zpřístupňují podporovanou cestu data → universe → snapshot → experiment → eligibility → explicitní promotion → deployment → approval → monitoring → autonomous PAPER. UI používá výhradně autoritativní operator endpointy, server-side RBAC/actor identity a auditní reason; runtime manifest, readiness a XNYS termíny pouze zobrazuje z backend read modelu. Implementace a mapování jsou v `docs/operational-readiness-remediation-m4-operator-ui.md`.
 
 ## 8. LOW findings
 

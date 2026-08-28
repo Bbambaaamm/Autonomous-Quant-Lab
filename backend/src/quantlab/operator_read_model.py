@@ -11,6 +11,7 @@ from quantlab.automation import JobRun, ScheduledJob, WorkerHeartbeat
 from quantlab.config import Settings
 from quantlab.market_data import XNYSCalendar
 from quantlab.persistence import (
+    CorporateActionReadinessRecord,
     DatasetSnapshotRecord,
     ExperimentRecord,
     InstrumentRecord,
@@ -19,6 +20,8 @@ from quantlab.persistence import (
     Phase6EligibilityDecisionRecord,
     StrategyDeploymentRecord,
     StrategyRecord,
+    UniverseDefinitionRecord,
+    UniverseMembershipRecord,
 )
 from quantlab.phase4 import (
     AuditEventRecord,
@@ -428,7 +431,11 @@ class OperatorReadModel:
                 .where(MarketDataIngestionRecord.status == "SUCCEEDED")
             )
             return {
-                "provider": {"name": "stooq", "type": "persistent"},
+                "provider": {
+                    "name": "stooq",
+                    "type": "persistent",
+                    "supports_actions": False,
+                },
                 "calendar_identity": XNYSCalendar().identity,
                 "latest_completed_session": completed,
                 "latest_successful_session": latest_observation.date()
@@ -447,6 +454,32 @@ class OperatorReadModel:
                 ],
                 "ingestions": [_row(x) for x in ingestions],
                 "snapshots": [_row(x) for x in snapshots],
+                "universes": [
+                    _row(x)
+                    for x in session.scalars(
+                        select(UniverseDefinitionRecord).order_by(
+                            UniverseDefinitionRecord.universe_id
+                        )
+                    )
+                ],
+                "memberships": [
+                    _row(x)
+                    for x in session.scalars(
+                        select(UniverseMembershipRecord).order_by(
+                            UniverseMembershipRecord.universe_id,
+                            UniverseMembershipRecord.instrument_id,
+                            UniverseMembershipRecord.valid_from,
+                        )
+                    )
+                ],
+                "corporate_action_readiness": [
+                    _row(x)
+                    for x in session.scalars(
+                        select(CorporateActionReadinessRecord)
+                        .order_by(CorporateActionReadinessRecord.checked_at.desc())
+                        .limit(50)
+                    )
+                ],
             }
 
     def automation(self, now: datetime) -> dict[str, Any]:
@@ -602,6 +635,26 @@ class OperatorReadModel:
                 **_row(row),
                 "experiments": [_row(x) for x in experiments],
                 "deployments": deployment_views,
+                "monitoring_policies": [
+                    {**_row(x), "config": _json(x.config_json)}
+                    for x in session.scalars(
+                        select(PaperMonitoringPolicyRecord).order_by(
+                            PaperMonitoringPolicyRecord.created_at.desc()
+                        )
+                    )
+                ],
+                "monitoring_runs": [
+                    _row(x)
+                    for x in session.scalars(
+                        select(PaperMonitoringRunRecord)
+                        .where(
+                            PaperMonitoringRunRecord.deployment_id.in_(
+                                [x.deployment_id for x in deployments]
+                            )
+                        )
+                        .order_by(PaperMonitoringRunRecord.created_at.desc())
+                    )
+                ],
             }
 
     def experiments(self, limit: int, offset: int) -> dict[str, Any]:

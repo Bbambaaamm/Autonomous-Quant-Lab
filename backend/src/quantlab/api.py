@@ -949,6 +949,31 @@ def retire_monitoring(monitoring_id: str, request: MonitoringTransition) -> dict
     return _transition_monitoring(monitoring_id, MonitoringState.RETIRED, request)
 
 
+@app.post("/operator/monitoring/{monitoring_id}/{action}")
+def operator_monitoring_transition(
+    monitoring_id: str, action: str, body: MonitoringTransition, request: Request
+) -> dict[str, object]:
+    """Tenký auditovaný operator adaptér nad autoritativním Phase 7 state machine."""
+    targets = {
+        "pause": MonitoringState.PAUSED,
+        "resume": MonitoringState.ACTIVE,
+        "retire": MonitoringState.RETIRED,
+    }
+    target = targets.get(action)
+    if target is None:
+        raise HTTPException(404, "Monitoring transition není podporována")
+    result = _transition_monitoring(monitoring_id, target, body)
+    _audit_control_mutation(
+        f"CONTROL_MONITORING_{action.upper()}",
+        "monitoring",
+        monitoring_id,
+        _actor(request),
+        body.reason,
+        _correlation(request),
+    )
+    return result
+
+
 @app.get("/paper/deployments/{deployment_id}/performance")
 def deployment_performance(
     deployment_id: str, limit: int = Query(500, ge=1, le=1000)

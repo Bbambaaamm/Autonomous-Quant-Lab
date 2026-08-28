@@ -19,3 +19,30 @@ describe("autonomous worker readiness", () => {
     expect(screen.getByText("DISABLED")).toHaveClass("unsafe");
   });
 });
+
+import { MutationForm } from "../components/mutation-form";
+import { fireEvent } from "@testing-library/react";
+
+describe("kritické operator mutations", () => {
+  it("viewer-compatible disabled action nelze odeslat", () => {
+    render(<MutationForm action={async () => ({success:"neočekáváno"})} title="Promotion" submit="Promote" disabled><input name="reason" /></MutationForm>);
+    expect(screen.getByRole("button", {name:"Promote"})).toBeDisabled();
+  });
+
+  it("během čekání na server zakáže double submit", async () => {
+    let finish: ((state:{success:string})=>void) | undefined;
+    const action = () => new Promise<{success:string}>(resolve => { finish=resolve; });
+    render(<MutationForm action={action} title="Approval" submit="Approve"><input name="reason" /></MutationForm>);
+    fireEvent.click(screen.getByRole("button", {name:"Approve"}));
+    expect(await screen.findByRole("button", {name:"Ověřuji na serveru…"})).toBeDisabled();
+    finish?.({success:"APPROVED"});
+    expect(await screen.findByRole("status")).toHaveTextContent("APPROVED");
+  });
+
+  it("zobrazí bezpečnou doménovou chybu bez optimistic success", async () => {
+    render(<MutationForm action={async()=>({error:"Deployment vyžaduje PAPER_CANDIDATE"})} title="Deployment" submit="Create"><input /></MutationForm>);
+    fireEvent.click(screen.getByRole("button", {name:"Create"}));
+    expect(await screen.findByRole("alert")).toHaveTextContent("PAPER_CANDIDATE");
+    expect(screen.queryByText("Deployment vyžaduje PAPER_CANDIDATE", {selector:".success"})).not.toBeInTheDocument();
+  });
+});
