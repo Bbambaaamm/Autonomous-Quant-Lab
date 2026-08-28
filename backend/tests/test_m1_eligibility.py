@@ -1,12 +1,19 @@
 import json
+from datetime import UTC, datetime
 
 import pytest
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
-from test_phase6_audit_fixes import _seed
 
 from quantlab.market_data import DatasetInvalid
-from quantlab.persistence import Base, ExperimentRecord, Phase6EligibilityDecisionRecord
+from quantlab.persistence import (
+    Base,
+    DatasetSnapshotRecord,
+    ExperimentRecord,
+    Phase6EligibilityDecisionRecord,
+    StrategyRecord,
+    UniverseDefinitionRecord,
+)
 from quantlab.phase6_runtime import EligibilityPolicy, Phase6EligibilityService
 
 
@@ -14,6 +21,66 @@ def _factory():
     engine = create_engine("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(engine)
     return sessionmaker(engine, expire_on_commit=False)
+
+
+def _seed(factory) -> None:
+    """Vytvoří minimální samostatnou Phase 6 evidenci pro M1 unit testy."""
+    now = datetime(2026, 1, 2, tzinfo=UTC)
+    with factory() as session, session.begin():
+        session.add(
+            UniverseDefinitionRecord(
+                universe_id="u", name="PIT", kind="POINT_IN_TIME_MEMBERSHIP", created_at=now
+            )
+        )
+        session.add(
+            DatasetSnapshotRecord(
+                snapshot_id="s",
+                created_at=now,
+                as_of=now,
+                provider="fixture",
+                calendar_identity="XNYS:fixture",
+                universe_id="u",
+                start_at=now,
+                end_at=now,
+                timeframe="1d",
+                content_hash="a" * 64,
+                status="VALID",
+                coverage="1",
+                manifest_json="{}",
+            )
+        )
+        session.add(
+            StrategyRecord(
+                strategy_identity="trend-1",
+                strategy_name="multi_asset_trend",
+                strategy_version="1.0.0",
+                created_at=now,
+                metadata_json="{}",
+            )
+        )
+        session.add(
+            ExperimentRecord(
+                id="e",
+                created_at=now,
+                completed_at=now,
+                status="COMPLETED",
+                snapshot_id="s",
+                strategy_identity="trend-1",
+                strategy_name="multi_asset_trend",
+                strategy_version="1.0.0",
+                decision="RESEARCH_ONLY",
+                total_return=0.1,
+                sharpe=1.0,
+                max_drawdown=-0.1,
+                trade_count=10,
+                seed=42,
+                code_sha="b" * 40,
+                cost_model_json="{}",
+                selected_parameters_json='{"fast": 2, "slow": 3}',
+                config_json="{}",
+                result_json='{"stage":"OOS","metrics":{}}',
+            )
+        )
 
 
 def test_policy_boundaries_and_deterministic_retry() -> None:
