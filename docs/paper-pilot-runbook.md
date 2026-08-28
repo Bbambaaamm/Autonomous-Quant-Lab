@@ -7,6 +7,8 @@ deployment, jeden scheduler/worker a aktivní lidský dohled. Nezakládá ani ne
 
 - Použijte pouze commit se zelenými CI jobs `quality`, `unit-research`, `api`,
   `integration-postgres`, `frontend`, `security`, `container-build` a `production-smoke`.
+- Pro auditovaný head `6ed177a81d89fe2ac367e236435286dc31c7ad49` je referenčním důkazem
+  úspěšný GitHub Actions run #435; při jakékoli další změně je povinný nový zelený běh na novém SHA.
 - Připravte PostgreSQL 17, HTTPS ingress, persistentní volume, ověřený backup/restore a oddělenou
   least-privilege runtime roli podle `scripts/configure-runtime-role.sql`.
 - Vygenerujte unikátní silné viewer/operator/admin tokeny a DB secret mimo Git. Nikdy nepoužívejte
@@ -48,7 +50,10 @@ correlation ID. Operátor nesmí používat demo endpointy ani přímé SQL.
 6. Vytvořte deployment pro `paper-main`. Nezávisle zkontrolujte runtime manifest: experiment,
    snapshot, universe, strategy/version, parameters, risk, commission, slippage, volume fraction,
    code SHA a hash. Poté jej schvalte s důvodem.
-7. Vytvořte monitoring policy, enrollment a ověřte stav `ACTIVE` a oddělenou OOS baseline.
+7. Vytvořte monitoring policy a enrollment. Enrollment musí idempotentně vrátit existující
+   aktivní záznam nebo vytvořit nový a současně zajistit scheduled job typu
+   `MONITOR_PAPER_DEPLOYMENT`; ověřte `ACTIVE`, schedule a oddělenou OOS baseline. Nový enrollment
+   po ukončení je dovolen až po stavu `RETIRED`, nikdy jako druhý souběžný aktivní záznam.
 8. Zapněte autonomous scheduling přes `/operator/deployments/{id}/autonomous/enable`.
 
 ## 5. Pre-session a daily operator check
@@ -84,8 +89,12 @@ reconciliation. Chybějící run není důvod k ručnímu zpětnému fillu.
 - **DB outage:** nejprve obnovte DB a readiness, pak worker. Před RESUME spusťte reconciliation.
 - **Dead letter:** opravte příčinu, ověřte data/manifest/monitoring a použijte auditovaný retry se
   stejnou ekonomickou identitou.
-- **Reconciliation mismatch:** účet zůstává HALTED. Obnovte z ověřené evidence/backup procesu;
-  RESUME smí následovat pouze po SAFE reconciliation a nezávislé kontrole.
+- **Reconciliation mismatch:** účet zůstává HALTED. Použijte auditovanou operátorskou akci
+  `POST /operator/reconciliation/run`, odstraňte příčinu podle evidence a nikdy neměňte stav
+  přímým SQL. RESUME smí následovat pouze po autoritativní SAFE reconciliation a nezávislé kontrole.
+- **Suspended monitoring:** ponechte execution zastavenou, vyřešte příčinu a použijte pouze
+  auditovanou monitoring transition. Je-li lifecycle ukončen, nejprve jej převeďte do `RETIRED` a
+  teprve potom proveďte nové enrollment; ověřte právě jeden ACTIVE record a monitoring schedule.
 
 Jednou během pilotu proveďte plánovaný recovery drill: worker claimne neekonomický nebo bezpečně
 idempotentní staging job, je ukončen, lease expiruje a nový worker dokončí stejnou occurrence bez
