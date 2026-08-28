@@ -84,3 +84,17 @@ def test_production_worker_has_no_csv_or_target_weight_contract() -> None:
     assert "dataset_path" not in string_literals
     assert "target_weights" not in string_literals
     assert "Phase6PaperExecutionService" in referenced_names
+
+
+def test_api_has_no_legacy_direct_paper_execution_route() -> None:
+    tree = ast.parse((SOURCE_ROOT / "api.py").read_text())
+    routes = {
+        argument.value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr in {"post", "put", "patch"}
+        for argument in node.args[:1]
+        if isinstance(argument, ast.Constant) and isinstance(argument.value, str)
+    }
+    assert "/demo/trading/cycles/run-paper" not in routes

@@ -80,7 +80,6 @@ aplikují dostupné security aktualizace. Nejde o blanket potlačení reportu.
 | POST | `/automation/runs/{run_id}/retry` | ADMIN |
 | POST | `/risk/halt` | OPERATOR/ADMIN |
 | POST | `/risk/resume` | ADMIN |
-| POST | `/demo/trading/cycles/run-paper` | ADMIN |
 | POST | `/reconciliation/run` | ADMIN |
 | POST | `/api/backtests/demo` | ADMIN |
 | POST | `/demo/research/experiments` | ADMIN |

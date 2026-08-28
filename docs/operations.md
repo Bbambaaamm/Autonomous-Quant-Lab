@@ -5,8 +5,8 @@ Production-like PAPER provoz vyžaduje explicitní migration step, strong secret
 
 1. Spusťte PostgreSQL a `uv run alembic -c ../alembic.ini upgrade head`.
 2. Před prvním cyklem a po incidentu volejte `POST /reconciliation/run`.
-3. Legacy fixture cycle je pouze development demo na `POST /demo/trading/cycles/run-paper`;
-   schválený Phase 6 deployment tento B1 control plane záměrně nespouští (B2 zůstává otevřené).
+3. Ekonomický cyklus smí spustit pouze worker z autoritativního schváleného deploymentu;
+   legacy fixture endpoint byl odstraněn, protože obcházel deployment a monitoring autoritu.
    Incident zastaví `POST /risk/halt`.
 4. `/risk/resume` funguje jen po safe reconciliation.
 
