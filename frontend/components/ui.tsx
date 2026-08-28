@@ -8,18 +8,25 @@ export const pct = (value: unknown): string =>
 
 export function Status({ value }: { value: unknown }) {
   const text = na(value);
-  const unsafe = [
-    "HALTED",
-    "SUSPENDED",
-    "FAILED",
-    "DEAD_LETTER",
-    "STALE",
-    "UNAVAILABLE",
-    "DISABLED",
-    "MISSING_SESSION_DATA",
-    "UNSAFE",
-  ].includes(text);
-  const watch = ["WATCH", "REVIEW_REQUIRED", "INSUFFICIENT_DATA", "STARTED"].includes(text);
+  const normalized = text.toUpperCase();
+  const unsafe =
+    value === false ||
+    [
+      "FALSE",
+      "HALTED",
+      "SUSPENDED",
+      "FAILED",
+      "DEAD_LETTER",
+      "STALE",
+      "UNAVAILABLE",
+      "UNSUPPORTED",
+      "NOT_READY",
+      "CAPABILITY_NOT_REPORTED",
+      "DISABLED",
+      "MISSING_SESSION_DATA",
+      "UNSAFE",
+    ].includes(normalized);
+  const watch = ["WATCH", "REVIEW_REQUIRED", "INSUFFICIENT_DATA", "STARTED"].includes(normalized);
   return <span className={`badge ${unsafe ? "unsafe" : watch ? "watch" : "safe"}`}>{text}</span>;
 }
 

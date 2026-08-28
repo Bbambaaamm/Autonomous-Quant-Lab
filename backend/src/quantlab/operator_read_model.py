@@ -11,6 +11,7 @@ from quantlab.automation import JobRun, ScheduledJob, WorkerHeartbeat
 from quantlab.config import Settings
 from quantlab.market_data import XNYSCalendar
 from quantlab.persistence import (
+    CorporateActionReadinessRecord,
     DatasetSnapshotRecord,
     ExperimentRecord,
     InstrumentRecord,
@@ -19,6 +20,8 @@ from quantlab.persistence import (
     Phase6EligibilityDecisionRecord,
     StrategyDeploymentRecord,
     StrategyRecord,
+    UniverseDefinitionRecord,
+    UniverseMembershipRecord,
 )
 from quantlab.phase4 import (
     AuditEventRecord,
@@ -368,7 +371,12 @@ class OperatorReadModel:
                 ],
             }
 
-    def data_health(self, now: datetime) -> dict[str, Any]:
+    def data_health(
+        self,
+        now: datetime,
+        membership_limit: int = 100,
+        membership_offset: int = 0,
+    ) -> dict[str, Any]:
         completed = XNYSCalendar().latest_completed_session(now)
         session_start = datetime.combine(completed, datetime.min.time(), tzinfo=UTC)
         session_end = session_start + timedelta(days=1)
@@ -427,8 +435,27 @@ class OperatorReadModel:
                 )
                 .where(MarketDataIngestionRecord.status == "SUCCEEDED")
             )
+            membership_total = (
+                session.scalar(select(func.count()).select_from(UniverseMembershipRecord)) or 0
+            )
+            memberships = list(
+                session.scalars(
+                    select(UniverseMembershipRecord)
+                    .order_by(
+                        UniverseMembershipRecord.universe_id,
+                        UniverseMembershipRecord.instrument_id,
+                        UniverseMembershipRecord.valid_from,
+                    )
+                    .limit(membership_limit)
+                    .offset(membership_offset)
+                )
+            )
             return {
-                "provider": {"name": "stooq", "type": "persistent"},
+                "provider": {
+                    "name": "stooq",
+                    "type": "persistent",
+                    "supports_actions": False,
+                },
                 "calendar_identity": XNYSCalendar().identity,
                 "latest_completed_session": completed,
                 "latest_successful_session": latest_observation.date()
@@ -447,6 +474,28 @@ class OperatorReadModel:
                 ],
                 "ingestions": [_row(x) for x in ingestions],
                 "snapshots": [_row(x) for x in snapshots],
+                "universes": [
+                    _row(x)
+                    for x in session.scalars(
+                        select(UniverseDefinitionRecord).order_by(
+                            UniverseDefinitionRecord.universe_id
+                        )
+                    )
+                ],
+                "memberships": [_row(x) for x in memberships],
+                "membership_page": {
+                    "total": membership_total,
+                    "limit": membership_limit,
+                    "offset": membership_offset,
+                },
+                "corporate_action_readiness": [
+                    _row(x)
+                    for x in session.scalars(
+                        select(CorporateActionReadinessRecord)
+                        .order_by(CorporateActionReadinessRecord.checked_at.desc())
+                        .limit(50)
+                    )
+                ],
             }
 
     def automation(self, now: datetime) -> dict[str, Any]:
@@ -542,6 +591,21 @@ class OperatorReadModel:
                 )
             ]
 
+    def deployments(self, limit: int = 50) -> list[dict[str, Any]]:
+        """Bounded dashboard projection; never fans out one read per strategy."""
+        with self._session_factory() as session:
+            return [
+                _row(x)
+                for x in session.scalars(
+                    select(StrategyDeploymentRecord)
+                    .order_by(
+                        StrategyDeploymentRecord.created_at.desc(),
+                        StrategyDeploymentRecord.deployment_id.desc(),
+                    )
+                    .limit(limit)
+                )
+            ]
+
     def strategy(self, identity: str) -> dict[str, Any] | None:
         with self._session_factory() as session:
             row = session.get(StrategyRecord, identity)
@@ -602,6 +666,26 @@ class OperatorReadModel:
                 **_row(row),
                 "experiments": [_row(x) for x in experiments],
                 "deployments": deployment_views,
+                "monitoring_policies": [
+                    {**_row(x), "config": _json(x.config_json)}
+                    for x in session.scalars(
+                        select(PaperMonitoringPolicyRecord).order_by(
+                            PaperMonitoringPolicyRecord.created_at.desc()
+                        )
+                    )
+                ],
+                "monitoring_runs": [
+                    _row(x)
+                    for x in session.scalars(
+                        select(PaperMonitoringRunRecord)
+                        .where(
+                            PaperMonitoringRunRecord.deployment_id.in_(
+                                [x.deployment_id for x in deployments]
+                            )
+                        )
+                        .order_by(PaperMonitoringRunRecord.created_at.desc())
+                    )
+                ],
             }
 
     def experiments(self, limit: int, offset: int) -> dict[str, Any]:

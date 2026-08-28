@@ -194,6 +194,12 @@ def test_supported_b1_control_plane_reaches_active_monitoring(monkeypatch) -> No
         },
     )
     assert retry.json()["monitoring_id"] == enrollment.json()["monitoring_id"]
+    autonomous = client.post(
+        f"/operator/deployments/{deployment_id}/autonomous/enable",
+        json={"reason": reason},
+    )
+    assert autonomous.status_code == 200, autonomous.text
+    assert autonomous.json()["enabled"] is True
     with Session(api_module.paper_repository.engine) as session:
         monitoring = session.get(PaperMonitoringRunRecord, enrollment.json()["monitoring_id"])
         assert monitoring is not None
