@@ -2,237 +2,294 @@
 
 ## Executive verdict
 
-**CONDITIONAL READY FOR PAPER PILOT**
+**CONDITIONAL READY FOR CONTROLLED PAPER PILOT**
 
-Tento verdikt platí pro stav po odstranění nalezené přímé legacy execution cesty. Pilot není
-bezpodmínečně připraven: v auditním prostředí nebyl dostupný Docker/PostgreSQL ani uzamčený
-Python toolchain, a proto zde nelze označit clean-database tok ani production container runtime
-za `END-TO-END PASS`. Před pilotem musí CI na výsledném commitu dodat chybějící důkaz.
+Aktuální kombinovaný strom obsahuje merged PR #62 (M4) i remediation z PR #63. Není známý otevřený P0 ani P1 pilot blocker. Legacy direct paper execution route `POST /demo/trading/cycles/run-paper` byla odstraněna a kryta regresním testem. GitHub CI #435 na kombinovaném code tree úspěšně prošlo přes quality, unit-research, api, frontend, security, container-build, integration-postgres a production-smoke.
 
-## Audited commit
+Pilot zůstává podmíněný, protože před prvním autonomním PAPER během musí proběhnout řízený staging dry-run skutečného podporovaného workflow a musí se ověřit provozní evidence workeru, scheduleru, monitoringu, reconciliation a fail-closed chování v nasazení.
 
-Výchozí auditovaný commit: `6d4b3ed778809204930f1151c2b211c91ea1df14` (lokální větev
-`work`). Repository nemělo nakonfigurovaný remote ani lokální větev `main`; načtení novějšího
-`origin/main` proto bylo `UNVERIFIED`. Auditovaný strom obsahoval merge PR #61 (M1), nikoli
-samostatný merge PR #62. Změny tohoto re-auditu jsou popsány v Git commitu, který obsahuje tento
-dokument.
+## Audited code tree
+
+- Runtime/code tree auditovaný po začlenění PR #62: `6ed177a81d89fe2ac367e236435286dc31c7ad49`.
+- Merge-base proti `main`: `2227aa5b36c14cec0a2482b98926843d2cccec99` (merge PR #62).
+- V okamžiku re-auditu byl PR #63 proti `main` `behind_by = 0`.
+- Tento dokumentační refresh nemění runtime business logic; finální PR head musí znovu projít CI.
+
+Úroveň evidence níže používá:
+
+- `CODE INSPECTION PASS`
+- `UNIT TEST PASS`
+- `POSTGRES ACCEPTANCE PASS`
+- `CONTAINER RUNTIME PASS`
+- `CI PASS`
+- `UNVERIFIED`
 
 ## Scope
 
-Byly přečteny aplikační moduly, Alembic migrace, API a security middleware, worker/scheduler,
-Phase 3–9 testy, oba Dockerfile, production compose, CI, frontend server actions a operátorské
-stránky. Repo bylo prohledáno na live brokery, credentials, order routing a legacy ekonomické
-cesty. Historické dokumenty byly použity jen jako navigace; status níže vychází z implementace.
+Re-audit zahrnuje Phase 1–9, zejména:
 
-Úroveň evidence je vždy explicitní: `CODE INSPECTION PASS`, `UNIT TEST PASS`,
-`POSTGRES ACCEPTANCE PASS`, `CONTAINER RUNTIME PASS`, `END-TO-END PASS` nebo `UNVERIFIED`.
+- market-data ingestion, PIT universe a dataset snapshot lineage;
+- corporate-action capability/readiness;
+- experiment/OOS/eligibility/promotion;
+- deployment, immutable runtime manifest a approval;
+- Phase 4 risk, paper broker, orders/fills, ledger/positions a reconciliation;
+- scheduler, worker, lease/retry/recovery a XNYS orchestration;
+- monitoring a paper-performance evidence;
+- operator control-plane UI po M4;
+- RBAC, actor/reason/correlation audit trail;
+- PAPER-only architecture;
+- security, container a production-smoke gates.
 
 ## Evidence summary
 
 | Evidence | Výsledek |
 | --- | --- |
-| Git SHA, historie a pracovní strom | `CODE INSPECTION PASS`; remote/main `UNVERIFIED` |
-| Paper-only repository scan | `CODE INSPECTION PASS` po remediation; pouze `PaperBroker`/`PersistentPaperBroker` |
-| Přímá legacy paper mutation | Nalezena na baseline, reprodukce `POST /demo/trading/cycles/run-paper`; odstraněna a kryta AST regresí |
-| Python format/lint/type/unit | `UNVERIFIED`: požadované `uv==0.12.3` nebylo instalováno; registry vracela 403 |
-| PostgreSQL acceptance a clean DB E2E | `UNVERIFIED`: PostgreSQL/Docker runtime nebyl v prostředí dostupný |
-| Frontend lint/type/test/build | `UNIT TEST PASS`: 27 testů; produkční Next build dokončen |
-| Security/dependency/secret/container scan | `UNVERIFIED` runtime; konfigurace CI obsahuje pip-audit, npm audit a Trivy secret/misconfig/image gates |
-| `git diff --check` a samostatný Ruff audit změněných Python souborů | `CODE INSPECTION PASS` / lokální Ruff po opravě importu |
-
-## Phase 1–9 findings
-
-### Phase 1–3 — data, PIT universe a snapshot
-
-`InstrumentRecord` je stabilní identita oddělená od symbolu a nese exchange, calendar, currency a
-asset type. Ingestion persistuje provider/version, interval, stav a revision evidence; runtime
-dotazy filtrují úspěšné ingestion. Membership používá `valid_from`, `valid_to` a `known_at` a
-runtime ji řeže `decision_time`. Snapshot service vytváří manifest/content hash a experiment
-validuje jeho evidence. Stav: `CODE INSPECTION PASS`; tamper a PostgreSQL concurrency assertions
-existují v Phase 3/6 suites, jejich běh zde je `UNVERIFIED`.
-
-Corporate-action capability/readiness váže provider identity/version, interval a knowledge
-cutoff. Runtime vyžaduje přesnou readiness a filtruje actions podle `known_at <= decision_time`.
-Chybějící readiness končí výjimkou před Phase 4. Stav: `CODE INSPECTION PASS`; H2 acceptance zde
-`UNVERIFIED`.
-
-### Phase 4 — risk, execution, ledger a reconciliation
-
-Autoritou ekonomického efektu je `TradingCycleService` přes production risk engine a persistentní
-paper broker. Cycle fingerprint, databázový lease a order/fill identity chrání retry; fill vede k
-cash/position evidence a následné reconciliation. Vstupy NaN/infinity a neplatné hodnoty odmítají
-Decimal/Pydantic/doménové validace. Baseline ale vystavoval veřejně routovanou ADMIN mutation,
-která přímo volala tuto službu nad CSV fixture bez deployment/monitoring autority. To byl P0 a
-byl v tomto re-auditu odstraněn. Corruption/reconciliation runtime: `UNVERIFIED`.
-
-### Phase 5 — automation, concurrency a recovery
-
-Scheduler persistuje occurrence; claim používá podmíněný PostgreSQL update, lease owner/expiry a
-fencing. Worker přijímá deployment ID a rekonstruuje ekonomickou konfiguraci server-side.
-Heartbeat, attempts, retry a dead letter jsou persistentní a čitelné API. Stav:
-`CODE INSPECTION PASS`; duplicate-worker a expired-lease PostgreSQL testy existují, tento běh
-`UNVERIFIED`.
-
-### Phase 6 — experiment, eligibility, promotion, deployment
-
-Experiment váže snapshot, strategy/version, parametry, chronologický train/validation/OOS split,
-seed, code SHA a cost model. OOS se nepoužívá pro výběr kandidáta. M1 používá server-side policy
-registry, kanonické dokumenty, rules, metrics a integrity hash; promotion znovu validuje přesnou
-lineage a immutable decision. Deployment lze vytvořit jen z `PAPER_CANDIDATE`.
-Stav: `CODE INSPECTION PASS`; replay a M1 adversarial PostgreSQL běh `UNVERIFIED`.
-
-### Phase 7 — approval, monitoring a performance
-
-Approval je ADMIN server mutation, nikoli boolean klienta, a validuje lineage i runtime manifest.
-Execution vyžaduje právě jeden `ACTIVE` monitoring record a stav znovu čte před ekonomickým
-krokem. OOS baseline a realized paper snapshots jsou oddělené tabulky. Stav:
-`CODE INSPECTION PASS`; race transition/execution a performance acceptance `UNVERIFIED`.
-
-### Phase 8 — operator UI
-
-UI je server-rendered a mutations používají server actions, same-origin kontrolu, server session
-a backend bearer token podle role. Implementuje eligibility, promotion, risk, monitoring a
-autonomous toggle. Neimplementuje však požadovaný kompletní create workflow pro instrument,
-universe, ingestion, snapshot, experiment, deployment, approval a enrollment; data/research jsou
-v těchto částech read-only. Stav: **M4 REGRESSED / P2**. Pilot lze řídit autoritativním API, ale
-nikoli celý běžný tok pouze UI.
-
-### Phase 9 — security a operations
-
-Bearer identity vzniká server-side, GET vyžaduje VIEWER, všechny mutations ADMIN kromě HALT
-(OPERATOR). Host allowlist, response no-store, correlation ID, rate limiting a production secret
-validace failují closed. Bearer API nepoužívá cookie auth; CSRF se proto na backendu neopírá o
-cookie ambient authority, zatímco frontend server actions kontrolují origin. Containers deklarují
-non-root/read-only/cap-drop/no-new-privileges a oddělenou interní data síť. Stav:
-`CODE INSPECTION PASS`; production smoke a skeny `UNVERIFIED`.
+| PR #62 zahrnut v auditovaném stromu | `CODE INSPECTION PASS` |
+| PR #63 není za `main` | `CODE INSPECTION PASS` (`behind_by = 0`) |
+| PAPER-only architecture | `CODE INSPECTION PASS` + architecture regression |
+| Legacy direct paper route | `RESOLVED`; route odstraněna a kryta AST testem |
+| Python format/lint/type | `CI PASS` |
+| Unit/research/API tests | `CI PASS` |
+| PostgreSQL Phase 3–9 | `POSTGRES ACCEPTANCE PASS` |
+| B1 control-plane acceptance | `POSTGRES ACCEPTANCE PASS` |
+| B2 approved-deployment worker acceptance | `POSTGRES ACCEPTANCE PASS` |
+| P0 missed-open causality | `POSTGRES ACCEPTANCE PASS` |
+| P0 production worker runtime | `POSTGRES ACCEPTANCE PASS` |
+| Stage C / M3 orchestration | `POSTGRES ACCEPTANCE PASS` |
+| H2 corporate-action readiness | `POSTGRES ACCEPTANCE PASS` |
+| H3 runtime-config identity | `POSTGRES ACCEPTANCE PASS` |
+| M1 eligibility decision | `POSTGRES ACCEPTANCE PASS` |
+| Frontend lint/type/test/build | `CI PASS` |
+| Dependency / secret / misconfiguration checks | `CI PASS` |
+| Backend/frontend container build + Trivy image gates | `CONTAINER RUNTIME PASS` |
+| Production smoke | `CONTAINER RUNTIME PASS` |
+| Full staging operator workflow against deployed environment | `UNVERIFIED` — mandatory before first pilot session |
 
 ## Previous remediation verification
 
 | Finding | Status | Evidence |
 | --- | --- | --- |
-| B1 | RESOLVED | Control-plane API vytváří registry → snapshot → experiment → deployment evidence |
-| B2 | RESOLVED | Worker ekonomicky začíná autoritativním approved deployment ID |
-| B3 / P0-A | RESOLVED | Decision time a následující raw open jsou validovány; missed open failuje closed |
-| P0-B | RESOLVED | Worker entrypoint, compose service, heartbeat, lease a CI runtime acceptance existují |
-| H1 | RESOLVED | Autonomous session preparation provádí allowlisted refresh a staleness gate |
-| H2 | RESOLVED | Capability/readiness/knowledge cutoff jsou persistentní a execution gate je fail-closed |
-| H3 | RESOLVED | Kanonický approved runtime manifest/hash se před worker execution znovu ověřuje |
-| M1 | RESOLVED | Immutable policy decision a promotion revalidation jsou server-side autorita |
-| M2 | RESOLVED WITH P2 GAP | Klíčové control mutations nesou actor/reason/result/correlation; legacy non-operator mutations nejsou všechny reasoned |
-| M3 | RESOLVED | Backend XNYS calendar řeší sessions; existují DST/holiday/early-close testy |
-| M4 | REGRESSED | UI neumí celý požadovaný create/approve/enroll workflow; API jej umí |
+| B1 | RESOLVED | Autoritativní control-plane a PostgreSQL B1 acceptance |
+| B2 | RESOLVED | Worker začíná approved deployment ID; B2 acceptance PASS |
+| B3 / P0-A | RESOLVED | Decision/executable-open causality a missed-open fail-closed acceptance PASS |
+| P0-B | RESOLVED | Production worker entrypoint/runtime acceptance PASS |
+| H1 | RESOLVED | Autonomous market-data/session orchestration a staleness gates |
+| H2 | RESOLVED | Corporate-action capability/readiness fail-closed acceptance PASS |
+| H3 | RESOLVED | Approved runtime manifest identity/hash acceptance PASS |
+| M1 | RESOLVED | Immutable eligibility policy decision + promotion gate acceptance PASS |
+| M2 | RESOLVED FOR PILOT CONTROL-PLANE | Kritické operator mutations mají server-side actor, reason, correlation a audit evidence |
+| M3 | RESOLVED | Backend XNYS calendar/session orchestration acceptance PASS |
+| M4 | RESOLVED | Kompletní operator workflow po PR #62 včetně review remediations |
 
-## New findings
+## M4 — operator control-plane revalidation
 
-| ID | Severity | Finding | Evidence | Pilot blocker |
+M4 je v aktuálním stromu přítomné a není považováno za regresi.
+
+Podporovaná cesta je:
+
+`DATA → UNIVERSE → SNAPSHOT → EXPERIMENT → ELIGIBILITY → PROMOTION → DEPLOYMENT → APPROVAL → MONITORING → AUTONOMOUS PAPER`
+
+Re-audit zohledňuje i následné review opravy PR #62:
+
+- autoritativní reconciliation recovery je dostupná přes operator control-plane;
+- `SUSPENDED` monitoring má bezpečné resume/retire recovery akce;
+- po `RETIRED` lze vytvořit nový monitoring enrollment;
+- enrollment zajišťuje deterministický `MONITOR_PAPER_DEPLOYMENT` job;
+- audit identity opakovaných control mutations zahrnuje correlation ID;
+- corporate-action `UNSUPPORTED` není prezentováno jako bezpečný zelený stav;
+- dashboard používá bounded deployment summary místo N+1 strategy reads;
+- PIT membership evidence je bounded/paginated;
+- universe ID contract je URL-safe a route parametry jsou bezpečně adresovatelné.
+
+Frontend je pouze ovládací vrstva. Eligibility, promotion, approval, monitoring state machine, XNYS orchestrace, runtime identity, risk a execution autorita zůstávají server-side.
+
+## PAPER-only invariant
+
+Podporovaný pilotní runtime je PAPER-only.
+
+Byla odstraněna legacy mutation:
+
+`POST /demo/trading/cycles/run-paper`
+
+která obcházela deployment/approval/runtime-manifest/monitoring autoritu.
+
+Regresní architecture test vyžaduje, aby se tato route nevrátila. Pilot nesmí zavádět live broker SDK, exchange order routing, live credentials ani funding flow.
+
+## Phase 1–3 — data a lineage
+
+Instrument identity je oddělena od ticker symbolu. PIT universe používá časově omezené membership evidence včetně `known_at`. Dataset snapshot váže zdrojová data, universe a obsahovou/integritní identitu.
+
+Corporate-action readiness zůstává fail-closed součástí execution preparedness. H2 acceptance na kombinovaném stromu prošla v PostgreSQL CI.
+
+Stav: `CODE INSPECTION PASS` + `POSTGRES ACCEPTANCE PASS` pro relevantní gates.
+
+## Phase 4 — risk, execution, ledger a reconciliation
+
+Ekonomický efekt vzniká pouze přes podporovanou PAPER execution cestu s risk autoritou, persistentními orders/fills a account/position evidence.
+
+Missed-open causality acceptance je zelená: systém nesmí vytvořit retroaktivní fill na již proběhlém open.
+
+Reconciliation recovery je součástí operator control-plane. Resume po incidentu musí být podmíněn SAFE reconciliation.
+
+Stav: `POSTGRES ACCEPTANCE PASS` pro P0 causality a související integration suite.
+
+## Phase 5 — scheduler, worker, concurrency a recovery
+
+Scheduler/worker používají persistentní jobs/runs/attempts, claim/lease/fencing a bounded retry. Production worker runtime acceptance prošla.
+
+Monitoring enrollment vytváří/zajišťuje deterministický monitoring job a retry enrollmentu nesmí vytvářet nekontrolované duplicitní ekonomické efekty.
+
+Stav: `POSTGRES ACCEPTANCE PASS` + `CONTAINER RUNTIME PASS`.
+
+## Phase 6 — experiment, eligibility, promotion a deployment
+
+Experiment evidence obsahuje snapshot, strategy/version, parametry, split, seed, code SHA a cost assumptions. M1 eligibility rozhodnutí je immutable a policy-controlled. Promotion zůstává explicitní krok oddělený od evaluation.
+
+Deployment lze vytvořit pouze z podporovaného promoted kandidáta a worker z něj rekonstruuje autoritativní runtime configuration.
+
+Stav: `POSTGRES ACCEPTANCE PASS` pro M1/B2/H3 relevantní acceptance.
+
+## Phase 7 — approval, monitoring a performance
+
+Approval je server-side mutation. Runtime manifest identity se kontroluje před execution. Monitoring musí být v podporovaném stavu a recovery transitions jsou auditované.
+
+Po retirement lze bezpečně založit nový enrollment; starý retired run není znovu aktivován jako nový lifecycle.
+
+Stav: `CODE INSPECTION PASS` + relevantní integration coverage.
+
+## Phase 8 — operator UI
+
+M4 je `RESOLVED`.
+
+ADMIN může použít podporovaný operator workflow od dat/research až po approved, monitored a autonomous PAPER deployment bez nutnosti přímých SQL zásahů. UI zobrazuje backend evidence a neimplementuje vlastní ekonomická pravidla.
+
+Viewer zůstává read-only; mutations jsou chráněné backend RBAC.
+
+Stav: `CI PASS` pro frontend lint/type/test/build + backend control-plane acceptance.
+
+## Phase 9 — security a operations
+
+CI #435 úspěšně prošlo:
+
+- Ruff security checks;
+- `pip-audit --strict`;
+- npm audit gates;
+- repository secret/misconfiguration scan;
+- backend/frontend Trivy HIGH/CRITICAL image gates;
+- non-root container checks;
+- production smoke.
+
+Auth/RBAC autorita zůstává backendová. Actor se odvozuje server-side, nikoli z libovolného klientského pole.
+
+Full historical Git secret scan nebyl v tomto re-auditu samostatně doložen jako vlastní acceptance; protože repo je veřejný, je doporučeno jej jednorázově provést a případný nalezený skutečný secret okamžitě rotovat.
+
+## New / residual findings
+
+| ID | Severity | Finding | Stav | Pilot blocker |
 | --- | --- | --- | --- | --- |
-| RA-P0-01 | P0 | Legacy fixture endpoint obcházel deployment, approval, runtime manifest, monitoring a current-data causal gate | Baseline `api.py` route přímo volala `trading_service.run` nad fixture | Ano na baseline; **opraveno** odstraněním route |
-| RA-P2-01 | P2 | M4 UI není kompletní operátorský workflow | Data/research stránky jsou read-only; chybí create deployment/approval/enrollment UI | Ne při API runbooku a lidském dohledu |
-| RA-P2-02 | P2 | Aktuální runtime/PostgreSQL/container důkaz nebylo možné v tomto prostředí obnovit | Docker/PostgreSQL chybí; uv pin nelze stáhnout kvůli 403 | Ne jako kódový blocker; před pilotem povinná CI podmínka |
-| RA-P3-01 | P3 | Některé legacy ADMIN mutations nemají reasoned audit contract | `/reconciliation/run`, demo backtest/research a obecná automation API | Ne; pro pilot používat operator control plane |
+| RA-P0-01 | P0 | Legacy direct fixture paper execution obcházelo control-plane | RESOLVED + regression test | Ne, po opravě |
+| RA-P2-01 | P2 | Staging dry-run finálního podporovaného operator workflow ještě není evidován | OPEN OPERATING CONDITION | Ano pro první pilot session, ne pro merge kódu |
+| RA-P3-01 | P3 | Full historical Git secret scan není samostatně doložen | OPEN HARDENING ITEM | Ne, pokud není nalezen actual secret |
 
-## RBAC matice `/operator/...`
+Aktuálně nejsou známy otevřené P0/P1.
 
-Všechny řádky procházejí globálním middlewarem. `Actor` je `request.state.principal`, nikoli pole
-requestu. GET nevyžaduje reason; každá uvedená control mutation jej vyžaduje v Pydantic body.
+## RBAC / control-plane invariants
 
-| Endpoint | Method | Viewer | Admin | Actor | Reason | Backend authority |
-| --- | --- | --- | --- | --- | --- | --- |
-| `/operator/overview`, `/paper`, `/paper/performance` | GET | ano | ano | server | N/A | read model |
-| `/operator/monitoring/{id}/comparison` | GET | ano | ano | server | N/A | monitoring read model |
-| `/operator/strategies[/​{id}]` | GET | ano | ano | server | N/A | registry read model |
-| `/operator/research/experiments[/​{id}]` | GET | ano | ano | server | N/A | research read model |
-| `/operator/research/experiments/{id}/eligibility` | GET | ano | ano | server | N/A | M1 decision store |
-| `/operator/risk`, `/data-health`, `/automation`, `/audit` | GET | ano | ano | server | N/A | respective read model |
-| `/operator/instruments` | POST | ne | ano | server | ano | registry service |
-| `/operator/universes`, `/universes/{id}/memberships` | POST | ne | ano | server | ano | registry service |
-| `/operator/market-data/ingestions`, `/datasets` | POST | ne | ano | server | ano | data/snapshot service |
-| `/operator/research/experiments` | POST | ne | ano | server | ano | Phase6 runner |
-| `/operator/research/experiments/{id}/eligibility`, `/promote` | POST | ne | ano | server | ano | M1 service |
-| `/operator/deployments`, `/deployments/{id}/approve` | POST | ne | ano | server | ano | deployment service |
-| `/operator/deployments/{id}/jobs`, `/autonomous/enable`, `/autonomous/disable` | POST | ne | ano | server | ano | automation repository |
-| `/operator/monitoring/policies`, `/monitoring/enrollments` | POST | ne | ano | server | ano | monitoring service |
-| `/operator/risk/halt` | POST | ne | ano (i operator) | server | ano | risk service |
-| `/operator/risk/resume` | POST | ne | ano | server | ano | risk/reconciliation gate |
+Pro pilot platí:
 
-## E2E evidence
+- VIEWER: read-only;
+- ADMIN: operator mutations;
+- OPERATOR může pouze přesně povolené nouzové operace, pokud to backend role model umožňuje;
+- actor je server-side principal;
+- kritické mutation vyžadují reason;
+- correlation/audit evidence musí být dohledatelná;
+- žádný klient nesmí dodávat autoritativní eligibility, approval, runtime manifest nebo fill state.
 
-Clean PostgreSQL cesta je implementována v CI jako Alembic `upgrade head`, Phase 3–9 integration
-suites, čistý schema reset pro B1 a M1 a samostatné B1/B2/P0/H2/H3/Stage-C acceptance kroky.
-Assertions v klíčových testech kontrolují vznik experiment/deployment/job/cycle/order/fill,
-idempotentní retry, monitoring lineage a fail-closed scénáře. V tomto auditu však nebyl dostupný
-PostgreSQL server ani Docker daemon: **clean DB E2E = UNVERIFIED**, nikoli PASS.
+## Failure behavior
 
-Před pilotem se musí na výsledném SHA uložit zelený CI run a operátor musí provést staging dry-run
-podle runbooku. Přímé SQL inserty mimo fixture bootstrap nejsou povoleny.
+Před pilotem musí zůstat fail-closed zejména:
 
-## Failure tests
+- stale/missing market data;
+- incomplete corporate-action readiness;
+- invalid/tampered snapshot evidence;
+- missing/invalid eligibility decision;
+- runtime-manifest mismatch;
+- monitoring mimo podporovaný stav;
+- missed executable open;
+- duplicate/retry worker scenario;
+- reconciliation mismatch.
 
-| Scénář | Expected behavior | Observed evidence |
-| --- | --- | --- |
-| Provider unavailable | retry/dead-letter, bez fillu | CODE INSPECTION PASS; runtime UNVERIFIED |
-| Incomplete/failed/stale ingestion | data accessor odmítne execution | CODE INSPECTION PASS; runtime UNVERIFIED |
-| Missing corporate readiness | fail closed před signal/fill | CODE INSPECTION PASS; H2 runtime UNVERIFIED |
-| Corrupted snapshot | hash/manifest validation error | CODE INSPECTION PASS; tamper runtime UNVERIFIED |
-| Eligibility/policy/metrics tamper | promotion conflict | CODE INSPECTION PASS; M1 runtime UNVERIFIED |
-| Promotion bez decision | konflikt, žádný candidate | CODE INSPECTION PASS; runtime UNVERIFIED |
-| Manifest/approval lineage mismatch | approval/execution odmítnuta | CODE INSPECTION PASS; H3 runtime UNVERIFIED |
-| Monitoring inactive | no-action nebo exception, bez fillu | CODE INSPECTION PASS; runtime UNVERIFIED |
-| Scheduler retry / duplicate worker | jedna occurrence, fenced lease | CODE INSPECTION PASS; PostgreSQL runtime UNVERIFIED |
-| Missed open | žádný retroaktivní fill | CODE INSPECTION PASS; P0 acceptance runtime UNVERIFIED |
-| DB interruption/restart | rollback nebo expired-lease takeover | CODE INSPECTION PASS; runtime UNVERIFIED |
-| Legacy direct cycle | route nesmí existovat | Remediation CODE INSPECTION PASS + AST regression připravena |
+Existující CI acceptance potvrzuje klíčové P0/H2/H3/M1/B2 scénáře. Staging dry-run musí ověřit provozní observability a recovery workflow v nasazeném prostředí.
 
-## Security
-
-Nebyl nalezen broker SDK, exchange order API, funding/withdrawal flow, private key ani hardcoded
-production credential. Stooq je read-only market-data provider. `.env.production` není commitnutý
-a compose používá secret file. Git history secret scan, dependency CVE audit a image scan jsou v
-tomto prostředí `UNVERIFIED`; CI je však má jako blocking kroky bez `continue-on-error`.
-
-Auth negativní očekávání z middleware: bez tokenu `401`, viewer mutation `403`, neplatný Host
-`400`, malformed body `422`. Origin obrana je v server action vrstvě; přímý bearer klient nemá
-ambient cookie credential. Input model eligibility zakazuje extra fields; ostatní významné modely
-mají délkové/enum/numerické meze, ale nejsou všechny `extra=forbid` (P3 hardening).
-
-## CI audit
-
-CI má minimální `contents: read`, nepoužívá `continue-on-error` a samostatně blokuje quality,
-unit/API, PostgreSQL integration, frontend, security, image build/scan a production smoke.
-B1, B2, missed-open P0, production-worker P0, H2, H3 a M1 mají explicitní acceptance commands.
-M4 má pouze obecné frontend test/build pokrytí a potřebuje budoucí workflow-level UI test;
-pro API-řízený omezený pilot to není blocker.
-
-## Operational constraints
+## Operational constraints pro první pilot
 
 **PILOT JE POVOLEN POUZE ZA PODMÍNEK:**
 
-1. výsledný commit má zelené všechny CI jobs včetně clean PostgreSQL acceptance, Trivy a smoke;
-2. PAPER ONLY, XNYS, USD equities, daily timeframe, jeden aktivní deployment a jeden worker;
-3. pouze autoritativní `/operator` workflow; žádné demo/legacy mutations;
-4. ACTIVE monitoring, čerstvá successful ingestion a complete corporate-action readiness před runem;
-5. denní lidská kontrola heartbeat, latest run/attempt, fills a reconciliation;
-6. při stale heartbeat, FAILED/DEAD_LETTER, mismatch nebo nejasném fillu okamžitý HALT;
-7. žádné bezobslužné konfigurační změny a žádné paralelní scheduler deploymenty.
+1. finální PR head má znovu zelené všechny required CI checks;
+2. PAPER ONLY;
+3. XNYS, USD equities, daily timeframe;
+4. jeden aktivní pilotní deployment;
+5. jeden scheduler/worker topology;
+6. ACTIVE monitoring a automaticky zajištěný monitoring job;
+7. fresh successful data a complete corporate-action readiness;
+8. reconciliation `SAFE` před resume/novým ekonomickým během;
+9. denní lidská kontrola heartbeat, jobs, fills, positions, monitoring a reconciliation;
+10. při nejasném fillu, duplicate/retroactive fillu, stale workeru nebo mismatch okamžitý HALT a disable autonomous scheduling;
+11. žádné ruční ekonomické SQL opravy a žádná demo execution cesta.
 
-## Residual risks
+## Mandatory staging dry-run před první session
 
-Hlavní residual risk je chybějící lokálně zopakovaný runtime důkaz, nikoli známý otevřený P0/P1.
-UI nepokrývá celý workflow a operátor musí používat zdokumentované API. Process-local rate limiter
-je přijatelný pouze při single-backend pilot topology. Provider Stooq nemá SLA; failure musí zůstat
-no-fill a být denně kontrolován.
+Před prvním autonomním pilotním během proveď v produkčně podobném staging prostředí:
+
+1. migrations;
+2. instrument + universe + PIT membership;
+3. market-data ingestion a readiness;
+4. immutable snapshot;
+5. experiment;
+6. eligibility evaluation;
+7. promotion;
+8. deployment;
+9. runtime manifest review;
+10. approval;
+11. monitoring enrollment;
+12. ověření právě jednoho `MONITOR_PAPER_DEPLOYMENT` jobu;
+13. autonomous enable;
+14. worker/scheduler heartbeat;
+15. jednu bezpečnou scheduled execution/no-action cestu;
+16. reconciliation;
+17. recovery test pause/resume nebo HALT/reconcile/resume bez direct DB editace.
+
+Dry-run musí skončit bez duplicate economic effect, bez retroactive fillu a s kompletní audit correlation.
+
+## Pilot exit criteria
+
+Pilot je úspěšný pouze pokud současně platí:
+
+1. 10 po sobě jdoucích XNYS sessions;
+2. žádný duplicate fill;
+3. žádný retroactive fill;
+4. žádný nevysvětlený reconciliation mismatch;
+5. žádný P0/P1 incident;
+6. 100 % očekávaných occurrences má dohledatelnou run/attempt evidence nebo vysvětlený fail-closed no-action;
+7. všechny fills mají dohledatelnou deployment/runtime/risk/order/cycle lineage;
+8. proběhne alespoň jeden úspěšný worker restart/lease recovery drill bez dvojitého ekonomického efektu;
+9. monitoring evidence je oddělena od research OOS baseline;
+10. denní operator evidence je kompletní.
 
 ## Final recommendation
 
-Po odstranění `RA-P0-01` nejsou z code inspection známé otevřené P0/P1. Pilot lze spustit pouze
-po zeleném CI výsledného commitu a úspěšném staging clean-DB dry-runu, v úzkém scope a podle
-`docs/paper-pilot-runbook.md`. Pokud kterýkoli povinný gate není zelený, rozhodnutí se automaticky
-mění na **NOT READY FOR PAPER PILOT**.
+Kombinovaný code tree po PR #62 a PR #63 má zelené CI #435 a nejsou známy otevřené P0/P1 pilot blockery. M4 je znovu ověřeno jako součást stromu a předchozí tvrzení o chybějícím PR #62 / neověřeném PostgreSQL/container CI už neplatí.
+
+PR #63 lze po zeleném CI na finálním dokumentačním headu sloučit.
+
+Samotný PAPER pilot ale nezačínej, dokud neproběhne povinný staging dry-run výše.
 
 # MŮŽEME AUTONOMOUS QUANT LAB PUSTIT DO ŘÍZENÉHO PAPER TESTOVACÍHO PROVOZU?
 
 ## ANO, ALE POUZE ZA TĚCHTO PODMÍNEK
 
-- zelený CI a clean PostgreSQL staging E2E na výsledném SHA;
-- jeden XNYS/USD/daily paper deployment a jeden worker pod denním dohledem;
-- ACTIVE monitoring, fresh data, reconciliation SAFE a okamžitý HALT při odchylce.
+- finální CI je zelené;
+- staging dry-run podporovaného workflow projde;
+- jeden XNYS/USD/daily PAPER deployment pod lidským dohledem;
+- ACTIVE monitoring, fresh data a reconciliation SAFE;
+- okamžitý HALT při jakékoli nevysvětlené ekonomické odchylce.
