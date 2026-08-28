@@ -188,13 +188,14 @@ Infrastruktura actions a causal adjustment je správná, ale reálný externí i
 Split/dividend/delisting evidence by proto pro běžná equities nebyla úplná a adjusted signal série
 nemůže být provozně důvěryhodná bez jiného ručního provideru/importu.
 
-### H3 — Deployment nepinuje risk/cost runtime konfiguraci
+### H3 — RESOLVED: deployment pinuje úplnou runtime konfiguraci
 
-Deployment manifest pinuje strategii, parametry, universe, experiment/snapshot, účet, měnu a
-timeframe, ale ne risk policy ani broker commission/slippage identity. `TradingCycleService` při
-startu procesu vytváří defaultní `ProductionRiskConfig`, `FixedBpsSlippage` a cost model. Audit
-později prokáže jednotlivá rozhodnutí a fill cost, ale neprokáže, jaká verzovaná risk/cost policy
-byla schválena s deploymentem; restart s jinou konfigurací může změnit chování stejného deploymentu.
+Remediation H3 přidala verzovaný canonical manifest risku, sizingu, commission, slippage,
+execution a ověřitelné artifact identity. Hash je součástí deployment identity, approval jej
+auditně pinuje a PostgreSQL odmítá jeho následnou změnu. Deployment worker před ekonomickým
+efektem manifest ověří a komponenty rekonstruuje přímo z něj; legacy deployment bez identity je
+fail-closed. Podrobnosti a test evidence jsou v
+`docs/operational-readiness-remediation-h3-runtime-identity.md`.
 
 ## 7. MEDIUM findings
 
