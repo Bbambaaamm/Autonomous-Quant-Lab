@@ -8,6 +8,7 @@ from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
 from quantlab.automation import (
+    PREOPEN_EXECUTION_INTENT_BLOCK,
     AutomationRepository,
     JobExecutor,
     JobRun,
@@ -95,7 +96,9 @@ def test_worker_restart_five_minutes_after_open_is_stable_no_action() -> None:
         assert stored is not None
         assert stored.status == RunStatus.SUCCEEDED
         assert stored.outcome == "NO_ACTION"
-        assert stored.no_action_reason == "MISSED_EXECUTION_OPEN"
+        # Legacy/materialized XNYS occurrence nemá sealed immutable pre-open intent.
+        # Po upgradu proto failuje dříve a přísněji než samotný missed-open cutoff.
+        assert stored.no_action_reason == PREOPEN_EXECUTION_INTENT_BLOCK
         assert stored.trading_cycle_id is None
         assert _economic_state(session, account_id) == before
 
