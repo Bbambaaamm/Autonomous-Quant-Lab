@@ -43,7 +43,7 @@ Enrollment record a automation job nejsou deklarovány jako jedna atomická tran
 
 `POST /operator/automation/runs/{run_id}/retry` je podporovaná recovery cesta pouze pro managed PAPER jobs a pouze pro `FAILED`/`DEAD_LETTER`.
 
-Retry state transition a `CONTROL_AUTOMATION_RUN_RETRY` audit evidence jsou persistovány v jedné databázové transakci. Pokud audit insert nemůže commitnout, nesmí commitnout ani `RETRY_SCHEDULED`. Generic `/automation/runs/{run_id}/retry` managed job odmítá.
+Retry state transition a `CONTROL_AUTOMATION_RUN_RETRY` audit evidence jsou persistovány v jedné databázové transakci. Pokud audit insert nemůže commitnout, nesmí commitnout ani `RETRY_SCHEDULED`. Generic `/automation/runs/{run_id}/retry` managed job odmítá. Recovery transition lze bezpečně persistovat i při globálně vypnuté automation; tím se worker nespouští a ekonomická execution zůstává zastavená až do samostatného povolení automation.
 
 ## Lifecycle retirement
 
