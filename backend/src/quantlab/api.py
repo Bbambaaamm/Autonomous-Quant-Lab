@@ -1371,8 +1371,8 @@ def automation_run(run_id: str) -> dict[str, object]:
 def operator_retry_automation_run(
     run_id: str, body: ReasonedMutation, request: Request
 ) -> dict[str, object]:
-    if not settings.automation_enabled:
-        raise HTTPException(status_code=503, detail="Automation je globálně vypnutá")
+    # Recovery transition lze auditovaně persistovat i při globálně vypnutém workeru;
+    # samotná execution zůstává zastavená, dokud automation není znovu povolena.
     try:
         row = automation_repository.retry_managed_run(
             run_id,
