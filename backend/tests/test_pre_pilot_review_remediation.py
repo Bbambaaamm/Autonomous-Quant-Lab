@@ -44,7 +44,7 @@ def test_monitoring_schedule_ensure_reenables_and_normalizes(tmp_path) -> None: 
     assert repaired.schedule_type == ScheduleType.INTERVAL
     assert repaired.interval_seconds == MONITOR_INTERVAL_SECONDS
     assert repaired.misfire_policy == MisfirePolicy.RUN_ONCE_IF_MISSED
-    assert repaired.next_run_at == now + timedelta(minutes=1)
+    assert repaired.next_run_at.replace(tzinfo=UTC) == now + timedelta(minutes=1)
 
 
 def test_autonomous_daily_occurrence_tracks_new_york_dst() -> None:
@@ -136,9 +136,11 @@ def test_managed_retry_and_audit_commit_in_one_repository_transaction(tmp_path) 
     with Session(repository.engine) as session:
         stored = session.get(JobRun, "run-test")
         assert stored is not None and stored.status == RunStatus.RETRY_SCHEDULED
-        audit = session.query(AuditEventRecord).filter_by(
-            event_type="CONTROL_AUTOMATION_RUN_RETRY", entity_id="run-test"
-        ).one()
+        audit = (
+            session.query(AuditEventRecord)
+            .filter_by(event_type="CONTROL_AUTOMATION_RUN_RETRY", entity_id="run-test")
+            .one()
+        )
         assert audit.correlation_id == "retry-correlation"
 
 

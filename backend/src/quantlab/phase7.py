@@ -755,9 +755,7 @@ class PaperMonitoringService:
                     hashlib.sha256(
                         f"monitor-paper-deployment:{monitoring_id}".encode()
                     ).hexdigest(),
-                    hashlib.sha256(
-                        f"paper-session:{run.deployment_id}".encode()
-                    ).hexdigest(),
+                    hashlib.sha256(f"paper-session:{run.deployment_id}".encode()).hexdigest(),
                 )
                 for job_id in job_ids:
                     job = session.get(ScheduledJob, job_id, with_for_update=True)

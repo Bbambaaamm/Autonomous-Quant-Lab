@@ -21,7 +21,7 @@ describe("paper-only hranice", () => {
     const actions = fs.readFileSync(path.join(process.cwd(), "app/actions.ts"), "utf8");
     const operations = fs.readFileSync(path.join(process.cwd(), "app/operations/page.tsx"), "utf8");
     expect(actions).toContain("/operator/automation/runs/${segment(runId)}/retry");
-    expect(actions).not.toContain("/automation/runs/${segment(runId)}/retry");
+    expect(actions).not.toContain("mutate(`/automation/runs/${segment(runId)}/retry`");
     expect(operations).toContain("automationRetryAction");
     expect(operations).toContain("Audit reason");
     expect(operations).toContain("scheduled_job_id");

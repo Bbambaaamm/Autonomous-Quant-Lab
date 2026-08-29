@@ -510,9 +510,7 @@ class AutomationRepository:
                         entity_id=run_id,
                         trading_cycle_id=None,
                         correlation_id=correlation_id,
-                        payload_json=json.dumps(
-                            {"actor": actor, "reason": reason}, sort_keys=True
-                        ),
+                        payload_json=json.dumps({"actor": actor, "reason": reason}, sort_keys=True),
                     )
                 )
             session.flush()
