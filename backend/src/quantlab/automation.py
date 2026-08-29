@@ -74,6 +74,17 @@ class AttemptStatus(StrEnum):
     LEASE_LOST = "LEASE_LOST"
 
 
+MANAGED_JOB_TYPES = frozenset(
+    {
+        JobType.RUN_PAPER_DEPLOYMENT,
+        JobType.PREPARE_PAPER_SESSION,
+        JobType.MONITOR_PAPER_DEPLOYMENT,
+    }
+)
+AUTONOMOUS_DAILY_TIME = "09:30"
+AUTONOMOUS_TIMEZONE = "America/New_York"
+MONITOR_INTERVAL_SECONDS = 3600
+
 TERMINAL = {RunStatus.SUCCEEDED, RunStatus.FAILED, RunStatus.DEAD_LETTER, RunStatus.CANCELLED}
 
 
@@ -232,6 +243,30 @@ def parse_daily_time(value: str) -> tuple[int, int]:
     return parsed.hour, parsed.minute
 
 
+def daily_occurrence_at_or_after(value: datetime, daily_time: str, timezone: str) -> datetime:
+    """Vrátí první timezone-aware daily occurrence, která není před value."""
+    current = utc(value)
+    try:
+        zone = ZoneInfo(timezone)
+    except ZoneInfoNotFoundError as exc:
+        raise ValueError("Neplatná časová zóna") from exc
+    hour, minute = parse_daily_time(daily_time)
+    local = current.astimezone(zone)
+    candidate = datetime.combine(local.date(), time(hour, minute), zone).replace(fold=0)
+    roundtrip = candidate.astimezone(UTC).astimezone(zone)
+    if (roundtrip.hour, roundtrip.minute) != (hour, minute):
+        candidate = roundtrip
+    candidate_utc = candidate.astimezone(UTC)
+    if candidate_utc < current:
+        next_day = local.date() + timedelta(days=1)
+        candidate = datetime.combine(next_day, time(hour, minute), zone).replace(fold=0)
+        roundtrip = candidate.astimezone(UTC).astimezone(zone)
+        if (roundtrip.hour, roundtrip.minute) != (hour, minute):
+            candidate = roundtrip
+        candidate_utc = candidate.astimezone(UTC)
+    return candidate_utc
+
+
 class AutomationRepository:
     def __init__(self, database_url: str, bootstrap_test_schema: bool = False) -> None:
         self.engine = create_engine(database_url)
@@ -322,6 +357,79 @@ class AutomationRepository:
             session.expunge(row)
         return row
 
+    @staticmethod
+    def monitoring_job_id(monitoring_id: str) -> str:
+        return hashlib.sha256(f"monitor-paper-deployment:{monitoring_id}".encode()).hexdigest()
+
+    def ensure_monitoring_job(
+        self,
+        *,
+        monitoring_id: str,
+        account_id: str,
+        now: datetime | None = None,
+    ) -> ScheduledJob:
+        """Idempotentně vytvoří nebo opraví deterministický monitoring schedule."""
+        now = utc(now or datetime.now(UTC))
+        job_id = self.monitoring_job_id(monitoring_id)
+        expected_config = json.dumps({"monitoring_id": monitoring_id}, sort_keys=True)
+        with Session(self.engine) as session, session.begin():
+            row = session.get(ScheduledJob, job_id, with_for_update=True)
+            if row is None:
+                row = ScheduledJob(
+                    id=job_id,
+                    job_type=JobType.MONITOR_PAPER_DEPLOYMENT,
+                    account_id=account_id,
+                    strategy_id=None,
+                    enabled=True,
+                    schedule_type=ScheduleType.INTERVAL,
+                    interval_seconds=MONITOR_INTERVAL_SECONDS,
+                    daily_time=None,
+                    timezone="UTC",
+                    misfire_policy=MisfirePolicy.RUN_ONCE_IF_MISSED,
+                    misfire_grace_seconds=MONITOR_INTERVAL_SECONDS,
+                    next_run_at=now,
+                    max_attempts=5,
+                    config_json=expected_config,
+                    correlation_metadata_json="{}",
+                    created_at=now,
+                    updated_at=now,
+                )
+                session.add(row)
+                session.flush()
+            else:
+                if (
+                    row.job_type != JobType.MONITOR_PAPER_DEPLOYMENT
+                    or row.account_id != account_id
+                    or row.strategy_id is not None
+                    or row.config_json != expected_config
+                ):
+                    raise ValueError("Monitoring job má konfliktní deterministickou identitu")
+                drifted = (
+                    not row.enabled
+                    or row.schedule_type != ScheduleType.INTERVAL
+                    or row.interval_seconds != MONITOR_INTERVAL_SECONDS
+                    or row.daily_time is not None
+                    or row.timezone != "UTC"
+                    or row.misfire_policy != MisfirePolicy.RUN_ONCE_IF_MISSED
+                    or row.misfire_grace_seconds != MONITOR_INTERVAL_SECONDS
+                    or row.max_attempts != 5
+                )
+                row.enabled = True
+                row.schedule_type = ScheduleType.INTERVAL
+                row.interval_seconds = MONITOR_INTERVAL_SECONDS
+                row.daily_time = None
+                row.timezone = "UTC"
+                row.misfire_policy = MisfirePolicy.RUN_ONCE_IF_MISSED
+                row.misfire_grace_seconds = MONITOR_INTERVAL_SECONDS
+                row.max_attempts = 5
+                if drifted:
+                    row.next_run_at = now
+                row.updated_at = now
+                session.flush()
+            session.refresh(row)
+            session.expunge(row)
+            return row
+
     def create_deployment_job(self, *, deployment_id: str, **schedule: Any) -> ScheduledJob:
         """Vytvoří idempotentní job pouze z ověřené persistentní deployment lineage."""
         from quantlab.persistence import StrategyDeploymentRecord
@@ -355,12 +463,16 @@ class AutomationRepository:
     def set_autonomous_deployment(
         self, *, deployment_id: str, enabled: bool, now: datetime | None = None
     ) -> ScheduledJob:
-        """Idempotentně zapne nebo vypne explicitně opt-in XNYS orchestrace deploymentu."""
+        """Idempotentně zapne nebo vypne opt-in XNYS-open orchestrace deploymentu."""
         from quantlab.persistence import StrategyDeploymentRecord
         from quantlab.phase7 import PaperMonitoringRunRecord
 
         now = utc(now or datetime.now(UTC))
         job_id = hashlib.sha256(f"paper-session:{deployment_id}".encode()).hexdigest()
+        expected_config = json.dumps({"deployment_id": deployment_id}, sort_keys=True)
+        next_open_schedule = daily_occurrence_at_or_after(
+            now, AUTONOMOUS_DAILY_TIME, AUTONOMOUS_TIMEZONE
+        )
         with Session(self.engine) as session:
             deployment = session.get(StrategyDeploymentRecord, deployment_id)
             if deployment is None:
@@ -375,11 +487,45 @@ class AutomationRepository:
             )
             if enabled and active is None:
                 raise ValueError("Autonomous orchestrace vyžaduje ACTIVE monitoring")
+            if enabled and active is not None:
+                monitoring_job = session.get(
+                    ScheduledJob, self.monitoring_job_id(active.monitoring_id)
+                )
+                expected_monitor_config = json.dumps(
+                    {"monitoring_id": active.monitoring_id}, sort_keys=True
+                )
+                if (
+                    monitoring_job is None
+                    or not monitoring_job.enabled
+                    or monitoring_job.job_type != JobType.MONITOR_PAPER_DEPLOYMENT
+                    or monitoring_job.account_id != deployment.paper_account_id
+                    or monitoring_job.strategy_id is not None
+                    or monitoring_job.config_json != expected_monitor_config
+                    or monitoring_job.schedule_type != ScheduleType.INTERVAL
+                    or monitoring_job.interval_seconds != MONITOR_INTERVAL_SECONDS
+                ):
+                    raise ValueError(
+                        "Autonomous orchestrace vyžaduje validní enabled monitoring schedule"
+                    )
             existing = session.get(ScheduledJob, job_id)
             if existing is not None:
+                if (
+                    existing.job_type != JobType.PREPARE_PAPER_SESSION
+                    or existing.account_id != deployment.paper_account_id
+                    or existing.strategy_id is not None
+                    or existing.config_json != expected_config
+                ):
+                    raise ValueError("Autonomous job má konfliktní deterministickou identitu")
                 existing.enabled = enabled
                 if enabled:
-                    existing.next_run_at = now
+                    existing.schedule_type = ScheduleType.DAILY
+                    existing.interval_seconds = None
+                    existing.daily_time = AUTONOMOUS_DAILY_TIME
+                    existing.timezone = AUTONOMOUS_TIMEZONE
+                    existing.misfire_policy = MisfirePolicy.SKIP_IF_TOO_OLD
+                    existing.misfire_grace_seconds = 1
+                    existing.max_attempts = 1
+                    existing.next_run_at = next_open_schedule
                 existing.updated_at = now
                 session.commit()
                 session.refresh(existing)
@@ -389,12 +535,13 @@ class AutomationRepository:
         return self.create_job(
             job_type=JobType.PREPARE_PAPER_SESSION,
             account_id=account_id,
-            schedule_type=ScheduleType.INTERVAL,
-            interval_seconds=300,
-            next_run_at=now,
-            misfire_policy=MisfirePolicy.RUN_ONCE_IF_MISSED,
-            misfire_grace_seconds=900,
-            max_attempts=5,
+            schedule_type=ScheduleType.DAILY,
+            daily_time=AUTONOMOUS_DAILY_TIME,
+            timezone=AUTONOMOUS_TIMEZONE,
+            next_run_at=next_open_schedule,
+            misfire_policy=MisfirePolicy.SKIP_IF_TOO_OLD,
+            misfire_grace_seconds=1,
+            max_attempts=1,
             config={"deployment_id": deployment_id},
             enabled=enabled,
             job_id=job_id,

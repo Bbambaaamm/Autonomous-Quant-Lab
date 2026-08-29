@@ -37,6 +37,7 @@ services:
       AUTOMATION_ENABLED: "true"
       WORKER_REQUIRE_PRODUCTION: "true"
       WORKER_ID_PREFIX: "${WORKER_ID_PREFIX:-production-worker}"
+      WORKER_POLL_INTERVAL: "0.2"
     command: ["/app/backend/.venv/bin/quantlab-worker"]
     healthcheck: {disable: true}
     depends_on: {postgres: {condition: service_healthy}}

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from uuid import uuid4
 
@@ -14,6 +14,7 @@ from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session
 
 import quantlab.api as api_module
+from quantlab.automation import JobRun, RunStatus, ScheduledJob
 from quantlab.persistence import (
     DatasetSnapshotRecord,
     ExperimentRecord,
@@ -21,6 +22,7 @@ from quantlab.persistence import (
     StrategyDeploymentRecord,
     UniverseMembershipRecord,
 )
+from quantlab.phase4 import AuditEventRecord
 from quantlab.phase7 import PaperMonitoringRunRecord
 
 pytestmark = pytest.mark.skipif(
@@ -194,12 +196,67 @@ def test_supported_b1_control_plane_reaches_active_monitoring(monkeypatch) -> No
         },
     )
     assert retry.json()["monitoring_id"] == enrollment.json()["monitoring_id"]
+    monitoring_job_id = enrollment.json()["monitoring_job"]["id"]
+    with Session(api_module.automation_repository.engine) as session:
+        monitoring_job = session.get(ScheduledJob, monitoring_job_id)
+        assert monitoring_job is not None
+        monitoring_job.enabled = False
+        session.commit()
+    blocked_autonomous = client.post(
+        f"/operator/deployments/{deployment_id}/autonomous/enable",
+        json={"reason": reason},
+    )
+    assert blocked_autonomous.status_code == 409
+    ensured = client.post(
+        "/operator/monitoring/enrollments",
+        json={
+            "deployment_id": deployment_id,
+            "policy_id": policy.json()["policy_id"],
+            "reason": reason,
+        },
+    )
+    assert ensured.status_code == 200, ensured.text
+    assert ensured.json()["monitoring_job"]["id"] == monitoring_job_id
+    assert ensured.json()["monitoring_job"]["enabled"] is True
+    generic_disable = client.post(f"/automation/jobs/{monitoring_job_id}/disable")
+    assert generic_disable.status_code == 422
     autonomous = client.post(
         f"/operator/deployments/{deployment_id}/autonomous/enable",
         json={"reason": reason},
     )
     assert autonomous.status_code == 200, autonomous.text
     assert autonomous.json()["enabled"] is True
+    assert autonomous.json()["schedule_type"] == "DAILY"
+    assert autonomous.json()["daily_time"] == "09:30"
+    assert autonomous.json()["timezone"] == "America/New_York"
+
+    recovery_run_id = api_module.automation_scheduler.run_now(
+        autonomous.json()["id"], f"recovery-{suffix}"
+    )
+    with Session(api_module.automation_repository.engine) as session:
+        recovery_run = session.get(JobRun, recovery_run_id)
+        assert recovery_run is not None
+        recovery_run.status = RunStatus.DEAD_LETTER
+        recovery_run.finished_at = datetime.now(UTC)
+        session.commit()
+    legacy_retry = client.post(f"/automation/runs/{recovery_run_id}/retry")
+    assert legacy_retry.status_code == 422
+    audited_retry = client.post(
+        f"/operator/automation/runs/{recovery_run_id}/retry",
+        json={"reason": reason},
+    )
+    assert audited_retry.status_code == 200, audited_retry.text
+    assert audited_retry.json()["status"] == "RETRY_SCHEDULED"
+    with Session(api_module.paper_repository.engine) as session:
+        audit = session.scalar(
+            select(AuditEventRecord).where(
+                AuditEventRecord.event_type == "CONTROL_AUTOMATION_RUN_RETRY",
+                AuditEventRecord.entity_id == recovery_run_id,
+            )
+        )
+        assert audit is not None
+        assert reason in audit.payload_json
+        assert "api-admin" in audit.payload_json
     with Session(api_module.paper_repository.engine) as session:
         monitoring = session.get(PaperMonitoringRunRecord, enrollment.json()["monitoring_id"])
         assert monitoring is not None
