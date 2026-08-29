@@ -13,7 +13,9 @@ services:
       interval: 5s
       timeout: 3s
       retries: 12
+    restart: unless-stopped
     cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETGID, SETUID]
     security_opt: [no-new-privileges:true]
   backend:
     image: quantlab-backend
@@ -23,6 +25,7 @@ services:
       AUTOMATION_ENABLED: "true"
     depends_on: {postgres: {condition: service_healthy}}
     networks: [data, application]
+    restart: unless-stopped
     read_only: true
     tmpfs: [/tmp]
     cap_drop: [ALL]
@@ -49,13 +52,14 @@ services:
     depends_on: [backend]
     networks: [application]
     ports: ["127.0.0.1:3000:3000"]
+    restart: unless-stopped
     read_only: true
     tmpfs: [/tmp]
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
 networks:
   data: {internal: true}
-  application: {internal: true}
+  application: {internal: false}
 volumes:
   quantlab-production-db:
 secrets:
