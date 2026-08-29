@@ -1,23 +1,29 @@
 # Paper pilot runbook
 
-Tento runbook je výhradně pro interní PAPER provoz. **Aktuální stav repository je NOT READY FOR PAPER PILOT**, protože production `StooqProvider` nemá corporate-action capability (`supports_actions=False`). Následující postup je bezpečnostní runbook pro staging a pro budoucí pilot až po uzavření tohoto blockeru. Nezakládá ani nepovoluje live režim.
+Tento runbook je pouze pro interní PAPER provoz. **Aktuální stav repository je NOT READY FOR PAPER PILOT.** Nezakládá ani nepovoluje live režim.
+
+Aktuálně existují dva hard blockery:
+
+1. production `StooqProvider` nemá corporate-action capability (`supports_actions=False`);
+2. autonomous execution ještě nemá před XNYS open persistovaný plně specifikovaný immutable economic/order intent (`side` + `quantity`). Proto autonomous open-time path záměrně končí no-action `PREOPEN_EXECUTION_INTENT_NOT_PERSISTED`.
 
 ## 1. Hard gates před pilotem
 
-Pilot se nesmí spustit, pokud není současně splněno vše:
+Pilot se nesmí spustit, dokud není současně splněno vše:
 
 1. výsledný commit má zelené required CI jobs `quality`, `unit-research`, `api`, `integration-postgres`, `frontend`, `security`, `container-build` a `production-smoke`;
-2. `live_trading_enabled=false` a repository neobsahuje podporovanou live execution cestu;
-3. PostgreSQL, HTTPS ingress, persistentní volume, ověřený backup/restore a least-privilege runtime role jsou funkční;
-4. backend i worker mají ověřený market-data egress, DB síť zůstává interní;
-5. production provider pro pilotní equity scope skutečně deklaruje a E2E prokazuje corporate-action capability;
-6. corporate-action readiness je `READY` pro celý požadovaný interval — `UNSUPPORTED` není green stav;
-7. monitoring enrollment má právě jeden validní enabled `MONITOR_PAPER_DEPLOYMENT` schedule;
-8. autonomous orchestration je ukotvená na XNYS open, ne na náhodnou fázi času enable;
-9. FAILED/DEAD_LETTER recovery je dostupná pouze přes auditovaný operator control-plane s reason/actor/correlation evidence;
-10. proběhl production-like staging dry-run níže.
+2. `live_trading_enabled=false` a neexistuje podporovaná live broker/exchange execution cesta;
+3. PostgreSQL, HTTPS ingress, persistentní volume, backup/restore a least-privilege runtime role jsou ověřené;
+4. backend i worker mají production-like market-data egress a DB síť zůstává interní;
+5. production provider pro equity scope skutečně podporuje corporate actions a capability je E2E ověřena;
+6. corporate-action readiness je `READY` pro celý požadovaný interval;
+7. monitoring enrollment má právě jeden validní enabled canonical `MONITOR_PAPER_DEPLOYMENT` schedule;
+8. autonomous schedule je DST-safe ukotvený na XNYS 09:30 a žádný legacy/drifted schedule není enabled;
+9. před 09:30 existuje immutable auditovatelný economic/order intent, jehož side/quantity nemůže záviset na current-session opening printu;
+10. FAILED/DEAD_LETTER recovery pro managed jobs je auditovaná a atomická;
+11. proběhl celý production-like staging dry-run.
 
-Dokud bod 5 není splněn, **nepokračujte k autonomous equity pilotu**.
+Dokud body 5 a 9 nejsou splněny, **nepokračujte k autonomous equity pilotu**.
 
 ## 2. Production-like topology
 
@@ -25,24 +31,25 @@ Požadované síťové oddělení:
 
 - `data` — interní PostgreSQL síť;
 - `application` — interní frontend ↔ backend komunikace;
-- `market-data-egress` — explicitní neinterní egress pouze pro backend a worker;
-- `ingress` — neinterní frontend síť pro host loopback publish.
+- `market-data-egress` — explicitní egress pro backend a worker;
+- `ingress` — frontendová síť pro host loopback publish.
 
-Docker egress síť sama neomezuje DNS hostname. Aplikační provider transport proto musí dál fail-closed dovolovat pouze očekávané HTTPS hosty; pro Stooq je to pouze `https://stooq.com` bez credentials, custom portu nebo redirectu mimo allowlist.
+Docker egress není hostname firewall. Provider transport musí samostatně fail-closed allowlistovat očekávané HTTPS endpointy. Pro Stooq je povolen pouze očekávaný `https://stooq.com` transport bez credentials, custom portu a redirectu mimo allowlist.
 
-Po nasazení vždy proveďte staging provider-egress smoke z backendu i workeru. Úspěšný container start není důkazem externí market-data konektivity.
+Po nasazení proveďte skutečný provider-egress smoke z backendu i workeru. Healthy container není důkaz externí konektivity.
 
 ## 3. Migration a start
 
-1. Nastavte production-like environment mimo Git: production/staging DB URL, runtime URL, unikátní tokeny, `APP_ENV=production`, allowlisted host/origin a `AUTOMATION_ENABLED=true`.
+1. Nastavte production-like environment mimo Git, včetně DB/runtime URL, unikátních tokenů, `APP_ENV=production`, allowlisted host/origin a `AUTOMATION_ENABLED=true`.
 2. Uložte DB secret mimo Git s minimálními filesystem právy.
 3. Spusťte Alembic migrace migrator rolí.
-4. Aplikujte runtime grants a ověřte, že runtime role nemůže měnit immutable evidence.
-5. Proveďte DB backup a ověřte checksum/restore proces.
+4. Aplikujte runtime grants.
+5. Vytvořte DB backup a ověřte restore proceduru.
 6. Sestavte production images a spusťte stack.
 7. Ověřte HTTPS `/healthz`, `/readyz`, login a RBAC.
-8. Ověřte fresh worker + scheduler heartbeat.
-9. Ověřte skutečný market-data egress z backendu i workeru.
+8. Ověřte fresh worker/scheduler heartbeat.
+9. Ověřte provider egress.
+10. Při worker startupu ověřte, že legacy/drifted autonomous schedules byly fail-closed vypnuty před prvním scheduler tickem.
 
 ## 4. Supported operator workflow
 
@@ -50,169 +57,127 @@ Používejte pouze operator UI a `/operator/...` control-plane. Nepoužívejte d
 
 `DATA → UNIVERSE → SNAPSHOT → EXPERIMENT → ELIGIBILITY → PROMOTION → DEPLOYMENT → APPROVAL → MONITORING → AUTONOMOUS PAPER`
 
-Postup:
+Před autonomous enable musí být ověřeno:
 
-1. Zaregistrujte instrumenty.
-2. Vytvořte universe a PIT memberships (`known_at`, `valid_from`, `valid_to`).
-3. Proveďte ingestion a ověřte `SUCCEEDED`, provider identity/version a latest completed XNYS session.
-4. Ověřte skutečnou provider capability pro corporate actions. Pokud provider hlásí `supports_actions=False`, **STOP — NOT READY**.
-5. Ověřte complete corporate-action readiness pro požadovaný interval.
-6. Vytvořte VALID immutable dataset snapshot a zaznamenejte snapshot/content hash.
-7. Spusťte experiment s explicitním code SHA, seed, cost model a chronologickým splitem.
-8. Proveďte eligibility evaluation a zkontrolujte immutable policy/evidence.
-9. Pouze `ELIGIBLE` experiment promujte na `PAPER_CANDIDATE`.
-10. Vytvořte deployment pro `paper-main`.
-11. Zkontrolujte runtime manifest a hash.
-12. Deployment explicitně schvalte s audit reason.
-13. Vytvořte monitoring policy a enrollment.
-14. Ověřte stav `ACTIVE` a oddělenou OOS baseline.
-15. Ověřte právě jeden deterministický `MONITOR_PAPER_DEPLOYMENT` job a že je `enabled=true` s očekávanou konfigurací.
-16. Opakovaný enrollment stejného ACTIVE runu musí stejný monitoring schedule idempotentně ensure-nout; nesmí vzniknout druhý monitoring job.
-17. Teprve potom povolte autonomous scheduling.
+- APPROVED deployment a immutable runtime manifest;
+- ACTIVE monitoring run;
+- právě jeden canonical enabled monitoring schedule;
+- production corporate-action capability + readiness;
+- canonical autonomous schedule;
+- pre-open immutable economic/order intent capability.
 
-## 5. Monitoring schedule invariant
+Současný production provider a současná autonomous intent architektura poslední dva ekonomické gates nesplňují; funkční autonomous pilot je proto zakázán.
 
-Enrollment a automation job nemusí vznikat v jedné DB transakci; runbook proto netvrdí transakční atomicitu. Bezpečnostní pravidlo je fail-closed:
+## 5. Monitoring invariant
 
-- deterministická job identity je odvozena z `monitoring_id`;
-- existující disabled/drifted job musí být při supported enrollment ensure bezpečně normalizován/re-enabled, nebo musí endpoint selhat;
-- autonomous enable musí znovu validovat, že ACTIVE monitoring má odpovídající enabled schedule;
-- managed monitoring/autonomous/deployment jobs nesmí být měněny generic `/automation/jobs/*` mutation cestou;
-- po `RETIRED` lze založit nový monitoring lifecycle; retired run se nereaktivuje jako nový enrollment.
+Enrollment a scheduler job nemusí vznikat v jedné DB transakci. Bezpečnost je fail-closed:
 
-## 6. XNYS autonomous scheduling
+- job ID je deterministický z `monitoring_id`;
+- ensure ověří identity/account/config a normalizuje `enabled`, schedule type, interval, timezone, misfire policy, grace, max attempts a due time;
+- autonomous enable znovu validuje celý canonical schedule;
+- generic `/automation/jobs/*` mutations nesmí měnit managed PAPER jobs;
+- přechod monitoringu do `RETIRED` v lifecycle transakci vypne monitoring schedule i autonomous deployment schedule;
+- retired monitoring se znovu neaktivuje; nový lifecycle vyžaduje nový enrollment.
 
-Autonomous orchestration musí být ukotvená na **09:30 America/New_York** a musí používat timezone-aware/DST-safe schedule. Kliknutí na enable nesmí vytvořit arbitrary 300sekundovou fázi.
+## 6. XNYS scheduling a execution causalita
 
-Close-derived signal má economic execution intent připnutý na next-session XNYS open. Krátké bounded post-open okno slouží pouze k tomu, aby worker získal a ověřil raw opening print. `scheduled_for`/occurrence identity zůstává XNYS open.
+Autonomous schedule je ukotvený na `09:30 America/New_York` a je DST-safe. To pouze řeší orchestration phase; samo o sobě to nedává právo obchodovat.
 
-Pokud worker nestihne bounded cutoff:
+Strict executable-open cutoff zůstává `[open, open + 1 second)`. Současný autonomous path ale nesmí ani uvnitř tohoto okna nejprve načíst opening print a až potom vytvořit side/quantity. Proto bez pre-open immutable intentu platí:
 
-- výsledek musí být `MISSED_EXECUTION_OPEN` / no-action;
-- nevytváří se retroaktivní fill;
-- operátor nesmí missed run ručně backfillovat.
+- `PREPARE_PAPER_SESSION` při/po execution open vrátí `NO_ACTION / PREOPEN_EXECUTION_INTENT_NOT_PERSISTED`;
+- raw opening print se nesmí použít k vytvoření nového ekonomického intentu;
+- legacy materializovaný `xnys:` execution run je rovněž no-action;
+- žádný backdating `scheduled_for` nevytváří pre-open objednávku;
+- po cutoff se nikdy nedělá retroaktivní fill ani ruční backfill.
 
-## 7. Daily operator check
+Budoucí funkční implementace musí před open persistovat immutable intent s plně určenou side/quantity a lineage. Po open smí pouze připojit validovaný raw opening print a provést fill podle již existujícího intentu.
 
-Před očekávanou session ověřte:
+## 7. Auditovaný FAILED/DEAD_LETTER recovery
 
-- API/DB health;
-- fresh worker a scheduler heartbeat;
-- právě jeden enabled autonomous pilotní deployment;
-- právě jeden ACTIVE monitoring run;
-- právě jeden validní enabled monitoring schedule;
-- autonomous next run odpovídá XNYS open;
-- latest completed XNYS session;
-- poslední ingestion `SUCCEEDED`;
-- skutečný provider egress;
-- corporate-action provider capability a complete readiness;
-- account není HALTED;
-- reconciliation je SAFE;
-- žádný nevyřešený FAILED/DEAD_LETTER managed run;
-- žádný runtime-manifest mismatch.
-
-Po session zkontrolujte run/attempt, scheduled execution intent, raw open evidence, order/fill identity, risk decision, commission/slippage, cash/position delta, monitoring snapshot/evaluation, audit correlation a reconciliation.
-
-## 8. Auditovaný FAILED/DEAD_LETTER recovery
-
-Podporovaná recovery managed runu vede pouze přes reasoned ADMIN operator akci, např. `/operator/automation/runs/{run_id}/retry`.
+Managed run lze retry pouze reasoned ADMIN operator akcí `/operator/automation/runs/{run_id}/retry`.
 
 Povinné vlastnosti:
 
-1. endpoint přijme audit `reason`;
-2. actor se odvodí ze server-side principalu;
-3. correlation ID se persistuje do control audit evidence;
-4. backend použije autoritativní retry state machine a povolí pouze podporované stavy;
-5. frontend Operations nabídne retry jen jako auditovanou recovery akci;
-6. UI neposkytuje economic `run-now` shortcut;
-7. generic `/automation/runs/{run_id}/retry` není podporovaná pilotní recovery cesta pro managed jobs.
+1. run je `FAILED` nebo `DEAD_LETTER` a patří managed PAPER jobu;
+2. actor je odvozen ze server-side principalu;
+3. reason je povinný;
+4. correlation ID je persistovaný;
+5. změna na `RETRY_SCHEDULED` a `CONTROL_AUTOMATION_RUN_RETRY` audit event commitnou v jedné DB transakci;
+6. při selhání auditu nesmí retry transition commitnout;
+7. generic `/automation/runs/{run_id}/retry` managed run odmítá;
+8. Operations UI nabízí recovery jen managed FAILED/DEAD_LETTER runům a nemá economic `run-now` shortcut.
 
-Před retry nejdřív opravte příčinu. Retry není náhrada za reconciliation ani způsob, jak obejít missed-open fail-closed.
+Retry nikdy nesmí sloužit k obejití causal/open/readiness gate.
 
-## 9. Reconciliation recovery
+## 8. Daily operator check
 
-Při mismatch:
+Před session ověřte:
 
-1. účet zůstává HALTED/fail-closed;
-2. odstraňte příčinu bez direct SQL ekonomických editací;
-3. z operator control-plane spusťte autoritativní reconciliation s reason;
-4. ověřte nový reconciliation record a `SAFE`;
-5. teprve potom použijte podporovaný `RESUME`;
-6. ověřte actor/reason/correlation audit evidence.
+- API/DB health a fresh worker/scheduler heartbeat;
+- žádný enabled legacy/drifted autonomous schedule;
+- právě jeden ACTIVE monitoring run a canonical enabled monitoring schedule;
+- provider egress;
+- corporate-action capable production provider a complete readiness;
+- účet ACTIVE a reconciliation SAFE;
+- žádný unresolved managed FAILED/DEAD_LETTER run;
+- žádný runtime-manifest mismatch;
+- existenci validního pre-open immutable intentu pro ekonomický autonomous běh.
 
-## 10. Monitoring lifecycle recovery
+Pokud poslední bod není splněn, očekávaným bezpečným výsledkem je `PREOPEN_EXECUTION_INTENT_NOT_PERSISTED`, nikoli fill.
 
-- `ACTIVE` lze podle state machine pause/retire;
-- `SUSPENDED` lze bezpečně resume pouze pokud backend gates dovolí přechod, jinak retire;
-- po retirement se zakládá nový enrollment;
-- monitoring stav se nikdy nepřepisuje direct SQL.
+## 9. Reconciliation a monitoring recovery
 
-## 11. Emergency stop
+Při reconciliation mismatch účet zůstává HALTED/fail-closed. Příčinu opravte bez direct SQL ekonomických editací, spusťte autoritativní reconciliation, ověřte `SAFE` a teprve potom použijte podporovaný `RESUME` s audit reason.
 
-Při duplicate/retroactive/unexplained fillu, reconciliation mismatch, stale workeru, nejasné lineage, runtime-manifest mismatch nebo provider/readiness problému:
+Monitoring lifecycle:
+
+- `ACTIVE` lze pause/retire podle state machine;
+- `SUSPENDED` lze resume pouze při splnění backend gates, jinak retire;
+- `RETIRED` je terminální a vypíná jeho managed schedules;
+- nový lifecycle po retirement vyžaduje nový enrollment.
+
+## 10. Emergency stop
+
+Při duplicate/retroactive/unexplained fillu, reconciliation mismatch, stale workeru, lineage mismatch nebo provider/readiness problému:
 
 1. `/operator/risk/halt` s důvodem;
-2. disable autonomous deployment podporovanou operator akcí;
+2. podporovaně disable autonomous deployment;
 3. uchovat run/attempt/cycle/order/fill/audit evidence;
-4. nic ekonomického neopravovat direct SQL;
+4. nepoužívat direct SQL ekonomické opravy;
 5. klasifikovat incident.
 
 Jakýkoli P0/P1 incident zastavuje pilot do opravy a nové acceptance.
 
-## 12. Mandatory staging dry-run
+## 11. Mandatory staging dry-run
 
-Dry-run provádějte až s providerem, který pravdivě splňuje corporate-action capability.
+Dry-run má smysl jako kandidát na pilot acceptance až po uzavření obou současných hard blockerů: production corporate actions a pre-open immutable intent.
 
-1. clean migrations;
-2. instrument + universe + PIT membership;
-3. backend provider-egress smoke;
-4. worker provider-egress smoke;
-5. market-data ingestion;
-6. corporate-action capability/readiness;
-7. immutable snapshot;
-8. experiment;
-9. eligibility;
-10. promotion;
-11. deployment + runtime manifest review;
-12. approval;
-13. monitoring enrollment;
-14. disable/re-enable regression monitoring jobu a ověření idempotentního ensure;
-15. právě jeden enabled monitoring schedule;
-16. autonomous enable;
-17. next autonomous run = XNYS 09:30 `America/New_York`;
-18. worker/scheduler heartbeat;
-19. scheduled safe execution/no-action;
-20. missed-open cutoff regression bez ekonomického efektu;
-21. reconciliation;
-22. vytvoření bezpečného FAILED/DEAD_LETTER staging scénáře a auditovaný operator retry;
-23. pause/resume nebo HALT/reconcile/resume recovery bez direct DB editace.
+Musí ověřit minimálně:
 
-Dry-run musí skončit bez duplicate/retroactive fillu, bez nevysvětleného reconciliation mismatch a s kompletní actor/reason/correlation evidence.
+1. clean migrations a runtime grants;
+2. backend + worker provider-egress smoke;
+3. ingestion a corporate-action capability/readiness;
+4. research → eligibility → promotion → deployment → approval;
+5. monitoring enrollment a full canonical schedule ensure/re-enable;
+6. restart workeru s legacy 300s schedule fixture a ověření fail-closed disable před scheduler tickem;
+7. autonomous next schedule odpovídá XNYS 09:30 přes DST;
+8. fully-specified immutable pre-open order intent existuje před open;
+9. opening print nemění side/quantity;
+10. missed-open/cutoff vytváří no-action bez ekonomického efektu;
+11. managed FAILED/DEAD_LETTER atomic retry + audit evidence;
+12. monitoring `RETIRED` vypne monitor i autonomous schedule;
+13. reconciliation SAFE a žádný duplicate/retroactive fill.
 
-## 13. Pilot exit criteria
-
-Po povolení pilotu musí být současně splněno:
-
-1. 10 po sobě jdoucích XNYS sessions;
-2. 100 % očekávaných occurrences má dohledatelný run/attempt nebo vysvětlený fail-closed no-action;
-3. žádný duplicate fill;
-4. žádný retroactive fill;
-5. žádný nevysvětlený reconciliation mismatch;
-6. žádný P0/P1 incident;
-7. všechny fills mají deployment/runtime/risk/order/cycle/monitoring lineage;
-8. alespoň jeden worker restart/lease recovery drill bez dvojitého ekonomického efektu;
-9. alespoň jeden auditovaný FAILED/DEAD_LETTER recovery drill;
-10. monitoring evidence je oddělená od research OOS baseline;
-11. denní operator evidence je kompletní.
-
-## 14. Zakázané postupy
+## 12. Zakázané postupy
 
 - live broker nebo live routing;
 - direct SQL ekonomické opravy;
 - demo paper execution route;
-- retroaktivní fill/backfill missed open;
-- obcházení eligibility, promotion, approval, monitoring nebo risk;
-- autonomous start s `supports_actions=False` pro equity scope;
-- start se stale/missing data nebo incomplete readiness;
-- generic mutation managed pilot jobs mimo podporovaný operator control-plane;
-- generic unaudited DEAD_LETTER retry jako pilotní recovery.
+- retroaktivní fill/backfill;
+- vytvoření side/quantity až po znalosti opening printu;
+- obcházení eligibility, promotion, approval, monitoring, risk nebo provider readiness;
+- autonomous equity start s `supports_actions=False`;
+- generic mutation managed pilot jobs;
+- generic unaudited retry managed runu;
+- změna verdictu na READY pouze na základě syntetických testů.
