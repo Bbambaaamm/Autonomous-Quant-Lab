@@ -61,6 +61,7 @@ jobs:
           tests/test_phase6_audit_fixes.py
           tests/test_phase6_experiment_audit.py
           tests/test_phase7.py
+          tests/test_pre_pilot_review_remediation.py
 
   api:
     runs-on: ubuntu-latest
