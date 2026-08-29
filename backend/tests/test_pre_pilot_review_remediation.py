@@ -12,8 +12,8 @@ from quantlab.automation import (
     JobType,
     MisfirePolicy,
     RunStatus,
-    ScheduleType,
     ScheduledJob,
+    ScheduleType,
     daily_occurrence_at_or_after,
 )
 from quantlab.market_data import XNYSCalendar

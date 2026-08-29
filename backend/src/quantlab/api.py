@@ -13,11 +13,11 @@ from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 
 from quantlab.automation import (
+    MANAGED_JOB_TYPES,
     AutomationRepository,
     JobAttempt,
     JobRun,
     JobType,
-    MANAGED_JOB_TYPES,
     MisfirePolicy,
     ScheduledJob,
     SchedulerService,
