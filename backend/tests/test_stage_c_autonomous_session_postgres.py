@@ -16,6 +16,7 @@ from quantlab.automation import (
 )
 from quantlab.market_data import XNYSCalendar
 from quantlab.persistence import StrategyDeploymentRecord
+from quantlab.phase7 import PaperMonitoringRunRecord
 
 pytestmark = pytest.mark.skipif(
     os.getenv("RUN_POSTGRES_TESTS") != "1", reason="vyžaduje PostgreSQL CI"
@@ -30,15 +31,29 @@ def test_stage_c_autonomous_opt_in_and_session_occurrence_are_idempotent() -> No
             .where(StrategyDeploymentRecord.status == "APPROVED")
             .order_by(StrategyDeploymentRecord.created_at.desc())
         )
-    if deployment is None:
-        pytest.skip("Stage C navazuje na B1/B2 acceptance deployment")
+        if deployment is None:
+            pytest.skip("Stage C navazuje na B1/B2 acceptance deployment")
+        monitoring = session.scalar(
+            select(PaperMonitoringRunRecord).where(
+                PaperMonitoringRunRecord.deployment_id == deployment.deployment_id,
+                PaperMonitoringRunRecord.state == "ACTIVE",
+            )
+        )
+        assert monitoring is not None
+        monitoring_job = session.get(
+            ScheduledJob, repository.monitoring_job_id(monitoring.monitoring_id)
+        )
+        assert monitoring_job is not None and monitoring_job.enabled
+        # Autonomous enable nově fail-closed ověřuje i due time monitorovacího
+        # schedule. Test proto používá čas konzistentní s persistentním ACTIVE
+        # monitoringem místo historického času, který jeho schedule předcházel.
+        enable_now = monitoring_job.next_run_at
 
-    now = datetime(2026, 7, 3, 18, tzinfo=UTC)
     first = repository.set_autonomous_deployment(
-        deployment_id=deployment.deployment_id, enabled=True, now=now
+        deployment_id=deployment.deployment_id, enabled=True, now=enable_now
     )
     second = repository.set_autonomous_deployment(
-        deployment_id=deployment.deployment_id, enabled=True, now=now
+        deployment_id=deployment.deployment_id, enabled=True, now=enable_now
     )
     assert first.id == second.id
     assert first.job_type == JobType.PREPARE_PAPER_SESSION
@@ -51,19 +66,20 @@ def test_stage_c_autonomous_opt_in_and_session_occurrence_are_idempotent() -> No
     signal = date(2026, 7, 2)
     execution = calendar.next_session(signal)
     execution_open = calendar.session_open(execution)
+    scenario_now = datetime(2026, 7, 3, 18, tzinfo=UTC)
     run_a = repository.materialize_execution_session(
         deployment_id=deployment.deployment_id,
         account_id=deployment.paper_account_id,
         execution_session=execution,
         execution_time=execution_open,
-        created_at=now,
+        created_at=scenario_now,
     )
     run_b = repository.materialize_execution_session(
         deployment_id=deployment.deployment_id,
         account_id=deployment.paper_account_id,
         execution_session=execution,
         execution_time=execution_open,
-        created_at=now,
+        created_at=scenario_now,
     )
     assert run_a == run_b
     with Session(repository.engine) as session:
@@ -74,7 +90,7 @@ def test_stage_c_autonomous_opt_in_and_session_occurrence_are_idempotent() -> No
         assert persisted is not None and persisted.scheduled_for == execution_open
 
     disabled = repository.set_autonomous_deployment(
-        deployment_id=deployment.deployment_id, enabled=False, now=now
+        deployment_id=deployment.deployment_id, enabled=False, now=enable_now
     )
     assert disabled.enabled is False
     with Session(repository.engine) as session:
