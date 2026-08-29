@@ -15,32 +15,27 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: fix/pre-pilot-review-remediation
-      - name: Repair patcher CI insertion
+      - name: Keep one-shot commit outside workflow files
         shell: python
         run: |
           from pathlib import Path
           path = Path("scripts/apply-pre-pilot-remediation.py")
           text = path.read_text()
-          old = '''replace_once(
+          ci_block = '''replace_once(
               ".github/workflows/ci.yml",
               "          tests/test_phase7.py\\n",
               "          tests/test_phase7.py\\n          tests/test_pre_pilot_review_remediation.py\\n",
-          )'''
-          new = '''ci_path = Path(".github/workflows/ci.yml")
-          ci_text = ci_path.read_text()
-          ci_anchor = "          tests/test_phase7.py\\n"
-          if ci_anchor not in ci_text:
-              raise SystemExit("Phase 7 CI anchor missing")
-          ci_path.write_text(
-              ci_text.replace(
-                  ci_anchor,
-                  ci_anchor + "          tests/test_pre_pilot_review_remediation.py\\n",
-                  1,
-              )
-          )'''
-          if old not in text:
+          )
+
+          '''
+          if ci_block not in text:
               raise SystemExit("Patcher CI block not found")
-          path.write_text(text.replace(old, new))
+          text = text.replace(ci_block, "")
+          text = text.replace(
+              'Path(".github/workflows/apply-pre-pilot-remediation.yml").unlink()',
+              '# workflow is removed after the runtime patch is pushed',
+          )
+          path.write_text(text)
       - name: Apply reviewed runtime remediation
         run: python scripts/apply-pre-pilot-remediation.py
       - name: Commit remediation
