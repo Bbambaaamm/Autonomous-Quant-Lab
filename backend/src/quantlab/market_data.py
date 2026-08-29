@@ -112,7 +112,9 @@ class XNYSCalendar:
     audited_start = date(1970, 1, 1)
     audited_end = date(2100, 12, 31)
     timezone = ZoneInfo("America/New_York")
-    executable_open_window = timedelta(seconds=1)
+    # Execution intent je deterministicky připnutý na XNYS open. Bounded window pouze
+    # dovoluje workeru po open získat a ověřit raw opening print bez retroaktivního intentu.
+    executable_open_window = timedelta(minutes=5)
 
     def __init__(self) -> None:
         library_version = version("exchange-calendars")
@@ -142,11 +144,11 @@ class XNYSCalendar:
         return cast(datetime, closed)
 
     def executable_open_cutoff(self, day: date) -> datetime:
-        """Vrátí exkluzivní konec krátkého okna pro kauzální raw-open execution."""
+        """Vrátí exkluzivní konec bounded okna pro kauzální raw-open execution."""
         return self.session_open(day) + self.executable_open_window
 
     def is_executable_open_time(self, day: date, timestamp: datetime) -> bool:
-        """Ověří, že skutečný knowledge/run čas leží v krátkém XNYS open okně."""
+        """Ověří, že knowledge/run čas leží v bounded XNYS open okně."""
         value = require_utc(timestamp)
         return self.session_open(day) <= value < self.executable_open_cutoff(day)
 
