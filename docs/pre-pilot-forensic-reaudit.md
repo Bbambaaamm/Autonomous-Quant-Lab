@@ -80,6 +80,10 @@ Proto PR #67 zavádí fail-closed hranici:
 
 Budoucí funkční autonomous pilot vyžaduje nový persistentní, immutable a auditovatelný pre-open intent, jehož side/quantity vzniknou bez znalosti current-session opening printu. Po open smí být pouze připojena validovaná execution price evidence a proveden fill podle tohoto již existujícího intentu.
 
+## Testovací izolace rate limitu
+
+B1 PostgreSQL acceptance skládá do jednoho testu více validních operator mutation scénářů (včetně negativních gate testů) než běžná jednotlivá operator session. Process-local mutation bucket se proto uvnitř tohoto acceptance testu před navazující recovery částí explicitně vyčistí. Produkční `security_boundary`, limity ani jejich security testy se tím nemění; jde pouze o izolaci workflow acceptance od samostatně testované rate-limit politiky.
+
 ## Evidence nutná před změnou verdictu
 
 Před změnou z `NOT READY FOR PAPER PILOT` musí být současně doloženo:
