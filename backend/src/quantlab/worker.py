@@ -16,6 +16,9 @@ def main() -> None:
     repository = AutomationRepository(settings.database_url)
     scheduler = SchedulerService(repository)
     worker = WorkerService(repository, settings)
+    reconciled = repository.reconcile_managed_schedules()
+    if reconciled:
+        logger.warning("Fail-closed disabled %s legacy/drifted autonomous schedules", reconciled)
     logger.info(
         "Worker startuje: worker_id=%s scheduler_enabled=%s",
         worker.worker_id,

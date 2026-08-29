@@ -2,294 +2,105 @@
 
 ## Executive verdict
 
-**CONDITIONAL READY FOR CONTROLLED PAPER PILOT**
+**NOT READY FOR PAPER PILOT**
 
-Aktuální kombinovaný strom obsahuje merged PR #62 (M4) i remediation z PR #63. Není známý otevřený P0 ani P1 pilot blocker. Legacy direct paper execution route `POST /demo/trading/cycles/run-paper` byla odstraněna a kryta regresním testem. GitHub CI #435 na kombinovaném code tree úspěšně prošlo přes quality, unit-research, api, frontend, security, container-build, integration-postgres a production-smoke.
+Verdikt je záměrně fail-closed. PR #67 opravuje nalezené control-plane, scheduling, recovery a network mezery, ale současný production path stále nesplňuje dvě nutné ekonomické capability:
 
-Pilot zůstává podmíněný, protože před prvním autonomním PAPER během musí proběhnout řízený staging dry-run skutečného podporovaného workflow a musí se ověřit provozní evidence workeru, scheduleru, monitoringu, reconciliation a fail-closed chování v nasazení.
+1. `StooqProvider` deklaruje `supports_actions=False`, takže neexistuje production corporate-action-capable feed pro XNYS/USD equity pilot.
+2. Současná autonomous orchestrace nepersistuje před XNYS open plně specifikovaný immutable economic/order intent (`side` + `quantity`). Runtime proto po open záměrně odmítá vytvořit ekonomický efekt a vrací `PREOPEN_EXECUTION_INTENT_NOT_PERSISTED`.
 
-## Audited code tree
+Dokumentace nesmí být silnější než implementace. Zelený syntetický test není production evidence a timestamp připnutý na 09:30 sám o sobě nedokazuje, že objednávka vznikla před znalostí opening printu.
 
-- Runtime/code tree auditovaný po začlenění PR #62: `6ed177a81d89fe2ac367e236435286dc31c7ad49`.
-- Merge-base proti `main`: `2227aa5b36c14cec0a2482b98926843d2cccec99` (merge PR #62).
-- V okamžiku re-auditu byl PR #63 proti `main` `behind_by = 0`.
-- Tento dokumentační refresh nemění runtime business logic; finální PR head musí znovu projít CI.
+## Stav remediation PR #67
 
-Úroveň evidence níže používá:
-
-- `CODE INSPECTION PASS`
-- `UNIT TEST PASS`
-- `POSTGRES ACCEPTANCE PASS`
-- `CONTAINER RUNTIME PASS`
-- `CI PASS`
-- `UNVERIFIED`
-
-## Scope
-
-Re-audit zahrnuje Phase 1–9, zejména:
-
-- market-data ingestion, PIT universe a dataset snapshot lineage;
-- corporate-action capability/readiness;
-- experiment/OOS/eligibility/promotion;
-- deployment, immutable runtime manifest a approval;
-- Phase 4 risk, paper broker, orders/fills, ledger/positions a reconciliation;
-- scheduler, worker, lease/retry/recovery a XNYS orchestration;
-- monitoring a paper-performance evidence;
-- operator control-plane UI po M4;
-- RBAC, actor/reason/correlation audit trail;
-- PAPER-only architecture;
-- security, container a production-smoke gates.
-
-## Evidence summary
-
-| Evidence | Výsledek |
-| --- | --- |
-| PR #62 zahrnut v auditovaném stromu | `CODE INSPECTION PASS` |
-| PR #63 není za `main` | `CODE INSPECTION PASS` (`behind_by = 0`) |
-| PAPER-only architecture | `CODE INSPECTION PASS` + architecture regression |
-| Legacy direct paper route | `RESOLVED`; route odstraněna a kryta AST testem |
-| Python format/lint/type | `CI PASS` |
-| Unit/research/API tests | `CI PASS` |
-| PostgreSQL Phase 3–9 | `POSTGRES ACCEPTANCE PASS` |
-| B1 control-plane acceptance | `POSTGRES ACCEPTANCE PASS` |
-| B2 approved-deployment worker acceptance | `POSTGRES ACCEPTANCE PASS` |
-| P0 missed-open causality | `POSTGRES ACCEPTANCE PASS` |
-| P0 production worker runtime | `POSTGRES ACCEPTANCE PASS` |
-| Stage C / M3 orchestration | `POSTGRES ACCEPTANCE PASS` |
-| H2 corporate-action readiness | `POSTGRES ACCEPTANCE PASS` |
-| H3 runtime-config identity | `POSTGRES ACCEPTANCE PASS` |
-| M1 eligibility decision | `POSTGRES ACCEPTANCE PASS` |
-| Frontend lint/type/test/build | `CI PASS` |
-| Dependency / secret / misconfiguration checks | `CI PASS` |
-| Backend/frontend container build + Trivy image gates | `CONTAINER RUNTIME PASS` |
-| Production smoke | `CONTAINER RUNTIME PASS` |
-| Full staging operator workflow against deployed environment | `UNVERIFIED` — mandatory before first pilot session |
-
-## Previous remediation verification
-
-| Finding | Status | Evidence |
+| Oblast | Stav | Bezpečnostní vlastnost |
 | --- | --- | --- |
-| B1 | RESOLVED | Autoritativní control-plane a PostgreSQL B1 acceptance |
-| B2 | RESOLVED | Worker začíná approved deployment ID; B2 acceptance PASS |
-| B3 / P0-A | RESOLVED | Decision/executable-open causality a missed-open fail-closed acceptance PASS |
-| P0-B | RESOLVED | Production worker entrypoint/runtime acceptance PASS |
-| H1 | RESOLVED | Autonomous market-data/session orchestration a staleness gates |
-| H2 | RESOLVED | Corporate-action capability/readiness fail-closed acceptance PASS |
-| H3 | RESOLVED | Approved runtime manifest identity/hash acceptance PASS |
-| M1 | RESOLVED | Immutable eligibility policy decision + promotion gate acceptance PASS |
-| M2 | RESOLVED FOR PILOT CONTROL-PLANE | Kritické operator mutations mají server-side actor, reason, correlation a audit evidence |
-| M3 | RESOLVED | Backend XNYS calendar/session orchestration acceptance PASS |
-| M4 | RESOLVED | Kompletní operator workflow po PR #62 včetně review remediations |
+| Monitoring enrollment/schedule | REMEDIATED, čeká na výsledné CI | Deterministický `MONITOR_PAPER_DEPLOYMENT` job je idempotentně ensure/re-enable/normalizován. Autonomous enable kontroluje celý kanonický schedule a failuje při driftu. |
+| Corporate-action provider | **OPEN PILOT BLOCKER** | `StooqProvider.supports_actions=False` zůstává pravdivé; equity autonomous enable nesmí tento gate obejít. |
+| FAILED/DEAD_LETTER recovery | REMEDIATED, čeká na výsledné CI | Managed retry a control audit event vznikají v jedné DB transakci. Actor pochází ze server-side principalu, reason je povinný a correlation ID je persistovaný. |
+| Managed retry UI | REMEDIATED, čeká na výsledné CI | ADMIN recovery se zobrazuje pouze FAILED/DEAD_LETTER runům, jejichž `scheduled_job_id` patří managed jobu. |
+| Market-data egress | REMEDIATED, staging evidence stále povinná | DB `data` síť zůstává interní; backend/worker mají explicitní market-data egress; frontend ingress je oddělený. Aplikační Stooq transport dál allowlistuje HTTPS `stooq.com`. |
+| Legacy 300s schedules | REMEDIATED, čeká na výsledné CI | Worker před prvním scheduler tickem fail-closed vypne enabled legacy/drifted `PREPARE_PAPER_SESSION` rows. |
+| Monitoring retirement | REMEDIATED, čeká na výsledné CI | `RETIRED` v téže lifecycle transakci vypne deterministický monitoring schedule i autonomous deployment schedule. |
+| XNYS causal execution | **OPEN PILOT BLOCKER** | Schedule je DST-safe ukotvený na 09:30 `America/New_York`, ale bez immutable pre-open order intentu nesmí open-time path vytvořit order/fill. Autonomous XNYS occurrence proto končí no-action. |
 
-## M4 — operator control-plane revalidation
+Žádný řádek označený `REMEDIATED, čeká na výsledné CI` není `PASS`, dokud required CI výsledného SHA skutečně neprojde.
 
-M4 je v aktuálním stromu přítomné a není považováno za regresi.
+## Monitoring schedule invariant
 
-Podporovaná cesta je:
+Bezpečnostní invariant je následující:
 
-`DATA → UNIVERSE → SNAPSHOT → EXPERIMENT → ELIGIBILITY → PROMOTION → DEPLOYMENT → APPROVAL → MONITORING → AUTONOMOUS PAPER`
+- právě jeden podporovaný open monitoring lifecycle;
+- právě jeden deterministický `MONITOR_PAPER_DEPLOYMENT` job pro `monitoring_id`;
+- canonical identity/config/account, `enabled=true`, `INTERVAL=3600`, `timezone=UTC`, očekávaný misfire policy/grace/max-attempts a due time bez nepřiměřeného odkladu;
+- opakovaný enrollment stejného ACTIVE runu disabled nebo drifted schedule bezpečně normalizuje/re-enable;
+- autonomous enable znovu ověřuje celý schedule a při jakémkoli driftu failuje closed;
+- generic `/automation/jobs/*` mutations nejsou podporovaná cesta pro managed pilot jobs.
 
-Re-audit zohledňuje i následné review opravy PR #62:
+Enrollment record a automation job nejsou deklarovány jako jedna atomická transakce. Bezpečnost vzniká idempotentním ensure a následným fail-closed autonomous gate.
 
-- autoritativní reconciliation recovery je dostupná přes operator control-plane;
-- `SUSPENDED` monitoring má bezpečné resume/retire recovery akce;
-- po `RETIRED` lze vytvořit nový monitoring enrollment;
-- enrollment zajišťuje deterministický `MONITOR_PAPER_DEPLOYMENT` job;
-- audit identity opakovaných control mutations zahrnuje correlation ID;
-- corporate-action `UNSUPPORTED` není prezentováno jako bezpečný zelený stav;
-- dashboard používá bounded deployment summary místo N+1 strategy reads;
-- PIT membership evidence je bounded/paginated;
-- universe ID contract je URL-safe a route parametry jsou bezpečně adresovatelné.
+## Auditovaný managed retry
 
-Frontend je pouze ovládací vrstva. Eligibility, promotion, approval, monitoring state machine, XNYS orchestrace, runtime identity, risk a execution autorita zůstávají server-side.
+`POST /operator/automation/runs/{run_id}/retry` je podporovaná recovery cesta pouze pro managed PAPER jobs a pouze pro `FAILED`/`DEAD_LETTER`.
 
-## PAPER-only invariant
+Retry state transition a `CONTROL_AUTOMATION_RUN_RETRY` audit evidence jsou persistovány v jedné databázové transakci. Pokud audit insert nemůže commitnout, nesmí commitnout ani `RETRY_SCHEDULED`. Generic `/automation/runs/{run_id}/retry` managed job odmítá. Recovery transition lze bezpečně persistovat i při globálně vypnuté automation; tím se worker nespouští a ekonomická execution zůstává zastavená až do samostatného povolení automation.
 
-Podporovaný pilotní runtime je PAPER-only.
+## Lifecycle retirement
 
-Byla odstraněna legacy mutation:
+Přechod monitoringu do `RETIRED` je terminální. V téže lifecycle transakci se vypíná:
 
-`POST /demo/trading/cycles/run-paper`
+- deterministický `MONITOR_PAPER_DEPLOYMENT` schedule pro monitoring;
+- deterministický `PREPARE_PAPER_SESSION` schedule pro deployment.
 
-která obcházela deployment/approval/runtime-manifest/monitoring autoritu.
+Tím retired monitoring nevytváří nekonečné nové failed occurrences a není potřeba generic mutation managed jobu.
 
-Regresní architecture test vyžaduje, aby se tato route nevrátila. Pilot nesmí zavádět live broker SDK, exchange order routing, live credentials ani funding flow.
+## Production network topology
 
-## Phase 1–3 — data a lineage
+Cílová topologie je rozdělena podle účelu:
 
-Instrument identity je oddělena od ticker symbolu. PIT universe používá časově omezené membership evidence včetně `known_at`. Dataset snapshot váže zdrojová data, universe a obsahovou/integritní identitu.
+- `data`: interní PostgreSQL síť;
+- `application`: interní frontend ↔ backend komunikace;
+- `market-data-egress`: neinterní egress pro backend a worker;
+- `ingress`: frontendová síť pro loopback publish na hostu.
 
-Corporate-action readiness zůstává fail-closed součástí execution preparedness. H2 acceptance na kombinovaném stromu prošla v PostgreSQL CI.
+Samotná Docker egress síť není hostname firewall. Provider transport proto dál musí fail-closed povolit pouze očekávané HTTPS endpointy. Před pilotem je povinný production-like staging smoke skutečného provider egressu z backendu i workeru.
 
-Stav: `CODE INSPECTION PASS` + `POSTGRES ACCEPTANCE PASS` pro relevantní gates.
+## XNYS scheduling a causalita
 
-## Phase 4 — risk, execution, ledger a reconciliation
+Arbitrary 300sekundový interval od času enablementu není autoritativní scheduling. Nový managed schedule je daily `09:30 America/New_York`, tedy DST-safe. Při startu workeru jsou staré enabled 300s nebo jinak drifted managed schedules před prvním scheduler tickem vypnuty.
 
-Ekonomický efekt vzniká pouze přes podporovanou PAPER execution cestu s risk autoritou, persistentními orders/fills a account/position evidence.
+To však samo o sobě nestačí k ekonomické kauzalitě. Současný systém nemá před 09:30 persistovaný plně specifikovaný immutable order intent. Kdyby po 09:30 nejprve načetl opening print a teprve potom odvodil side/quantity, šlo by o retroaktivní rozhodnutí i při `scheduled_for=09:30`.
 
-Missed-open causality acceptance je zelená: systém nesmí vytvořit retroaktivní fill na již proběhlém open.
+Proto PR #67 zavádí fail-closed hranici:
 
-Reconciliation recovery je součástí operator control-plane. Resume po incidentu musí být podmíněn SAFE reconciliation.
+- autonomous PREPARE při/po execution open nevytváří raw-open economic run a vrací `PREOPEN_EXECUTION_INTENT_NOT_PERSISTED`;
+- již materializovaný legacy `xnys:` execution run je rovněž no-action;
+- strict executable-open cutoff zůstává `[open, open + 1 second)` jako obrana ostatních explicitně auditovaných cest;
+- žádný timestamp backdating nesmí nahrazovat skutečný pre-open intent.
 
-Stav: `POSTGRES ACCEPTANCE PASS` pro P0 causality a související integration suite.
+Budoucí funkční autonomous pilot vyžaduje nový persistentní, immutable a auditovatelný pre-open intent, jehož side/quantity vzniknou bez znalosti current-session opening printu. Po open smí být pouze připojena validovaná execution price evidence a proveden fill podle tohoto již existujícího intentu.
 
-## Phase 5 — scheduler, worker, concurrency a recovery
+## Testovací izolace rate limitu
 
-Scheduler/worker používají persistentní jobs/runs/attempts, claim/lease/fencing a bounded retry. Production worker runtime acceptance prošla.
+B1 PostgreSQL acceptance skládá do jednoho testu více validních operator mutation scénářů (včetně negativních gate testů) než běžná jednotlivá operator session. Process-local mutation bucket se proto uvnitř tohoto acceptance testu před navazující recovery částí explicitně vyčistí. Produkční `security_boundary`, limity ani jejich security testy se tím nemění; jde pouze o izolaci workflow acceptance od samostatně testované rate-limit politiky.
 
-Monitoring enrollment vytváří/zajišťuje deterministický monitoring job a retry enrollmentu nesmí vytvářet nekontrolované duplicitní ekonomické efekty.
+## Evidence nutná před změnou verdictu
 
-Stav: `POSTGRES ACCEPTANCE PASS` + `CONTAINER RUNTIME PASS`.
+Před změnou z `NOT READY FOR PAPER PILOT` musí být současně doloženo:
 
-## Phase 6 — experiment, eligibility, promotion a deployment
+1. všechny required CI jobs zelené na výsledném SHA;
+2. PostgreSQL acceptance pro monitoring ensure/re-enable, full schedule gate, retirement a rollout reconciliation;
+3. API/RBAC test atomického operator retry včetně actor/reason/correlation evidence;
+4. frontend test, že recovery control existuje jen pro managed FAILED/DEAD_LETTER runs a není zde economic `run-now`;
+5. regresní testy DST schedule a strict missed-open/no-economic-effect chování;
+6. production Compose topology test a staging provider-egress smoke;
+7. skutečný corporate-action-capable production provider s E2E readiness evidence;
+8. persistentní fully-specified immutable pre-open economic/order intent a E2E důkaz, že opening print nemůže ovlivnit side/quantity.
 
-Experiment evidence obsahuje snapshot, strategy/version, parametry, split, seed, code SHA a cost assumptions. M1 eligibility rozhodnutí je immutable a policy-controlled. Promotion zůstává explicitní krok oddělený od evaluation.
-
-Deployment lze vytvořit pouze z podporovaného promoted kandidáta a worker z něj rekonstruuje autoritativní runtime configuration.
-
-Stav: `POSTGRES ACCEPTANCE PASS` pro M1/B2/H3 relevantní acceptance.
-
-## Phase 7 — approval, monitoring a performance
-
-Approval je server-side mutation. Runtime manifest identity se kontroluje před execution. Monitoring musí být v podporovaném stavu a recovery transitions jsou auditované.
-
-Po retirement lze bezpečně založit nový enrollment; starý retired run není znovu aktivován jako nový lifecycle.
-
-Stav: `CODE INSPECTION PASS` + relevantní integration coverage.
-
-## Phase 8 — operator UI
-
-M4 je `RESOLVED`.
-
-ADMIN může použít podporovaný operator workflow od dat/research až po approved, monitored a autonomous PAPER deployment bez nutnosti přímých SQL zásahů. UI zobrazuje backend evidence a neimplementuje vlastní ekonomická pravidla.
-
-Viewer zůstává read-only; mutations jsou chráněné backend RBAC.
-
-Stav: `CI PASS` pro frontend lint/type/test/build + backend control-plane acceptance.
-
-## Phase 9 — security a operations
-
-CI #435 úspěšně prošlo:
-
-- Ruff security checks;
-- `pip-audit --strict`;
-- npm audit gates;
-- repository secret/misconfiguration scan;
-- backend/frontend Trivy HIGH/CRITICAL image gates;
-- non-root container checks;
-- production smoke.
-
-Auth/RBAC autorita zůstává backendová. Actor se odvozuje server-side, nikoli z libovolného klientského pole.
-
-Full historical Git secret scan nebyl v tomto re-auditu samostatně doložen jako vlastní acceptance; protože repo je veřejný, je doporučeno jej jednorázově provést a případný nalezený skutečný secret okamžitě rotovat.
-
-## New / residual findings
-
-| ID | Severity | Finding | Stav | Pilot blocker |
-| --- | --- | --- | --- | --- |
-| RA-P0-01 | P0 | Legacy direct fixture paper execution obcházelo control-plane | RESOLVED + regression test | Ne, po opravě |
-| RA-P2-01 | P2 | Staging dry-run finálního podporovaného operator workflow ještě není evidován | OPEN OPERATING CONDITION | Ano pro první pilot session, ne pro merge kódu |
-| RA-P3-01 | P3 | Full historical Git secret scan není samostatně doložen | OPEN HARDENING ITEM | Ne, pokud není nalezen actual secret |
-
-Aktuálně nejsou známy otevřené P0/P1.
-
-## RBAC / control-plane invariants
-
-Pro pilot platí:
-
-- VIEWER: read-only;
-- ADMIN: operator mutations;
-- OPERATOR může pouze přesně povolené nouzové operace, pokud to backend role model umožňuje;
-- actor je server-side principal;
-- kritické mutation vyžadují reason;
-- correlation/audit evidence musí být dohledatelná;
-- žádný klient nesmí dodávat autoritativní eligibility, approval, runtime manifest nebo fill state.
-
-## Failure behavior
-
-Před pilotem musí zůstat fail-closed zejména:
-
-- stale/missing market data;
-- incomplete corporate-action readiness;
-- invalid/tampered snapshot evidence;
-- missing/invalid eligibility decision;
-- runtime-manifest mismatch;
-- monitoring mimo podporovaný stav;
-- missed executable open;
-- duplicate/retry worker scenario;
-- reconciliation mismatch.
-
-Existující CI acceptance potvrzuje klíčové P0/H2/H3/M1/B2 scénáře. Staging dry-run musí ověřit provozní observability a recovery workflow v nasazeném prostředí.
-
-## Operational constraints pro první pilot
-
-**PILOT JE POVOLEN POUZE ZA PODMÍNEK:**
-
-1. finální PR head má znovu zelené všechny required CI checks;
-2. PAPER ONLY;
-3. XNYS, USD equities, daily timeframe;
-4. jeden aktivní pilotní deployment;
-5. jeden scheduler/worker topology;
-6. ACTIVE monitoring a automaticky zajištěný monitoring job;
-7. fresh successful data a complete corporate-action readiness;
-8. reconciliation `SAFE` před resume/novým ekonomickým během;
-9. denní lidská kontrola heartbeat, jobs, fills, positions, monitoring a reconciliation;
-10. při nejasném fillu, duplicate/retroactive fillu, stale workeru nebo mismatch okamžitý HALT a disable autonomous scheduling;
-11. žádné ruční ekonomické SQL opravy a žádná demo execution cesta.
-
-## Mandatory staging dry-run před první session
-
-Před prvním autonomním pilotním během proveď v produkčně podobném staging prostředí:
-
-1. migrations;
-2. instrument + universe + PIT membership;
-3. market-data ingestion a readiness;
-4. immutable snapshot;
-5. experiment;
-6. eligibility evaluation;
-7. promotion;
-8. deployment;
-9. runtime manifest review;
-10. approval;
-11. monitoring enrollment;
-12. ověření právě jednoho `MONITOR_PAPER_DEPLOYMENT` jobu;
-13. autonomous enable;
-14. worker/scheduler heartbeat;
-15. jednu bezpečnou scheduled execution/no-action cestu;
-16. reconciliation;
-17. recovery test pause/resume nebo HALT/reconcile/resume bez direct DB editace.
-
-Dry-run musí skončit bez duplicate economic effect, bez retroactive fillu a s kompletní audit correlation.
-
-## Pilot exit criteria
-
-Pilot je úspěšný pouze pokud současně platí:
-
-1. 10 po sobě jdoucích XNYS sessions;
-2. žádný duplicate fill;
-3. žádný retroactive fill;
-4. žádný nevysvětlený reconciliation mismatch;
-5. žádný P0/P1 incident;
-6. 100 % očekávaných occurrences má dohledatelnou run/attempt evidence nebo vysvětlený fail-closed no-action;
-7. všechny fills mají dohledatelnou deployment/runtime/risk/order/cycle lineage;
-8. proběhne alespoň jeden úspěšný worker restart/lease recovery drill bez dvojitého ekonomického efektu;
-9. monitoring evidence je oddělena od research OOS baseline;
-10. denní operator evidence je kompletní.
+Body 7 a 8 jsou aktuální pilot blockery. Dokud nejsou oba splněny, autonomous equity PAPER pilot se nesmí spustit.
 
 ## Final recommendation
 
-Kombinovaný code tree po PR #62 a PR #63 má zelené CI #435 a nejsou známy otevřené P0/P1 pilot blockery. M4 je znovu ověřeno jako součást stromu a předchozí tvrzení o chybějícím PR #62 / neověřeném PostgreSQL/container CI už neplatí.
+Předchozí `CONDITIONAL READY` verdict se ruší. Bezpečný stav je **NOT READY FOR PAPER PILOT**. PR #67 může uzavřít control-plane a fail-closed runtime mezery, ale nesmí změnit verdict na READY, dokud production provider nemá pravdivou corporate-action capability a autonomous execution nemá auditovatelný immutable pre-open economic intent.
 
-PR #63 lze po zeleném CI na finálním dokumentačním headu sloučit.
-
-Samotný PAPER pilot ale nezačínej, dokud neproběhne povinný staging dry-run výše.
-
-# MŮŽEME AUTONOMOUS QUANT LAB PUSTIT DO ŘÍZENÉHO PAPER TESTOVACÍHO PROVOZU?
-
-## ANO, ALE POUZE ZA TĚCHTO PODMÍNEK
-
-- finální CI je zelené;
-- staging dry-run podporovaného workflow projde;
-- jeden XNYS/USD/daily PAPER deployment pod lidským dohledem;
-- ACTIVE monitoring, fresh data a reconciliation SAFE;
-- okamžitý HALT při jakékoli nevysvětlené ekonomické odchylce.
+Acceptance tohoto PR se vyhodnocuje výhradně nad finálním head SHA po všech remediation commitech. Jakákoli další změna kódu nebo testů vyžaduje nové required CI nad novým head SHA.

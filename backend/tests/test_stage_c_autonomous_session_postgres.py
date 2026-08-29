@@ -16,6 +16,7 @@ from quantlab.automation import (
 )
 from quantlab.market_data import XNYSCalendar
 from quantlab.persistence import StrategyDeploymentRecord
+from quantlab.phase7 import PaperMonitoringRunRecord
 
 pytestmark = pytest.mark.skipif(
     os.getenv("RUN_POSTGRES_TESTS") != "1", reason="vyžaduje PostgreSQL CI"
@@ -30,19 +31,41 @@ def test_stage_c_autonomous_opt_in_and_session_occurrence_are_idempotent() -> No
             .where(StrategyDeploymentRecord.status == "APPROVED")
             .order_by(StrategyDeploymentRecord.created_at.desc())
         )
-    if deployment is None:
-        pytest.skip("Stage C navazuje na B1/B2 acceptance deployment")
+        if deployment is None:
+            pytest.skip("Stage C navazuje na B1/B2 acceptance deployment")
+        monitoring = session.scalar(
+            select(PaperMonitoringRunRecord).where(
+                PaperMonitoringRunRecord.deployment_id == deployment.deployment_id,
+                PaperMonitoringRunRecord.state == "ACTIVE",
+            )
+        )
+        assert monitoring is not None
+        deployment_id = deployment.deployment_id
+        account_id = deployment.paper_account_id
+        monitoring_id = monitoring.monitoring_id
 
-    now = datetime(2026, 7, 3, 18, tzinfo=UTC)
+    # Předchozí PostgreSQL acceptance testy mohou záměrně ověřovat disable/recovery
+    # managed schedule. Stage C si proto explicitně obnoví svou produkční precondition
+    # stejnou autoritativní ensure cestou, kterou používá enrollment, místo závislosti
+    # na pořadí testů nebo na zbytkovém enabled stavu v databázi.
+    enable_now = datetime(2026, 7, 3, 18, tzinfo=UTC)
+    monitoring_job = repository.ensure_monitoring_job(
+        monitoring_id=monitoring_id,
+        account_id=account_id,
+        now=enable_now,
+    )
+    assert monitoring_job.enabled
+    assert monitoring_job.next_run_at <= enable_now
+
     first = repository.set_autonomous_deployment(
-        deployment_id=deployment.deployment_id, enabled=True, now=now
+        deployment_id=deployment_id, enabled=True, now=enable_now
     )
     second = repository.set_autonomous_deployment(
-        deployment_id=deployment.deployment_id, enabled=True, now=now
+        deployment_id=deployment_id, enabled=True, now=enable_now
     )
     assert first.id == second.id
     assert first.job_type == JobType.PREPARE_PAPER_SESSION
-    assert json.loads(first.config_json) == {"deployment_id": deployment.deployment_id}
+    assert json.loads(first.config_json) == {"deployment_id": deployment_id}
 
     calendar = XNYSCalendar()
     friday = date(2026, 7, 3)
@@ -52,18 +75,18 @@ def test_stage_c_autonomous_opt_in_and_session_occurrence_are_idempotent() -> No
     execution = calendar.next_session(signal)
     execution_open = calendar.session_open(execution)
     run_a = repository.materialize_execution_session(
-        deployment_id=deployment.deployment_id,
-        account_id=deployment.paper_account_id,
+        deployment_id=deployment_id,
+        account_id=account_id,
         execution_session=execution,
         execution_time=execution_open,
-        created_at=now,
+        created_at=enable_now,
     )
     run_b = repository.materialize_execution_session(
-        deployment_id=deployment.deployment_id,
-        account_id=deployment.paper_account_id,
+        deployment_id=deployment_id,
+        account_id=account_id,
         execution_session=execution,
         execution_time=execution_open,
-        created_at=now,
+        created_at=enable_now,
     )
     assert run_a == run_b
     with Session(repository.engine) as session:
@@ -74,7 +97,7 @@ def test_stage_c_autonomous_opt_in_and_session_occurrence_are_idempotent() -> No
         assert persisted is not None and persisted.scheduled_for == execution_open
 
     disabled = repository.set_autonomous_deployment(
-        deployment_id=deployment.deployment_id, enabled=False, now=now
+        deployment_id=deployment_id, enabled=False, now=enable_now
     )
     assert disabled.enabled is False
     with Session(repository.engine) as session:

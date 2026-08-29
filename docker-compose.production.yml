@@ -24,7 +24,7 @@ services:
     environment:
       AUTOMATION_ENABLED: "true"
     depends_on: {postgres: {condition: service_healthy}}
-    networks: [data, application]
+    networks: [data, application, market-data-egress]
     restart: unless-stopped
     read_only: true
     tmpfs: [/tmp]
@@ -37,10 +37,11 @@ services:
       AUTOMATION_ENABLED: "true"
       WORKER_REQUIRE_PRODUCTION: "true"
       WORKER_ID_PREFIX: "${WORKER_ID_PREFIX:-production-worker}"
+      WORKER_POLL_INTERVAL: "0.2"
     command: ["/app/backend/.venv/bin/quantlab-worker"]
     healthcheck: {disable: true}
     depends_on: {postgres: {condition: service_healthy}}
-    networks: [data]
+    networks: [data, market-data-egress]
     restart: unless-stopped
     read_only: true
     tmpfs: [/tmp]
@@ -50,7 +51,7 @@ services:
     build: {context: ., dockerfile: frontend/Dockerfile}
     env_file: [.env.production]
     depends_on: [backend]
-    networks: [application]
+    networks: [application, ingress]
     ports: ["127.0.0.1:3000:3000"]
     restart: unless-stopped
     read_only: true
@@ -59,7 +60,9 @@ services:
     security_opt: [no-new-privileges:true]
 networks:
   data: {internal: true}
-  application: {internal: false}
+  application: {internal: true}
+  market-data-egress: {internal: false}
+  ingress: {internal: false}
 volumes:
   quantlab-production-db:
 secrets:

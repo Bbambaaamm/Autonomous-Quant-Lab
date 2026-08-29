@@ -16,6 +16,18 @@ describe("paper-only hranice", () => {
     expect(actions).toContain("confirmation");
     expect(actions).toContain("if (!response.ok)");
   });
+
+  it("FAILED/DEAD_LETTER recovery používá pouze reasoned operator endpoint", () => {
+    const actions = fs.readFileSync(path.join(process.cwd(), "app/actions.ts"), "utf8");
+    const operations = fs.readFileSync(path.join(process.cwd(), "app/operations/page.tsx"), "utf8");
+    expect(actions).toContain("/operator/automation/runs/${segment(runId)}/retry");
+    expect(actions).not.toContain("mutate(`/automation/runs/${segment(runId)}/retry`");
+    expect(operations).toContain("automationRetryAction");
+    expect(operations).toContain("Audit reason");
+    expect(operations).toContain("scheduled_job_id");
+    expect(operations).toContain("MANAGED_JOB_TYPES");
+    expect(operations).not.toContain("/run-now");
+  });
 });
 
 describe("Phase 9 security boundary", () => {

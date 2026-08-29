@@ -13,6 +13,7 @@ from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 
 from quantlab.automation import (
+    MANAGED_JOB_TYPES,
     AutomationRepository,
     JobAttempt,
     JobRun,
@@ -819,6 +820,10 @@ def _set_autonomous_deployment(
     enabled: bool,
 ) -> dict[str, object]:
     try:
+        if enabled and not StooqProvider().metadata.supports_actions:
+            raise DatasetInvalid(
+                "CORPORATE_ACTIONS_UNSUPPORTED: production provider není způsobilý pro equity autonomous pilot"
+            )
         job = automation_repository.set_autonomous_deployment(
             deployment_id=deployment_id, enabled=enabled
         )
@@ -851,23 +856,10 @@ def operator_monitoring_enrollment(
             if deployment is None:
                 raise DatasetInvalid("Monitoring deployment lineage neexistuje")
             account_id = deployment.paper_account_id
-        monitoring_job_id = hashlib.sha256(
-            f"monitor-paper-deployment:{row.monitoring_id}".encode()
-        ).hexdigest()
-        monitoring_job = automation_repository.create_job(
-            job_type=JobType.MONITOR_PAPER_DEPLOYMENT,
+        monitoring_job = automation_repository.ensure_monitoring_job(
+            monitoring_id=row.monitoring_id,
             account_id=account_id,
-            strategy_id=None,
-            schedule_type=ScheduleType.INTERVAL,
-            next_run_at=now,
-            interval_seconds=3600,
-            timezone="UTC",
-            misfire_policy=MisfirePolicy.RUN_ONCE_IF_MISSED,
-            misfire_grace_seconds=3600,
-            max_attempts=5,
-            config={"monitoring_id": row.monitoring_id},
-            enabled=True,
-            job_id=monitoring_job_id,
+            now=now,
         )
         correlation_id = _correlation(request)
         _audit_control_mutation(
@@ -1269,10 +1261,10 @@ def universe(universe_id: str) -> dict[str, object]:
 
 @app.post("/automation/jobs")
 def create_automation_job(request: JobCreate) -> dict[str, object]:
-    if request.job_type in {JobType.RUN_PAPER_CYCLE, JobType.RUN_PAPER_DEPLOYMENT}:
+    if request.job_type == JobType.RUN_PAPER_CYCLE or request.job_type in MANAGED_JOB_TYPES:
         raise HTTPException(
             status_code=422,
-            detail="Paper deployment lze plánovat pouze podporovanou operator deployment mutation",
+            detail="Managed PAPER job lze plánovat pouze podporovanou operator control-plane mutation",
         )
     try:
         return _row(automation_repository.create_job(**request.model_dump()))
@@ -1302,6 +1294,11 @@ def patch_automation_job(job_id: str, request: JobPatch) -> dict[str, object]:
         row = session.get(ScheduledJob, job_id)
         if row is None:
             raise HTTPException(status_code=404, detail="Job nebyl nalezen")
+        if JobType(row.job_type) in MANAGED_JOB_TYPES:
+            raise HTTPException(
+                status_code=422,
+                detail="Managed PAPER job lze měnit pouze operator control-plane cestou",
+            )
         if request.enabled is not None:
             row.enabled = request.enabled
         if request.next_run_at is not None:
@@ -1328,6 +1325,15 @@ def run_automation_job(
 ) -> dict[str, str]:
     if not settings.automation_enabled:
         raise HTTPException(status_code=503, detail="Automation je globálně vypnutá")
+    with Session(automation_repository.engine) as session:
+        job = session.get(ScheduledJob, job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="Job nebyl nalezen")
+        if JobType(job.job_type) in MANAGED_JOB_TYPES:
+            raise HTTPException(
+                status_code=422,
+                detail="Managed PAPER job nepodporuje generic run-now",
+            )
     try:
         return {"id": automation_scheduler.run_now(job_id, idempotency_key)}
     except KeyError as exc:
@@ -1361,8 +1367,38 @@ def automation_run(run_id: str) -> dict[str, object]:
         return result
 
 
+@app.post("/operator/automation/runs/{run_id}/retry")
+def operator_retry_automation_run(
+    run_id: str, body: ReasonedMutation, request: Request
+) -> dict[str, object]:
+    # Recovery transition lze auditovaně persistovat i při globálně vypnutém workeru;
+    # samotná execution zůstává zastavená, dokud automation není znovu povolena.
+    try:
+        row = automation_repository.retry_managed_run(
+            run_id,
+            actor=_actor(request),
+            reason=body.reason,
+            correlation_id=_correlation(request),
+        )
+        return _row(row)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Run nebyl nalezen") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
 @app.post("/automation/runs/{run_id}/retry")
 def retry_automation_run(run_id: str) -> dict[str, str]:
+    with Session(automation_repository.engine) as session:
+        run = session.get(JobRun, run_id)
+        if run is None:
+            raise HTTPException(status_code=404, detail="Run nebyl nalezen")
+        job = session.get(ScheduledJob, run.scheduled_job_id)
+        if job is not None and JobType(job.job_type) in MANAGED_JOB_TYPES:
+            raise HTTPException(
+                status_code=422,
+                detail="Managed PAPER run vyžaduje auditovaný operator retry",
+            )
     try:
         automation_worker.retry(run_id)
     except KeyError as exc:
