@@ -1,0 +1,45 @@
+name: PR67 B1 test cleanup
+
+on:
+  push:
+    branches:
+      - fix/pre-pilot-review-remediation
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/pre-pilot-review-remediation
+      - name: Isolate workflow acceptance from rate-limit coverage
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('backend/tests/test_b1_control_plane_postgres.py')
+          text = p.read_text()
+          old = 'from quantlab.phase7 import PaperMonitoringRunRecord\n'
+          new = 'from quantlab.phase7 import PaperMonitoringRunRecord\nfrom quantlab.security import limiter\n'
+          if text.count(old) != 1:
+              raise SystemExit('security import marker mismatch')
+          text = text.replace(old, new, 1)
+          old = '''    generic_disable = client.post(f"/automation/jobs/{monitoring_job_id}/disable")\n    assert generic_disable.status_code == 422\n    autonomous = client.post(\n'''
+          new = '''    generic_disable = client.post(f"/automation/jobs/{monitoring_job_id}/disable")\n    assert generic_disable.status_code == 422\n    # Tento B1 acceptance test záměrně skládá mnoho validních mutation scénářů do\n    # jediného request bucketu. Rate-limit behavior má samostatné security testy;\n    # před pokračováním workflow acceptance tedy izolovaně vyčistíme process-local bucket.\n    with limiter.lock:\n        limiter.events.clear()\n    autonomous = client.post(\n'''
+          if text.count(old) != 1:
+              raise SystemExit('B1 rate-limit reset marker mismatch')
+          p.write_text(text.replace(old, new, 1))
+          PY
+          rm .github/workflows/pr67-b1-rate-limit-test-fix.yml
+          git diff --check
+      - name: Commit test isolation
+        shell: bash
+        run: |
+          git config user.name "PR67 remediation"
+          git config user.email "actions@users.noreply.github.com"
+          git add -A
+          git commit -m "Isolate B1 acceptance from rate limiter"
+          git push origin HEAD:fix/pre-pilot-review-remediation
