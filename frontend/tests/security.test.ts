@@ -24,6 +24,8 @@ describe("paper-only hranice", () => {
     expect(actions).not.toContain("/automation/runs/${segment(runId)}/retry");
     expect(operations).toContain("automationRetryAction");
     expect(operations).toContain("Audit reason");
+    expect(operations).toContain("scheduled_job_id");
+    expect(operations).toContain("MANAGED_JOB_TYPES");
     expect(operations).not.toContain("/run-now");
   });
 });

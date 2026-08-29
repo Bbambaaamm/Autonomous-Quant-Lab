@@ -84,6 +84,7 @@ MANAGED_JOB_TYPES = frozenset(
 AUTONOMOUS_DAILY_TIME = "09:30"
 AUTONOMOUS_TIMEZONE = "America/New_York"
 MONITOR_INTERVAL_SECONDS = 3600
+PREOPEN_EXECUTION_INTENT_BLOCK = "PREOPEN_EXECUTION_INTENT_NOT_PERSISTED"
 
 TERMINAL = {RunStatus.SUCCEEDED, RunStatus.FAILED, RunStatus.DEAD_LETTER, RunStatus.CANCELLED}
 
@@ -430,6 +431,95 @@ class AutomationRepository:
             session.expunge(row)
             return row
 
+    def reconcile_managed_schedules(self, now: datetime | None = None) -> int:
+        """Před pollingem fail-closed vypne legacy/drifted autonomous schedule."""
+        current = utc(now or datetime.now(UTC))
+        disabled = 0
+        with Session(self.engine) as session, session.begin():
+            rows = tuple(
+                session.scalars(
+                    select(ScheduledJob)
+                    .where(
+                        ScheduledJob.job_type == JobType.PREPARE_PAPER_SESSION,
+                        ScheduledJob.enabled.is_(True),
+                    )
+                    .with_for_update()
+                )
+            )
+            for row in rows:
+                canonical = (
+                    row.schedule_type == ScheduleType.DAILY
+                    and row.interval_seconds is None
+                    and row.daily_time == AUTONOMOUS_DAILY_TIME
+                    and row.timezone == AUTONOMOUS_TIMEZONE
+                    and row.misfire_policy == MisfirePolicy.SKIP_IF_TOO_OLD
+                    and row.misfire_grace_seconds == 1
+                    and row.max_attempts == 1
+                )
+                if canonical:
+                    continue
+                row.enabled = False
+                row.updated_at = current
+                disabled += 1
+        return disabled
+
+    def retry_managed_run(
+        self,
+        run_id: str,
+        *,
+        actor: dict[str, str],
+        reason: str,
+        correlation_id: str,
+        now: datetime | None = None,
+    ) -> JobRun:
+        """Atomicky persistuje managed retry transition i control audit evidence."""
+        if not reason.strip():
+            raise ValueError("Retry vyžaduje auditní důvod")
+        current = utc(now or datetime.now(UTC))
+        from quantlab.phase4 import AuditEventRecord
+
+        event_type = "CONTROL_AUTOMATION_RUN_RETRY"
+        entity_type = "job_run"
+        identity = hashlib.sha256(
+            json.dumps(
+                [event_type, entity_type, run_id, actor["actor_id"], reason, correlation_id],
+                sort_keys=True,
+            ).encode()
+        ).hexdigest()
+        with Session(self.engine) as session, session.begin():
+            run = session.scalar(select(JobRun).where(JobRun.id == run_id).with_for_update())
+            if run is None:
+                raise KeyError(run_id)
+            job = session.get(ScheduledJob, run.scheduled_job_id)
+            if job is None or JobType(job.job_type) not in MANAGED_JOB_TYPES:
+                raise ValueError("Operator retry je určen pouze pro managed PAPER jobs")
+            if run.status == RunStatus.SUCCEEDED:
+                raise ValueError("Úspěšný run nelze opakovat")
+            if run.status not in {RunStatus.FAILED, RunStatus.DEAD_LETTER}:
+                raise ValueError("Run není v retry stavu")
+            run.status = RunStatus.RETRY_SCHEDULED
+            run.next_attempt_at = current
+            run.finished_at = None
+            if session.get(AuditEventRecord, identity) is None:
+                session.add(
+                    AuditEventRecord(
+                        id=identity,
+                        timestamp=current,
+                        event_type=event_type,
+                        entity_type=entity_type,
+                        entity_id=run_id,
+                        trading_cycle_id=None,
+                        correlation_id=correlation_id,
+                        payload_json=json.dumps(
+                            {"actor": actor, "reason": reason}, sort_keys=True
+                        ),
+                    )
+                )
+            session.flush()
+            session.refresh(run)
+            session.expunge(run)
+            return run
+
     def create_deployment_job(self, *, deployment_id: str, **schedule: Any) -> ScheduledJob:
         """Vytvoří idempotentní job pouze z ověřené persistentní deployment lineage."""
         from quantlab.persistence import StrategyDeploymentRecord
@@ -503,6 +593,13 @@ class AutomationRepository:
                     or monitoring_job.config_json != expected_monitor_config
                     or monitoring_job.schedule_type != ScheduleType.INTERVAL
                     or monitoring_job.interval_seconds != MONITOR_INTERVAL_SECONDS
+                    or monitoring_job.daily_time is not None
+                    or monitoring_job.timezone != "UTC"
+                    or monitoring_job.misfire_policy != MisfirePolicy.RUN_ONCE_IF_MISSED
+                    or monitoring_job.misfire_grace_seconds != MONITOR_INTERVAL_SECONDS
+                    or monitoring_job.max_attempts != 5
+                    or utc(monitoring_job.next_run_at)
+                    > now + timedelta(seconds=MONITOR_INTERVAL_SECONDS)
                 ):
                     raise ValueError(
                         "Autonomous orchestrace vyžaduje validní enabled monitoring schedule"
@@ -923,6 +1020,19 @@ class JobExecutor:
             )
         if not rows or len(rows) != len(instrument_ids):
             raise PermanentJobError("PIT universe scope je prázdný nebo nekonzistentní")
+        # Současný runtime nepersistuje před 09:30 plně specifikovaný immutable order
+        # intent (side + quantity). Po open proto nesmí číst opening print a teprve
+        # následně z něj odvozovat ekonomický příkaz. Do zavedení pre-open intentu
+        # je autonomous economic path záměrně fail-closed.
+        if now >= execution_open:
+            return {
+                "deployment_id": deployment_id,
+                "monitoring_id": monitoring.monitoring_id,
+                "trading_cycle_id": None,
+                "reconciliation_id": None,
+                "outcome": "NO_ACTION",
+                "no_action_reason": PREOPEN_EXECUTION_INTENT_BLOCK,
+            }
         provider = self.provider_factory() if self.provider_factory else StooqProvider()
         ingestions: list[str] = []
         action_evidence: list[str] = []
@@ -1090,36 +1200,16 @@ class JobExecutor:
         execution_now = utc(self.clock())
 
         if run.occurrence_key.startswith("xnys:"):
-            from quantlab.market_data import XNYSCalendar
-            from quantlab.phase6_runtime import Phase6PaperExecutionService
-
-            try:
-                pinned_session = date.fromisoformat(run.occurrence_key.removeprefix("xnys:"))
-            except ValueError as exc:
-                raise PermanentJobError("Execution occurrence má neplatnou XNYS session") from exc
-            calendar = XNYSCalendar()
-            pinned_open = calendar.session_open(pinned_session)
-            if not calendar.is_executable_open_time(pinned_session, execution_now):
-                return {
-                    "deployment_id": deployment_id,
-                    "monitoring_id": None,
-                    "trading_cycle_id": None,
-                    "reconciliation_id": None,
-                    "outcome": "NO_ACTION",
-                    "no_action_reason": "EXECUTION_SESSION_NOT_OPEN"
-                    if execution_now < pinned_open
-                    else "MISSED_EXECUTION_OPEN",
-                }
-            timing = Phase6PaperExecutionService.execution_timing(calendar, execution_now)
-            if timing.execution_session != pinned_session:
-                return {
-                    "deployment_id": deployment_id,
-                    "monitoring_id": None,
-                    "trading_cycle_id": None,
-                    "reconciliation_id": None,
-                    "outcome": "NO_ACTION",
-                    "no_action_reason": "MISSED_EXECUTION_SESSION",
-                }
+            # Legacy/materialized XNYS occurrence nesmí po upgradu obejít chybějící
+            # immutable pre-open order intent. Žádný raw-open economic effect.
+            return {
+                "deployment_id": deployment_id,
+                "monitoring_id": None,
+                "trading_cycle_id": None,
+                "reconciliation_id": None,
+                "outcome": "NO_ACTION",
+                "no_action_reason": PREOPEN_EXECUTION_INTENT_BLOCK,
+            }
 
         def sessions() -> Session:
             return Session(self.trading.repository.engine)

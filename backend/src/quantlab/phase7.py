@@ -747,6 +747,23 @@ class PaperMonitoringService:
             run.state, run.state_reason, run.state_changed_at = target, reason, changed
             if target is MonitoringState.RETIRED:
                 run.ended_at = changed
+                # Retirement must stop the deterministic managed schedules in the same
+                # DB transaction; generic job mutation is deliberately forbidden.
+                from quantlab.automation import ScheduledJob
+
+                job_ids = (
+                    hashlib.sha256(
+                        f"monitor-paper-deployment:{monitoring_id}".encode()
+                    ).hexdigest(),
+                    hashlib.sha256(
+                        f"paper-session:{run.deployment_id}".encode()
+                    ).hexdigest(),
+                )
+                for job_id in job_ids:
+                    job = session.get(ScheduledJob, job_id, with_for_update=True)
+                    if job is not None:
+                        job.enabled = False
+                        job.updated_at = changed
             session.flush()
             session.expunge(run)
             return run

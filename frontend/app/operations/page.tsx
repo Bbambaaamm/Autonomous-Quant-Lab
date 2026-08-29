@@ -6,7 +6,18 @@ import { session } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 
-type AutomationRun = Record<string, unknown> & { id?: string; status?: string };
+type AutomationJob = Record<string, unknown> & { id?: string; job_type?: string };
+type AutomationRun = Record<string, unknown> & {
+  id?: string;
+  status?: string;
+  scheduled_job_id?: string;
+};
+
+const MANAGED_JOB_TYPES = new Set([
+  "RUN_PAPER_DEPLOYMENT",
+  "PREPARE_PAPER_SESSION",
+  "MONITOR_PAPER_DEPLOYMENT",
+]);
 
 export default async function Operations() {
   const [data, user] = await Promise.all([
@@ -14,9 +25,17 @@ export default async function Operations() {
     session(),
   ]);
   const admin = user?.role === "ADMIN";
+  const jobs: AutomationJob[] = Array.isArray(data.jobs) ? data.jobs : [];
+  const managedJobIds = new Set(
+    jobs
+      .filter((job) => MANAGED_JOB_TYPES.has(String(job.job_type ?? "")))
+      .map((job) => String(job.id ?? ""))
+      .filter(Boolean),
+  );
   const runs: AutomationRun[] = Array.isArray(data.runs) ? data.runs : [];
   const recoverable = runs.filter((run) =>
-    ["FAILED", "DEAD_LETTER"].includes(String(run.status ?? "")),
+    ["FAILED", "DEAD_LETTER"].includes(String(run.status ?? ""))
+      && managedJobIds.has(String(run.scheduled_job_id ?? "")),
   );
 
   return <>

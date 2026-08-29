@@ -1371,36 +1371,20 @@ def automation_run(run_id: str) -> dict[str, object]:
 def operator_retry_automation_run(
     run_id: str, body: ReasonedMutation, request: Request
 ) -> dict[str, object]:
-    with Session(automation_repository.engine) as session:
-        run = session.get(JobRun, run_id)
-        if run is None:
-            raise HTTPException(status_code=404, detail="Run nebyl nalezen")
-        job = session.get(ScheduledJob, run.scheduled_job_id)
-        if job is None or JobType(job.job_type) not in MANAGED_JOB_TYPES:
-            raise HTTPException(
-                status_code=409,
-                detail="Operator retry je určen pouze pro managed PAPER jobs",
-            )
-    correlation_id = _correlation(request)
+    if not settings.automation_enabled:
+        raise HTTPException(status_code=503, detail="Automation je globálně vypnutá")
     try:
-        automation_worker.retry(run_id)
+        row = automation_repository.retry_managed_run(
+            run_id,
+            actor=_actor(request),
+            reason=body.reason,
+            correlation_id=_correlation(request),
+        )
+        return _row(row)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Run nebyl nalezen") from exc
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-    _audit_control_mutation(
-        "CONTROL_AUTOMATION_RUN_RETRY",
-        "job_run",
-        run_id,
-        _actor(request),
-        body.reason,
-        correlation_id,
-    )
-    with Session(automation_repository.engine) as session:
-        refreshed = session.get(JobRun, run_id)
-        if refreshed is None:
-            raise HTTPException(status_code=404, detail="Run nebyl nalezen")
-        return _row(refreshed)
 
 
 @app.post("/automation/runs/{run_id}/retry")
