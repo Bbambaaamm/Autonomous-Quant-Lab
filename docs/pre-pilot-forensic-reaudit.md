@@ -98,3 +98,5 @@ Body 7 a 8 jsou aktuální pilot blockery. Dokud nejsou oba splněny, autonomous
 ## Final recommendation
 
 Předchozí `CONDITIONAL READY` verdict se ruší. Bezpečný stav je **NOT READY FOR PAPER PILOT**. PR #67 může uzavřít control-plane a fail-closed runtime mezery, ale nesmí změnit verdict na READY, dokud production provider nemá pravdivou corporate-action capability a autonomous execution nemá auditovatelný immutable pre-open economic intent.
+
+Acceptance tohoto PR se vyhodnocuje výhradně nad finálním head SHA po všech remediation commitech.
