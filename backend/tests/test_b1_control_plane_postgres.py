@@ -24,6 +24,7 @@ from quantlab.persistence import (
 )
 from quantlab.phase4 import AuditEventRecord
 from quantlab.phase7 import PaperMonitoringRunRecord
+from quantlab.security import limiter
 
 pytestmark = pytest.mark.skipif(
     os.getenv("RUN_POSTGRES_TESTS") != "1", reason="vyžaduje PostgreSQL CI"
@@ -220,6 +221,11 @@ def test_supported_b1_control_plane_reaches_active_monitoring(monkeypatch) -> No
     assert ensured.json()["monitoring_job"]["enabled"] is True
     generic_disable = client.post(f"/automation/jobs/{monitoring_job_id}/disable")
     assert generic_disable.status_code == 422
+    # Tento B1 acceptance test záměrně skládá mnoho validních mutation scénářů do
+    # jediného request bucketu. Rate-limit behavior má samostatné security testy;
+    # před pokračováním workflow acceptance tedy izolovaně vyčistíme process-local bucket.
+    with limiter.lock:
+        limiter.events.clear()
     autonomous = client.post(
         f"/operator/deployments/{deployment_id}/autonomous/enable",
         json={"reason": reason},
