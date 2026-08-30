@@ -299,9 +299,34 @@ class CorporateActionEventType(StrEnum):
     DELETE = "delete"
 
 
+def _canonical_provider_value(value: Any) -> Any:
+    """Sjednotí REST number a SSE decimal-string reprezentace pro stabilní hash CA verze."""
+    if isinstance(value, dict):
+        return {
+            str(key): _canonical_provider_value(item)
+            for key, item in sorted(value.items())
+            if item is not None
+        }
+    if isinstance(value, list):
+        return [_canonical_provider_value(item) for item in value]
+    if isinstance(value, bool) or value is None:
+        return value
+    if isinstance(value, (int, float, Decimal)):
+        decimal = Decimal(str(value))
+        return format(decimal.normalize(), "f")
+    return value
+
+
+def canonical_corporate_action_payload_hash(payload: dict[str, Any]) -> str:
+    canonical = json.dumps(
+        _canonical_provider_value(payload), sort_keys=True, separators=(",", ":"), ensure_ascii=True
+    ).encode()
+    return hashlib.sha256(canonical).hexdigest()
+
+
 @dataclass(frozen=True)
 class CorporateActionEvent:
-    """Neměnná evidence doručení změny corporate action z provider streamu."""
+    """Neměnná evidence konkrétní verze corporate action doručené Alpaca SSE."""
 
     event_id: str
     at: datetime
@@ -318,17 +343,27 @@ class CorporateActionEvent:
 
     @classmethod
     def from_sse(cls, payload: bytes) -> CorporateActionEvent:
-        """Normalizuje minimální Alpaca SSE envelope a připne přesné přijaté bajty."""
+        """Parsuje dokumentovaný Alpaca envelope ``event_id/at/action/event_type/ca``."""
         try:
             envelope = json.loads(payload)
             if not isinstance(envelope, dict):
+                raise TypeError
+            event_type = envelope["event_type"]
+            ca = envelope["ca"]
+            region = envelope["region"]
+            if not isinstance(event_type, str) or not event_type.endswith("_corporateaction_event"):
+                raise TypeError
+            if not isinstance(ca, dict) or region not in {"us", "non_us"}:
+                raise TypeError
+            action_id = ca["id"]
+            if not isinstance(action_id, str) or not action_id:
                 raise TypeError
             return cls(
                 event_id=str(envelope["event_id"]),
                 at=datetime.fromisoformat(str(envelope["at"]).replace("Z", "+00:00")),
                 action=CorporateActionEventType(str(envelope["action"])),
-                provider_action_id=str(envelope["corporate_action_id"]),
-                payload_hash=hashlib.sha256(payload).hexdigest(),
+                provider_action_id=action_id,
+                payload_hash=canonical_corporate_action_payload_hash(ca),
             )
         except (KeyError, TypeError, ValueError, UnicodeError, json.JSONDecodeError) as exc:
             raise InvalidProviderResponse("Alpaca SSE event nemá platný envelope") from exc
@@ -339,10 +374,24 @@ ActionEvidenceLoader = Callable[[str], tuple[CorporateActionEvent, ...]]
 
 
 class AlpacaProvider:
-    """REST adapter, který odvozuje ``known_at`` výhradně z persistentní SSE evidence."""
+    """REST adapter; ``known_at`` je použit jen při shodě REST faktu s SSE verzí."""
 
-    metadata = ProviderMetadata("alpaca", "1", True, True)
+    metadata = ProviderMetadata("alpaca", "2", True, True)
     _base_url = "https://data.alpaca.markets"
+    _supported_action_types = (
+        "forward_split",
+        "reverse_split",
+        "cash_dividend",
+        "name_change",
+        "worthless_removal",
+    )
+    _supported_collections = (
+        "forward_splits",
+        "reverse_splits",
+        "cash_dividends",
+        "name_changes",
+        "worthless_removals",
+    )
 
     def __init__(
         self,
@@ -385,7 +434,7 @@ class AlpacaProvider:
         return cast(dict[str, Any], payload)
 
     def _get_all(self, path: str, query: dict[str, str], collection: str) -> list[Any]:
-        """Vyčerpá stránkování; částečná odpověď nikdy nesmí dokazovat úplnost."""
+        """Vyčerpá stránkování jednoduché list kolekce (např. OHLCV bars)."""
         rows: list[Any] = []
         tokens: set[str] = set()
         while True:
@@ -394,6 +443,46 @@ class AlpacaProvider:
             if not isinstance(page, list):
                 raise InvalidProviderResponse(f"Alpaca odpověď neobsahuje {collection}")
             rows.extend(page)
+            token = payload.get("next_page_token")
+            if token is None:
+                return rows
+            if not isinstance(token, str) or not token or token in tokens:
+                raise InvalidProviderResponse("Alpaca vrátila neplatné stránkování")
+            tokens.add(token)
+            query = {**query, "page_token": token}
+
+    def _get_corporate_action_rows(self, symbol: str) -> list[tuple[str, dict[str, Any]]]:
+        """Načte podporované CA přes skutečný vnořený Alpaca REST kontrakt.
+
+        REST ``start/end`` filtrují ``process_date``, nikoli ex/effective date. Proto se pro
+        auditovatelnou readiness neinterpretuje research interval jako process-date interval;
+        načte se úplná historie podporovaných typů pro symbol a až poté se filtruje ekonomické
+        datum jednotlivého faktu.
+        """
+        query = {
+            "symbols": symbol,
+            "types": ",".join(self._supported_action_types),
+            "start": "1970-01-01",
+            "end": datetime.now(UTC).date().isoformat(),
+            "limit": "1000",
+        }
+        rows: list[tuple[str, dict[str, Any]]] = []
+        tokens: set[str] = set()
+        while True:
+            payload = self._get("/v1/corporate-actions", query)
+            groups = payload.get("corporate_actions")
+            if not isinstance(groups, dict):
+                raise InvalidProviderResponse("Alpaca odpověď neobsahuje corporate_actions objekt")
+            for collection in self._supported_collections:
+                page = groups.get(collection, [])
+                if not isinstance(page, list):
+                    raise InvalidProviderResponse(
+                        f"Alpaca corporate_actions.{collection} není seznam"
+                    )
+                for row in page:
+                    if not isinstance(row, dict):
+                        raise InvalidProviderResponse("Alpaca corporate action není objekt")
+                    rows.append((collection, cast(dict[str, Any], row)))
             token = payload.get("next_page_token")
             if token is None:
                 return rows
@@ -433,52 +522,90 @@ class AlpacaProvider:
         except (KeyError, TypeError, ValueError, InvalidOperation) as exc:
             raise InvalidProviderResponse("Alpaca vrátila neplatný OHLCV bar") from exc
 
+    @staticmethod
+    def _midnight(day: str) -> datetime:
+        return datetime.fromisoformat(f"{day}T00:00:00+00:00")
+
+    def _normalize_action(
+        self,
+        collection: str,
+        row: dict[str, Any],
+        instrument_id: str,
+        known_at: datetime,
+    ) -> CorporateAction:
+        action_id = str(row["id"])
+        if collection in {"forward_splits", "reverse_splits"}:
+            old_rate = Decimal(str(row["old_rate"]))
+            new_rate = Decimal(str(row["new_rate"]))
+            if old_rate <= 0 or new_rate <= 0:
+                raise InvalidProviderResponse("Alpaca split má neplatný poměr")
+            return CorporateAction(
+                action_id,
+                instrument_id,
+                CorporateActionKind.SPLIT,
+                self._midnight(str(row["ex_date"])),
+                known_at,
+                new_rate / old_rate,
+            )
+        if collection == "cash_dividends":
+            return CorporateAction(
+                action_id,
+                instrument_id,
+                CorporateActionKind.CASH_DIVIDEND,
+                self._midnight(str(row["ex_date"])),
+                known_at,
+                Decimal(str(row["rate"])),
+            )
+        if collection == "name_changes":
+            return CorporateAction(
+                action_id,
+                instrument_id,
+                CorporateActionKind.SYMBOL_CHANGE,
+                self._midnight(str(row["process_date"])),
+                known_at,
+                None,
+                str(row["new_symbol"]),
+            )
+        if collection == "worthless_removals":
+            return CorporateAction(
+                action_id,
+                instrument_id,
+                CorporateActionKind.DELISTING,
+                self._midnight(str(row["process_date"])),
+                known_at,
+            )
+        raise InvalidProviderResponse("Nepodporovaný Alpaca corporate-action typ")
+
     def corporate_actions(self, symbol: str, start: date, end: date) -> list[CorporateAction]:
+        if start > end:
+            raise ValueError("Počáteční datum musí předcházet koncovému")
         normalized = self.resolve(symbol)["provider_symbol"]
-        rows = self._get_all(
-            "/v1/corporate-actions",
-            {"symbols": normalized, "start": start.isoformat(), "end": end.isoformat()},
-            "corporate_actions",
-        )
         events = self._evidence_loader("alpaca")
         latest: dict[str, CorporateActionEvent] = {}
         for event in sorted(events, key=lambda item: (item.at, item.event_id)):
             latest[event.provider_action_id] = event
+
         result: list[CorporateAction] = []
-        kinds = {
-            "split": CorporateActionKind.SPLIT,
-            "cash_dividend": CorporateActionKind.CASH_DIVIDEND,
-            "symbol_change": CorporateActionKind.SYMBOL_CHANGE,
-            "delisting": CorporateActionKind.DELISTING,
-        }
-        for row in rows:
-            try:
+        try:
+            for collection, row in self._get_corporate_action_rows(normalized):
                 action_id = str(row["id"])
                 evidence = latest.get(action_id)
-                if evidence is None:
+                if evidence is None or evidence.action is CorporateActionEventType.DELETE:
                     raise DatasetInvalid("CORPORATE_ACTION_KNOWLEDGE_UNAVAILABLE")
-                if evidence.action is CorporateActionEventType.DELETE:
-                    # Aktuální REST fakt po delete neumí rekonstruovat předchozí verzi.
+                if canonical_corporate_action_payload_hash(row) != evidence.payload_hash:
+                    # REST může dnes obsahovat novější opravenou verzi než verzi známou v SSE historii.
+                    # Takové hodnotě nesmíme přiřadit starší known_at; raději fail closed.
                     raise DatasetInvalid("CORPORATE_ACTION_KNOWLEDGE_UNAVAILABLE")
-                kind = kinds[str(row["type"])]
-                effective = datetime.fromisoformat(str(row["effective_at"]).replace("Z", "+00:00"))
-                value = Decimal(str(row["value"])) if row.get("value") is not None else None
-                result.append(
-                    CorporateAction(
-                        action_id,
-                        self._instrument_ids[normalized],
-                        kind,
-                        effective,
-                        evidence.at,
-                        value,
-                        row.get("new_symbol"),
-                    )
+                action = self._normalize_action(
+                    collection, row, self._instrument_ids[normalized], evidence.at
                 )
-            except DatasetInvalid:
-                raise
-            except (KeyError, TypeError, ValueError, InvalidOperation) as exc:
-                raise InvalidProviderResponse("Alpaca vrátila neplatnou corporate action") from exc
-        return result
+                if start <= action.effective_at.date() <= end:
+                    result.append(action)
+        except DatasetInvalid:
+            raise
+        except (KeyError, TypeError, ValueError, InvalidOperation) as exc:
+            raise InvalidProviderResponse("Alpaca vrátila neplatnou corporate action") from exc
+        return sorted(result, key=lambda item: (item.effective_at, item.action_id))
 
 
 def causal_adjusted_close(
