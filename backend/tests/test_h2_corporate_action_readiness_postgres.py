@@ -13,6 +13,8 @@ from sqlalchemy.orm import sessionmaker
 from quantlab.market_data import (
     AssetType,
     CorporateAction,
+    CorporateActionEvent,
+    CorporateActionEventType,
     CorporateActionKind,
     DatasetInvalid,
     Instrument,
@@ -21,7 +23,11 @@ from quantlab.market_data import (
     StooqProvider,
 )
 from quantlab.market_data_service import PersistentMarketDataService
-from quantlab.persistence import CorporateActionReadinessRecord, InstrumentRecord
+from quantlab.persistence import (
+    CorporateActionEventRecord,
+    CorporateActionReadinessRecord,
+    InstrumentRecord,
+)
 
 pytestmark = pytest.mark.skipif(
     os.getenv("RUN_POSTGRES_TESTS") != "1", reason="vyžaduje PostgreSQL CI"
@@ -33,10 +39,16 @@ class ActionProvider:
     supports: bool
     actions: list[CorporateAction]
     fails: bool = False
+    knowledge_unavailable: bool = False
 
     @property
     def metadata(self) -> ProviderMetadata:
-        return ProviderMetadata(f"h2-{self.supports}-{self.fails}", "1", self.supports, False)
+        return ProviderMetadata(
+            f"h2-{self.supports}-{self.fails}-{self.knowledge_unavailable}",
+            "1",
+            self.supports,
+            False,
+        )
 
     def resolve(self, symbol: str) -> dict[str, str]:
         return {"symbol": symbol}
@@ -45,6 +57,8 @@ class ActionProvider:
         return []
 
     def corporate_actions(self, symbol, start, end):  # type: ignore[no-untyped-def]
+        if self.knowledge_unavailable:
+            raise DatasetInvalid("CORPORATE_ACTION_KNOWLEDGE_UNAVAILABLE")
         if self.fails:
             raise ProviderUnavailable("simulované selhání actions API")
         return self.actions
@@ -157,6 +171,66 @@ def test_action_api_failure_is_persisted_and_fails_closed(scope) -> None:
         assert evidence is not None
         assert evidence.status == "FAILED"
         assert evidence.blocking_reason == "CORPORATE_ACTIONS_UNAVAILABLE"
+
+
+def test_missing_causal_knowledge_reason_is_persisted_exactly(scope) -> None:
+    factory, instrument = scope
+    cutoff = datetime(2026, 8, 26, 20, tzinfo=UTC)
+    service = PersistentMarketDataService(factory, clock=lambda: cutoff)
+
+    with pytest.raises(DatasetInvalid, match="^CORPORATE_ACTION_KNOWLEDGE_UNAVAILABLE$"):
+        service.verify_corporate_action_readiness(
+            ActionProvider(True, [], knowledge_unavailable=True),
+            instrument,
+            date(2026, 8, 1),
+            date(2026, 8, 26),
+            cutoff,
+        )
+
+    with factory() as session:
+        evidence = session.scalar(
+            select(CorporateActionReadinessRecord).where(
+                CorporateActionReadinessRecord.instrument_id == instrument.instrument_id
+            )
+        )
+        assert evidence is not None
+        assert evidence.status == "FAILED"
+        assert evidence.blocking_reason == "CORPORATE_ACTION_KNOWLEDGE_UNAVAILABLE"
+
+
+def test_corporate_action_event_persistence_is_idempotent_and_collision_strict(scope) -> None:
+    factory, _ = scope
+    suffix = uuid4().hex
+    service = PersistentMarketDataService(factory)
+    event = CorporateActionEvent(
+        f"event-{suffix}",
+        datetime(2026, 8, 29, 15, tzinfo=UTC),
+        CorporateActionEventType.INSERT,
+        f"ca-{suffix}",
+        "a" * 64,
+    )
+
+    service.record_corporate_action_event("alpaca", event)
+    service.record_corporate_action_event("alpaca", event)
+
+    with factory() as session:
+        rows = session.scalars(
+            select(CorporateActionEventRecord).where(
+                CorporateActionEventRecord.event_id == event.event_id
+            )
+        ).all()
+        assert len(rows) == 1
+        assert rows[0].payload_hash == "a" * 64
+
+    collision = CorporateActionEvent(
+        event.event_id,
+        event.at,
+        event.action,
+        event.provider_action_id,
+        "b" * 64,
+    )
+    with pytest.raises(DatasetInvalid, match="identity koliduje"):
+        service.record_corporate_action_event("alpaca", collision)
 
 
 def test_standard_stooq_is_explicitly_unsupported(scope) -> None:
