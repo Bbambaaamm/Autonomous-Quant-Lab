@@ -30,7 +30,7 @@ from quantlab.config import get_settings
 from quantlab.control_plane import ControlPlaneRegistryService
 from quantlab.demo import run_demo
 from quantlab.domain import AuditEventType
-from quantlab.market_data import AssetType, DatasetInvalid, Instrument, StooqProvider, XNYSCalendar
+from quantlab.market_data import AssetType, DatasetInvalid, Instrument, XNYSCalendar
 from quantlab.market_data_service import DatasetSnapshotService, PersistentMarketDataService
 from quantlab.multi_asset import STRATEGY_REGISTRY
 from quantlab.operator_read_model import OperatorReadModel
@@ -68,6 +68,7 @@ from quantlab.phase7 import (
     PaperPerformanceEvaluationRecord,
     PaperPerformanceSnapshotRecord,
 )
+from quantlab.provider_factory import build_market_data_provider
 from quantlab.research_service import ResearchService
 from quantlab.security import current_principal, security_boundary
 from quantlab.universe import UniverseDefinition, UniverseKind, UniverseMembership
@@ -204,7 +205,7 @@ class MembershipCreate(BaseModel):
 
 
 class IngestionCreate(BaseModel):
-    provider: str = "stooq"
+    provider: str = settings.market_data_provider
     instrument_id: str = Field(min_length=1, max_length=64)
     start: date
     end: date
@@ -596,8 +597,8 @@ def add_universe_membership(
 
 @app.post("/operator/market-data/ingestions")
 def ingest_market_data(body: IngestionCreate, request: Request) -> dict[str, object]:
-    if body.provider != "stooq":
-        raise HTTPException(422, "Provider není v production allowlistu")
+    if body.provider != settings.market_data_provider:
+        raise HTTPException(422, "Provider neodpovídá production konfiguraci")
     with session_factory() as session:
         persisted = session.get(InstrumentRecord, body.instrument_id)
         if persisted is None:
@@ -613,8 +614,9 @@ def ingest_market_data(body: IngestionCreate, request: Request) -> dict[str, obj
             persisted.active_to.date() if persisted.active_to else None,
             persisted.created_at,
         )
+    provider = build_market_data_provider(settings, paper_repository.engine)
     result = market_data_service.ingest(
-        StooqProvider(), instrument, body.start, body.end, datetime.now(UTC)
+        provider, instrument, body.start, body.end, datetime.now(UTC)
     )
     _audit_control_mutation(
         "CONTROL_MARKET_DATA_INGESTED",
@@ -820,10 +822,12 @@ def _set_autonomous_deployment(
     enabled: bool,
 ) -> dict[str, object]:
     try:
-        if enabled and not StooqProvider().metadata.supports_actions:
-            raise DatasetInvalid(
-                "CORPORATE_ACTIONS_UNSUPPORTED: production provider není způsobilý pro equity autonomous pilot"
-            )
+        if enabled:
+            provider = build_market_data_provider(settings, paper_repository.engine)
+            if not provider.metadata.supports_actions:
+                raise DatasetInvalid(
+                    "CORPORATE_ACTIONS_UNSUPPORTED: production provider není způsobilý pro equity autonomous pilot"
+                )
         job = automation_repository.set_autonomous_deployment(
             deployment_id=deployment_id, enabled=enabled
         )
@@ -1117,8 +1121,8 @@ def readyz() -> dict[str, str]:
 
 @app.get("/market-data/providers")
 def market_data_providers() -> list[dict[str, object]]:
-    """Vrací pouze allowlistované adaptery, nikdy dynamický import nebo arbitrary URL."""
-    metadata = StooqProvider.metadata
+    """Vrací právě aktivní allowlistovaný provider bez dynamického importu nebo arbitrary URL."""
+    metadata = build_market_data_provider(settings, paper_repository.engine).metadata
     return [
         {
             "name": metadata.name,

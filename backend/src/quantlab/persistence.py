@@ -115,6 +115,18 @@ class CorporateActionRecord(Base):
     new_symbol: Mapped[str | None] = mapped_column(String(32))
 
 
+class CorporateActionEventRecord(Base):
+    """Neměnný provider event dokazující, kdy byla corporate action známa."""
+
+    __tablename__ = "corporate_action_events"
+    event_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    provider: Mapped[str] = mapped_column(String(40), nullable=False, index=True)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    action: Mapped[str] = mapped_column(String(10), nullable=False)
+    provider_action_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    payload_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+
+
 class CorporateActionReadinessRecord(Base):
     """Neměnný důkaz, že provider prověřil konkrétní interval akcí."""
 

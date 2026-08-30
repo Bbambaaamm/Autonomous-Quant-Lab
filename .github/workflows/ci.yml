@@ -55,6 +55,7 @@ jobs:
           tests/test_research.py
           tests/test_research_engine.py
           tests/test_phase6.py
+          tests/test_alpaca_corporate_actions.py
           tests/test_xnys_calendar.py
           tests/test_paper_only_architecture.py
           tests/test_phase6_runtime.py

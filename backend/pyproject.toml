@@ -16,6 +16,7 @@ dependencies = [
 
 [project.scripts]
 quantlab-worker = "quantlab.worker:main"
+quantlab-alpaca-events = "quantlab.alpaca_event_worker:main"
 
 [dependency-groups]
 dev = [

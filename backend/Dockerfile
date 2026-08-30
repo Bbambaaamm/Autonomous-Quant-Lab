@@ -6,6 +6,7 @@ COPY backend/pyproject.toml backend/uv.lock ./
 RUN uv sync --locked --no-dev --no-install-project
 COPY backend/src ./src
 COPY --chmod=0555 backend/bin/quantlab-worker ./.venv/bin/quantlab-worker
+COPY --chmod=0555 backend/bin/quantlab-alpaca-events ./.venv/bin/quantlab-alpaca-events
 RUN rm -rf /usr/local/lib/python3.12/site-packages/pip* \
     /usr/local/lib/python3.12/ensurepip \
     /usr/local/lib/python3.12/lib-dynload/_curses*.so \

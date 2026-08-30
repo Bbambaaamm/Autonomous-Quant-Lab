@@ -27,6 +27,8 @@ class Settings(BaseSettings):
     market_data_calendar: str = "XNYS"
     market_data_minimum_coverage: Decimal = Decimal("0.98")
     market_data_staleness_policy: int = 1
+    alpaca_key_id: str = ""
+    alpaca_secret_key: str = ""
     api_viewer_token: str = ""
     api_operator_token: str = ""
     api_admin_token: str = ""
@@ -49,8 +51,15 @@ class Settings(BaseSettings):
             raise ValueError("Počet pokusů musí být v rozsahu 1 až 100")
         if self.retry_base_delay <= 0 or self.retry_max_delay < self.retry_base_delay:
             raise ValueError("Retry intervaly nejsou platné")
-        if self.market_data_provider not in {"stooq"} or self.market_data_calendar != "XNYS":
+        if (
+            self.market_data_provider not in {"stooq", "alpaca"}
+            or self.market_data_calendar != "XNYS"
+        ):
             raise ValueError("Market-data provider nebo kalendář není na allowlistu")
+        if self.market_data_provider == "alpaca" and not (
+            self.alpaca_key_id.strip() and self.alpaca_secret_key.strip()
+        ):
+            raise ValueError("Alpaca provider vyžaduje ALPACA_KEY_ID a ALPACA_SECRET_KEY")
         if self.market_data_timeout <= 0 or not 1 <= self.market_data_max_attempts <= 10:
             raise ValueError("Market-data retry konfigurace není platná")
         if self.market_data_sync_overlap < 0 or self.market_data_staleness_policy < 0:
