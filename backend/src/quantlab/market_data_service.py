@@ -13,6 +13,8 @@ from sqlalchemy.orm import Session
 from quantlab.domain import require_utc
 from quantlab.market_data import (
     CorporateAction,
+    CorporateActionEvent,
+    CorporateActionEventType,
     DatasetInvalid,
     DatasetSnapshot,
     IngestionResult,
@@ -24,6 +26,7 @@ from quantlab.market_data import (
     normalize_bar,
 )
 from quantlab.persistence import (
+    CorporateActionEventRecord,
     CorporateActionReadinessRecord,
     CorporateActionRecord,
     DatasetSnapshotRecord,
@@ -85,6 +88,61 @@ class PersistentMarketDataService:
         self._sessions = session_factory
         self.calendar = calendar or XNYSCalendar()
         self.clock = clock or (lambda: datetime.now(UTC))
+
+    def record_corporate_action_event(self, provider: str, event: CorporateActionEvent) -> None:
+        """Zapíše event jednou; kolize identity s jiným obsahem vždy failne."""
+        with self._sessions() as session, session.begin():
+            _lock(session, f"corporate-action-event:{provider}:{event.event_id}")
+            existing = session.get(CorporateActionEventRecord, event.event_id)
+            values = (
+                provider,
+                event.at,
+                event.action.value,
+                event.provider_action_id,
+                event.payload_hash,
+            )
+            if existing is not None:
+                persisted = (
+                    existing.provider,
+                    _database_utc(existing.occurred_at),
+                    existing.action,
+                    existing.provider_action_id,
+                    existing.payload_hash,
+                )
+                if persisted != values:
+                    raise DatasetInvalid("Corporate-action event identity koliduje s jiným obsahem")
+                return
+            session.add(
+                CorporateActionEventRecord(
+                    event_id=event.event_id,
+                    provider=provider,
+                    occurred_at=event.at,
+                    action=event.action.value,
+                    provider_action_id=event.provider_action_id,
+                    payload_hash=event.payload_hash,
+                )
+            )
+
+    def corporate_action_events(self, provider: str) -> tuple[CorporateActionEvent, ...]:
+        """Načte persistentní stream evidence v deterministickém pořadí."""
+        with self._sessions() as session:
+            rows = session.scalars(
+                select(CorporateActionEventRecord)
+                .where(CorporateActionEventRecord.provider == provider)
+                .order_by(
+                    CorporateActionEventRecord.occurred_at, CorporateActionEventRecord.event_id
+                )
+            ).all()
+        return tuple(
+            CorporateActionEvent(
+                row.event_id,
+                _database_utc(row.occurred_at),
+                CorporateActionEventType(row.action),
+                row.provider_action_id,
+                row.payload_hash,
+            )
+            for row in rows
+        )
 
     def ingest(
         self,
@@ -169,7 +227,14 @@ class PersistentMarketDataService:
                     raise DatasetInvalid("Corporate action porušuje knowledge cutoff")
                 status, reason = "COMPLETE", None
             except Exception as exc:
-                status, reason, error = "FAILED", "CORPORATE_ACTIONS_UNAVAILABLE", exc
+                status = "FAILED"
+                reason = (
+                    "CORPORATE_ACTION_KNOWLEDGE_UNAVAILABLE"
+                    if isinstance(exc, DatasetInvalid)
+                    and str(exc) == "CORPORATE_ACTION_KNOWLEDGE_UNAVAILABLE"
+                    else "CORPORATE_ACTIONS_UNAVAILABLE"
+                )
+                error = exc
         evidence_payload = "|".join(sorted(action.action_id for action in actions))
         evidence_id = hashlib.sha256(f"{identity}|{status}|{evidence_payload}".encode()).hexdigest()
         checked_at = require_utc(self.clock())

@@ -11,6 +11,13 @@ Všechny timestampy jsou timezone-aware UTC. Provider datum se mapuje přes `XNY
 ## Ceny a corporate actions
 Raw OHLC je jediná execution série. Signal adjustment je explicitní a používá pouze split/dividend známý (`known_at`) a účinný (`effective_at`) nejpozději k `as_of`. Split upraví quantity i unit basis; cash dividend je samostatný cash event a nesmí se současně započítat do total-return série. Symbol change zachovává instrument ID. Delisting bez executable ceny zůstává unresolved; cena se nevymýšlí.
 
+Alpaca adapter vyžaduje oddělené zdroje důkazu: REST poskytuje raw OHLCV a aktuální fakta
+corporate actions, zatímco `known_at` se smí odvodit pouze z času `at` odpovídajícího Alpaca SSE
+eventu. Envelope `event_id`, `at`, `action` (`insert`/`update`/`delete`) a identita akce se ukládá
+neměnně spolu s hashem původních bajtů. REST historická akce bez takové evidence skončí
+`CORPORATE_ACTION_KNOWLEDGE_UNAVAILABLE`; readiness je `FAILED` a prázdná domněnka ani datum
+účinnosti nesmí chybějící knowledge timestamp nahradit.
+
 ## Snapshoty
 Snapshot ukládá `as_of`, provider, calendar identity, PIT universe, rozsah, coverage, seřazený manifest observation revisions a SHA-256. Hash nezávisí na pořadí DB řádků. Pozdější correction vytvoří jiný snapshot, nikdy nezmění manifest starého. Snapshot pod minimální coverage (default 80 %) má stav `INVALID` a nesmí spustit experiment.
 
