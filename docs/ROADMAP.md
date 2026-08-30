@@ -2,7 +2,7 @@
 
 This document is the repository-level source of truth for development order, promotion gates, and long-term architecture.
 
-Detailed capability specifications live in linked GitHub Issues. An Issue may describe future capabilities, but it does not authorize implementation outside the current phase.
+Detailed capability specifications live in linked GitHub Issues. An Issue may describe future capabilities, but it does not authorize implementation outside the current approved workstream.
 
 ## Constitutional invariants
 
@@ -25,32 +25,33 @@ The following are non-negotiable:
 
 See `AGENTS.md` for mandatory engineering rules.
 
-## Current phase — Phase 6: stable PIT research + paper execution
+## Existing implementation baseline — Phase 1 through Phase 9 complete
 
-Goal: complete and operationally validate the causal market-data, immutable research, point-in-time universe, strategy, eligibility, paper deployment, and autonomous paper-execution pipeline.
+`docs/implementation-plan.md` is authoritative for the already completed numbered implementation phases. Phase 1 through Phase 9 are complete there, including Phase 6 market data/PIT research, Phase 7 paper monitoring, Phase 8 operator control plane, and Phase 9 security/production hardening.
 
-Phase 6 is complete only when the final exact deployed SHA has passed CI and production-like staging acceptance, including real-session paper execution acceptance where required.
+The current work is a **paper-pilot / production-like acceptance workstream on top of that completed Phase 1–9 baseline**. It must finish the remaining real-session and acceptance blockers without reusing completed phase numbers.
 
-No Phase 7+ work may be used to bypass a Phase 6 blocker.
+No Phase 10+ capability work may be used to bypass an unresolved current paper-pilot blocker.
 
 ## Long-term capability order
 
 ```text
-Phase 6 — Stable PIT Research + Paper Execution
-→ Phase 7 — Autonomous Research Factory (#74)
-→ Phase 8 — News & Event Intelligence (#75)
-→ Phase 9 — Model Validation, Alpha Attribution & Capacity (#76)
-→ Phase 9/10 — Portfolio Intelligence & Capital Allocation
-→ Permanent Paper Laboratory
-→ Live Readiness
+Completed baseline — Phase 1 through Phase 9
+→ current paper-pilot / production-like acceptance
+→ Phase 10 — Autonomous Research Factory (#74)
+→ Phase 11 — News & Event Intelligence (#75)
+→ Phase 12 — Model Validation, Alpha Attribution & Capacity (#76)
+→ Phase 13 — Portfolio Intelligence & Capital Allocation
+→ Permanent Paper Laboratory (ongoing operating model)
+→ Phase 14 — Live Readiness
 → possible future Controlled Live Portfolio (separate explicit project/decision)
 ```
 
-The numbering after Phase 9 may be refined when those phases are formally specified. Ordering and gates matter more than provisional numbers.
+Phase 10+ numbering is reserved for future capabilities after the completed Phase 1–9 baseline. A future live execution project is not implicitly authorized by this numbering.
 
 ## Capability roadmaps
 
-### #74 — Autonomous hypothesis and strategy research
+### Phase 10 / #74 — Autonomous hypothesis and strategy research
 
 Parent roadmap for the Autonomous Research Factory:
 
@@ -65,7 +66,7 @@ Parent roadmap for the Autonomous Research Factory:
 
 Issue: https://github.com/Bbambaaamm/Autonomous-Quant-Lab/issues/74
 
-### #75 — News & Event Intelligence Layer
+### Phase 11 / #75 — News & Event Intelligence Layer
 
 Dedicated point-in-time news/event capability:
 
@@ -79,7 +80,7 @@ Dedicated point-in-time news/event capability:
 
 Issue: https://github.com/Bbambaaamm/Autonomous-Quant-Lab/issues/75
 
-### #76 — Model Validation, Alpha Attribution & Capacity Framework
+### Phase 12 / #76 — Model Validation, Alpha Attribution & Capacity Framework
 
 Institutional validation layer that answers whether an apparent edge is real, independent, robust, and scalable:
 
@@ -151,10 +152,13 @@ The target operating model is:
 ```text
 Autonomous Research Factory
 → Independent Validation
-→ Permanent Paper Laboratory
-→ Independent Risk & Governance
-→ future Controlled Live Portfolio
+→ Independent Risk & Governance authorization gate
+→ Permanent Paper Laboratory / Paper Execution
+→ Post-trade monitoring, reconciliation, and governance
+→ future Controlled Live Portfolio only after separate Live Readiness approval
 ```
+
+At runtime, every economic order path remains `Strategy → Portfolio → RiskEngine → ExecutionEngine → Broker`.
 
 ## Definition of Ready
 
@@ -201,7 +205,7 @@ Use `docs/acceptance/README.md` for acceptance evidence conventions.
 - Every implementation PR must link its Issue and parent capability/phase.
 - Material architecture decisions must be recorded under `docs/adr/`.
 - Failed experiments, rejected strategies, invalid data states, and operational incidents remain part of the audit history.
-- Attractive new features must not pre-empt unresolved blockers in the current phase.
+- Attractive new features must not pre-empt unresolved blockers in the current workstream.
 
 ## Planning principle
 
