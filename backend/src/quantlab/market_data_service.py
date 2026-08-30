@@ -315,7 +315,7 @@ class PersistentMarketDataService:
         cutoff = require_utc(knowledge_cutoff)
         identity = "|".join(
             (
-                provider.metadata.name,
+                provider.metadata.persistent_name,
                 provider.metadata.version,
                 instrument.instrument_id,
                 start.isoformat(),
@@ -326,7 +326,7 @@ class PersistentMarketDataService:
         with self._sessions() as session:
             existing = session.scalar(
                 select(CorporateActionReadinessRecord).where(
-                    CorporateActionReadinessRecord.provider == provider.metadata.name,
+                    CorporateActionReadinessRecord.provider == provider.metadata.persistent_name,
                     CorporateActionReadinessRecord.provider_version == provider.metadata.version,
                     CorporateActionReadinessRecord.instrument_id == instrument.instrument_id,
                     CorporateActionReadinessRecord.requested_start == _instant(start),
@@ -368,7 +368,7 @@ class PersistentMarketDataService:
                 session.add(
                     CorporateActionReadinessRecord(
                         evidence_id=evidence_id,
-                        provider=provider.metadata.name,
+                        provider=provider.metadata.persistent_name,
                         provider_version=provider.metadata.version,
                         instrument_id=instrument.instrument_id,
                         requested_start=_instant(start),
@@ -382,7 +382,7 @@ class PersistentMarketDataService:
                     )
                 )
                 for action in actions:
-                    self._persist_action(session, provider.metadata.name, action)
+                    self._persist_action(session, provider.metadata.persistent_name, action)
         if status != "COMPLETE":
             if error is not None:
                 raise error
@@ -400,10 +400,12 @@ class PersistentMarketDataService:
         executable_open: bool,
     ) -> IngestionResult:
         observed_at = require_utc(observed_at)
-        if len(provider.metadata.name) > 40:
+        persistent_provider = provider.metadata.persistent_name
+        if len(persistent_provider) > 40:
             raise DatasetInvalid("Provider identity překračuje persistentní limit 40 znaků")
         scope_identity = (
-            f"{provider.metadata.name}|{instrument.instrument_id}|{start}|{end}|"
+            f"{persistent_provider}|{provider.metadata.version}|{instrument.instrument_id}|"
+            f"{start}|{end}|"
             f"{observed_at.isoformat()}"
         )
         if executable_open:
@@ -417,7 +419,7 @@ class PersistentMarketDataService:
                 session.add(
                     MarketDataIngestionRecord(
                         id=ingestion_id,
-                        provider=provider.metadata.name,
+                        provider=persistent_provider,
                         scope_hash=scope,
                         started_at=observed_at,
                         status="STARTED",
@@ -450,13 +452,13 @@ class PersistentMarketDataService:
                 )
             normalized = [
                 self._normalize_open(
-                    bar, instrument, provider.metadata.name, knowledge_time, ingestion_id
+                    bar, instrument, persistent_provider, knowledge_time, ingestion_id
                 )
                 if executable_open
                 else normalize_bar(
                     bar,
                     instrument,
-                    provider.metadata.name,
+                    persistent_provider,
                     observed_at,
                     ingestion_id,
                     self.calendar,
@@ -528,7 +530,7 @@ class PersistentMarketDataService:
                     )
                     added.append(item)
                 for action in actions:
-                    self._persist_action(session, provider.metadata.name, action)
+                    self._persist_action(session, persistent_provider, action)
                 existing.status = "SUCCEEDED"
                 existing.finished_at = datetime.now(UTC)
                 existing.row_count = len(added)

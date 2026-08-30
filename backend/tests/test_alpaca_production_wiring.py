@@ -5,6 +5,7 @@ from pydantic import ValidationError
 
 import quantlab.alpaca_event_worker as event_worker
 from quantlab.config import Settings
+from quantlab.market_data import AlpacaProvider, ProviderUnavailable
 
 REPOSITORY_ROOT = Path(__file__).parents[2]
 
@@ -33,6 +34,24 @@ def test_alpaca_feed_rejects_value_outside_allowlist() -> None:
         Settings(alpaca_feed="automatic")
 
 
+def test_alpaca_feed_is_part_of_persistent_provider_lineage() -> None:
+    common = (
+        "key",
+        "secret",
+        lambda _: (),
+        {"AAPL": "instrument-aapl"},
+        lambda *_: (200, {}, b"{}"),
+    )
+
+    iex = AlpacaProvider(*common, feed="iex")
+    sip = AlpacaProvider(*common, feed="sip")
+
+    assert iex.metadata.name == sip.metadata.name == "alpaca"
+    assert iex.metadata.version == sip.metadata.version == "4"
+    assert iex.metadata.persistent_name == "alpaca:iex"
+    assert sip.metadata.persistent_name == "alpaca:sip"
+
+
 def test_production_compose_hardens_alpaca_event_worker() -> None:
     service = _compose_service("alpaca-events")
 
@@ -57,3 +76,25 @@ def test_alpaca_event_worker_exits_successfully_for_stooq(monkeypatch: pytest.Mo
     )
 
     assert event_worker.main() is None
+
+
+def test_alpaca_event_worker_fails_after_clean_stream_exhaustion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = type("Engine", (), {"dispose": lambda self: None})()
+    service = type("Service", (), {"corporate_action_events": lambda self, provider: ()})()
+    stream = type("Stream", (), {"run": lambda self, cursor: None})()
+    monkeypatch.setattr(
+        event_worker,
+        "get_settings",
+        lambda: Settings(
+            market_data_provider="alpaca", alpaca_key_id="key", alpaca_secret_key="secret"
+        ),
+    )
+    monkeypatch.setattr(event_worker, "create_engine", lambda *args, **kwargs: engine)
+    monkeypatch.setattr(event_worker, "sessionmaker", lambda *args, **kwargs: object())
+    monkeypatch.setattr(event_worker, "PersistentMarketDataService", lambda factory: service)
+    monkeypatch.setattr(event_worker, "AlpacaCorporateActionStream", lambda *args, **kwargs: stream)
+
+    with pytest.raises(ProviderUnavailable, match="vyčerpal povolené reconnect pokusy"):
+        event_worker.main()
