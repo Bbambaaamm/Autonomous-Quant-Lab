@@ -81,7 +81,8 @@ def upgrade() -> None:
     )
     op.create_table(
         "corporate_action_cancellations",
-        sa.Column("action_id", sa.String(64), primary_key=True),
+        sa.Column("cancellation_id", sa.String(64), primary_key=True),
+        sa.Column("action_id", sa.String(64), nullable=False),
         sa.Column("provider", sa.String(40), nullable=False),
         sa.Column("provider_action_id", sa.String(128), nullable=False),
         sa.Column(
@@ -92,9 +93,11 @@ def upgrade() -> None:
             unique=True,
         ),
         sa.Column("known_at", sa.DateTime(timezone=True), nullable=False),
-        sa.UniqueConstraint(
-            "provider", "provider_action_id", name="uq_corporate_action_cancellation_provider"
-        ),
+    )
+    op.create_index(
+        "ix_corporate_action_cancellations_pit",
+        "corporate_action_cancellations",
+        ["action_id", "known_at"],
     )
 
     if op.get_bind().dialect.name == "postgresql":
