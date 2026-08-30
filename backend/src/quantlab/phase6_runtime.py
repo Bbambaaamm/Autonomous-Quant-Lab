@@ -1525,13 +1525,17 @@ class Phase6PaperExecutionService:
                 ready_instruments = {item.instrument_id for item in readiness}
                 if ready_instruments != set(execution_instruments):
                     raise DatasetInvalid("CORPORATE_ACTIONS_NOT_READY")
-            action_rows = tuple(
-                session.scalars(
-                    select(CorporateActionRecord).where(
-                        CorporateActionRecord.instrument_id.in_(eligible),
-                        CorporateActionRecord.known_at <= decision_time,
+            action_rows = (
+                tuple(
+                    session.scalars(
+                        select(CorporateActionRecord).where(
+                            CorporateActionRecord.instrument_id.in_(eligible),
+                            CorporateActionRecord.known_at <= decision_time,
+                        )
                     )
                 )
+                if persisted_intents is None
+                else ()
             )
         strategy_type = STRATEGY_REGISTRY.get(deployment.strategy_name)
         if strategy_type is None:
@@ -1548,48 +1552,6 @@ class Phase6PaperExecutionService:
         latest = self.current_data.for_execution_session(
             execution_instruments, executable_session, as_of
         )
-        expected_sessions: list[date] = []
-        history_session = executable_session
-        for _ in range(strategy.required_lookback):
-            history_session = self.current_data.calendar.previous_session(history_session)
-            expected_sessions.append(history_session)
-        expected_sessions.reverse()
-        signal_time = self.current_data.calendar.session_close(expected_sessions[-1])
-        history = self.current_data.history(
-            eligible,
-            decision_time,
-            strategy.required_lookback,
-            before_session=executable_session,
-            known_at=signal_time,
-        )
-        if any(
-            len(values) != strategy.required_lookback
-            or [item.session_date for item in values] != expected_sessions
-            for values in history.values()
-        ):
-            raise DatasetInvalid("Current strategy history je neúplná")
-        actions = tuple(
-            CorporateAction(
-                item.action_id,
-                item.instrument_id,
-                CorporateActionKind(item.kind),
-                _database_utc(item.effective_at),
-                _database_utc(item.known_at),
-                Decimal(item.value) if item.value is not None else None,
-                item.new_symbol,
-            )
-            for item in action_rows
-            if _database_utc(item.known_at) <= signal_time
-        )
-        signal_prices = {
-            instrument: tuple(
-                causal_adjusted_close(values, actions, decision_time)[item.session_date]
-                for item in values
-            )
-            for instrument, values in history.items()
-        }
-        from quantlab.multi_asset import StrategyContext
-
         strategy_id = f"phase6:{deployment.deployment_id}"
         with self._sessions() as session:
             previous_cycle = session.scalar(
@@ -1611,17 +1573,66 @@ class Phase6PaperExecutionService:
                 as_of,
             )
             return previous_cycle.id
-        if previous_cycle is not None and not self._rebalance_due(
-            executable_session,
-            previous_cycle.session_date,
-            strategy.rebalance_frequency,
-        ):
-            raise DatasetInvalid("Deployment dnes nemá povolený rebalance")
-        target = strategy.generate_targets(
-            StrategyContext(signal_time, history, eligible, signal_prices)
-        )
-        if any(instrument not in eligible for instrument, _ in target.weights):
-            raise DatasetInvalid("Strategy vytvořila target mimo deployment PIT universe")
+        history: dict[str, tuple[Observation, ...]] = {}
+        signal_prices: dict[str, tuple[Decimal, ...]] = {}
+        expected_sessions = [timing.signal_session]
+        target_weights: dict[str, Decimal] = {}
+        if persisted_intents is None:
+            expected_sessions = []
+            history_session = executable_session
+            for _ in range(strategy.required_lookback):
+                history_session = self.current_data.calendar.previous_session(history_session)
+                expected_sessions.append(history_session)
+            expected_sessions.reverse()
+            signal_time = self.current_data.calendar.session_close(expected_sessions[-1])
+            history = self.current_data.history(
+                eligible,
+                decision_time,
+                strategy.required_lookback,
+                before_session=executable_session,
+                known_at=signal_time,
+            )
+            if any(
+                len(values) != strategy.required_lookback
+                or [item.session_date for item in values] != expected_sessions
+                for values in history.values()
+            ):
+                raise DatasetInvalid("Current strategy history je neúplná")
+            actions = tuple(
+                CorporateAction(
+                    item.action_id,
+                    item.instrument_id,
+                    CorporateActionKind(item.kind),
+                    _database_utc(item.effective_at),
+                    _database_utc(item.known_at),
+                    Decimal(item.value) if item.value is not None else None,
+                    item.new_symbol,
+                )
+                for item in action_rows
+                if _database_utc(item.known_at) <= signal_time
+            )
+            signal_prices = {
+                instrument: tuple(
+                    causal_adjusted_close(values, actions, decision_time)[item.session_date]
+                    for item in values
+                )
+                for instrument, values in history.items()
+            }
+            from quantlab.multi_asset import StrategyContext
+
+            if previous_cycle is not None and not self._rebalance_due(
+                executable_session,
+                previous_cycle.session_date,
+                strategy.rebalance_frequency,
+            ):
+                raise DatasetInvalid("Deployment dnes nemá povolený rebalance")
+            target = strategy.generate_targets(
+                StrategyContext(signal_time, history, eligible, signal_prices)
+            )
+            if any(instrument not in eligible for instrument, _ in target.weights):
+                raise DatasetInvalid("Strategy vytvořila target mimo deployment PIT universe")
+            target_weights = {instrument: Decimal("0") for instrument in held}
+            target_weights.update(dict(target.weights))
         bars = [
             Bar(
                 item.instrument_id,
@@ -1639,8 +1650,6 @@ class Phase6PaperExecutionService:
             )
             for item in latest
         ]
-        target_weights = {instrument: Decimal("0") for instrument in held}
-        target_weights.update(dict(target.weights))
         from quantlab.phase7 import PaperCorporateActionService
 
         PaperCorporateActionService(self._sessions).apply(account.id, as_of)
@@ -1695,6 +1704,9 @@ class Phase6PaperExecutionService:
                     "signal_observation_ids": [
                         item.observation_id for values in history.values() for item in values
                     ],
+                    "persisted_intent_ids": sorted(
+                        intent.id for intent in (persisted_intents or ())
+                    ),
                     "decision_time": decision_time.isoformat(),
                     "signal_through_session": expected_sessions[-1].isoformat(),
                     "executable_session": executable_session.isoformat(),

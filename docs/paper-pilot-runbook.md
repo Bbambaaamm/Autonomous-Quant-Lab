@@ -92,6 +92,7 @@ Production worker rezervuje nejbližší materializované XNYS occurrence před 
 - execution-time risk decision používá skutečný open-time knowledge čas, nikdy previous-session signal close;
 - risk equity a nový `session_start_equity` se markují z cash a raw-open cen všech held instrumentů; stale ledger equity není risk denominator;
 - corporate-action readiness pre-open intentu končí execution session a používá skutečný PREPARE decision cutoff, zatímco strategy signal history zůstává omezena prior-session causal cutoffem;
+- persisted-intent open cesta znovu nenačítá signal history ani negeneruje target portfolio; ekonomické strategy rozhodnutí proběhlo výhradně v PREPARE a open runtime pouze validuje a vykonává immutable intent;
 - žádný backdating `scheduled_for` nevytváří pre-open objednávku;
 - po cutoff se nikdy nedělá retroaktivní fill ani ruční backfill.
 
