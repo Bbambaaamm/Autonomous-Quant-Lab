@@ -79,6 +79,23 @@ def upgrade() -> None:
         "corporate_action_revisions",
         ["instrument_id", "provider", "provider_action_id", "known_at"],
     )
+    op.create_table(
+        "corporate_action_cancellations",
+        sa.Column("action_id", sa.String(64), primary_key=True),
+        sa.Column("provider", sa.String(40), nullable=False),
+        sa.Column("provider_action_id", sa.String(128), nullable=False),
+        sa.Column(
+            "event_id",
+            sa.String(128),
+            sa.ForeignKey("corporate_action_events.event_id", ondelete="RESTRICT"),
+            nullable=False,
+            unique=True,
+        ),
+        sa.Column("known_at", sa.DateTime(timezone=True), nullable=False),
+        sa.UniqueConstraint(
+            "provider", "provider_action_id", name="uq_corporate_action_cancellation_provider"
+        ),
+    )
 
     if op.get_bind().dialect.name == "postgresql":
         op.execute(
@@ -88,6 +105,7 @@ def upgrade() -> None:
             ("corporate_action_events", "corporate_action_events_immutable"),
             ("corporate_action_event_audit", "corporate_action_event_audit_immutable"),
             ("corporate_action_revisions", "corporate_action_revisions_immutable"),
+            ("corporate_action_cancellations", "corporate_action_cancellations_immutable"),
         ):
             op.execute(
                 f"CREATE TRIGGER {trigger} BEFORE UPDATE OR DELETE ON {table} "
@@ -98,12 +116,14 @@ def upgrade() -> None:
 def downgrade() -> None:
     if op.get_bind().dialect.name == "postgresql":
         for table, trigger in (
+            ("corporate_action_cancellations", "corporate_action_cancellations_immutable"),
             ("corporate_action_revisions", "corporate_action_revisions_immutable"),
             ("corporate_action_event_audit", "corporate_action_event_audit_immutable"),
             ("corporate_action_events", "corporate_action_events_immutable"),
         ):
             op.execute(f"DROP TRIGGER IF EXISTS {trigger} ON {table}")
         op.execute("DROP FUNCTION IF EXISTS reject_corporate_action_evidence_mutation()")
+    op.drop_table("corporate_action_cancellations")
     op.drop_table("corporate_action_revisions")
     op.drop_table("corporate_action_event_audit")
     op.drop_table("corporate_action_events")
