@@ -47,6 +47,18 @@ services:
     tmpfs: [/tmp]
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
+  alpaca-events:
+    image: quantlab-backend
+    env_file: [.env.production]
+    command: ["/app/backend/.venv/bin/quantlab-alpaca-events"]
+    healthcheck: {disable: true}
+    depends_on: {postgres: {condition: service_healthy}}
+    networks: [data, market-data-egress]
+    restart: "on-failure:5"
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
   frontend:
     build: {context: ., dockerfile: frontend/Dockerfile}
     env_file: [.env.production]

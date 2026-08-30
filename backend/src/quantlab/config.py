@@ -29,6 +29,7 @@ class Settings(BaseSettings):
     market_data_staleness_policy: int = 1
     alpaca_key_id: str = ""
     alpaca_secret_key: str = ""
+    alpaca_feed: str = "iex"
     api_viewer_token: str = ""
     api_operator_token: str = ""
     api_admin_token: str = ""
@@ -60,6 +61,8 @@ class Settings(BaseSettings):
             self.alpaca_key_id.strip() and self.alpaca_secret_key.strip()
         ):
             raise ValueError("Alpaca provider vyžaduje ALPACA_KEY_ID a ALPACA_SECRET_KEY")
+        if self.alpaca_feed not in {"iex", "sip", "delayed_sip", "otc", "boats", "overnight"}:
+            raise ValueError("ALPACA_FEED není na allowlistu")
         if self.market_data_timeout <= 0 or not 1 <= self.market_data_max_attempts <= 10:
             raise ValueError("Market-data retry konfigurace není platná")
         if self.market_data_sync_overlap < 0 or self.market_data_staleness_policy < 0:

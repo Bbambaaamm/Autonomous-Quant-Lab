@@ -7,6 +7,7 @@ from sqlalchemy.orm import sessionmaker
 
 from quantlab.alpaca_sse import AlpacaCorporateActionStream
 from quantlab.config import get_settings
+from quantlab.market_data import ProviderUnavailable
 from quantlab.market_data_service import PersistentMarketDataService
 
 
@@ -16,7 +17,8 @@ def main() -> None:
     logging.basicConfig(level=settings.log_level)
     logger = logging.getLogger("quantlab.alpaca_event_worker")
     if settings.market_data_provider != "alpaca":
-        raise ValueError("Alpaca event worker smí běžet pouze pro MARKET_DATA_PROVIDER=alpaca")
+        logger.info("Alpaca event worker je pro aktuální market-data provider vypnutý")
+        return
 
     engine = create_engine(settings.database_url, pool_pre_ping=True)
     factory = sessionmaker(engine, expire_on_commit=False)
@@ -36,6 +38,7 @@ def main() -> None:
     )
     try:
         stream.run(cursor)
+        raise ProviderUnavailable("Alpaca SSE stream vyčerpal povolené reconnect pokusy")
     finally:
         engine.dispose()
         logger.info("Alpaca corporate-action event worker skončil")

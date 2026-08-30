@@ -84,6 +84,12 @@ class ProviderMetadata:
     version: str
     supports_actions: bool
     requires_credentials: bool
+    lineage: str | None = None
+
+    @property
+    def persistent_name(self) -> str:
+        """Vrátí identitu zdroje, která nesmí sloučit odlišné datové lineage."""
+        return self.lineage or self.name
 
 
 @dataclass(frozen=True)
@@ -421,7 +427,6 @@ ActionEvidenceLoader = Callable[[str], tuple[CorporateActionEvent, ...]]
 class AlpacaProvider:
     """REST adapter; ``known_at`` je lokální receipt time přesně odpovídající SSE revize."""
 
-    metadata = ProviderMetadata("alpaca", "4", True, True)
     _base_url = "https://data.alpaca.markets"
     _supported_collections = frozenset(
         {
@@ -441,6 +446,7 @@ class AlpacaProvider:
         instrument_ids: dict[str, str],
         transport: AlpacaTransport,
         timeout: float = 10,
+        feed: str = "iex",
     ) -> None:
         if not key_id or not secret_key:
             raise ValueError("Alpaca credentials jsou povinné")
@@ -449,6 +455,10 @@ class AlpacaProvider:
         self._instrument_ids = {key.upper(): value for key, value in instrument_ids.items()}
         self._transport = transport
         self._timeout = timeout
+        if feed not in {"iex", "sip", "delayed_sip", "otc", "boats", "overnight"}:
+            raise ValueError("Alpaca feed není na allowlistu")
+        self._feed = feed
+        self.metadata = ProviderMetadata("alpaca", "4", True, True, f"alpaca:{feed}")
 
     def resolve(self, symbol: str) -> dict[str, str]:
         normalized = symbol.strip().upper()
@@ -537,6 +547,7 @@ class AlpacaProvider:
                 "start": f"{start.isoformat()}T00:00:00Z",
                 "end": exclusive_end,
                 "adjustment": "raw",
+                "feed": self._feed,
             },
             "bars",
         )
@@ -872,7 +883,8 @@ class InMemoryObservationStore:
         current = [
             r
             for r in self._rows
-            if r.instrument_id == instrument.instrument_id and r.provider == provider.metadata.name
+            if r.instrument_id == instrument.instrument_id
+            and r.provider == provider.metadata.persistent_name
         ]
         actual_start = max(
             start,
@@ -881,7 +893,12 @@ class InMemoryObservationStore:
         try:
             incoming = [
                 normalize_bar(
-                    b, instrument, provider.metadata.name, observed_at, ingestion_id, calendar
+                    b,
+                    instrument,
+                    provider.metadata.persistent_name,
+                    observed_at,
+                    ingestion_id,
+                    calendar,
                 )
                 for b in provider.historical_daily(instrument.symbol, actual_start, end)
             ]

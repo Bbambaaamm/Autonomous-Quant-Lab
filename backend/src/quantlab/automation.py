@@ -1257,7 +1257,10 @@ class JobExecutor:
             ValidatedCurrentDataAccessor(sessions),
             self.trading,
             require_corporate_action_readiness=True,
-            corporate_action_provider_identity=(provider.metadata.name, provider.metadata.version),
+            corporate_action_provider_identity=(
+                provider.metadata.persistent_name,
+                provider.metadata.version,
+            ),
         )
         try:
             cycle_id = service.run(
