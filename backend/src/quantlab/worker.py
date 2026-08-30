@@ -1,7 +1,8 @@
 import logging
 
-from quantlab.automation import AutomationRepository, SchedulerService, WorkerService
+from quantlab.automation import AutomationRepository, JobExecutor, SchedulerService, WorkerService
 from quantlab.config import get_settings
+from quantlab.provider_factory import build_market_data_provider
 
 
 def main() -> None:
@@ -15,14 +16,19 @@ def main() -> None:
         raise
     repository = AutomationRepository(settings.database_url)
     scheduler = SchedulerService(repository)
-    worker = WorkerService(repository, settings)
+    executor = JobExecutor(
+        repository,
+        provider_factory=lambda: build_market_data_provider(settings, repository.engine),
+    )
+    worker = WorkerService(repository, settings, executor=executor)
     reconciled = repository.reconcile_managed_schedules()
     if reconciled:
         logger.warning("Fail-closed disabled %s legacy/drifted autonomous schedules", reconciled)
     logger.info(
-        "Worker startuje: worker_id=%s scheduler_enabled=%s",
+        "Worker startuje: worker_id=%s scheduler_enabled=%s market_data_provider=%s",
         worker.worker_id,
         settings.automation_enabled,
+        settings.market_data_provider,
     )
     worker.install_signal_handlers()
     try:
