@@ -90,6 +90,8 @@ Production worker rezervuje nejbližší materializované XNYS occurrence před 
 - validní `xnys:` run smí raw open použít jen pro risk, kapacitu a fill, nikoli pro side/quantity;
 - persisted-intent execution načítá raw open pro všechny intent instrumenty a všechny držené instrumenty potřebné pro portfolio/risk marking; zero-delta neheld člen universe raw open nevyžaduje;
 - execution-time risk decision používá skutečný open-time knowledge čas, nikdy previous-session signal close;
+- risk equity a nový `session_start_equity` se markují z cash a raw-open cen všech held instrumentů; stale ledger equity není risk denominator;
+- corporate-action readiness pre-open intentu končí execution session a používá skutečný PREPARE decision cutoff, zatímco strategy signal history zůstává omezena prior-session causal cutoffem;
 - žádný backdating `scheduled_for` nevytváří pre-open objednávku;
 - po cutoff se nikdy nedělá retroaktivní fill ani ruční backfill.
 

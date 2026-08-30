@@ -421,6 +421,27 @@ class PortfolioRiskSnapshot:
     trading_state: SystemTradingState
 
 
+def execution_marked_equity(
+    cash: Decimal, positions: dict[str, Decimal], prices: dict[str, Decimal]
+) -> Decimal:
+    """Ocení held portfolio raw executable cenami pro execution-time risk."""
+    if set(positions) - set(prices):
+        raise ValueError("Execution risk postrádá raw-open cenu drženého instrumentu")
+    relevant_prices = {instrument: prices[instrument] for instrument in positions}
+    values = (cash, *positions.values(), *relevant_prices.values())
+    if any(not value.is_finite() for value in values) or any(
+        price <= 0 for price in relevant_prices.values()
+    ):
+        raise ValueError("Execution portfolio mark obsahuje neplatnou hodnotu")
+    marked = cash + sum(
+        (quantity * relevant_prices[instrument] for instrument, quantity in positions.items()),
+        Decimal(0),
+    )
+    if not marked.is_finite() or marked <= 0:
+        raise ValueError("Execution portfolio mark musí být konečný a kladný")
+    return marked
+
+
 class ProductionRiskEngine:
     def __init__(self, config: ProductionRiskConfig):
         self.config = config
@@ -1279,16 +1300,12 @@ class TradingCycleService:
                 )
             session.commit()
         bars_by_symbol = {item.symbol: item for item in bars}
-        with Session(self.repository.engine) as session:
-            account_row = session.get(PaperAccountRecord, account_id)
-            if account_row is None:
-                raise KeyError(account_id)
-            if account_row.session_date != session_date:
-                account_row.session_date = session_date
-                account_row.session_start_equity = account_row.equity
-                session.commit()
         account = self.repository.account(account_id)
-        positions = {p.instrument_id: p.quantity for p in self.repository.positions(account_id)}
+        positions = {
+            p.instrument_id: p.quantity
+            for p in self.repository.positions(account_id)
+            if p.quantity != 0
+        }
         pending: dict[str, Decimal] = {}
         for open_order in self.broker.get_open_orders(account_id):
             signed_remaining = (
@@ -1301,6 +1318,19 @@ class TradingCycleService:
             )
         # Všechny risk marky musí být dostupné ve stejném okamžiku jako next-open fill.
         prices = {symbol: item.open for symbol, item in bars_by_symbol.items()}
+        marked_equity = (
+            execution_marked_equity(account.cash, positions, prices)
+            if persisted_intents is not None
+            else account.equity
+        )
+        with Session(self.repository.engine) as session:
+            account_row = session.get(PaperAccountRecord, account_id)
+            if account_row is None:
+                raise KeyError(account_id)
+            if account_row.session_date != session_date:
+                account_row.session_date = session_date
+                account_row.session_start_equity = marked_equity
+                session.commit()
         with Session(self.repository.engine) as session:
             daily_orders = int(
                 session.scalar(
@@ -1383,10 +1413,15 @@ class TradingCycleService:
                 if account_row is None:
                     raise RuntimeError("Paper účet během trading cycle zmizel")
                 session_start_equity = account_row.session_start_equity or account.equity
+            if persisted_intent is not None:
+                marked_equity = execution_marked_equity(account.cash, positions, prices)
+                session_start_equity = account_row.session_start_equity or marked_equity
             snapshot = PortfolioRiskSnapshot(
                 account.cash,
-                account.equity,
-                account.high_water_mark,
+                marked_equity if persisted_intent is not None else account.equity,
+                max(account.high_water_mark, marked_equity)
+                if persisted_intent is not None
+                else account.high_water_mark,
                 session_start_equity,
                 positions,
                 prices,
@@ -1489,6 +1524,7 @@ class TradingCycleService:
             positions = {
                 position.instrument_id: position.quantity
                 for position in self.repository.positions(account_id)
+                if position.quantity != 0
             }
             daily_orders += 1
             daily_notional += order.submitted_notional

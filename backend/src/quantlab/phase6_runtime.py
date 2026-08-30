@@ -1492,6 +1492,20 @@ class Phase6PaperExecutionService:
                 if self.corporate_action_provider_identity is None:
                     raise DatasetInvalid("CORPORATE_ACTION_PROVIDER_IDENTITY_MISSING")
                 provider_name, provider_version = self.corporate_action_provider_identity
+                readiness_end = timing.signal_session
+                readiness_cutoff = decision_time
+                if persisted_intents is not None:
+                    intent_cutoffs = {intent.decision_time for intent in persisted_intents}
+                    if len(intent_cutoffs) != 1:
+                        raise DatasetInvalid(
+                            "Persisted intents mají nekonzistentní pre-open decision cutoff"
+                        )
+                    readiness_cutoff = next(iter(intent_cutoffs))
+                    if not decision_time < readiness_cutoff < execution_time:
+                        raise DatasetInvalid(
+                            "Persisted intent decision cutoff není mezi signal close a open"
+                        )
+                    readiness_end = executable_session
                 readiness = tuple(
                     session.scalars(
                         select(CorporateActionReadinessRecord).where(
@@ -1500,8 +1514,8 @@ class Phase6PaperExecutionService:
                             CorporateActionReadinessRecord.provider_version == provider_version,
                             CorporateActionReadinessRecord.requested_start <= snapshot.start_at,
                             CorporateActionReadinessRecord.requested_end
-                            >= datetime.combine(timing.signal_session, time(), UTC),
-                            CorporateActionReadinessRecord.knowledge_cutoff == decision_time,
+                            >= datetime.combine(readiness_end, time(), UTC),
+                            CorporateActionReadinessRecord.knowledge_cutoff == readiness_cutoff,
                             CorporateActionReadinessRecord.checked_at <= as_of,
                             CorporateActionReadinessRecord.supports_actions == 1,
                             CorporateActionReadinessRecord.status == "COMPLETE",

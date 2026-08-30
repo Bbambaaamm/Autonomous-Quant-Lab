@@ -1359,8 +1359,8 @@ class JobExecutor:
                             provider,
                             instrument,
                             snapshot.start_at.date(),
-                            signal_session,
-                            signal_close,
+                            execution_session,
+                            now,
                         )
                     )
                 except DatasetInvalid as exc:
