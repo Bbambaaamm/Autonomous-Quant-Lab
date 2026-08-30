@@ -51,7 +51,10 @@ class Settings(BaseSettings):
             raise ValueError("Počet pokusů musí být v rozsahu 1 až 100")
         if self.retry_base_delay <= 0 or self.retry_max_delay < self.retry_base_delay:
             raise ValueError("Retry intervaly nejsou platné")
-        if self.market_data_provider not in {"stooq", "alpaca"} or self.market_data_calendar != "XNYS":
+        if (
+            self.market_data_provider not in {"stooq", "alpaca"}
+            or self.market_data_calendar != "XNYS"
+        ):
             raise ValueError("Market-data provider nebo kalendář není na allowlistu")
         if self.market_data_provider == "alpaca" and not (
             self.alpaca_key_id.strip() and self.alpaca_secret_key.strip()
