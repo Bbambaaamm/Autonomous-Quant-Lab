@@ -71,9 +71,7 @@ def _response(groups: dict[str, list[dict[str, Any]]], token: str | None = None)
     return json.dumps(payload).encode()
 
 
-def _transport(
-    pages: dict[str | None, bytes], calls: list[dict[str, list[str]]]
-) -> Transport:
+def _transport(pages: dict[str | None, bytes], calls: list[dict[str, list[str]]]) -> Transport:
     def request(
         url: str, headers: dict[str, str], timeout: float
     ) -> tuple[int, dict[str, str], bytes]:
@@ -268,6 +266,7 @@ def test_alpaca_sse_reconnect_uses_last_event_id_and_skips_inclusive_replay() ->
         headers_seen.append(headers.copy())
         attempts += 1
         if attempts == 1:
+
             def interrupted():  # type: ignore[no-untyped-def]
                 yield first
                 raise ProviderUnavailable("simulovaný reconnect")
