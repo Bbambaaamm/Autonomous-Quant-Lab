@@ -6,6 +6,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Callable, Iterable, Iterator
+from datetime import UTC, datetime
 from typing import Any
 
 from quantlab.market_data import (
@@ -49,6 +50,7 @@ class AlpacaCorporateActionStream:
         timeout: float = 60,
         max_reconnects: int = 3,
         sleep: Callable[[float], None] = time.sleep,
+        clock: Callable[[], datetime] | None = None,
     ) -> None:
         if not key_id or not secret_key:
             raise ValueError("Alpaca credentials jsou povinné")
@@ -66,6 +68,7 @@ class AlpacaCorporateActionStream:
         self._timeout = timeout
         self._max_reconnects = max_reconnects
         self._sleep = sleep
+        self._clock = clock or (lambda: datetime.now(UTC))
         self._last_event_id: str | None = None
         self._last_batch_count = 0
 
@@ -119,7 +122,7 @@ class AlpacaCorporateActionStream:
             raise ProviderUnavailable("Alpaca SSE není dostupné") from exc
 
     @staticmethod
-    def _events(payload: bytes) -> tuple[CorporateActionEvent, ...]:
+    def _events(payload: bytes, received_at: datetime) -> tuple[CorporateActionEvent, ...]:
         try:
             decoded: Any = json.loads(payload)
         except (UnicodeError, json.JSONDecodeError) as exc:
@@ -129,7 +132,8 @@ class AlpacaCorporateActionStream:
             raise InvalidProviderResponse("Alpaca SSE event nemá objektový tvar")
         return tuple(
             CorporateActionEvent.from_sse(
-                json.dumps(item, sort_keys=True, separators=(",", ":")).encode()
+                json.dumps(item, sort_keys=True, separators=(",", ":")).encode(),
+                received_at=received_at,
             )
             for item in items
         )
@@ -150,7 +154,8 @@ class AlpacaCorporateActionStream:
         self._last_event_id = last_event_id
         self._last_batch_count = 0
         for payload in self._transport(self._url, headers, self._timeout):
-            for event in self._events(payload):
+            received_at = self._clock()
+            for event in self._events(payload, received_at):
                 if event.event_id in seen:
                     continue
                 self._sink("alpaca", event)
