@@ -21,13 +21,20 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from quantlab.automation import PreOpenExecutionIntentRecord
 from quantlab.domain import OrderIntent, ReconciliationStatus, Side, SystemTradingState
-from quantlab.market_data import AssetType, CorporateAction, CorporateActionKind, Instrument
+from quantlab.market_data import (
+    AssetType,
+    CorporateAction,
+    CorporateActionKind,
+    DatasetInvalid,
+    Instrument,
+)
 from quantlab.market_data_service import DatasetSnapshotService, PersistentMarketDataService
 from quantlab.multi_asset import MultiAssetPortfolio
 from quantlab.persistence import (
     CorporateActionRecord,
     DatasetSnapshotRecord,
     ExperimentRecord,
+    InstrumentRecord,
     MarketDataIngestionRecord,
     MarketObservationRecord,
     StrategyRecord,
@@ -477,7 +484,9 @@ def _seed_opening_observation(
         )
 
 
-def _research_to_paper(factory, engine, *, halted: bool, persisted: bool = False):
+def _research_to_paper(
+    factory, engine, *, halted: bool, persisted: bool = False, allowlist_mismatch: bool = False
+):
     suffix = uuid4().hex
     instrument, provider, sessions, snapshot, request = seed_phase6_snapshot(factory, suffix=suffix)
     runner = Phase6ExperimentRunner(factory)
@@ -506,6 +515,9 @@ def _research_to_paper(factory, engine, *, halted: bool, persisted: bool = False
     deployment_service = DeploymentService(factory)
     deployment = deployment_service.create(experiment.id, account_id, risk_config=approved_risk)
     assert deployment.status == "PENDING_REVIEW"
+    assert json.loads(deployment.runtime_manifest_json)["risk"]["instrument_allowlist"] == [
+        instrument.instrument_id
+    ]
     deployment_service.approve(deployment.deployment_id, datetime.now(UTC))
     monitoring_service = PaperMonitoringService(factory)
     policy = monitoring_service.create_policy(
@@ -540,6 +552,43 @@ def _research_to_paper(factory, engine, *, halted: bool, persisted: bool = False
     current_data = ValidatedCurrentDataAccessor(factory)
     service = Phase6PaperExecutionService(factory, current_data, cycle)
     execution_open = CALENDAR.session_open(next_session)
+    if allowlist_mismatch:
+        late_instrument_id = f"late-{suffix[:35]}"
+        with factory() as session, session.begin():
+            session.add(
+                InstrumentRecord(
+                    instrument_id=late_instrument_id,
+                    symbol=f"L{suffix[:7]}",
+                    exchange="XNYS",
+                    calendar="XNYS",
+                    currency="USD",
+                    asset_type="EQUITY",
+                    active_from=snapshot.as_of,
+                    active_to=None,
+                    created_at=snapshot.as_of,
+                )
+            )
+            session.add(
+                UniverseMembershipRecord(
+                    universe_id=deployment.universe_id,
+                    instrument_id=late_instrument_id,
+                    valid_from=snapshot.as_of,
+                    valid_to=None,
+                    known_at=snapshot.as_of + timedelta(microseconds=1),
+                )
+            )
+        with pytest.raises(DatasetInvalid, match="RISK_ALLOWLIST_COVERAGE_MISMATCH"):
+            service.run(deployment.deployment_id, execution_open)
+        with factory() as session:
+            assert (
+                session.scalar(
+                    select(func.count())
+                    .select_from(TradingCycleRecord)
+                    .where(TradingCycleRecord.account_id == account_id)
+                )
+                == 0
+            )
+        return account_id, deployment, experiment, snapshot, None, instrument, halted
     if persisted:
         intent = OrderIntent(
             instrument.instrument_id,
@@ -563,6 +612,10 @@ def _research_to_paper(factory, engine, *, halted: bool, persisted: bool = False
     else:
         cycle_id = service.run(deployment.deployment_id, execution_open)
     return account_id, deployment, experiment, snapshot, cycle_id, instrument, halted
+
+
+def test_postgres_runtime_allowlist_gate_precedes_economic_execution(factory, engine) -> None:
+    _research_to_paper(factory, engine, halted=False, allowlist_mismatch=True)
 
 
 def test_postgres_persisted_execution_does_not_regenerate_strategy(factory, engine) -> None:

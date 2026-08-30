@@ -3256,3 +3256,24 @@ Postup:
 Nevracej pouze implementační plán.
 
 **Implementuj celou Phase 6 end-to-end.**
+
+---
+
+## Staging remediation: canonical PAPER risk allowlist
+
+Production-like acceptance odhalila, že standardní operator deployment přebíral legacy
+`ProductionRiskConfig` allowlist `SPY`, zatímco celý Phase 6 runtime používá jako ekonomickou
+identitu canonical `instrument_id`. Deployment nyní při vytvoření deterministicky odvodí
+seřazený allowlist ze všech PIT memberships známých nejpozději v immutable snapshot cutoffu.
+Prázdná identita, whitespace nebo identita delší než Phase 4 persistentní limit 40 znaků
+creation fail-closed zastaví; ticker ani wildcard nejsou náhradou canonical identity.
+
+Explicitní risk konfigurace může nadále měnit numerické a provozní limity, její procesní
+allowlist je však pro Phase 6 deployment nahrazen canonical množinou ze schválené universe
+evidence. Výsledný allowlist zůstává součástí immutable runtime manifest hash i deployment
+identity. Approval znovu ověří pokrytí stejné snapshot evidence a PAPER runtime před načtením
+execution dat, tvorbou targetů nebo voláním `TradingCycleService` ověří všechny aktuálně
+eligible a persisted-intent identity. Drift končí deterministickým
+`DatasetInvalid("RISK_ALLOWLIST_COVERAGE_MISMATCH")`; jednotlivé pozdější risk rejectiony
+nejsou náhradou této deployment-level brány. Phase 4 risk engine svůj obecný allowlist nadále
+vynucuje beze změny a execution path zůstává výhradně paper-only.

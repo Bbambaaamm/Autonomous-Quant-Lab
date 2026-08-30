@@ -6,7 +6,7 @@ import math
 import shutil
 import subprocess
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, time
 from decimal import Decimal, InvalidOperation
 from uuid import uuid4
@@ -1159,8 +1159,15 @@ class DeploymentService:
             if universe is None or universe.kind != UniverseKind.POINT_IN_TIME_MEMBERSHIP:
                 raise DatasetInvalid("Paper deployment vyžaduje POINT_IN_TIME_SAFE universe")
             parameters = self._evidence(experiment.selected_parameters_json, "parameters")
+            canonical_instruments = self._deployment_universe_instruments(session, snapshot)
+            # Limity mohou být operátorem zpřísněny, identity však vždy pocházejí
+            # z neměnné PIT evidence, nikoli z tickerů ani procesního defaultu.
+            deployment_risk = replace(
+                risk_config or ProductionRiskConfig(),
+                instrument_allowlist=frozenset(canonical_instruments),
+            )
             manifest = build_runtime_manifest(
-                risk=risk_config,
+                risk=deployment_risk,
                 costs=costs,
                 slippage=slippage,
                 volume_fraction=volume_fraction,
@@ -1274,6 +1281,10 @@ class DeploymentService:
             )
             if persisted_parameters != parameters:
                 raise DatasetInvalid("Deployment parameters neodpovídají experiment evidence")
+            approved_instruments = set(self._deployment_universe_instruments(session, snapshot))
+            runtime_instruments = components_from_manifest(manifest).risk.instrument_allowlist
+            if not approved_instruments <= runtime_instruments:
+                raise DatasetInvalid("RISK_ALLOWLIST_COVERAGE_MISMATCH")
             if already_approved:
                 return
             row.status = "APPROVED"
@@ -1332,6 +1343,32 @@ class DeploymentService:
         except (KeyError, TypeError, ValueError) as exc:
             raise DatasetInvalid(str(exc)) from exc
         return manifest
+
+    @staticmethod
+    def _deployment_universe_instruments(
+        session: Session, snapshot: DatasetSnapshotRecord
+    ) -> tuple[str, ...]:
+        """Vrátí deterministické canonical identity známé v immutable snapshot cutoffu."""
+        instrument_ids = tuple(
+            sorted(
+                set(
+                    session.scalars(
+                        select(UniverseMembershipRecord.instrument_id).where(
+                            UniverseMembershipRecord.universe_id == snapshot.universe_id,
+                            UniverseMembershipRecord.known_at <= snapshot.as_of,
+                        )
+                    )
+                )
+            )
+        )
+        if not instrument_ids:
+            raise DatasetInvalid("PIT universe nemá canonical instrument identity pro deployment")
+        if any(
+            not instrument_id or instrument_id.strip() != instrument_id or len(instrument_id) > 40
+            for instrument_id in instrument_ids
+        ):
+            raise DatasetInvalid("PIT universe instrument ID překračuje Phase 4 podporovaný limit")
+        return instrument_ids
 
     @classmethod
     def validate_experiment(
@@ -1580,6 +1617,9 @@ class Phase6PaperExecutionService:
             )
             if not eligible:
                 raise DatasetInvalid("PIT universe nemá v decision time eligible instrument")
+            approved_allowlist = components_from_manifest(manifest).risk.instrument_allowlist
+            if not set(eligible) <= approved_allowlist:
+                raise DatasetInvalid("RISK_ALLOWLIST_COVERAGE_MISMATCH")
             held = {
                 item.instrument_id
                 for item in session.scalars(
@@ -1597,6 +1637,8 @@ class Phase6PaperExecutionService:
                     raise DatasetInvalid(
                         "Persisted intent instrument neodpovídá PIT universe ani held scope"
                     )
+                if not intent_instruments <= approved_allowlist:
+                    raise DatasetInvalid("RISK_ALLOWLIST_COVERAGE_MISMATCH")
                 # Open-time risk potřebuje pouze instrumenty s ekonomickým intentem
                 # a držené instrumenty pro úplné portfolio marking.
                 execution_instruments = persisted_execution_open_scope(intent_instruments, held)
