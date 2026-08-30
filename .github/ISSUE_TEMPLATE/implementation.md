@@ -1,6 +1,6 @@
 ---
 name: Implementation task
-description: Implementation work derived from an approved phase or capability roadmap
+about: Implementation work derived from an approved phase or capability roadmap
 title: ""
 labels: []
 assignees: []
