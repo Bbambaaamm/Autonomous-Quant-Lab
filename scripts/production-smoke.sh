@@ -39,11 +39,24 @@ docker run -d --name "$postgres" --network "$network" \
   -e POSTGRES_DB=quantlab -e POSTGRES_USER=quantlab -e POSTGRES_PASSWORD="$DB_PASSWORD" \
   postgres:17-alpine >/dev/null
 
+# The official PostgreSQL image may briefly expose its bootstrap server over the
+# Unix socket before the final TCP listener is ready. Checking pg_isready without
+# -h can therefore release the migration step too early. Require the final TCP
+# listener explicitly so the smoke test cannot race database initialization.
+postgres_ready=false
 for _ in $(seq 1 30); do
-  if docker exec "$postgres" pg_isready -U quantlab -d quantlab >/dev/null 2>&1; then break; fi
+  if docker exec "$postgres" pg_isready -h 127.0.0.1 -U quantlab -d quantlab >/dev/null 2>&1; then
+    postgres_ready=true
+    break
+  fi
   sleep 1
 done
-docker exec "$postgres" pg_isready -U quantlab -d quantlab >/dev/null
+if [ "$postgres_ready" != "true" ]; then
+  echo "PostgreSQL TCP listener did not become ready" >&2
+  docker logs "$postgres" >&2 || true
+  exit 1
+fi
+docker exec "$postgres" pg_isready -h 127.0.0.1 -U quantlab -d quantlab >/dev/null
 
 migration_url="postgresql+psycopg://quantlab:${DB_PASSWORD}@${postgres}:5432/quantlab"
 docker run --rm --network "$network" -e DATABASE_URL="$migration_url" \
