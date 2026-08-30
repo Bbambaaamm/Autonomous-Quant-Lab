@@ -292,6 +292,10 @@ def run_multi_asset(
         observations, key=lambda item: (item.timestamp, item.observed_at, item.revision)
     ):
         revisions.setdefault((row.instrument_id, row.timestamp), []).append(row)
+    if observation_knowledge_mode is ObservationKnowledgeMode.SNAPSHOT_PINNED and any(
+        len(rows) != 1 for rows in revisions.values()
+    ):
+        raise ValueError("Snapshot-pinned research vyžaduje právě jednu připnutou revision")
     times = sorted({row.timestamp for row in observations})
     portfolio = MultiAssetPortfolio(initial_cash)
     pending: TargetPortfolio | None = None
@@ -307,11 +311,7 @@ def run_multi_asset(
     )
     for index, when in enumerate(times):
         if observation_knowledge_mode is ObservationKnowledgeMode.SNAPSHOT_PINNED:
-            known_rows = {
-                key: max(rows, key=lambda row: (row.observed_at, row.revision))
-                for key, rows in revisions.items()
-                if key[1] <= when
-            }
+            known_rows = {key: rows[0] for key, rows in revisions.items() if key[1] <= when}
         else:
             known_rows = {
                 key: max(

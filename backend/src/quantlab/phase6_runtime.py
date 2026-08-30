@@ -972,7 +972,12 @@ class Phase6EligibilityService:
             row = session.get(ExperimentRecord, experiment_id, with_for_update=True)
             if row is None:
                 raise DatasetInvalid("Experiment neexistuje")
-            DeploymentService.validate_experiment(session, row)
+            snapshot, _, _ = DeploymentService.validate_experiment(session, row)
+            universe = session.get(UniverseDefinitionRecord, snapshot.universe_id)
+            if universe is None or universe.kind != UniverseKind.POINT_IN_TIME_MEMBERSHIP:
+                raise DatasetInvalid(
+                    "BIAS_PRONE_STATIC experiment zůstává RESEARCH_ONLY a nelze jej povýšit"
+                )
             decision = session.scalar(
                 select(Phase6EligibilityDecisionRecord).where(
                     Phase6EligibilityDecisionRecord.experiment_id == row.id,
@@ -1059,6 +1064,9 @@ class DeploymentService:
             if experiment is None or experiment.decision != "PAPER_CANDIDATE":
                 raise DatasetInvalid("Deployment lze vytvořit pouze z PAPER_CANDIDATE")
             snapshot, _, _ = self.validate_experiment(session, experiment)
+            universe = session.get(UniverseDefinitionRecord, snapshot.universe_id)
+            if universe is None or universe.kind != UniverseKind.POINT_IN_TIME_MEMBERSHIP:
+                raise DatasetInvalid("Paper deployment vyžaduje POINT_IN_TIME_SAFE universe")
             parameters = self._evidence(experiment.selected_parameters_json, "parameters")
             manifest = build_runtime_manifest(
                 risk=risk_config,

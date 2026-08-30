@@ -53,7 +53,9 @@ rozhodnutí striktně vyžaduje `known_at <= decision_time`, `valid_from <= deci
 half-open `valid_to`. `STATIC` naproti tomu aplikuje seznam členů známý k `snapshot.as_of` na celé
 retrospektivní období; ignoruje historické membership intervaly, je úmyslně survivorship-bias-prone
 a vždy se označuje `BIAS_PRONE_STATIC`, nikdy `POINT_IN_TIME_SAFE`. Membership knowledge se tím
-nebackdatuje: cutoff výběru statického seznamu zůstává dohledatelný v lineage.
+nebackdatuje: cutoff výběru statického seznamu zůstává dohledatelný v lineage. STATIC experiment
+je použitelný pro explicitně bias-prone retrospektivní analýzu, ale zůstává `RESEARCH_ONLY`;
+promotion na `PAPER_CANDIDATE` a paper deployment vyžadují `POINT_IN_TIME_SAFE` universe.
 
 Snapshot pod minimální coverage (default 80 %) má stav `INVALID` a nesmí spustit experiment.
 

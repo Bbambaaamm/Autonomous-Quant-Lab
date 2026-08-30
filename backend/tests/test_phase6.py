@@ -464,6 +464,36 @@ def test_static_universe_is_snapshot_current_and_explicitly_bias_prone():
     assert definition.survivorship_bias_status != "POINT_IN_TIME_SAFE"
 
 
+def test_static_universe_requires_explicit_snapshot_cutoff():
+    with pytest.raises(ValueError, match="explicitní snapshot knowledge cutoff"):
+        PointInTimeUniverse(
+            UniverseDefinition("static", "current constituents", UniverseKind.STATIC),
+            [],
+        )
+
+
+def test_snapshot_pinned_research_rejects_multiple_revisions_for_same_bar():
+    day = date(2024, 1, 3)
+    rows = [
+        obs("a", day, "10", observed=datetime(2024, 2, 1, tzinfo=UTC)),
+        obs(
+            "a",
+            day,
+            "11",
+            observed=datetime(2024, 2, 2, tzinfo=UTC),
+            ingestion="correction",
+        ),
+    ]
+
+    with pytest.raises(ValueError, match="právě jednu připnutou revision"):
+        run_multi_asset(
+            rows,
+            single_asset_universe(),
+            TrendStrategy(1, 2),
+            observation_knowledge_mode=ObservationKnowledgeMode.SNAPSHOT_PINNED,
+        )
+
+
 def test_runner_uses_adjusted_signals_and_applies_actions():
     days = [date(2024, 1, day) for day in (3, 4, 5, 8)]
     closes = ("90", "100", "55", "60")

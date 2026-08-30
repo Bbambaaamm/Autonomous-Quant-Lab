@@ -49,6 +49,8 @@ class PointInTimeUniverse:
     ) -> None:
         if any(m.universe_id != definition.universe_id for m in memberships):
             raise ValueError("Membership patří do jiného universe")
+        if definition.kind is UniverseKind.STATIC and static_knowledge_as_of is None:
+            raise ValueError("STATIC universe vyžaduje explicitní snapshot knowledge cutoff")
         self.definition = definition
         self._memberships = tuple(memberships)
         self._static_knowledge_as_of = (
@@ -63,8 +65,10 @@ class PointInTimeUniverse:
         if self.definition.kind is UniverseKind.STATIC:
             # STATIC je explicitně current/snapshot seznam aplikovaný na celé historické
             # období. known_at se nebackdatuje: seznam smí obsahovat jen membership známé
-            # k explicitnímu snapshot cutoffu (nebo knowledge_as_of volajícího).
-            cutoff = self._static_knowledge_as_of or knowledge
+            # k explicitnímu snapshot cutoffu.
+            if self._static_knowledge_as_of is None:
+                raise RuntimeError("STATIC universe nemá snapshot knowledge cutoff")
+            cutoff = self._static_knowledge_as_of
             return tuple(
                 sorted({m.instrument_id for m in self._memberships if m.known_at <= cutoff})
             )
