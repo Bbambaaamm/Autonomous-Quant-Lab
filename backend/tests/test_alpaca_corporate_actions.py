@@ -254,7 +254,7 @@ def test_alpaca_rest_uses_nested_collections_and_exhausts_pagination() -> None:
 
 def test_alpaca_future_process_date_is_included_by_full_inventory_horizon() -> None:
     row = _dma_cash_dividend()
-    received_at = datetime(2026, 8, 20, 18, tzinfo=UTC)
+    received_at = datetime(2026, 8, 30, 15, 0, 1, tzinfo=UTC)
     event = CorporateActionEvent.from_sse(
         _sse_payload(
             row,
