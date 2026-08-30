@@ -125,6 +125,40 @@ def test_unsupported_provider_is_not_empty_complete_even_with_hidden_event(scope
         assert evidence.action_count == 0
 
 
+def test_split_known_after_signal_close_is_ready_at_preopen_cutoff(scope) -> None:
+    factory, instrument = scope
+    signal_close = datetime(2026, 8, 24, 20, tzinfo=UTC)
+    received_at = datetime(2026, 8, 25, 11, tzinfo=UTC)
+    preopen_decision = datetime(2026, 8, 25, 13, tzinfo=UTC)
+    execution_open = datetime(2026, 8, 25, 13, 30, tzinfo=UTC)
+    split = CorporateAction(
+        uuid4().hex,
+        instrument.instrument_id,
+        CorporateActionKind.SPLIT,
+        execution_open,
+        received_at,
+        Decimal("2"),
+    )
+    evidence_id = PersistentMarketDataService(
+        factory, clock=lambda: preopen_decision
+    ).verify_corporate_action_readiness(
+        ActionProvider(True, [split]),
+        instrument,
+        date(2026, 8, 1),
+        execution_open.date(),
+        preopen_decision,
+    )
+    with factory() as session:
+        evidence = session.get(CorporateActionReadinessRecord, evidence_id)
+        persisted = session.get(CorporateActionRecord, split.action_id)
+        assert evidence is not None and evidence.status == "COMPLETE"
+        assert evidence.knowledge_cutoff == preopen_decision
+        assert evidence.requested_end.date() == execution_open.date()
+        assert persisted is not None and persisted.known_at == received_at
+        assert persisted.effective_at == execution_open
+    assert signal_close < received_at <= preopen_decision < execution_open
+
+
 @pytest.mark.parametrize("actions", [[], ["split"]])
 def test_capable_provider_can_prove_empty_or_pit_valid_actions(scope, actions) -> None:
     factory, instrument = scope

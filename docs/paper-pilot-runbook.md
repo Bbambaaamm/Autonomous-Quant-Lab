@@ -2,10 +2,7 @@
 
 Tento runbook je pouze pro interní PAPER provoz. **Aktuální stav repository je NOT READY FOR PAPER PILOT.** Nezakládá ani nepovoluje live režim.
 
-Aktuálně existují dva hard blockery:
-
-1. production `StooqProvider` nemá corporate-action capability (`supports_actions=False`);
-2. autonomous execution ještě nemá před XNYS open persistovaný plně specifikovaný immutable economic/order intent (`side` + `quantity`). Proto autonomous open-time path záměrně končí no-action `PREOPEN_EXECUTION_INTENT_NOT_PERSISTED`.
+Obě dříve chybějící capability (production Alpaca v5 corporate-action evidence a immutable pre-open economic intent) jsou implementované. Hard blockerem spuštění je nyní chybějící zelený required CI a production-like PostgreSQL/staging acceptance výsledného head SHA.
 
 ## 1. Hard gates před pilotem
 
@@ -18,12 +15,12 @@ Pilot se nesmí spustit, dokud není současně splněno vše:
 5. production provider pro equity scope skutečně podporuje corporate actions a capability je E2E ověřena;
 6. corporate-action readiness je `READY` pro celý požadovaný interval;
 7. monitoring enrollment má právě jeden validní enabled canonical `MONITOR_PAPER_DEPLOYMENT` schedule;
-8. autonomous schedule je DST-safe ukotvený na XNYS 09:30 a žádný legacy/drifted schedule není enabled;
+8. autonomous PREPARE schedule je DST-safe ukotvený na 09:00 `America/New_York` a žádný legacy/drifted schedule není enabled;
 9. před 09:30 existuje immutable auditovatelný economic/order intent, jehož side/quantity nemůže záviset na current-session opening printu;
 10. FAILED/DEAD_LETTER recovery pro managed jobs je auditovaná a atomická;
 11. proběhl celý production-like staging dry-run.
 
-Dokud body 5 a 9 nejsou splněny, **nepokračujte k autonomous equity pilotu**.
+Dokud všechny body včetně CI a production-like acceptance nejsou doloženy pro nasazovaný SHA, **nepokračujte k autonomous equity pilotu**.
 
 ## 2. Production-like topology
 
@@ -66,7 +63,7 @@ Před autonomous enable musí být ověřeno:
 - canonical autonomous schedule;
 - pre-open immutable economic/order intent capability.
 
-Současný production provider a současná autonomous intent architektura poslední dva ekonomické gates nesplňují; funkční autonomous pilot je proto zakázán.
+Tyto gates musí být ověřeny nad konkrétním nasazovaným SHA; samotná existence implementace není provozní důkaz.
 
 ## 5. Monitoring invariant
 
@@ -81,17 +78,25 @@ Enrollment a scheduler job nemusí vznikat v jedné DB transakci. Bezpečnost je
 
 ## 6. XNYS scheduling a execution causalita
 
-Autonomous schedule je ukotvený na `09:30 America/New_York` a je DST-safe. To pouze řeší orchestration phase; samo o sobě to nedává právo obchodovat.
+Autonomous PREPARE schedule je ukotvený na `09:00 America/New_York` a je DST-safe; připravený execution occurrence zůstává ukotvený na skutečný XNYS open.
 
-Strict executable-open cutoff zůstává `[open, open + 1 second)`. Současný autonomous path ale nesmí ani uvnitř tohoto okna nejprve načíst opening print a až potom vytvořit side/quantity. Proto bez pre-open immutable intentu platí:
+Strict executable-open cutoff zůstává `[open, open + 1 second)`. `PREPARE_PAPER_SESSION` před open persistuje target delta vypočtený z causal adjusted signal close a teprve poté materializuje execution occurrence. Proto platí:
 
-- `PREPARE_PAPER_SESSION` při/po execution open vrátí `NO_ACTION / PREOPEN_EXECUTION_INTENT_NOT_PERSISTED`;
+Production worker rezervuje nejbližší materializované XNYS occurrence před běžnou frontou a čeká přímo do jejího `scheduled_for`; pětisekundový obecný polling tedy není dispatch mechanismem executable-open běhu. Provider response time se měří živými UTC hodinami a odpověď získaná po cutoff failuje jako `MISSED_EXECUTION_OPEN` bez fillu.
+
+- execution bez pre-open intentu vrátí `NO_ACTION / PREOPEN_EXECUTION_INTENT_NOT_PERSISTED`;
+- pozdní nebo porušený intent vrátí `NO_ACTION / PREOPEN_EXECUTION_INTENT_INVALID`;
 - raw opening print se nesmí použít k vytvoření nového ekonomického intentu;
-- legacy materializovaný `xnys:` execution run je rovněž no-action;
+- validní `xnys:` run smí raw open použít jen pro risk, kapacitu a fill, nikoli pro side/quantity;
+- persisted-intent execution načítá raw open pro všechny intent instrumenty a všechny držené instrumenty potřebné pro portfolio/risk marking; zero-delta neheld člen universe raw open nevyžaduje;
+- execution-time risk decision používá skutečný open-time knowledge čas, nikdy previous-session signal close;
+- risk equity a nový `session_start_equity` se markují z cash a raw-open cen všech held instrumentů; stale ledger equity není risk denominator;
+- corporate-action readiness pre-open intentu končí execution session a používá skutečný PREPARE decision cutoff, zatímco strategy signal history zůstává omezena prior-session causal cutoffem;
+- persisted-intent open cesta znovu nenačítá signal history ani negeneruje target portfolio; ekonomické strategy rozhodnutí proběhlo výhradně v PREPARE a open runtime pouze validuje a vykonává immutable intent;
 - žádný backdating `scheduled_for` nevytváří pre-open objednávku;
 - po cutoff se nikdy nedělá retroaktivní fill ani ruční backfill.
 
-Budoucí funkční implementace musí před open persistovat immutable intent s plně určenou side/quantity a lineage. Po open smí pouze připojit validovaný raw opening print a provést fill podle již existujícího intentu.
+Intent record je append-only a nese deployment/account/strategy/session identitu, decision a persistence čas, sizing reference, snapshot/universe/signal-observation lineage a integritní hash. Execution jeho ekonomická pole nemění.
 
 ## 7. Auditovaný FAILED/DEAD_LETTER recovery
 

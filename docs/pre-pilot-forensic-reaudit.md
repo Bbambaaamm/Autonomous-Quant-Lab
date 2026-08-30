@@ -4,10 +4,7 @@
 
 **NOT READY FOR PAPER PILOT**
 
-Verdikt je záměrně fail-closed. PR #67 opravuje nalezené control-plane, scheduling, recovery a network mezery, ale současný production path stále nesplňuje dvě nutné ekonomické capability:
-
-1. `StooqProvider` deklaruje `supports_actions=False`, takže neexistuje production corporate-action-capable feed pro XNYS/USD equity pilot.
-2. Současná autonomous orchestrace nepersistuje před XNYS open plně specifikovaný immutable economic/order intent (`side` + `quantity`). Runtime proto po open záměrně odmítá vytvořit ekonomický efekt a vrací `PREOPEN_EXECUTION_INTENT_NOT_PERSISTED`.
+Verdikt zůstává fail-closed do zeleného required CI a production-like acceptance výsledného SHA. Production Alpaca v5 corporate-action contract je provider-capable a autonomous orchestrace nyní před open persistuje plně specifikovaný immutable economic intent (`side` + `quantity`). Bez validního intentu zůstává `PREOPEN_EXECUTION_INTENT_NOT_PERSISTED`.
 
 Dokumentace nesmí být silnější než implementace. Zelený syntetický test není production evidence a timestamp připnutý na 09:30 sám o sobě nedokazuje, že objednávka vznikla před znalostí opening printu.
 
@@ -16,13 +13,13 @@ Dokumentace nesmí být silnější než implementace. Zelený syntetický test 
 | Oblast | Stav | Bezpečnostní vlastnost |
 | --- | --- | --- |
 | Monitoring enrollment/schedule | REMEDIATED, čeká na výsledné CI | Deterministický `MONITOR_PAPER_DEPLOYMENT` job je idempotentně ensure/re-enable/normalizován. Autonomous enable kontroluje celý kanonický schedule a failuje při driftu. |
-| Corporate-action provider | **OPEN PILOT BLOCKER** | `StooqProvider.supports_actions=False` zůstává pravdivé; equity autonomous enable nesmí tento gate obejít. |
+| Corporate-action provider | REMEDIATED, čeká na výsledné CI | Production Alpaca v5 používá SSE receipt evidence a exact REST ↔ SSE revision match; Stooq zůstává nezpůsobilý. |
 | FAILED/DEAD_LETTER recovery | REMEDIATED, čeká na výsledné CI | Managed retry a control audit event vznikají v jedné DB transakci. Actor pochází ze server-side principalu, reason je povinný a correlation ID je persistovaný. |
 | Managed retry UI | REMEDIATED, čeká na výsledné CI | ADMIN recovery se zobrazuje pouze FAILED/DEAD_LETTER runům, jejichž `scheduled_job_id` patří managed jobu. |
 | Market-data egress | REMEDIATED, staging evidence stále povinná | DB `data` síť zůstává interní; backend/worker mají explicitní market-data egress; frontend ingress je oddělený. Aplikační Stooq transport dál allowlistuje HTTPS `stooq.com`. |
 | Legacy 300s schedules | REMEDIATED, čeká na výsledné CI | Worker před prvním scheduler tickem fail-closed vypne enabled legacy/drifted `PREPARE_PAPER_SESSION` rows. |
 | Monitoring retirement | REMEDIATED, čeká na výsledné CI | `RETIRED` v téže lifecycle transakci vypne deterministický monitoring schedule i autonomous deployment schedule. |
-| XNYS causal execution | **OPEN PILOT BLOCKER** | Schedule je DST-safe ukotvený na 09:30 `America/New_York`, ale bez immutable pre-open order intentu nesmí open-time path vytvořit order/fill. Autonomous XNYS occurrence proto končí no-action. |
+| XNYS causal execution | REMEDIATED, čeká na výsledné CI | PREPARE schedule je DST-safe ukotvený na 09:00 `America/New_York`; pre-open target delta používá causal adjusted signal close, immutable intent má deterministickou identitu/hash/lineage a open-time cesta smí jen validovat intent a použít raw open pro risk/fill. |
 
 Žádný řádek označený `REMEDIATED, čeká na výsledné CI` není `PASS`, dokud required CI výsledného SHA skutečně neprojde.
 
@@ -67,18 +64,17 @@ Samotná Docker egress síť není hostname firewall. Provider transport proto d
 
 ## XNYS scheduling a causalita
 
-Arbitrary 300sekundový interval od času enablementu není autoritativní scheduling. Nový managed schedule je daily `09:30 America/New_York`, tedy DST-safe. Při startu workeru jsou staré enabled 300s nebo jinak drifted managed schedules před prvním scheduler tickem vypnuty.
+Arbitrary 300sekundový interval od času enablementu není autoritativní scheduling. Managed PREPARE schedule je daily `09:00 America/New_York`, tedy DST-safe a před open. Při startu workeru jsou staré enabled 300s nebo jinak drifted managed schedules před prvním scheduler tickem vypnuty.
 
-To však samo o sobě nestačí k ekonomické kauzalitě. Současný systém nemá před 09:30 persistovaný plně specifikovaný immutable order intent. Kdyby po 09:30 nejprve načetl opening print a teprve potom odvodil side/quantity, šlo by o retroaktivní rozhodnutí i při `scheduled_for=09:30`.
+`PREPARE_PAPER_SESSION` nyní po readiness a strategy evaluation vypočítá target delta z account equity, pozice a causal adjusted signal close. Persistuje side, quantity, decision/reference časy, snapshot/universe/observation lineage a integritní hash. Teprve potom materializuje `xnys:` occurrence. PostgreSQL trigger zakazuje UPDATE i DELETE.
 
-Proto PR #67 zavádí fail-closed hranici:
+Open-time cesta:
 
-- autonomous PREPARE při/po execution open nevytváří raw-open economic run a vrací `PREOPEN_EXECUTION_INTENT_NOT_PERSISTED`;
-- již materializovaný legacy `xnys:` execution run je rovněž no-action;
+- chybějící intent vrací `PREOPEN_EXECUTION_INTENT_NOT_PERSISTED`;
+- pozdní, konfliktní nebo integritně neplatný intent vrací `PREOPEN_EXECUTION_INTENT_INVALID`;
+- validní intent vstupuje beze změny side/quantity do stávající `TradingCycleService` → risk → execution → `PaperBroker` cesty;
 - strict executable-open cutoff zůstává `[open, open + 1 second)` jako obrana ostatních explicitně auditovaných cest;
 - žádný timestamp backdating nesmí nahrazovat skutečný pre-open intent.
-
-Budoucí funkční autonomous pilot vyžaduje nový persistentní, immutable a auditovatelný pre-open intent, jehož side/quantity vzniknou bez znalosti current-session opening printu. Po open smí být pouze připojena validovaná execution price evidence a proveden fill podle tohoto již existujícího intentu.
 
 ## Testovací izolace rate limitu
 
@@ -97,10 +93,10 @@ Před změnou z `NOT READY FOR PAPER PILOT` musí být současně doloženo:
 7. skutečný corporate-action-capable production provider s E2E readiness evidence;
 8. persistentní fully-specified immutable pre-open economic/order intent a E2E důkaz, že opening print nemůže ovlivnit side/quantity.
 
-Body 7 a 8 jsou aktuální pilot blockery. Dokud nejsou oba splněny, autonomous equity PAPER pilot se nesmí spustit.
+Capability body 7 a 8 jsou implementované. Zbývajícím blockerem verdictu je zelené required CI a production-like PostgreSQL/staging acceptance výsledného head SHA; bez těchto důkazů se pilot nesmí spustit.
 
 ## Final recommendation
 
-Předchozí `CONDITIONAL READY` verdict se ruší. Bezpečný stav je **NOT READY FOR PAPER PILOT**. PR #67 může uzavřít control-plane a fail-closed runtime mezery, ale nesmí změnit verdict na READY, dokud production provider nemá pravdivou corporate-action capability a autonomous execution nemá auditovatelný immutable pre-open economic intent.
+Bezpečný stav zůstává **NOT READY FOR PAPER PILOT**, dokud neprojde required CI a production-like acceptance finálního SHA. Nejde již o známou chybějící ekonomickou capability, ale o chybějící provozní důkaz této konkrétní revize.
 
 Acceptance tohoto PR se vyhodnocuje výhradně nad finálním head SHA po všech remediation commitech. Jakákoli další změna kódu nebo testů vyžaduje nové required CI nad novým head SHA.

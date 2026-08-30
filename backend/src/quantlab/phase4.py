@@ -421,6 +421,27 @@ class PortfolioRiskSnapshot:
     trading_state: SystemTradingState
 
 
+def execution_marked_equity(
+    cash: Decimal, positions: dict[str, Decimal], prices: dict[str, Decimal]
+) -> Decimal:
+    """Ocení held portfolio raw executable cenami pro execution-time risk."""
+    if set(positions) - set(prices):
+        raise ValueError("Execution risk postrádá raw-open cenu drženého instrumentu")
+    relevant_prices = {instrument: prices[instrument] for instrument in positions}
+    values = (cash, *positions.values(), *relevant_prices.values())
+    if any(not value.is_finite() for value in values) or any(
+        price <= 0 for price in relevant_prices.values()
+    ):
+        raise ValueError("Execution portfolio mark obsahuje neplatnou hodnotu")
+    marked = cash + sum(
+        (quantity * relevant_prices[instrument] for instrument, quantity in positions.items()),
+        Decimal(0),
+    )
+    if not marked.is_finite() or marked <= 0:
+        raise ValueError("Execution portfolio mark musí být konečný a kladný")
+    return marked
+
+
 class ProductionRiskEngine:
     def __init__(self, config: ProductionRiskConfig):
         self.config = config
@@ -1141,6 +1162,9 @@ class TradingCycleService:
         target_weights: dict[str, Decimal],
         session_date: date,
         decision_time: datetime,
+        persisted_intents: tuple[OrderIntent, ...] | None = None,
+        *,
+        risk_evaluation_time: datetime | None = None,
     ) -> str:
         if not bars:
             raise ValueError("Chybí market data")
@@ -1156,7 +1180,13 @@ class TradingCycleService:
             for executable_bar in bars:
                 validate_bars([executable_bar])
         cycle_key = deterministic_cycle_key(account_id, strategy_id, session_date)
-        input_fingerprint = cycle_input_fingerprint(bars, decision_time, target_weights)
+        fingerprint_targets = target_weights
+        if persisted_intents is not None:
+            fingerprint_targets = {
+                f"{item.symbol}:{item.side.value}:{item.id}": item.quantity
+                for item in persisted_intents
+            }
+        input_fingerprint = cycle_input_fingerprint(bars, decision_time, fingerprint_targets)
         cycle_id = cycle_key
         correlation_id = cycle_key
         lease_owner = str(uuid4())
@@ -1270,16 +1300,12 @@ class TradingCycleService:
                 )
             session.commit()
         bars_by_symbol = {item.symbol: item for item in bars}
-        with Session(self.repository.engine) as session:
-            account_row = session.get(PaperAccountRecord, account_id)
-            if account_row is None:
-                raise KeyError(account_id)
-            if account_row.session_date != session_date:
-                account_row.session_date = session_date
-                account_row.session_start_equity = account_row.equity
-                session.commit()
         account = self.repository.account(account_id)
-        positions = {p.instrument_id: p.quantity for p in self.repository.positions(account_id)}
+        positions = {
+            p.instrument_id: p.quantity
+            for p in self.repository.positions(account_id)
+            if p.quantity != 0
+        }
         pending: dict[str, Decimal] = {}
         for open_order in self.broker.get_open_orders(account_id):
             signed_remaining = (
@@ -1292,6 +1318,19 @@ class TradingCycleService:
             )
         # Všechny risk marky musí být dostupné ve stejném okamžiku jako next-open fill.
         prices = {symbol: item.open for symbol, item in bars_by_symbol.items()}
+        marked_equity = (
+            execution_marked_equity(account.cash, positions, prices)
+            if persisted_intents is not None
+            else account.equity
+        )
+        with Session(self.repository.engine) as session:
+            account_row = session.get(PaperAccountRecord, account_id)
+            if account_row is None:
+                raise KeyError(account_id)
+            if account_row.session_date != session_date:
+                account_row.session_date = session_date
+                account_row.session_start_equity = marked_equity
+                session.commit()
         with Session(self.repository.engine) as session:
             daily_orders = int(
                 session.scalar(
@@ -1321,36 +1360,68 @@ class TradingCycleService:
                 )
                 or 0
             )
-        for symbol, weight in sorted(target_weights.items()):
+        economic_inputs: list[tuple[str, Decimal, OrderIntent | None]] = []
+        if persisted_intents is not None:
+            economic_inputs = [(item.symbol, Decimal("0"), item) for item in persisted_intents]
+        else:
+            economic_inputs = [
+                (symbol, weight, None) for symbol, weight in sorted(target_weights.items())
+            ]
+        for symbol, weight, persisted_intent in economic_inputs:
             bar = bars_by_symbol.get(symbol)
             if bar is None:
                 raise ValueError("Cycle vyžaduje executable bar každého target instrumentu")
-            desired = (account.equity * weight / bar.open).to_integral_value(rounding=ROUND_DOWN)
-            delta = desired - positions.get(symbol, Decimal(0)) - pending.get(symbol, Decimal(0))
-            if delta == 0:
-                continue
-            intent_id = hashlib.sha256(f"{cycle_id}|{symbol}|{desired}".encode()).hexdigest()
-            intent = OrderIntent(
-                symbol,
-                Side.BUY if delta > 0 else Side.SELL,
-                abs(delta),
-                decision_time,
-                "target-vs-actual",
-                intent_id,
-                OrderType.MARKET,
-                None,
-                cycle_id,
-                correlation_id,
-            )
+            if persisted_intent is None:
+                desired = (account.equity * weight / bar.open).to_integral_value(
+                    rounding=ROUND_DOWN
+                )
+                delta = (
+                    desired - positions.get(symbol, Decimal(0)) - pending.get(symbol, Decimal(0))
+                )
+                if delta == 0:
+                    continue
+                intent_id = hashlib.sha256(f"{cycle_id}|{symbol}|{desired}".encode()).hexdigest()
+                intent = OrderIntent(
+                    symbol,
+                    Side.BUY if delta > 0 else Side.SELL,
+                    abs(delta),
+                    decision_time,
+                    "target-vs-actual",
+                    intent_id,
+                    OrderType.MARKET,
+                    None,
+                    cycle_id,
+                    correlation_id,
+                )
+            else:
+                # Autonomous kontrakt přebírá ekonomická pole beze změny;
+                # open je pouze risk/fill reference.
+                intent = OrderIntent(
+                    persisted_intent.symbol,
+                    persisted_intent.side,
+                    persisted_intent.quantity,
+                    persisted_intent.decision_time,
+                    persisted_intent.reason,
+                    persisted_intent.id,
+                    persisted_intent.order_type,
+                    persisted_intent.limit_price,
+                    cycle_id,
+                    correlation_id,
+                )
             with Session(self.repository.engine) as session:
                 account_row = session.get(PaperAccountRecord, account_id)
                 if account_row is None:
                     raise RuntimeError("Paper účet během trading cycle zmizel")
                 session_start_equity = account_row.session_start_equity or account.equity
+            if persisted_intent is not None:
+                marked_equity = execution_marked_equity(account.cash, positions, prices)
+                session_start_equity = account_row.session_start_equity or marked_equity
             snapshot = PortfolioRiskSnapshot(
                 account.cash,
-                account.equity,
-                account.high_water_mark,
+                marked_equity if persisted_intent is not None else account.equity,
+                max(account.high_water_mark, marked_equity)
+                if persisted_intent is not None
+                else account.high_water_mark,
                 session_start_equity,
                 positions,
                 prices,
@@ -1359,9 +1430,36 @@ class TradingCycleService:
                 daily_notional,
                 account.trading_state,
             )
+            evaluation_time = risk_evaluation_time or decision_time
+            if persisted_intent is not None and (
+                evaluation_time < intent.decision_time or evaluation_time < bar.timestamp
+            ):
+                raise ValueError(
+                    "Risk evaluation nesmí předcházet persisted intent ani executable open"
+                )
             decision = self.risk.evaluate(
-                intent, bar.open, snapshot, cycle_id, correlation_id, decision_time, bar.timestamp
+                intent,
+                bar.open,
+                snapshot,
+                cycle_id,
+                correlation_id,
+                evaluation_time,
+                bar.timestamp,
             )
+            if persisted_intent is not None and decision.status is RiskDecisionStatus.MODIFIED:
+                decision = RiskDecision(
+                    decision.decision_id,
+                    decision.timestamp,
+                    decision.order_intent_id,
+                    RiskDecisionStatus.REJECTED,
+                    decision.original_quantity,
+                    Decimal(0),
+                    decision.reasons,
+                    decision.evaluated_limits,
+                    decision.portfolio_snapshot,
+                    decision.correlation_id,
+                    decision.trading_cycle_id,
+                )
             with Session(self.repository.engine) as session:
                 if session.get(RiskDecisionRecord, decision.decision_id) is None:
                     self.repository.audit(
@@ -1426,6 +1524,7 @@ class TradingCycleService:
             positions = {
                 position.instrument_id: position.quantity
                 for position in self.repository.positions(account_id)
+                if position.quantity != 0
             }
             daily_orders += 1
             daily_notional += order.submitted_notional

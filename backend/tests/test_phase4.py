@@ -23,11 +23,13 @@ from quantlab.domain import (
 )
 from quantlab.phase4 import (
     AuditEventRecord,
+    PaperAccountRecord,
     PaperFillRecord,
     PaperOrderRecord,
     PersistentPaperBroker,
     Phase4Repository,
     PortfolioRiskSnapshot,
+    PositionRecord,
     ProductionRiskConfig,
     ProductionRiskEngine,
     ReconciliationService,
@@ -206,6 +208,144 @@ def test_end_to_end_cycle_is_idempotent_and_reconciles() -> None:
     assert position.quantity == Decimal("100")
     assert account.cash >= 0
     assert account.equity == account.cash + position.quantity * Decimal("101")
+
+
+@pytest.mark.parametrize("opening_price", [Decimal("100"), Decimal("150")])
+def test_persisted_intent_quantity_is_invariant_to_opening_print(
+    opening_price: Decimal,
+) -> None:
+    repository = Phase4Repository()
+    repository.seed_account()
+    persisted = OrderIntent(
+        "SPY",
+        Side.BUY,
+        Decimal("37"),
+        NOW + timedelta(hours=1),
+        "persisted-preopen",
+        "preopen-intent",
+    )
+    executable = Bar(
+        "SPY",
+        NOW + timedelta(days=1),
+        opening_price,
+        opening_price + 1,
+        opening_price - 1,
+        opening_price,
+        Decimal("10000"),
+        Decimal("100"),
+    )
+    TradingCycleService(repository, ProductionRiskConfig(max_single_order_pct=Decimal("1"))).run(
+        "paper-main",
+        "phase6:deployment",
+        [executable],
+        {"SPY": Decimal("0.99")},
+        date(2026, 8, 12),
+        NOW,
+        (persisted,),
+        risk_evaluation_time=executable.timestamp + timedelta(milliseconds=100),
+    )
+    with Session(repository.engine) as session:
+        order = session.scalar(select(PaperOrderRecord))
+        assert order is not None
+        assert order.side == Side.BUY
+        assert order.quantity == Decimal("37")
+        assert order.order_intent_id == "preopen-intent"
+        decision = session.scalar(select(RiskDecisionRecord))
+        assert decision is not None
+        risk_timestamp = (
+            decision.timestamp.replace(tzinfo=UTC)
+            if decision.timestamp.tzinfo is None
+            else decision.timestamp.astimezone(UTC)
+        )
+        assert risk_timestamp == executable.timestamp + timedelta(milliseconds=100)
+        assert NOW < persisted.decision_time < executable.timestamp
+        assert risk_timestamp >= executable.timestamp
+        assert risk_timestamp >= persisted.decision_time
+        assert RiskReason.STALE_DATA.value not in json.loads(decision.reasons_json)
+
+
+@pytest.mark.parametrize(
+    ("held_open", "expected_equity", "expected_status"),
+    [
+        (Decimal("100"), Decimal("10000"), RiskDecisionStatus.APPROVED),
+        (Decimal("150"), Decimal("12500"), RiskDecisionStatus.REJECTED),
+    ],
+)
+def test_persisted_intent_risk_uses_execution_marked_equity(
+    held_open: Decimal,
+    expected_equity: Decimal,
+    expected_status: RiskDecisionStatus,
+) -> None:
+    repository = Phase4Repository()
+    repository.seed_account(cash=Decimal("10000"))
+    with Session(repository.engine) as session, session.begin():
+        account = session.get(PaperAccountRecord, "paper-main")
+        assert account is not None
+        account.cash = Decimal("5000")
+        account.equity = Decimal("10000")
+        session.add(
+            PositionRecord(
+                account_id="paper-main",
+                instrument_id="B",
+                quantity=Decimal("50"),
+                average_cost=Decimal("100"),
+                realized_pnl=Decimal(0),
+                lots_json="[]",
+                updated_at=NOW,
+            )
+        )
+    opened = NOW + timedelta(days=1)
+    bars = [
+        Bar(
+            "A",
+            opened,
+            Decimal("100"),
+            Decimal("101"),
+            Decimal("99"),
+            Decimal("100"),
+            Decimal("10000"),
+            Decimal("100"),
+        ),
+        Bar(
+            "B",
+            opened,
+            held_open,
+            held_open + 1,
+            held_open - 1,
+            held_open,
+            Decimal("10000"),
+            Decimal("100"),
+        ),
+    ]
+    persisted = OrderIntent(
+        "A", Side.BUY, Decimal("10"), NOW + timedelta(hours=1), "persisted-preopen", "marked-risk"
+    )
+    TradingCycleService(
+        repository,
+        ProductionRiskConfig(
+            max_position_pct=Decimal("1"),
+            max_single_order_pct=Decimal("1"),
+            max_gross_exposure=Decimal("0.65"),
+            instrument_allowlist=frozenset({"A", "B"}),
+        ),
+    ).run(
+        "paper-main",
+        "phase6:marked",
+        bars,
+        {"A": Decimal(0)},
+        date(2026, 8, 12),
+        NOW,
+        (persisted,),
+        risk_evaluation_time=opened + timedelta(milliseconds=100),
+    )
+    with Session(repository.engine) as session:
+        decision = session.scalar(select(RiskDecisionRecord))
+        assert decision is not None
+        assert decision.status == expected_status
+        assert Decimal(json.loads(decision.portfolio_json)["equity"]) == expected_equity
+        account = session.get(PaperAccountRecord, "paper-main")
+        assert account is not None
+        assert account.session_start_equity == expected_equity
 
 
 def test_partial_fill_cancel_and_invalid_transition() -> None:

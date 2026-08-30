@@ -1,4 +1,5 @@
 from datetime import UTC, date, datetime, timedelta
+from decimal import Decimal
 
 from sqlalchemy.orm import Session
 
@@ -14,8 +15,12 @@ from quantlab.automation import (
     RunStatus,
     ScheduledJob,
     ScheduleType,
+    WorkerService,
     daily_occurrence_at_or_after,
+    mark_preopen_equity,
+    preopen_execution_delta,
 )
+from quantlab.config import Settings
 from quantlab.market_data import XNYSCalendar
 from quantlab.phase4 import AuditEventRecord, Phase4Repository
 
@@ -58,8 +63,8 @@ def test_autonomous_daily_occurrence_tracks_new_york_dst() -> None:
         AUTONOMOUS_DAILY_TIME,
         AUTONOMOUS_TIMEZONE,
     )
-    assert summer == datetime(2026, 7, 6, 13, 30, tzinfo=UTC)
-    assert winter == datetime(2026, 1, 5, 14, 30, tzinfo=UTC)
+    assert summer == datetime(2026, 7, 6, 13, tzinfo=UTC)
+    assert winter == datetime(2026, 1, 5, 14, tzinfo=UTC)
 
 
 def test_executable_open_window_remains_fail_closed() -> None:
@@ -69,6 +74,42 @@ def test_executable_open_window_remains_fail_closed() -> None:
     assert calendar.is_executable_open_time(session, opened)
     assert calendar.is_executable_open_time(session, opened + timedelta(milliseconds=999))
     assert not calendar.is_executable_open_time(session, opened + timedelta(seconds=1))
+
+
+def test_worker_waits_precisely_for_materialized_xnys_open(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    database_url = f"sqlite:///{tmp_path / 'xnys-dispatch.db'}"
+    Phase4Repository(database_url, bootstrap_test_schema=True).seed_account()
+    repository = AutomationRepository(database_url)
+    now = datetime(2026, 7, 6, 13, 29, 59, 750000, tzinfo=UTC)
+    opened = datetime(2026, 7, 6, 13, 30, tzinfo=UTC)
+    repository.materialize_execution_session(
+        deployment_id="deployment-test",
+        account_id="paper-main",
+        execution_session=date(2026, 7, 6),
+        execution_time=opened,
+        created_at=now,
+    )
+    worker = WorkerService(
+        repository,
+        Settings(database_url=database_url, automation_enabled=True),
+        worker_id="dispatch-test",
+    )
+    assert worker.next_xnys_dispatch_delay(now) == 0.25
+
+
+def test_preopen_sizing_marks_equity_and_normalizes_next_open_split() -> None:
+    marked = mark_preopen_equity(Decimal("1000"), {"SPY": Decimal("50")}, {"SPY": Decimal("100")})
+    reference, delta = preopen_execution_delta(
+        marked_equity=marked,
+        weight=Decimal("1"),
+        signal_reference=Decimal("100"),
+        split_ratio=Decimal("2"),
+        position=Decimal("50"),
+        pending=Decimal(0),
+    )
+    assert marked == Decimal("6000")
+    assert reference == Decimal("50")
+    assert delta == Decimal("20")
 
 
 def test_legacy_autonomous_schedule_is_disabled_before_polling(tmp_path) -> None:  # type: ignore[no-untyped-def]

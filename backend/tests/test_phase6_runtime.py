@@ -3,7 +3,15 @@ from decimal import Decimal
 
 from quantlab.domain import Side
 from quantlab.multi_asset import MultiAssetFill, MultiAssetResult
-from quantlab.phase6_runtime import multi_asset_metrics
+from quantlab.phase6_runtime import multi_asset_metrics, persisted_execution_open_scope
+
+
+def test_persisted_execution_open_scope_excludes_zero_delta_unheld_assets() -> None:
+    assert persisted_execution_open_scope({"A"}, set()) == ("A",)
+
+
+def test_persisted_execution_open_scope_includes_held_assets_without_intent() -> None:
+    assert persisted_execution_open_scope({"A"}, {"B"}) == ("A", "B")
 
 
 def test_multi_asset_metrics_use_time_weighted_exposure_and_hand_calculated_costs() -> None:
