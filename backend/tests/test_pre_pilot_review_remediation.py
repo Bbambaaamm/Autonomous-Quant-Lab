@@ -58,8 +58,8 @@ def test_autonomous_daily_occurrence_tracks_new_york_dst() -> None:
         AUTONOMOUS_DAILY_TIME,
         AUTONOMOUS_TIMEZONE,
     )
-    assert summer == datetime(2026, 7, 6, 13, 30, tzinfo=UTC)
-    assert winter == datetime(2026, 1, 5, 14, 30, tzinfo=UTC)
+    assert summer == datetime(2026, 7, 6, 13, tzinfo=UTC)
+    assert winter == datetime(2026, 1, 5, 14, tzinfo=UTC)
 
 
 def test_executable_open_window_remains_fail_closed() -> None:

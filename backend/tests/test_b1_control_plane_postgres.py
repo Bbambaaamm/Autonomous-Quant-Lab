@@ -233,7 +233,7 @@ def test_supported_b1_control_plane_reaches_active_monitoring(monkeypatch) -> No
     assert autonomous.status_code == 200, autonomous.text
     assert autonomous.json()["enabled"] is True
     assert autonomous.json()["schedule_type"] == "DAILY"
-    assert autonomous.json()["daily_time"] == "09:30"
+    assert autonomous.json()["daily_time"] == "09:00"
     assert autonomous.json()["timezone"] == "America/New_York"
 
     recovery_run_id = api_module.automation_scheduler.run_now(
