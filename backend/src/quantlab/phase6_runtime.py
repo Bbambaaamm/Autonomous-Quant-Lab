@@ -14,7 +14,7 @@ from uuid import uuid4
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from quantlab.domain import AuditEventType, Bar, require_utc
+from quantlab.domain import AuditEventType, Bar, OrderIntent, require_utc
 from quantlab.market_data import (
     CorporateAction,
     CorporateActionKind,
@@ -1334,6 +1334,7 @@ class Phase6PaperExecutionService:
         now: datetime,
         *,
         execution_intent_time: datetime | None = None,
+        persisted_intents: tuple[OrderIntent, ...] | None = None,
     ) -> str:
         as_of = require_utc(now)
         if execution_intent_time is None:
@@ -1630,6 +1631,7 @@ class Phase6PaperExecutionService:
             target_weights,
             executable_session,
             decision_time,
+            persisted_intents,
         )
         self._ensure_cycle_lineage(
             monitoring.monitoring_id,

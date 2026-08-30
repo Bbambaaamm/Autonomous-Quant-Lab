@@ -208,6 +208,42 @@ def test_end_to_end_cycle_is_idempotent_and_reconciles() -> None:
     assert account.equity == account.cash + position.quantity * Decimal("101")
 
 
+@pytest.mark.parametrize("opening_price", [Decimal("100"), Decimal("150")])
+def test_persisted_intent_quantity_is_invariant_to_opening_print(
+    opening_price: Decimal,
+) -> None:
+    repository = Phase4Repository()
+    repository.seed_account()
+    persisted = OrderIntent(
+        "SPY", Side.BUY, Decimal("37"), NOW, "persisted-preopen", "preopen-intent"
+    )
+    executable = Bar(
+        "SPY",
+        NOW + timedelta(days=1),
+        opening_price,
+        opening_price + 1,
+        opening_price - 1,
+        opening_price,
+        Decimal("10000"),
+        Decimal("100"),
+    )
+    TradingCycleService(repository, ProductionRiskConfig(max_single_order_pct=Decimal("1"))).run(
+        "paper-main",
+        "phase6:deployment",
+        [executable],
+        {"SPY": Decimal("0.99")},
+        date(2026, 8, 12),
+        NOW,
+        (persisted,),
+    )
+    with Session(repository.engine) as session:
+        order = session.scalar(select(PaperOrderRecord))
+        assert order is not None
+        assert order.side == Side.BUY
+        assert order.quantity == Decimal("37")
+        assert order.order_intent_id == "preopen-intent"
+
+
 def test_partial_fill_cancel_and_invalid_transition() -> None:
     repository = Phase4Repository()
     repository.seed_account()

@@ -1141,6 +1141,7 @@ class TradingCycleService:
         target_weights: dict[str, Decimal],
         session_date: date,
         decision_time: datetime,
+        persisted_intents: tuple[OrderIntent, ...] | None = None,
     ) -> str:
         if not bars:
             raise ValueError("Chybí market data")
@@ -1156,7 +1157,13 @@ class TradingCycleService:
             for executable_bar in bars:
                 validate_bars([executable_bar])
         cycle_key = deterministic_cycle_key(account_id, strategy_id, session_date)
-        input_fingerprint = cycle_input_fingerprint(bars, decision_time, target_weights)
+        fingerprint_targets = target_weights
+        if persisted_intents is not None:
+            fingerprint_targets = {
+                f"{item.symbol}:{item.side.value}:{item.id}": item.quantity
+                for item in persisted_intents
+            }
+        input_fingerprint = cycle_input_fingerprint(bars, decision_time, fingerprint_targets)
         cycle_id = cycle_key
         correlation_id = cycle_key
         lease_owner = str(uuid4())
@@ -1321,27 +1328,54 @@ class TradingCycleService:
                 )
                 or 0
             )
-        for symbol, weight in sorted(target_weights.items()):
+        economic_inputs: list[tuple[str, Decimal, OrderIntent | None]] = []
+        if persisted_intents is not None:
+            economic_inputs = [(item.symbol, Decimal("0"), item) for item in persisted_intents]
+        else:
+            economic_inputs = [
+                (symbol, weight, None) for symbol, weight in sorted(target_weights.items())
+            ]
+        for symbol, weight, persisted_intent in economic_inputs:
             bar = bars_by_symbol.get(symbol)
             if bar is None:
                 raise ValueError("Cycle vyžaduje executable bar každého target instrumentu")
-            desired = (account.equity * weight / bar.open).to_integral_value(rounding=ROUND_DOWN)
-            delta = desired - positions.get(symbol, Decimal(0)) - pending.get(symbol, Decimal(0))
-            if delta == 0:
-                continue
-            intent_id = hashlib.sha256(f"{cycle_id}|{symbol}|{desired}".encode()).hexdigest()
-            intent = OrderIntent(
-                symbol,
-                Side.BUY if delta > 0 else Side.SELL,
-                abs(delta),
-                decision_time,
-                "target-vs-actual",
-                intent_id,
-                OrderType.MARKET,
-                None,
-                cycle_id,
-                correlation_id,
-            )
+            if persisted_intent is None:
+                desired = (account.equity * weight / bar.open).to_integral_value(
+                    rounding=ROUND_DOWN
+                )
+                delta = (
+                    desired - positions.get(symbol, Decimal(0)) - pending.get(symbol, Decimal(0))
+                )
+                if delta == 0:
+                    continue
+                intent_id = hashlib.sha256(f"{cycle_id}|{symbol}|{desired}".encode()).hexdigest()
+                intent = OrderIntent(
+                    symbol,
+                    Side.BUY if delta > 0 else Side.SELL,
+                    abs(delta),
+                    decision_time,
+                    "target-vs-actual",
+                    intent_id,
+                    OrderType.MARKET,
+                    None,
+                    cycle_id,
+                    correlation_id,
+                )
+            else:
+                # Autonomous kontrakt přebírá ekonomická pole beze změny;
+                # open je pouze risk/fill reference.
+                intent = OrderIntent(
+                    persisted_intent.symbol,
+                    persisted_intent.side,
+                    persisted_intent.quantity,
+                    persisted_intent.decision_time,
+                    persisted_intent.reason,
+                    persisted_intent.id,
+                    persisted_intent.order_type,
+                    persisted_intent.limit_price,
+                    cycle_id,
+                    correlation_id,
+                )
             with Session(self.repository.engine) as session:
                 account_row = session.get(PaperAccountRecord, account_id)
                 if account_row is None:
@@ -1362,6 +1396,20 @@ class TradingCycleService:
             decision = self.risk.evaluate(
                 intent, bar.open, snapshot, cycle_id, correlation_id, decision_time, bar.timestamp
             )
+            if persisted_intent is not None and decision.status is RiskDecisionStatus.MODIFIED:
+                decision = RiskDecision(
+                    decision.decision_id,
+                    decision.timestamp,
+                    decision.order_intent_id,
+                    RiskDecisionStatus.REJECTED,
+                    decision.original_quantity,
+                    Decimal(0),
+                    decision.reasons,
+                    decision.evaluated_limits,
+                    decision.portfolio_snapshot,
+                    decision.correlation_id,
+                    decision.trading_cycle_id,
+                )
             with Session(self.repository.engine) as session:
                 if session.get(RiskDecisionRecord, decision.decision_id) is None:
                     self.repository.audit(

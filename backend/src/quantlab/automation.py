@@ -7,6 +7,7 @@ import signal
 import socket
 from collections.abc import Callable
 from datetime import UTC, date, datetime, time, timedelta
+from decimal import ROUND_DOWN, Decimal
 from enum import StrEnum
 from threading import Event, Thread
 from typing import Any
@@ -15,10 +16,12 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sqlalchemy import (
     CheckConstraint,
+    Date,
     DateTime,
     ForeignKey,
     Index,
     Integer,
+    Numeric,
     String,
     Text,
     UniqueConstraint,
@@ -81,10 +84,11 @@ MANAGED_JOB_TYPES = frozenset(
         JobType.MONITOR_PAPER_DEPLOYMENT,
     }
 )
-AUTONOMOUS_DAILY_TIME = "09:30"
+AUTONOMOUS_DAILY_TIME = "09:00"
 AUTONOMOUS_TIMEZONE = "America/New_York"
 MONITOR_INTERVAL_SECONDS = 3600
 PREOPEN_EXECUTION_INTENT_BLOCK = "PREOPEN_EXECUTION_INTENT_NOT_PERSISTED"
+PREOPEN_EXECUTION_INTENT_INVALID = "PREOPEN_EXECUTION_INTENT_INVALID"
 
 TERMINAL = {RunStatus.SUCCEEDED, RunStatus.FAILED, RunStatus.DEAD_LETTER, RunStatus.CANCELLED}
 
@@ -192,6 +196,60 @@ class WorkerHeartbeat(Base):
         ForeignKey("job_runs.id", ondelete="SET NULL")
     )
     stopped_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class PreOpenExecutionIntentRecord(Base):
+    """Immutable ekonomická instrukce vytvořená před zamýšleným XNYS open."""
+
+    __tablename__ = "preopen_execution_intents"
+    __table_args__ = (
+        UniqueConstraint(
+            "deployment_id",
+            "execution_session",
+            "instrument_id",
+            name="uq_preopen_intent_logical_identity",
+        ),
+        CheckConstraint("quantity > 0", name="ck_preopen_intent_quantity_positive"),
+        CheckConstraint("side IN ('BUY', 'SELL')", name="ck_preopen_intent_side"),
+        CheckConstraint("order_type = 'MARKET'", name="ck_preopen_intent_order_type"),
+        CheckConstraint("sizing_reference_price > 0", name="ck_preopen_intent_reference_positive"),
+        CheckConstraint(
+            "created_at < intended_execution_open", name="ck_preopen_intent_created_preopen"
+        ),
+        CheckConstraint(
+            "decision_time < intended_execution_open", name="ck_preopen_intent_decision_preopen"
+        ),
+        CheckConstraint(
+            "sizing_reference_known_at <= decision_time", name="ck_preopen_intent_reference_causal"
+        ),
+    )
+    intent_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    deployment_id: Mapped[str] = mapped_column(
+        ForeignKey("strategy_deployments.deployment_id", ondelete="RESTRICT"), nullable=False
+    )
+    account_id: Mapped[str] = mapped_column(
+        ForeignKey("paper_accounts.id", ondelete="RESTRICT"), nullable=False
+    )
+    strategy_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    instrument_id: Mapped[str] = mapped_column(String(40), nullable=False)
+    side: Mapped[str] = mapped_column(String(10), nullable=False)
+    quantity: Mapped[Decimal] = mapped_column(Numeric(24, 8), nullable=False)
+    order_type: Mapped[str] = mapped_column(String(10), nullable=False)
+    execution_session: Mapped[date] = mapped_column(Date, nullable=False)
+    intended_execution_open: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    decision_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    sizing_reference_price: Mapped[Decimal] = mapped_column(Numeric(24, 8), nullable=False)
+    sizing_reference_known_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    snapshot_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    universe_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    signal_observation_ids_json: Mapped[str] = mapped_column(Text, nullable=False)
+    evidence_json: Mapped[str] = mapped_column(Text, nullable=False)
+    integrity_hash: Mapped[str] = mapped_column(String(64), nullable=False)
 
 
 def utc(value: datetime) -> datetime:
@@ -849,6 +907,184 @@ class JobExecutor:
         self.provider_factory = provider_factory
         self.clock = clock or (lambda: datetime.now(UTC))
 
+    @staticmethod
+    def _intent_content(row: PreOpenExecutionIntentRecord) -> dict[str, str | list[str]]:
+        def decimal_value(value: Decimal) -> str:
+            return format(Decimal(value).quantize(Decimal("0.00000001")), "f")
+
+        return {
+            "deployment_id": row.deployment_id,
+            "account_id": row.account_id,
+            "strategy_id": row.strategy_id,
+            "instrument_id": row.instrument_id,
+            "side": row.side,
+            "quantity": decimal_value(row.quantity),
+            "order_type": row.order_type,
+            "execution_session": row.execution_session.isoformat(),
+            "intended_execution_open": utc(row.intended_execution_open).isoformat(),
+            "decision_time": utc(row.decision_time).isoformat(),
+            "sizing_reference_price": decimal_value(row.sizing_reference_price),
+            "sizing_reference_known_at": utc(row.sizing_reference_known_at).isoformat(),
+            "snapshot_id": row.snapshot_id,
+            "universe_id": row.universe_id,
+            "signal_observation_ids": json.loads(row.signal_observation_ids_json),
+            "evidence": row.evidence_json,
+        }
+
+    @classmethod
+    def _intent_hash(cls, row: PreOpenExecutionIntentRecord) -> str:
+        canonical = json.dumps(cls._intent_content(row), sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(canonical.encode()).hexdigest()
+
+    def _persist_preopen_intents(
+        self,
+        *,
+        deployment: Any,
+        snapshot: Any,
+        eligible_ids: set[str],
+        execution_instrument_ids: tuple[str, ...],
+        signal_session: date,
+        signal_close: datetime,
+        execution_session: date,
+        execution_open: datetime,
+        created_at: datetime,
+    ) -> tuple[str, ...]:
+        """Vytvoří side/quantity výhradně z causal adjusted signal close."""
+        from quantlab.market_data import CorporateAction, CorporateActionKind, causal_adjusted_close
+        from quantlab.market_data_service import _database_utc
+        from quantlab.multi_asset import STRATEGY_REGISTRY, StrategyContext
+        from quantlab.persistence import CorporateActionRecord, ExperimentRecord
+        from quantlab.phase4 import PaperAccountRecord, PositionRecord
+        from quantlab.phase6_runtime import DeploymentService, ValidatedCurrentDataAccessor
+
+        if created_at >= execution_open:
+            raise PermanentJobError("PREOPEN_EXECUTION_INTENT_CREATED_TOO_LATE")
+        with Session(self.trading.repository.engine) as session:
+            experiment = session.get(ExperimentRecord, deployment.experiment_id)
+            if experiment is None:
+                raise PermanentJobError("Deployment experiment neexistuje")
+            _, _, selected = DeploymentService.validate_experiment(session, experiment)
+            strategy_type = STRATEGY_REGISTRY.get(deployment.strategy_name)
+            if strategy_type is None:
+                raise PermanentJobError("Deployment strategy není allowlisted")
+            strategy = strategy_type(**selected)
+            account = session.get(PaperAccountRecord, deployment.paper_account_id)
+            if account is None:
+                raise PermanentJobError("Paper account neexistuje")
+            positions = {
+                row.instrument_id: row.quantity
+                for row in session.scalars(
+                    select(PositionRecord).where(PositionRecord.account_id == account.id)
+                )
+            }
+            pending: dict[str, Decimal] = {}
+            for order in self.trading.broker.get_open_orders(account.id):
+                signed = (
+                    order.remaining_quantity if order.side == "BUY" else -order.remaining_quantity
+                )
+                pending[order.instrument_id] = pending.get(order.instrument_id, Decimal(0)) + signed
+            actions = tuple(
+                session.scalars(
+                    select(CorporateActionRecord).where(
+                        CorporateActionRecord.instrument_id.in_(eligible_ids),
+                        CorporateActionRecord.known_at <= signal_close,
+                    )
+                )
+            )
+        accessor = ValidatedCurrentDataAccessor(lambda: Session(self.trading.repository.engine))
+        history = accessor.history(
+            execution_instrument_ids,
+            signal_close,
+            strategy.required_lookback,
+            before_session=execution_session,
+            known_at=signal_close,
+        )
+        domain_actions = tuple(
+            CorporateAction(
+                item.action_id,
+                item.instrument_id,
+                CorporateActionKind(item.kind),
+                _database_utc(item.effective_at),
+                _database_utc(item.known_at),
+                Decimal(item.value) if item.value is not None else None,
+                item.new_symbol,
+            )
+            for item in actions
+        )
+        prices = {
+            instrument: tuple(
+                causal_adjusted_close(values, domain_actions, signal_close)[item.session_date]
+                for item in values
+            )
+            for instrument, values in history.items()
+        }
+        target = strategy.generate_targets(
+            StrategyContext(
+                signal_close,
+                {key: value for key, value in history.items() if key in eligible_ids},
+                tuple(sorted(eligible_ids)),
+                {key: value for key, value in prices.items() if key in eligible_ids},
+            )
+        )
+        weights = {instrument: Decimal("0") for instrument in positions}
+        weights.update(dict(target.weights))
+        rows: list[PreOpenExecutionIntentRecord] = []
+        strategy_id = f"phase6:{deployment.deployment_id}"
+        for instrument, weight in sorted(weights.items()):
+            reference = prices.get(instrument, ())[-1]
+            desired = (account.equity * weight / reference).to_integral_value(rounding=ROUND_DOWN)
+            delta = (
+                desired
+                - positions.get(instrument, Decimal(0))
+                - pending.get(instrument, Decimal(0))
+            )
+            if delta == 0:
+                continue
+            observation_ids = [item.observation_id for item in history[instrument]]
+            logical = f"{deployment.deployment_id}|{execution_session.isoformat()}|{instrument}"
+            intent_id = hashlib.sha256(logical.encode()).hexdigest()
+            row = PreOpenExecutionIntentRecord(
+                intent_id=intent_id,
+                deployment_id=deployment.deployment_id,
+                account_id=account.id,
+                strategy_id=strategy_id,
+                instrument_id=instrument,
+                side="BUY" if delta > 0 else "SELL",
+                quantity=abs(delta),
+                order_type="MARKET",
+                execution_session=execution_session,
+                intended_execution_open=execution_open,
+                decision_time=signal_close,
+                created_at=created_at,
+                sizing_reference_price=reference,
+                sizing_reference_known_at=signal_close,
+                snapshot_id=snapshot.snapshot_id,
+                universe_id=deployment.universe_id,
+                signal_observation_ids_json=json.dumps(observation_ids, sort_keys=True),
+                evidence_json=json.dumps(
+                    {
+                        "method": "equity_weight_over_causal_adjusted_close",
+                        "target_weight": str(weight),
+                    },
+                    sort_keys=True,
+                ),
+                integrity_hash="",
+            )
+            row.integrity_hash = self._intent_hash(row)
+            rows.append(row)
+        with Session(self.trading.repository.engine) as session, session.begin():
+            for row in rows:
+                existing = session.get(PreOpenExecutionIntentRecord, row.intent_id)
+                if existing is not None:
+                    if (
+                        existing.integrity_hash != row.integrity_hash
+                        or self._intent_hash(existing) != existing.integrity_hash
+                    ):
+                        raise PermanentJobError("PREOPEN_EXECUTION_INTENT_CONFLICT")
+                    continue
+                session.add(row)
+        return tuple(row.intent_id for row in rows)
+
     def __call__(self, job: ScheduledJob, run: JobRun) -> dict[str, str | None]:
         snapshot = json.loads(run.config_snapshot_json)
         if not isinstance(snapshot, dict) or snapshot.get("snapshot_version") != 1:
@@ -1018,10 +1254,7 @@ class JobExecutor:
             )
         if not rows or len(rows) != len(instrument_ids):
             raise PermanentJobError("PIT universe scope je prázdný nebo nekonzistentní")
-        # Současný runtime nepersistuje před 09:30 plně specifikovaný immutable order
-        # intent (side + quantity). Po open proto nesmí číst opening print a teprve
-        # následně z něj odvozovat ekonomický příkaz. Do zavedení pre-open intentu
-        # je autonomous economic path záměrně fail-closed.
+        # Intent smí vzniknout pouze před open; pozdní PREPARE jej nesmí backdatovat.
         if now >= execution_open:
             return {
                 "deployment_id": deployment_id,
@@ -1142,14 +1375,39 @@ class JobExecutor:
             if not open_ready:
                 raise TransientJobError("DATA_NOT_READY: provider nevrátil raw executable open")
         if now < execution_open:
+            intent_ids = self._persist_preopen_intents(
+                deployment=deployment,
+                snapshot=snapshot,
+                eligible_ids=eligible_ids,
+                execution_instrument_ids=instrument_ids,
+                signal_session=signal_session,
+                signal_close=signal_close,
+                execution_session=execution_session,
+                execution_open=execution_open,
+                created_at=now,
+            )
+            run_id = (
+                self.repository.materialize_execution_session(
+                    deployment_id=deployment_id,
+                    account_id=account_id,
+                    execution_session=execution_session,
+                    execution_time=execution_open,
+                    created_at=now,
+                )
+                if intent_ids
+                else None
+            )
             return {
                 "deployment_id": deployment_id,
                 "monitoring_id": monitoring.monitoring_id,
                 "trading_cycle_id": None,
                 "reconciliation_id": None,
-                "outcome": "WAITING_FOR_EXECUTION_OPEN",
-                "no_action_reason": "EXECUTION_SESSION_NOT_OPEN",
+                "outcome": "INTENT_READY" if intent_ids else "NO_ACTION",
+                "no_action_reason": None if intent_ids else "NO_TRADE_DELTA",
+                "execution_run_id": run_id,
+                "intent_ids": ",".join(intent_ids),
                 "ingestion_ids": ",".join(ingestions),
+                "corporate_action_evidence_ids": ",".join(action_evidence),
             }
         execution_now = utc(self.clock())
         if execution_now >= execution_cutoff:
@@ -1197,18 +1455,6 @@ class JobExecutor:
         deployment_id = payload["deployment_id"]
         execution_now = utc(self.clock())
 
-        if run.occurrence_key.startswith("xnys:"):
-            # Legacy/materialized XNYS occurrence nesmí po upgradu obejít chybějící
-            # immutable pre-open order intent. Žádný raw-open economic effect.
-            return {
-                "deployment_id": deployment_id,
-                "monitoring_id": None,
-                "trading_cycle_id": None,
-                "reconciliation_id": None,
-                "outcome": "NO_ACTION",
-                "no_action_reason": PREOPEN_EXECUTION_INTENT_BLOCK,
-            }
-
         def sessions() -> Session:
             return Session(self.trading.repository.engine)
 
@@ -1251,6 +1497,112 @@ class JobExecutor:
                     "outcome": "BLOCKED_BY_LIFECYCLE",
                     "no_action_reason": f"MONITORING_{monitoring.state}",
                 }
+        persisted_intents = None
+        if run.occurrence_key.startswith("xnys:"):
+            from quantlab.domain import OrderIntent, OrderType, Side
+            from quantlab.market_data import AssetType, Instrument, XNYSCalendar
+            from quantlab.market_data_service import PersistentMarketDataService
+            from quantlab.persistence import InstrumentRecord
+
+            try:
+                execution_session = date.fromisoformat(run.occurrence_key.removeprefix("xnys:"))
+            except ValueError as exc:
+                raise PermanentJobError(PREOPEN_EXECUTION_INTENT_INVALID) from exc
+            execution_open = XNYSCalendar().session_open(execution_session)
+            with sessions() as session:
+                rows = tuple(
+                    session.scalars(
+                        select(PreOpenExecutionIntentRecord).where(
+                            PreOpenExecutionIntentRecord.deployment_id == deployment_id,
+                            PreOpenExecutionIntentRecord.execution_session == execution_session,
+                        )
+                    )
+                )
+            if not rows:
+                return {
+                    "deployment_id": deployment_id,
+                    "monitoring_id": monitoring.monitoring_id,
+                    "trading_cycle_id": None,
+                    "reconciliation_id": None,
+                    "outcome": "NO_ACTION",
+                    "no_action_reason": PREOPEN_EXECUTION_INTENT_BLOCK,
+                }
+            invalid = any(
+                row.account_id != account_id
+                or row.strategy_id != f"phase6:{deployment_id}"
+                or utc(row.intended_execution_open) != execution_open
+                or utc(row.created_at) >= execution_open
+                or utc(row.decision_time) >= execution_open
+                or utc(row.sizing_reference_known_at) > utc(row.decision_time)
+                or row.quantity <= 0
+                or row.side not in {"BUY", "SELL"}
+                or self._intent_hash(row) != row.integrity_hash
+                for row in rows
+            )
+            if invalid:
+                return {
+                    "deployment_id": deployment_id,
+                    "monitoring_id": monitoring.monitoring_id,
+                    "trading_cycle_id": None,
+                    "reconciliation_id": None,
+                    "outcome": "NO_ACTION",
+                    "no_action_reason": PREOPEN_EXECUTION_INTENT_INVALID,
+                }
+            calendar = XNYSCalendar()
+            if not calendar.is_executable_open_time(execution_session, execution_now):
+                reason = (
+                    "EXECUTION_SESSION_NOT_OPEN"
+                    if execution_now < execution_open
+                    else "MISSED_EXECUTION_OPEN"
+                )
+                return {
+                    "deployment_id": deployment_id,
+                    "monitoring_id": monitoring.monitoring_id,
+                    "trading_cycle_id": None,
+                    "reconciliation_id": None,
+                    "outcome": "NO_ACTION",
+                    "no_action_reason": reason,
+                }
+            provider = self.provider_factory() if self.provider_factory else StooqProvider()
+            with sessions() as session:
+                instrument_rows = tuple(
+                    session.scalars(
+                        select(InstrumentRecord).where(
+                            InstrumentRecord.instrument_id.in_([row.instrument_id for row in rows])
+                        )
+                    )
+                )
+            if len(instrument_rows) != len(rows):
+                raise PermanentJobError(PREOPEN_EXECUTION_INTENT_INVALID)
+            for item in instrument_rows:
+                instrument = Instrument(
+                    item.instrument_id,
+                    item.symbol,
+                    item.exchange,
+                    item.calendar,
+                    item.currency,
+                    AssetType(item.asset_type),
+                    item.active_from.date(),
+                    item.active_to.date() if item.active_to else None,
+                    utc(item.created_at),
+                )
+                result = PersistentMarketDataService(
+                    sessions, calendar, clock=lambda: execution_now
+                ).ingest_open(provider, instrument, execution_session, execution_now)
+                if result.status != "SUCCEEDED":
+                    raise TransientJobError(result.error or "Raw executable open refresh selhal")
+            persisted_intents = tuple(
+                OrderIntent(
+                    row.instrument_id,
+                    Side(row.side),
+                    row.quantity,
+                    utc(row.decision_time),
+                    "persisted-preopen-target-delta",
+                    row.intent_id,
+                    OrderType(row.order_type),
+                )
+                for row in sorted(rows, key=lambda item: item.instrument_id)
+            )
         provider = self.provider_factory() if self.provider_factory else StooqProvider()
         service = Phase6PaperExecutionService(
             sessions,
@@ -1269,6 +1621,7 @@ class JobExecutor:
                 execution_intent_time=run.scheduled_for
                 if run.occurrence_key.startswith("xnys:")
                 else None,
+                persisted_intents=persisted_intents,
             )
         except DatasetInvalid as exc:
             message = str(exc)
