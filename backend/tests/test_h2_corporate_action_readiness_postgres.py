@@ -7,7 +7,8 @@ from decimal import Decimal
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import create_engine, select
+from sqlalchemy import create_engine, select, text
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import sessionmaker
 
 from quantlab.market_data import (
@@ -22,10 +23,16 @@ from quantlab.market_data import (
     ProviderUnavailable,
     StooqProvider,
 )
-from quantlab.market_data_service import PersistentMarketDataService
+from quantlab.market_data_service import (
+    CorporateActionCancellationRecord,
+    CorporateActionEventAuditRecord,
+    CorporateActionRevisionRecord,
+    PersistentMarketDataService,
+)
 from quantlab.persistence import (
     CorporateActionEventRecord,
     CorporateActionReadinessRecord,
+    CorporateActionRecord,
     InstrumentRecord,
 )
 
@@ -231,6 +238,163 @@ def test_corporate_action_event_persistence_is_idempotent_and_collision_strict(s
     )
     with pytest.raises(DatasetInvalid, match="identity koliduje"):
         service.record_corporate_action_event("alpaca", collision)
+
+
+def test_event_persistence_separates_provider_time_from_first_local_receipt(scope) -> None:
+    factory, _ = scope
+    suffix = uuid4().hex
+    provider_at = datetime(2026, 8, 29, 15, tzinfo=UTC)
+    received_at = datetime(2026, 8, 29, 17, tzinfo=UTC)
+    event = CorporateActionEvent(
+        f"receipt-{suffix}",
+        provider_at,
+        CorporateActionEventType.INSERT,
+        f"ca-{suffix}",
+        "c" * 64,
+        received_at,
+        ("H2A",),
+        date(2026, 8, 30),
+    )
+    service = PersistentMarketDataService(factory)
+
+    service.record_corporate_action_event("alpaca", event)
+    loaded = next(item for item in service.corporate_action_events("alpaca") if item.event_id == event.event_id)
+
+    assert loaded.at == provider_at
+    assert loaded.received_at == received_at
+    assert loaded.symbols == ("H2A",)
+    with factory() as session:
+        persisted = session.get(CorporateActionEventRecord, event.event_id)
+        audit = session.get(CorporateActionEventAuditRecord, event.event_id)
+        assert persisted is not None and persisted.occurred_at == received_at
+        assert audit is not None and audit.provider_at == provider_at
+
+
+def test_corporate_action_event_tables_reject_direct_mutation(scope) -> None:
+    factory, _ = scope
+    suffix = uuid4().hex
+    event = CorporateActionEvent(
+        f"immutable-{suffix}",
+        datetime(2026, 8, 29, 15, tzinfo=UTC),
+        CorporateActionEventType.INSERT,
+        f"ca-{suffix}",
+        "d" * 64,
+        datetime(2026, 8, 29, 16, tzinfo=UTC),
+    )
+    PersistentMarketDataService(factory).record_corporate_action_event("alpaca", event)
+
+    with factory() as session, pytest.raises(DBAPIError, match="immutable"):
+        session.execute(
+            text("UPDATE corporate_action_events SET action='delete' WHERE event_id=:event_id"),
+            {"event_id": event.event_id},
+        )
+        session.commit()
+
+
+def test_updated_action_creates_immutable_revision_and_updates_current_projection(scope) -> None:
+    factory, instrument = scope
+    suffix = uuid4().hex
+    action_id = uuid4().hex
+    provider_action_id = f"provider-{suffix}"
+    first = CorporateAction(
+        action_id,
+        instrument.instrument_id,
+        CorporateActionKind.SPLIT,
+        datetime(2026, 8, 20, tzinfo=UTC),
+        datetime(2026, 8, 19, tzinfo=UTC),
+        Decimal("2"),
+        None,
+        provider_action_id,
+        "a" * 64,
+    )
+    revised = CorporateAction(
+        action_id,
+        instrument.instrument_id,
+        CorporateActionKind.SPLIT,
+        datetime(2026, 8, 20, tzinfo=UTC),
+        datetime(2026, 8, 20, tzinfo=UTC),
+        Decimal("4"),
+        None,
+        provider_action_id,
+        "b" * 64,
+    )
+    service = PersistentMarketDataService(factory)
+
+    service.verify_corporate_action_readiness(
+        ActionProvider(True, [first]),
+        instrument,
+        date(2026, 8, 1),
+        date(2026, 8, 26),
+        datetime(2026, 8, 21, tzinfo=UTC),
+    )
+    service.verify_corporate_action_readiness(
+        ActionProvider(True, [revised]),
+        instrument,
+        date(2026, 8, 1),
+        date(2026, 8, 26),
+        datetime(2026, 8, 22, tzinfo=UTC),
+    )
+
+    with factory() as session:
+        revisions = session.scalars(
+            select(CorporateActionRevisionRecord).where(
+                CorporateActionRevisionRecord.action_id == action_id
+            )
+        ).all()
+        current = session.get(CorporateActionRecord, action_id)
+        assert len(revisions) == 2
+        assert {row.value for row in revisions} == {"2", "4"}
+        assert current is not None and current.value == "4"
+        assert current.known_at == revised.known_at
+
+
+def test_delete_event_tombstones_current_projection_and_persists_cancellation(scope) -> None:
+    factory, instrument = scope
+    suffix = uuid4().hex
+    action_id = uuid4().hex
+    provider_action_id = f"provider-{suffix}"
+    action = CorporateAction(
+        action_id,
+        instrument.instrument_id,
+        CorporateActionKind.CASH_DIVIDEND,
+        datetime(2026, 8, 25, tzinfo=UTC),
+        datetime(2026, 8, 20, tzinfo=UTC),
+        Decimal("1.25"),
+        None,
+        provider_action_id,
+        "e" * 64,
+    )
+    service = PersistentMarketDataService(factory)
+    service.verify_corporate_action_readiness(
+        ActionProvider(True, [action]),
+        instrument,
+        date(2026, 8, 1),
+        date(2026, 8, 26),
+        datetime(2026, 8, 21, tzinfo=UTC),
+    )
+    delete = CorporateActionEvent(
+        f"delete-{suffix}",
+        datetime(2026, 8, 21, 15, tzinfo=UTC),
+        CorporateActionEventType.DELETE,
+        provider_action_id,
+        "f" * 64,
+        datetime(2026, 8, 21, 16, tzinfo=UTC),
+        (instrument.symbol,),
+        date(2026, 8, 25),
+    )
+
+    service.record_corporate_action_event("h2-True-False-False", delete)
+
+    with factory() as session:
+        current = session.get(CorporateActionRecord, action_id)
+        cancellations = session.scalars(
+            select(CorporateActionCancellationRecord).where(
+                CorporateActionCancellationRecord.action_id == action_id
+            )
+        ).all()
+        assert current is not None and current.effective_at.year == 9999
+        assert len(cancellations) == 1
+        assert cancellations[0].known_at == datetime(2026, 8, 21, 16, tzinfo=UTC)
 
 
 def test_standard_stooq_is_explicitly_unsupported(scope) -> None:
