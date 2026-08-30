@@ -45,6 +45,7 @@ def upgrade() -> None:
         ),
         sa.Column("provider_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("symbols_json", sa.Text, nullable=False),
+        sa.Column("scope_date", sa.DateTime(timezone=True)),
     )
     op.create_table(
         "corporate_action_revisions",
