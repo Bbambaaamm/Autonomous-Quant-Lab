@@ -250,10 +250,15 @@ def test_persisted_intent_quantity_is_invariant_to_opening_print(
         assert order.order_intent_id == "preopen-intent"
         decision = session.scalar(select(RiskDecisionRecord))
         assert decision is not None
-        assert decision.timestamp == executable.timestamp + timedelta(milliseconds=100)
+        risk_timestamp = (
+            decision.timestamp.replace(tzinfo=UTC)
+            if decision.timestamp.tzinfo is None
+            else decision.timestamp.astimezone(UTC)
+        )
+        assert risk_timestamp == executable.timestamp + timedelta(milliseconds=100)
         assert NOW < persisted.decision_time < executable.timestamp
-        assert decision.timestamp >= executable.timestamp
-        assert decision.timestamp >= persisted.decision_time
+        assert risk_timestamp >= executable.timestamp
+        assert risk_timestamp >= persisted.decision_time
         assert RiskReason.STALE_DATA.value not in json.loads(decision.reasons_json)
 
 

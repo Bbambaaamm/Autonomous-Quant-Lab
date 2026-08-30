@@ -596,20 +596,22 @@ def test_postgres_research_to_paper_authoritative_e2e(factory, engine) -> None:
                 integrity_hash="0" * 64,
             )
         )
-    with pytest.raises(DBAPIError, match="pre-open execution intents are immutable"):
+    with pytest.raises(DBAPIError) as update_error:
         with Session(engine) as session, session.begin():
             session.execute(
                 update(PreOpenExecutionIntentRecord)
                 .where(PreOpenExecutionIntentRecord.intent_id == immutable_id)
                 .values(quantity=Decimal("2"))
             )
-    with pytest.raises(DBAPIError, match="pre-open execution intents are immutable"):
+    assert "pre-open execution intents are immutable" in str(update_error.value.orig)
+    with pytest.raises(DBAPIError) as delete_error:
         with Session(engine) as session, session.begin():
             session.execute(
                 delete(PreOpenExecutionIntentRecord).where(
                     PreOpenExecutionIntentRecord.intent_id == immutable_id
                 )
             )
+    assert "pre-open execution intents are immutable" in str(delete_error.value.orig)
     matching = next(
         item
         for item in lineage
