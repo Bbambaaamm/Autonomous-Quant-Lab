@@ -6,14 +6,20 @@ from copy import deepcopy
 from decimal import Decimal
 
 import pytest
+from fastapi.testclient import TestClient
 from phase6_audit_helpers import seed_phase6_snapshot
 from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import sessionmaker
 
 import quantlab.phase6_runtime as runtime
+from quantlab import api
 from quantlab.market_data import DatasetInvalid
-from quantlab.persistence import DatasetSnapshotRecord, ExperimentRecord
-from quantlab.phase6_runtime import Phase6ExperimentRunner
+from quantlab.persistence import DatasetSnapshotRecord, ExperimentRecord, StrategyRecord
+from quantlab.phase6_runtime import (
+    Phase6ExperimentRequest,
+    Phase6ExperimentRunner,
+    normalize_strategy_config,
+)
 
 
 def factory():
@@ -54,6 +60,147 @@ def test_phase6_runner_oos_isolation() -> None:
     first, second = runner.run(request_one), runner.run(request_two)
     assert first.selected_parameters_json == second.selected_parameters_json
     assert first.result_json != second.result_json
+
+
+def test_mean_reversion_decimal_transport_has_one_canonical_identity() -> None:
+    sessions = factory()
+    _, _, _, snapshot, _ = seed_phase6_snapshot(sessions, suffix="mean-reversion")
+    with sessions() as session, session.begin():
+        session.add(
+            StrategyRecord(
+                strategy_identity="mean-reversion-1",
+                strategy_name="multi_asset_mean_reversion",
+                strategy_version="1.0.0",
+                created_at=runtime.datetime.now(runtime.UTC),
+                metadata_json="{}",
+            )
+        )
+    runner = Phase6ExperimentRunner(sessions)
+
+    def request(threshold: object) -> Phase6ExperimentRequest:
+        return Phase6ExperimentRequest(
+            snapshot.snapshot_id,
+            "multi_asset_mean_reversion",
+            "1.0.0",
+            ({"lookback": 20, "threshold": threshold},),
+            code_sha="a" * 40,
+        )
+
+    from_string = runner.run(request("0.950"))
+    from_number = runner.run(request(0.95))
+    with_default_omitted = runner.run(
+        Phase6ExperimentRequest(
+            snapshot.snapshot_id,
+            "multi_asset_mean_reversion",
+            "1.0.0",
+            ({"threshold": "0.95"},),
+            code_sha="a" * 40,
+        )
+    )
+    replay = runner.replay(request(0.95))
+    assert from_string.id == from_number.id == with_default_omitted.id
+    assert from_string.selected_parameters_json == (
+        '{"lookback":20,"rebalance_frequency":"WEEKLY","threshold":"0.95"}'
+    )
+    assert replay.selected_parameters == {
+        "lookback": 20,
+        "rebalance_frequency": runtime.RebalanceFrequency.WEEKLY,
+        "threshold": Decimal("0.95"),
+    }
+
+
+def test_strategy_config_materializes_defaults_canonically() -> None:
+    omitted = normalize_strategy_config(
+        "multi_asset_mean_reversion", "1.0.0", {"threshold": "0.9500"}
+    )
+    explicit = normalize_strategy_config(
+        "multi_asset_mean_reversion",
+        "1.0.0",
+        {"lookback": 20, "threshold": Decimal("0.95")},
+    )
+    assert omitted == explicit
+    assert omitted == {
+        "lookback": 20,
+        "rebalance_frequency": runtime.RebalanceFrequency.WEEKLY,
+        "threshold": Decimal("0.95"),
+    }
+
+
+@pytest.mark.parametrize(
+    ("config", "message"),
+    [
+        ({"lookback": 20, "threshold": "abc"}, "desetinné číslo"),
+        ({"lookback": True, "threshold": "0.95"}, "celé číslo"),
+        ({"lookback": 20.5, "threshold": "0.95"}, "celé číslo"),
+        ({"lookback": 20.0, "threshold": "0.95"}, "celé číslo"),
+        ({"lookback": 9007199254740993.0, "threshold": "0.95"}, "celé číslo"),
+        (
+            {"lookback": 20, "threshold": "0.95", "threshhold": "0.9"},
+            "Neznámé strategy parametry",
+        ),
+    ],
+)
+def test_strategy_config_rejects_invalid_operator_values(
+    config: dict[str, object], message: str
+) -> None:
+    with pytest.raises(DatasetInvalid, match=message):
+        normalize_strategy_config("multi_asset_mean_reversion", "1.0.0", config)
+
+
+def test_runner_rejects_bad_config_before_strategy_construction() -> None:
+    sessions = factory()
+    runner = Phase6ExperimentRunner(sessions)
+    request = Phase6ExperimentRequest(
+        "unused",
+        "multi_asset_mean_reversion",
+        "1.0.0",
+        ({"lookback": 20, "threshold": "abc"},),
+        code_sha="a" * 40,
+    )
+    with pytest.raises(DatasetInvalid, match="desetinné číslo"):
+        runner.run(request)
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        {"lookback": 20, "threshold": "abc"},
+        {"lookback": True, "threshold": "0.95"},
+        {"lookback": 20.5, "threshold": "0.95"},
+        {"lookback": 20, "threshold": "0.95", "threshhold": "0.9"},
+    ],
+)
+def test_experiment_api_returns_domain_error_for_invalid_config(
+    config: dict[str, object], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(api.control_plane_registry, "ensure_strategy", lambda *args: None)
+    response = TestClient(api.app).post(
+        "/operator/research/experiments",
+        json={
+            "snapshot_id": "unused",
+            "strategy_name": "multi_asset_mean_reversion",
+            "strategy_version": "1.0.0",
+            "parameter_configs": [config],
+            "code_sha": "a" * 40,
+            "reason": "regression test",
+        },
+    )
+    assert response.status_code == 409, response.text
+
+
+def test_trend_and_momentum_configs_remain_typed() -> None:
+    assert normalize_strategy_config("multi_asset_trend", "1.0.0", {"fast": 2, "slow": 3}) == {
+        "fast": 2,
+        "rebalance_frequency": runtime.RebalanceFrequency.MONTHLY,
+        "slow": 3,
+    }
+    assert normalize_strategy_config(
+        "cross_sectional_momentum", "1.0.0", {"lookback": 20, "top_n": 3}
+    ) == {
+        "lookback": 20,
+        "rebalance_frequency": runtime.RebalanceFrequency.MONTHLY,
+        "top_n": 3,
+    }
 
 
 def _canonical_hash(manifest: dict[str, object]) -> str:

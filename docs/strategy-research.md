@@ -4,6 +4,18 @@ Strategie implementuje `generate_targets(StrategyContext) -> TargetPortfolio`, d
 
 Baseline registry obsahuje multi-asset MA trend (`fast`, `slow`), cross-sectional momentum (`lookback`, `top_n`, deterministický tie-break canonical ID) a distance-from-mean reversion (`lookback`, `threshold`). Chybějící lookback asset explicitně vyřadí. Monthly/weekly hranice používá dostupné společné XNYS sessions.
 
+Phase 6 normalizuje každou konfiguraci centrálně ještě před výpočtem identity, výběrem,
+konstrukcí strategie a persistencí. Celočíselné parametry odmítají boolean, zlomky i
+nekonečné hodnoty. Ekonomické Decimal parametry (například `threshold`) jsou interně vždy
+kanonické `Decimal`; JSON transport může použít přesný string (`"0.95"`) nebo number (`0.95`),
+který se převádí přes jeho deterministickou desetinnou reprezentaci. Oba transportní tvary tak
+mají stejnou experiment identity a replay konfiguraci. Neznámé parametry a nepovolené dvojice
+strategie/verze jsou odmítnuty fail closed. Canonical konfigurace materializuje také všechny
+dataclass defaulty a Decimal hodnotám odstraní nevýznamné koncové nuly, takže vynechaný default
+versus jeho explicitní hodnota ani `"0.95"` versus `"0.950"` nemění experiment identity.
+Integer parametry musí JSON transport poslat jako integer, nikoli jako float, protože float již
+mohl před validací nevratně ztratit přesnost.
+
 Engine vede společnou USD hotovost, více pozic, cost basis, fills a portfolio equity. Nejde o součet single-symbol backtestů. Sells proběhnou deterministicky před buys, množství jsou whole-share a buy je ořezán dostupnou hotovostí včetně fee. Nově obchodovat lze jen asset s čerstvým raw open; existing stale valuation starší než policy limit selže. Multi-currency universe bez FX selže uzavřeně.
 
 Universe typu `POINT_IN_TIME_MEMBERSHIP` filtruje `valid_from <= decision < valid_to` i `known_at <= knowledge_as_of`. `STATIC` je vždy označen `BIAS_PRONE_STATIC`: dnešní static seznam není survivorship-bias-free. Budoucí prices, membership a corporate actions nesmí ovlivnit prefix rozhodnutí.

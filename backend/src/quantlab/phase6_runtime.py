@@ -8,7 +8,7 @@ import subprocess
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from uuid import uuid4
 
 from sqlalchemy import select
@@ -122,6 +122,93 @@ class PaperExecutionTiming:
     execution_time: datetime
 
 
+_STRATEGY_PARAMETER_TYPES: dict[str, dict[str, type[object]]] = {
+    "multi_asset_trend": {"fast": int, "slow": int},
+    "cross_sectional_momentum": {"lookback": int, "top_n": int},
+    "multi_asset_mean_reversion": {"lookback": int, "threshold": Decimal},
+}
+
+
+def _normalize_integer(value: object, parameter: str) -> int:
+    if isinstance(value, bool) or isinstance(value, float) or not isinstance(value, (int, Decimal)):
+        raise DatasetInvalid(f"Parametr {parameter} musí být celé číslo")
+    try:
+        decimal_value = Decimal(str(value))
+    except (InvalidOperation, ValueError) as exc:
+        raise DatasetInvalid(f"Parametr {parameter} musí být celé číslo") from exc
+    if not decimal_value.is_finite() or decimal_value != decimal_value.to_integral_value():
+        raise DatasetInvalid(f"Parametr {parameter} musí být konečné celé číslo")
+    return int(decimal_value)
+
+
+def _normalize_decimal(value: object, parameter: str) -> Decimal:
+    if isinstance(value, bool) or not isinstance(value, (str, int, float, Decimal)):
+        raise DatasetInvalid(f"Parametr {parameter} musí být desetinné číslo")
+    try:
+        normalized = Decimal(str(value))
+    except (InvalidOperation, ValueError) as exc:
+        raise DatasetInvalid(f"Parametr {parameter} musí být desetinné číslo") from exc
+    if not normalized.is_finite():
+        raise DatasetInvalid(f"Parametr {parameter} musí být konečné desetinné číslo")
+    return normalized
+
+
+def _canonical_decimal(value: Decimal) -> Decimal:
+    if value.is_zero():
+        return Decimal(0)
+    sign, digits, exponent = value.as_tuple()
+    if not isinstance(exponent, int):
+        raise DatasetInvalid("Decimal strategy parametr musí být konečný")
+    canonical_digits = list(digits)
+    while canonical_digits[-1] == 0:
+        canonical_digits.pop()
+        exponent += 1
+    return Decimal((sign, tuple(canonical_digits), exponent))
+
+
+def normalize_strategy_config(
+    strategy_name: str, strategy_version: str, config: dict[str, object]
+) -> dict[str, object]:
+    """Normalizuje allowlisted Phase 6 konfiguraci na ekonomické Python typy."""
+    strategy_type = STRATEGY_REGISTRY.get(strategy_name)
+    parameter_types = _STRATEGY_PARAMETER_TYPES.get(strategy_name)
+    if strategy_type is None or parameter_types is None or strategy_version != "1.0.0":
+        raise DatasetInvalid("Přesná strategy version není allowlisted")
+    if any(not isinstance(parameter, str) for parameter in config):
+        raise DatasetInvalid("Názvy strategy parametrů musí být řetězce")
+    unknown = set(config) - (set(parameter_types) | {"rebalance_frequency"})
+    if unknown:
+        raise DatasetInvalid(f"Neznámé strategy parametry: {', '.join(sorted(unknown))}")
+    normalized: dict[str, object] = {}
+    for parameter, value in config.items():
+        expected = parameter_types.get(parameter)
+        if expected is int:
+            normalized[parameter] = _normalize_integer(value, parameter)
+        elif expected is Decimal:
+            normalized[parameter] = _normalize_decimal(value, parameter)
+        elif parameter == "rebalance_frequency":
+            if not isinstance(value, str):
+                raise DatasetInvalid("Parametr rebalance_frequency není platný")
+            try:
+                normalized[parameter] = RebalanceFrequency(value)
+            except (TypeError, ValueError) as exc:
+                raise DatasetInvalid("Parametr rebalance_frequency není platný") from exc
+    try:
+        implementation = strategy_type(**normalized)
+    except (TypeError, ValueError, InvalidOperation, OverflowError) as exc:
+        raise DatasetInvalid("Strategy parametry jsou mimo povolené meze") from exc
+    if implementation.name != strategy_name or implementation.version != strategy_version:
+        raise DatasetInvalid("Implementace strategy version neodpovídá allowlistu")
+    canonical: dict[str, object] = {
+        parameter: getattr(implementation, parameter) for parameter in parameter_types
+    }
+    canonical["rebalance_frequency"] = implementation.rebalance_frequency
+    for parameter, value in canonical.items():
+        if isinstance(value, Decimal):
+            canonical[parameter] = _canonical_decimal(value)
+    return canonical
+
+
 def persisted_execution_open_scope(
     intent_instruments: set[str], held_instruments: set[str]
 ) -> tuple[str, ...]:
@@ -178,6 +265,10 @@ class Phase6ExperimentRunner:
     ) -> ExperimentRecord | Phase6ExperimentReplay:
         if not request.parameter_configs:
             raise ValueError("Parameter space nesmí být prázdný")
+        normalized_configs = tuple(
+            normalize_strategy_config(request.strategy_name, request.strategy_version, config)
+            for config in request.parameter_configs
+        )
         if not Decimal(0) < request.train_fraction < Decimal(1) or not Decimal(
             0
         ) < request.validation_fraction < Decimal(1):
@@ -186,7 +277,7 @@ class Phase6ExperimentRunner:
         identity_payload = {
             "snapshot_id": request.snapshot_id,
             "strategy": [request.strategy_name, request.strategy_version],
-            "parameters": request.parameter_configs,
+            "parameters": normalized_configs,
             "train_fraction": request.train_fraction,
             "validation_fraction": request.validation_fraction,
             "initial_cash": request.initial_cash,
@@ -402,7 +493,7 @@ class Phase6ExperimentRunner:
                 return multi_asset_metrics(result, request.initial_cash), result
 
             scored: list[tuple[Decimal, str, dict[str, object], MultiAssetMetrics]] = []
-            for config in request.parameter_configs:
+            for config in normalized_configs:
                 evaluate(config, times[:train_end])
                 validation, _ = evaluate(config, times[train_end:validation_end])
                 scored.append(
@@ -439,7 +530,7 @@ class Phase6ExperimentRunner:
                 strategy_name=request.strategy_name,
                 strategy_version=request.strategy_version,
                 parameter_space_id=hashlib.sha256(
-                    self._canonical(request.parameter_configs).encode()
+                    self._canonical(normalized_configs).encode()
                 ).hexdigest(),
                 decision="RESEARCH_ONLY",
                 total_return=float(oos.total_return),
@@ -1176,7 +1267,12 @@ class DeploymentService:
                 raise DatasetInvalid("Deployment vyžaduje existující kompatibilní paper účet")
             if row.timeframe != "1d" or snapshot.timeframe != row.timeframe:
                 raise DatasetInvalid("Deployment timeframe není podporován")
-            if self._evidence(row.parameters_json, "deployment parameters") != parameters:
+            persisted_parameters = normalize_strategy_config(
+                row.strategy_name,
+                row.strategy_version,
+                self._evidence(row.parameters_json, "deployment parameters"),
+            )
+            if persisted_parameters != parameters:
                 raise DatasetInvalid("Deployment parameters neodpovídají experiment evidence")
             if already_approved:
                 return
@@ -1267,11 +1363,12 @@ class DeploymentService:
             raise DatasetInvalid("Experiment nemá code SHA")
         cls._valid_sha(experiment.code_sha)
         cls._evidence(experiment.cost_model_json, "cost model")
-        parameters = cls._evidence(experiment.selected_parameters_json, "parameters")
-        try:
-            implementation = strategy_type(**parameters)
-        except (TypeError, ValueError) as exc:
-            raise DatasetInvalid("Experiment parameters nejsou pro strategii platné") from exc
+        parameters = normalize_strategy_config(
+            experiment.strategy_name,
+            experiment.strategy_version,
+            cls._evidence(experiment.selected_parameters_json, "parameters"),
+        )
+        implementation = strategy_type(**parameters)
         if (
             implementation.name != experiment.strategy_name
             or implementation.version != experiment.strategy_version
@@ -1445,7 +1542,13 @@ class Phase6PaperExecutionService:
                 or deployment.universe_id != snapshot.universe_id
                 or deployment.strategy_name != strategy_row.strategy_name
                 or deployment.strategy_version != strategy_row.strategy_version
-                or DeploymentService._evidence(deployment.parameters_json, "deployment parameters")
+                or normalize_strategy_config(
+                    deployment.strategy_name,
+                    deployment.strategy_version,
+                    DeploymentService._evidence(
+                        deployment.parameters_json, "deployment parameters"
+                    ),
+                )
                 != selected
                 or account is None
                 or deployment.currency != "USD"
