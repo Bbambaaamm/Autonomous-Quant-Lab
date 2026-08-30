@@ -61,8 +61,6 @@ def _canonical_hash(manifest: dict[str, object]) -> str:
         "observations": manifest["observations"],
         "corporate_actions": manifest["corporate_actions"],
     }
-    if "universe" in manifest:
-        immutable["universe"] = manifest["universe"]
     return hashlib.sha256(
         json.dumps(immutable, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()

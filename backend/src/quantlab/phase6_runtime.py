@@ -312,16 +312,13 @@ class Phase6ExperimentRunner:
                     "Snapshot corporate actions neodpovídají persistentní evidence"
                 )
             universe_lineage = manifest.get("universe")
-            immutable_content: dict[str, object] = {
+            immutable_content = {
                 "observations": entries,
                 "corporate_actions": action_entries,
             }
-            # Schema 3 snapshoty vytvořené před přidáním bias lineage zůstávají
-            # replayovatelné; nové snapshoty chrání universe metadata content hashem.
             if universe_lineage is not None:
                 if not isinstance(universe_lineage, dict):
                     raise DatasetInvalid("Snapshot universe lineage není konzistentní")
-                immutable_content["universe"] = universe_lineage
             manifest_hash = hashlib.sha256(self._canonical(immutable_content).encode()).hexdigest()
             if manifest_hash != snapshot.content_hash:
                 raise DatasetInvalid("Snapshot manifest neodpovídá uloženému content hash")

@@ -35,20 +35,17 @@ pytestmark = pytest.mark.skipif(
 def test_failed_ingestion_api_returns_json_502_with_iso_dates(monkeypatch) -> None:
     suffix = uuid4().hex
     instrument_id = f"failed-{suffix[:32]}"
-    with Session(api_module.repository.engine) as session, session.begin():
-        session.add(
-            InstrumentRecord(
-                instrument_id=instrument_id,
-                symbol=f"F{suffix[:7]}".upper(),
-                exchange="XNYS",
-                calendar="XNYS",
-                currency="USD",
-                asset_type="EQUITY",
-                active_from=datetime(2020, 1, 1, tzinfo=UTC),
-                active_to=None,
-                created_at=datetime.now(UTC),
-            )
-        )
+    client = TestClient(api_module.app)
+    instrument = client.post(
+        "/operator/instruments",
+        json={
+            "instrument_id": instrument_id,
+            "symbol": f"F{suffix[:7]}".upper(),
+            "active_from": "2020-01-01",
+            "reason": "příprava failed ingestion regrese",
+        },
+    )
+    assert instrument.status_code == 200, instrument.text
     failed = IngestionResult(
         f"failed-{suffix}",
         date(2026, 6, 1),
@@ -60,7 +57,7 @@ def test_failed_ingestion_api_returns_json_502_with_iso_dates(monkeypatch) -> No
     monkeypatch.setattr(api_module, "build_market_data_provider", lambda settings, engine: object())
     monkeypatch.setattr(api_module.market_data_service, "ingest", lambda *args: failed)
 
-    response = TestClient(api_module.app).post(
+    response = client.post(
         "/operator/market-data/ingestions",
         json={
             "instrument_id": instrument_id,

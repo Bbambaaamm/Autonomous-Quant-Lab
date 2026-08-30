@@ -887,7 +887,6 @@ class DatasetSnapshotService:
             immutable_content = {
                 "observations": canonical,
                 "corporate_actions": canonical_actions,
-                "universe": universe_lineage,
             }
             content_hash = hashlib.sha256(
                 json.dumps(immutable_content, sort_keys=True, separators=(",", ":")).encode()
