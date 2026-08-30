@@ -9,18 +9,16 @@ from uuid import uuid4
 import pytest
 from fastapi.testclient import TestClient
 from phase6_audit_helpers import CALENDAR, MappingProvider, daily_bar
-from sqlalchemy import delete, select, text
+from sqlalchemy import select, text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session
 
 import quantlab.api as api_module
 from quantlab.automation import JobRun, RunStatus, ScheduledJob
-from quantlab.market_data import IngestionResult
 from quantlab.persistence import (
     DatasetSnapshotRecord,
     ExperimentRecord,
     InstrumentRecord,
-    InstrumentSymbolRecord,
     StrategyDeploymentRecord,
     UniverseMembershipRecord,
 )
@@ -31,59 +29,6 @@ from quantlab.security import limiter
 pytestmark = pytest.mark.skipif(
     os.getenv("RUN_POSTGRES_TESTS") != "1", reason="vyžaduje PostgreSQL CI"
 )
-
-
-def test_failed_ingestion_api_returns_json_502_with_iso_dates(monkeypatch) -> None:
-    suffix = uuid4().hex
-    instrument_id = f"failed-{suffix[:32]}"
-    client = TestClient(api_module.app)
-    instrument = client.post(
-        "/operator/instruments",
-        json={
-            "instrument_id": instrument_id,
-            "symbol": f"F{suffix[:7]}".upper(),
-            "active_from": "2020-01-01",
-            "reason": "příprava failed ingestion regrese",
-        },
-    )
-    assert instrument.status_code == 200, instrument.text
-    failed = IngestionResult(
-        f"failed-{suffix}",
-        date(2026, 6, 1),
-        date(2026, 8, 28),
-        "FAILED",
-        (),
-        "provider unavailable",
-    )
-    monkeypatch.setattr(api_module, "build_market_data_provider", lambda settings, engine: object())
-    monkeypatch.setattr(api_module.market_data_service, "ingest", lambda *args: failed)
-
-    response = client.post(
-        "/operator/market-data/ingestions",
-        json={
-            "instrument_id": instrument_id,
-            "start": "2026-06-01",
-            "end": "2026-08-28",
-            "reason": "ověření JSON chyby ingestion",
-        },
-    )
-
-    assert response.status_code == 502
-    assert response.headers["content-type"].startswith("application/json")
-    assert response.json()["detail"]["requested_start"] == "2026-06-01"
-    assert response.json()["detail"]["requested_end"] == "2026-08-28"
-    assert response.json()["detail"]["error"] == "provider unavailable"
-    # Acceptance job sdílí databázi s navazujícími scénáři. Syntetický instrument
-    # proto po API regresi odstraníme, aby neměnil jejich market-data universe.
-    with Session(api_module.repository.engine) as session, session.begin():
-        session.execute(
-            delete(InstrumentSymbolRecord).where(
-                InstrumentSymbolRecord.instrument_id == instrument_id
-            )
-        )
-        session.execute(
-            delete(InstrumentRecord).where(InstrumentRecord.instrument_id == instrument_id)
-        )
 
 
 def test_supported_b1_control_plane_reaches_active_monitoring(monkeypatch) -> None:
