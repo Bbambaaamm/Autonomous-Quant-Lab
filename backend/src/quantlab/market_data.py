@@ -274,6 +274,15 @@ class CorporateActionKind(StrEnum):
     DELISTING = "DELISTING"
 
 
+def corporate_action_logical_id(provider: str, provider_action_id: str) -> str:
+    """Mapuje libovolně dlouhou provider identitu na stabilní interní 64znakový klíč."""
+    if not provider or not provider_action_id:
+        raise InvalidProviderResponse("Corporate action nemá stabilní provider identitu")
+    if len(provider_action_id) > 128:
+        raise InvalidProviderResponse("Provider corporate-action ID překračuje limit")
+    return hashlib.sha256(f"{provider}:{provider_action_id}".encode()).hexdigest()
+
+
 @dataclass(frozen=True)
 class CorporateAction:
     action_id: str
@@ -283,14 +292,24 @@ class CorporateAction:
     known_at: datetime
     value: Decimal | None = None
     new_symbol: str | None = None
+    provider_action_id: str | None = None
+    payload_hash: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "effective_at", require_utc(self.effective_at))
         object.__setattr__(self, "known_at", require_utc(self.known_at))
-        if self.kind in {CorporateActionKind.SPLIT, CorporateActionKind.CASH_DIVIDEND} and (
-            self.value is None or self.value <= 0
+        if not self.action_id or len(self.action_id) > 64:
+            raise ValueError("Corporate action má neplatnou interní identitu")
+        if self.provider_action_id is not None and (
+            not self.provider_action_id or len(self.provider_action_id) > 128
         ):
-            raise ValueError("Split/dividend vyžaduje kladnou hodnotu")
+            raise ValueError("Corporate action má neplatnou provider identitu")
+        if self.payload_hash is not None and len(self.payload_hash) != 64:
+            raise ValueError("Corporate action má neplatný payload hash")
+        if self.kind in {CorporateActionKind.SPLIT, CorporateActionKind.CASH_DIVIDEND} and (
+            self.value is None or not self.value.is_finite() or self.value <= 0
+        ):
+            raise ValueError("Split/dividend vyžaduje konečnou kladnou hodnotu")
 
 
 class CorporateActionEventType(StrEnum):
@@ -333,17 +352,32 @@ class CorporateActionEvent:
     action: CorporateActionEventType
     provider_action_id: str
     payload_hash: str
+    received_at: datetime | None = None
+    symbols: tuple[str, ...] = ()
+    scope_date: date | None = None
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "at", require_utc(self.at))
-        if not self.event_id or not self.provider_action_id:
+        provider_at = require_utc(self.at)
+        received_at = require_utc(self.received_at or provider_at)
+        object.__setattr__(self, "at", provider_at)
+        object.__setattr__(self, "received_at", received_at)
+        object.__setattr__(
+            self,
+            "symbols",
+            tuple(sorted({symbol.strip().upper() for symbol in self.symbols if symbol.strip()})),
+        )
+        if not self.event_id or len(self.event_id) > 128 or not self.provider_action_id:
             raise InvalidProviderResponse("Corporate-action event nemá stabilní identitu")
+        if len(self.provider_action_id) > 128:
+            raise InvalidProviderResponse("Corporate-action provider ID překračuje limit")
         if len(self.payload_hash) != 64:
             raise InvalidProviderResponse("Corporate-action event nemá platný payload hash")
 
     @classmethod
-    def from_sse(cls, payload: bytes) -> CorporateActionEvent:
-        """Parsuje dokumentovaný Alpaca envelope ``event_id/at/action/event_type/ca``."""
+    def from_sse(
+        cls, payload: bytes, *, received_at: datetime | None = None
+    ) -> CorporateActionEvent:
+        """Parsuje dokumentovaný Alpaca envelope a oddělí provider time od receipt time."""
         try:
             envelope = json.loads(payload)
             if not isinstance(envelope, dict):
@@ -358,12 +392,23 @@ class CorporateActionEvent:
             action_id = ca["id"]
             if not isinstance(action_id, str) or not action_id:
                 raise TypeError
+            provider_at = datetime.fromisoformat(str(envelope["at"]).replace("Z", "+00:00"))
+            symbols = tuple(
+                str(ca[key])
+                for key in ("symbol", "old_symbol", "new_symbol")
+                if isinstance(ca.get(key), str) and str(ca[key]).strip()
+            )
+            scope_raw = ca.get("ex_date") or ca.get("process_date")
+            scope_date = date.fromisoformat(str(scope_raw)) if scope_raw is not None else None
             return cls(
                 event_id=str(envelope["event_id"]),
-                at=datetime.fromisoformat(str(envelope["at"]).replace("Z", "+00:00")),
+                at=provider_at,
                 action=CorporateActionEventType(str(envelope["action"])),
                 provider_action_id=action_id,
                 payload_hash=canonical_corporate_action_payload_hash(ca),
+                received_at=received_at or provider_at,
+                symbols=symbols,
+                scope_date=scope_date,
             )
         except (KeyError, TypeError, ValueError, UnicodeError, json.JSONDecodeError) as exc:
             raise InvalidProviderResponse("Alpaca SSE event nemá platný envelope") from exc
@@ -374,9 +419,9 @@ ActionEvidenceLoader = Callable[[str], tuple[CorporateActionEvent, ...]]
 
 
 class AlpacaProvider:
-    """REST adapter; ``known_at`` je použit jen při shodě REST faktu s SSE verzí."""
+    """REST adapter; ``known_at`` je lokální receipt time přesně odpovídající SSE revize."""
 
-    metadata = ProviderMetadata("alpaca", "3", True, True)
+    metadata = ProviderMetadata("alpaca", "4", True, True)
     _base_url = "https://data.alpaca.markets"
     _supported_collections = frozenset(
         {
@@ -481,19 +526,22 @@ class AlpacaProvider:
             query = {**query, "page_token": token}
 
     def historical_daily(self, symbol: str, start: date, end: date) -> list[ProviderBar]:
+        if start > end:
+            raise ValueError("Počáteční datum musí předcházet koncovému")
         provider_symbol = self.resolve(symbol)["provider_symbol"]
+        exclusive_end = f"{(end + timedelta(days=1)).isoformat()}T00:00:00Z"
         rows = self._get_all(
             f"/v2/stocks/{urllib.parse.quote(provider_symbol, safe='')}/bars",
             {
                 "timeframe": "1Day",
-                "start": start.isoformat(),
-                "end": end.isoformat(),
+                "start": f"{start.isoformat()}T00:00:00Z",
+                "end": exclusive_end,
                 "adjustment": "raw",
             },
             "bars",
         )
         try:
-            return [
+            bars = [
                 ProviderBar(
                     datetime.fromisoformat(str(row["t"]).replace("Z", "+00:00")).date(),
                     Decimal(str(row["o"])),
@@ -510,6 +558,9 @@ class AlpacaProvider:
             ]
         except (KeyError, TypeError, ValueError, InvalidOperation) as exc:
             raise InvalidProviderResponse("Alpaca vrátila neplatný OHLCV bar") from exc
+        if len({bar.session_date for bar in bars}) != len(bars):
+            raise InvalidProviderResponse("Alpaca vrátila duplicitní daily session")
+        return sorted(bars, key=lambda bar: bar.session_date)
 
     @staticmethod
     def _midnight(day: str) -> datetime:
@@ -530,13 +581,21 @@ class AlpacaProvider:
         collection: str,
         row: dict[str, Any],
         instrument_id: str,
-        known_at: datetime,
+        evidence: CorporateActionEvent,
     ) -> CorporateAction:
-        action_id = str(row["id"])
+        provider_action_id = str(row["id"])
+        action_id = corporate_action_logical_id("alpaca", provider_action_id)
+        known_at = cast(datetime, evidence.received_at)
+        payload_hash = evidence.payload_hash
         if collection in {"forward_splits", "reverse_splits"}:
             old_rate = Decimal(str(row["old_rate"]))
             new_rate = Decimal(str(row["new_rate"]))
-            if old_rate <= 0 or new_rate <= 0:
+            if (
+                not old_rate.is_finite()
+                or not new_rate.is_finite()
+                or old_rate <= 0
+                or new_rate <= 0
+            ):
                 raise InvalidProviderResponse("Alpaca split má neplatný poměr")
             return CorporateAction(
                 action_id,
@@ -545,15 +604,24 @@ class AlpacaProvider:
                 self._midnight(str(row["ex_date"])),
                 known_at,
                 new_rate / old_rate,
+                None,
+                provider_action_id,
+                payload_hash,
             )
         if collection == "cash_dividends":
+            rate = Decimal(str(row["rate"]))
+            if not rate.is_finite() or rate <= 0:
+                raise InvalidProviderResponse("Alpaca dividend má neplatnou hodnotu")
             return CorporateAction(
                 action_id,
                 instrument_id,
                 CorporateActionKind.CASH_DIVIDEND,
                 self._midnight(str(row["ex_date"])),
                 known_at,
-                Decimal(str(row["rate"])),
+                rate,
+                None,
+                provider_action_id,
+                payload_hash,
             )
         if collection == "name_changes":
             return CorporateAction(
@@ -564,6 +632,8 @@ class AlpacaProvider:
                 known_at,
                 None,
                 str(row["new_symbol"]),
+                provider_action_id,
+                payload_hash,
             )
         if collection == "worthless_removals":
             return CorporateAction(
@@ -572,6 +642,10 @@ class AlpacaProvider:
                 CorporateActionKind.DELISTING,
                 self._midnight(str(row["process_date"])),
                 known_at,
+                None,
+                None,
+                provider_action_id,
+                payload_hash,
             )
         raise DatasetInvalid("CORPORATE_ACTIONS_UNSUPPORTED")
 
@@ -585,15 +659,21 @@ class AlpacaProvider:
             latest[event.provider_action_id] = event
 
         result: list[CorporateAction] = []
+        rows = self._get_corporate_action_rows(normalized, end)
+        returned_ids = {
+            str(row.get("id"))
+            for _, row in rows
+            if isinstance(row.get("id"), str) and row.get("id")
+        }
         try:
-            for collection, row in self._get_corporate_action_rows(normalized, end):
+            for collection, row in rows:
                 scope_date = self._scope_date(row)
                 if not start <= scope_date <= end:
                     continue
                 if collection not in self._supported_collections:
                     raise DatasetInvalid("CORPORATE_ACTIONS_UNSUPPORTED")
-                action_id = str(row["id"])
-                evidence = latest.get(action_id)
+                provider_action_id = str(row["id"])
+                evidence = latest.get(provider_action_id)
                 if evidence is None or evidence.action is CorporateActionEventType.DELETE:
                     raise DatasetInvalid("CORPORATE_ACTION_KNOWLEDGE_UNAVAILABLE")
                 if canonical_corporate_action_payload_hash(row) != evidence.payload_hash:
@@ -601,10 +681,21 @@ class AlpacaProvider:
                     # Takové hodnotě nesmíme přiřadit starší known_at; raději fail closed.
                     raise DatasetInvalid("CORPORATE_ACTION_KNOWLEDGE_UNAVAILABLE")
                 action = self._normalize_action(
-                    collection, row, self._instrument_ids[normalized], evidence.at
+                    collection, row, self._instrument_ids[normalized], evidence
                 )
                 if start <= action.effective_at.date() <= end:
                     result.append(action)
+            for evidence in latest.values():
+                if evidence.action is not CorporateActionEventType.DELETE:
+                    continue
+                if normalized not in evidence.symbols:
+                    continue
+                if evidence.provider_action_id in returned_ids:
+                    continue
+                if evidence.scope_date is not None and not start <= evidence.scope_date <= end:
+                    continue
+                # DELETE, který odstranil fakt z REST, nesmí být zaměněn za prázdný COMPLETE interval.
+                raise DatasetInvalid("CORPORATE_ACTION_KNOWLEDGE_UNAVAILABLE")
         except DatasetInvalid:
             raise
         except (KeyError, TypeError, ValueError, InvalidOperation) as exc:
