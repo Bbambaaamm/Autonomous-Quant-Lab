@@ -82,6 +82,8 @@ Autonomous PREPARE schedule je ukotvený na `09:00 America/New_York` a je DST-sa
 
 Strict executable-open cutoff zůstává `[open, open + 1 second)`. `PREPARE_PAPER_SESSION` před open persistuje target delta vypočtený z causal adjusted signal close a teprve poté materializuje execution occurrence. Proto platí:
 
+Production worker rezervuje nejbližší materializované XNYS occurrence před běžnou frontou a čeká přímo do jejího `scheduled_for`; pětisekundový obecný polling tedy není dispatch mechanismem executable-open běhu. Provider response time se měří živými UTC hodinami a odpověď získaná po cutoff failuje jako `MISSED_EXECUTION_OPEN` bez fillu.
+
 - execution bez pre-open intentu vrátí `NO_ACTION / PREOPEN_EXECUTION_INTENT_NOT_PERSISTED`;
 - pozdní nebo porušený intent vrátí `NO_ACTION / PREOPEN_EXECUTION_INTENT_INVALID`;
 - raw opening print se nesmí použít k vytvoření nového ekonomického intentu;

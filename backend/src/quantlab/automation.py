@@ -26,6 +26,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     and_,
+    case,
     create_engine,
     func,
     or_,
@@ -254,6 +255,42 @@ class PreOpenExecutionIntentRecord(Base):
 
 def utc(value: datetime) -> datetime:
     return value.astimezone(UTC) if value.tzinfo else value.replace(tzinfo=UTC)
+
+
+def mark_preopen_equity(
+    cash: Decimal,
+    positions: dict[str, Decimal],
+    signal_references: dict[str, Decimal],
+) -> Decimal:
+    """Ocení účet pouze causal signal cenami dostupnými při PREPARE."""
+    if set(positions) - set(signal_references):
+        raise ValueError("Pre-open mark postrádá causal signal reference")
+    values = (cash, *positions.values(), *signal_references.values())
+    if any(not value.is_finite() for value in values) or any(
+        value <= 0 for value in signal_references.values()
+    ):
+        raise ValueError("Pre-open mark obsahuje neplatnou hodnotu")
+    return cash + sum(
+        (quantity * signal_references[instrument] for instrument, quantity in positions.items()),
+        Decimal(0),
+    )
+
+
+def preopen_execution_delta(
+    *,
+    marked_equity: Decimal,
+    weight: Decimal,
+    signal_reference: Decimal,
+    split_ratio: Decimal,
+    position: Decimal,
+    pending: Decimal,
+) -> tuple[Decimal, Decimal]:
+    """Vrátí execution-unit reference a delta bez použití opening printu."""
+    if signal_reference <= 0 or split_ratio <= 0:
+        raise ValueError("Pre-open sizing reference a split ratio musí být kladné")
+    execution_reference = signal_reference / split_ratio
+    desired = (marked_equity * weight / execution_reference).to_integral_value(rounding=ROUND_DOWN)
+    return execution_reference, desired - position * split_ratio - pending
 
 
 def validate_payload(payload: dict[str, Any]) -> None:
@@ -986,18 +1023,19 @@ class JobExecutor:
             actions = tuple(
                 session.scalars(
                     select(CorporateActionRecord).where(
-                        CorporateActionRecord.instrument_id.in_(eligible_ids),
-                        CorporateActionRecord.known_at <= signal_close,
+                        CorporateActionRecord.instrument_id.in_(execution_instrument_ids),
+                        CorporateActionRecord.known_at <= created_at,
+                        CorporateActionRecord.effective_at <= execution_open,
                     )
                 )
             )
         accessor = ValidatedCurrentDataAccessor(lambda: Session(self.trading.repository.engine))
         history = accessor.history(
             execution_instrument_ids,
-            signal_close,
+            created_at,
             strategy.required_lookback,
             before_session=execution_session,
-            known_at=signal_close,
+            known_at=created_at,
         )
         domain_actions = tuple(
             CorporateAction(
@@ -1013,14 +1051,14 @@ class JobExecutor:
         )
         prices = {
             instrument: tuple(
-                causal_adjusted_close(values, domain_actions, signal_close)[item.session_date]
+                causal_adjusted_close(values, domain_actions, created_at)[item.session_date]
                 for item in values
             )
             for instrument, values in history.items()
         }
         target = strategy.generate_targets(
             StrategyContext(
-                signal_close,
+                created_at,
                 {key: value for key, value in history.items() if key in eligible_ids},
                 tuple(sorted(eligible_ids)),
                 {key: value for key, value in prices.items() if key in eligible_ids},
@@ -1028,19 +1066,48 @@ class JobExecutor:
         )
         weights = {instrument: Decimal("0") for instrument in positions}
         weights.update(dict(target.weights))
+        strategy_observation_ids = sorted(
+            item.observation_id for values in history.values() for item in values
+        )
+        reference_known_at = max(
+            utc(item.observed_at) for values in history.values() for item in values
+        )
+        if reference_known_at > created_at:
+            raise PermanentJobError("PREOPEN_EXECUTION_INTENT_NON_CAUSAL_REFERENCE")
+        marked_equity = mark_preopen_equity(
+            account.cash,
+            positions,
+            {instrument: values[-1] for instrument, values in prices.items()},
+        )
+        split_ratios: dict[str, Decimal] = {}
+        for action in domain_actions:
+            if (
+                action.kind is CorporateActionKind.SPLIT
+                and signal_close < action.effective_at <= execution_open
+            ):
+                ratio = action.value or Decimal(0)
+                if ratio <= 0:
+                    raise PermanentJobError("PREOPEN_EXECUTION_INTENT_INVALID_SPLIT_RATIO")
+                split_ratios[action.instrument_id] = (
+                    split_ratios.get(action.instrument_id, Decimal(1)) * ratio
+                )
         rows: list[PreOpenExecutionIntentRecord] = []
         strategy_id = f"phase6:{deployment.deployment_id}"
         for instrument, weight in sorted(weights.items()):
-            reference = prices.get(instrument, ())[-1]
-            desired = (account.equity * weight / reference).to_integral_value(rounding=ROUND_DOWN)
-            delta = (
-                desired
-                - positions.get(instrument, Decimal(0))
-                - pending.get(instrument, Decimal(0))
+            signal_reference = prices.get(instrument, ())[-1]
+            split_ratio = split_ratios.get(instrument, Decimal(1))
+            if split_ratio != 1 and pending.get(instrument, Decimal(0)) != 0:
+                raise PermanentJobError("PREOPEN_EXECUTION_INTENT_SPLIT_WITH_PENDING_ORDER")
+            execution_unit_reference, delta = preopen_execution_delta(
+                marked_equity=marked_equity,
+                weight=weight,
+                signal_reference=signal_reference,
+                split_ratio=split_ratio,
+                position=positions.get(instrument, Decimal(0)),
+                pending=pending.get(instrument, Decimal(0)),
             )
             if delta == 0:
                 continue
-            observation_ids = [item.observation_id for item in history[instrument]]
             logical = f"{deployment.deployment_id}|{execution_session.isoformat()}|{instrument}"
             intent_id = hashlib.sha256(logical.encode()).hexdigest()
             row = PreOpenExecutionIntentRecord(
@@ -1054,17 +1121,21 @@ class JobExecutor:
                 order_type="MARKET",
                 execution_session=execution_session,
                 intended_execution_open=execution_open,
-                decision_time=signal_close,
+                decision_time=created_at,
                 created_at=created_at,
-                sizing_reference_price=reference,
-                sizing_reference_known_at=signal_close,
+                sizing_reference_price=execution_unit_reference,
+                sizing_reference_known_at=reference_known_at,
                 snapshot_id=snapshot.snapshot_id,
                 universe_id=deployment.universe_id,
-                signal_observation_ids_json=json.dumps(observation_ids, sort_keys=True),
+                signal_observation_ids_json=json.dumps(strategy_observation_ids),
                 evidence_json=json.dumps(
                     {
                         "method": "equity_weight_over_causal_adjusted_close",
                         "target_weight": str(weight),
+                        "marked_equity": str(marked_equity),
+                        "signal_time": signal_close.isoformat(),
+                        "signal_reference_price": str(signal_reference),
+                        "execution_unit_split_ratio": str(split_ratio),
                     },
                     sort_keys=True,
                 ),
@@ -1586,11 +1657,43 @@ class JobExecutor:
                     item.active_to.date() if item.active_to else None,
                     utc(item.created_at),
                 )
-                result = PersistentMarketDataService(
-                    sessions, calendar, clock=lambda: execution_now
-                ).ingest_open(provider, instrument, execution_session, execution_now)
+                request_time = utc(self.clock())
+                if not calendar.is_executable_open_time(execution_session, request_time):
+                    return {
+                        "deployment_id": deployment_id,
+                        "monitoring_id": monitoring.monitoring_id,
+                        "trading_cycle_id": None,
+                        "reconciliation_id": None,
+                        "outcome": "NO_ACTION",
+                        "no_action_reason": "MISSED_EXECUTION_OPEN",
+                    }
+                try:
+                    result = PersistentMarketDataService(
+                        sessions, calendar, clock=lambda: utc(self.clock())
+                    ).ingest_open(provider, instrument, execution_session, request_time)
+                except DatasetInvalid as exc:
+                    if "MISSED_EXECUTION_OPEN" not in str(exc):
+                        raise
+                    return {
+                        "deployment_id": deployment_id,
+                        "monitoring_id": monitoring.monitoring_id,
+                        "trading_cycle_id": None,
+                        "reconciliation_id": None,
+                        "outcome": "NO_ACTION",
+                        "no_action_reason": "MISSED_EXECUTION_OPEN",
+                    }
                 if result.status != "SUCCEEDED":
                     raise TransientJobError(result.error or "Raw executable open refresh selhal")
+            execution_now = utc(self.clock())
+            if not calendar.is_executable_open_time(execution_session, execution_now):
+                return {
+                    "deployment_id": deployment_id,
+                    "monitoring_id": monitoring.monitoring_id,
+                    "trading_cycle_id": None,
+                    "reconciliation_id": None,
+                    "outcome": "NO_ACTION",
+                    "no_action_reason": "MISSED_EXECUTION_OPEN",
+                }
             persisted_intents = tuple(
                 OrderIntent(
                     row.instrument_id,
@@ -1733,7 +1836,12 @@ class WorkerService:
                         ),
                     ),
                 )
-                .order_by(JobRun.scheduled_for, JobRun.created_at, JobRun.id)
+                .order_by(
+                    case((JobRun.occurrence_key.like("xnys:%"), 0), else_=1),
+                    JobRun.scheduled_for,
+                    JobRun.created_at,
+                    JobRun.id,
+                )
                 .limit(1)
             )
             if session.bind and session.bind.dialect.name == "postgresql":
@@ -1775,6 +1883,20 @@ class WorkerService:
             )
             session.commit()
             return run.id, run.fencing_token
+
+    def next_xnys_dispatch_delay(self, now: datetime | None = None) -> float | None:
+        """Vrátí přesné čekání k nejbližší připravené XNYS occurrence."""
+        current = utc(now or datetime.now(UTC))
+        with Session(self.repository.engine) as session:
+            due = session.scalar(
+                select(func.min(JobRun.scheduled_for)).where(
+                    JobRun.occurrence_key.like("xnys:%"),
+                    JobRun.status.in_([RunStatus.PENDING, RunStatus.RETRY_SCHEDULED]),
+                )
+            )
+        if due is None:
+            return None
+        return max(0.0, (utc(due) - current).total_seconds())
 
     def finish(
         self, run_id: str, token: int, result: dict[str, str | None], now: datetime | None = None

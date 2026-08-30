@@ -1,4 +1,5 @@
 import logging
+from datetime import UTC, datetime
 
 from quantlab.automation import AutomationRepository, JobExecutor, SchedulerService, WorkerService
 from quantlab.config import get_settings
@@ -36,8 +37,18 @@ def main() -> None:
             worker.heartbeat()
             scheduler.tick()
             worker.heartbeat(scheduler_ticked=True)
+            dispatch_delay = worker.next_xnys_dispatch_delay(datetime.now(UTC))
+            if dispatch_delay is not None and 0 < dispatch_delay <= settings.worker_poll_interval:
+                # Těsně před open nespouštíme starší práci, která by zabrala celé
+                # executable okno; worker se probudí přímo na připravenou occurrence.
+                worker.stop_event.wait(dispatch_delay)
+                continue
             worker.execute_one()
-            worker.stop_event.wait(settings.worker_poll_interval)
+            dispatch_delay = worker.next_xnys_dispatch_delay(datetime.now(UTC))
+            wait_for = settings.worker_poll_interval
+            if dispatch_delay is not None:
+                wait_for = min(wait_for, dispatch_delay)
+            worker.stop_event.wait(wait_for)
     finally:
         worker.mark_stopped()
         logger.info("Worker byl korektně zastaven: worker_id=%s", worker.worker_id)
