@@ -257,7 +257,14 @@ def test_alpaca_daily_bars_request_covers_entire_final_day() -> None:
     body = json.dumps(
         {
             "bars": [
-                {"t": "2026-09-02T04:00:00Z", "o": 10, "h": 11, "l": 9, "c": 10.5, "v": 100}
+                {
+                    "t": "2026-09-02T04:00:00Z",
+                    "o": 10,
+                    "h": 11,
+                    "l": 9,
+                    "c": 10.5,
+                    "v": 100,
+                },
             ],
             "next_page_token": None,
         }
@@ -269,7 +276,9 @@ def test_alpaca_daily_bars_request_covers_entire_final_day() -> None:
         calls.append(urllib.parse.parse_qs(urllib.parse.urlsplit(url).query))
         return 200, {}, body
 
-    provider = AlpacaProvider("key", "secret", lambda _: (), {"AAPL": "instrument-aapl"}, transport)
+    provider = AlpacaProvider(
+        "key", "secret", lambda _: (), {"AAPL": "instrument-aapl"}, transport
+    )
 
     bars = provider.historical_daily("AAPL", date(2026, 9, 2), date(2026, 9, 2))
 
@@ -279,7 +288,14 @@ def test_alpaca_daily_bars_request_covers_entire_final_day() -> None:
 
 
 def test_alpaca_duplicate_daily_sessions_are_rejected() -> None:
-    duplicate = {"t": "2026-09-02T04:00:00Z", "o": 10, "h": 11, "l": 9, "c": 10.5, "v": 100}
+    duplicate = {
+        "t": "2026-09-02T04:00:00Z",
+        "o": 10,
+        "h": 11,
+        "l": 9,
+        "c": 10.5,
+        "v": 100,
+    }
     body = json.dumps({"bars": [duplicate, duplicate], "next_page_token": None}).encode()
 
     def transport(
@@ -287,7 +303,9 @@ def test_alpaca_duplicate_daily_sessions_are_rejected() -> None:
     ) -> tuple[int, dict[str, str], bytes]:
         return 200, {}, body
 
-    provider = AlpacaProvider("key", "secret", lambda _: (), {"AAPL": "instrument-aapl"}, transport)
+    provider = AlpacaProvider(
+        "key", "secret", lambda _: (), {"AAPL": "instrument-aapl"}, transport
+    )
 
     with pytest.raises(InvalidProviderResponse, match="duplicitní daily session"):
         provider.historical_daily("AAPL", date(2026, 9, 2), date(2026, 9, 2))
