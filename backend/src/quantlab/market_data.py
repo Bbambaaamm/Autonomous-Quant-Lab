@@ -376,21 +376,16 @@ ActionEvidenceLoader = Callable[[str], tuple[CorporateActionEvent, ...]]
 class AlpacaProvider:
     """REST adapter; ``known_at`` je použit jen při shodě REST faktu s SSE verzí."""
 
-    metadata = ProviderMetadata("alpaca", "2", True, True)
+    metadata = ProviderMetadata("alpaca", "3", True, True)
     _base_url = "https://data.alpaca.markets"
-    _supported_action_types = (
-        "forward_split",
-        "reverse_split",
-        "cash_dividend",
-        "name_change",
-        "worthless_removal",
-    )
-    _supported_collections = (
-        "forward_splits",
-        "reverse_splits",
-        "cash_dividends",
-        "name_changes",
-        "worthless_removals",
+    _supported_collections = frozenset(
+        {
+            "forward_splits",
+            "reverse_splits",
+            "cash_dividends",
+            "name_changes",
+            "worthless_removals",
+        }
     )
 
     def __init__(
@@ -451,20 +446,17 @@ class AlpacaProvider:
             tokens.add(token)
             query = {**query, "page_token": token}
 
-    def _get_corporate_action_rows(self, symbol: str) -> list[tuple[str, dict[str, Any]]]:
-        """Načte podporované CA přes skutečný vnořený Alpaca REST kontrakt.
-
-        REST ``start/end`` filtrují ``process_date``, nikoli ex/effective date. Proto se pro
-        auditovatelnou readiness neinterpretuje research interval jako process-date interval;
-        načte se úplná historie podporovaných typů pro symbol a až poté se filtruje ekonomické
-        datum jednotlivého faktu.
-        """
+    def _get_corporate_action_rows(
+        self, symbol: str, requested_end: date
+    ) -> list[tuple[str, dict[str, Any]]]:
+        """Načte všechny CA typy; research interval se nepředstírá jako process-date interval."""
+        provider_end = max(requested_end, datetime.now(UTC).date())
         query = {
             "symbols": symbol,
-            "types": ",".join(self._supported_action_types),
             "start": "1970-01-01",
-            "end": datetime.now(UTC).date().isoformat(),
+            "end": provider_end.isoformat(),
             "limit": "1000",
+            "data_quality": "all",
         }
         rows: list[tuple[str, dict[str, Any]]] = []
         tokens: set[str] = set()
@@ -473,12 +465,9 @@ class AlpacaProvider:
             groups = payload.get("corporate_actions")
             if not isinstance(groups, dict):
                 raise InvalidProviderResponse("Alpaca odpověď neobsahuje corporate_actions objekt")
-            for collection in self._supported_collections:
-                page = groups.get(collection, [])
-                if not isinstance(page, list):
-                    raise InvalidProviderResponse(
-                        f"Alpaca corporate_actions.{collection} není seznam"
-                    )
+            for collection, page in groups.items():
+                if not isinstance(collection, str) or not isinstance(page, list):
+                    raise InvalidProviderResponse("Alpaca corporate_actions má neplatný tvar")
                 for row in page:
                     if not isinstance(row, dict):
                         raise InvalidProviderResponse("Alpaca corporate action není objekt")
@@ -525,6 +514,16 @@ class AlpacaProvider:
     @staticmethod
     def _midnight(day: str) -> datetime:
         return datetime.fromisoformat(f"{day}T00:00:00+00:00")
+
+    @staticmethod
+    def _scope_date(row: dict[str, Any]) -> date:
+        raw = row.get("ex_date") or row.get("process_date")
+        if raw is None:
+            raise DatasetInvalid("CORPORATE_ACTION_KNOWLEDGE_UNAVAILABLE")
+        try:
+            return date.fromisoformat(str(raw))
+        except ValueError as exc:
+            raise InvalidProviderResponse("Alpaca corporate action má neplatné datum") from exc
 
     def _normalize_action(
         self,
@@ -574,7 +573,7 @@ class AlpacaProvider:
                 self._midnight(str(row["process_date"])),
                 known_at,
             )
-        raise InvalidProviderResponse("Nepodporovaný Alpaca corporate-action typ")
+        raise DatasetInvalid("CORPORATE_ACTIONS_UNSUPPORTED")
 
     def corporate_actions(self, symbol: str, start: date, end: date) -> list[CorporateAction]:
         if start > end:
@@ -587,7 +586,12 @@ class AlpacaProvider:
 
         result: list[CorporateAction] = []
         try:
-            for collection, row in self._get_corporate_action_rows(normalized):
+            for collection, row in self._get_corporate_action_rows(normalized, end):
+                scope_date = self._scope_date(row)
+                if not start <= scope_date <= end:
+                    continue
+                if collection not in self._supported_collections:
+                    raise DatasetInvalid("CORPORATE_ACTIONS_UNSUPPORTED")
                 action_id = str(row["id"])
                 evidence = latest.get(action_id)
                 if evidence is None or evidence.action is CorporateActionEventType.DELETE:
