@@ -21,11 +21,13 @@ Každá ekonomická verze corporate action se ukládá do immutable `corporate_a
 
 REST parametry `start` a `end` Alpaca corporate-actions API filtrují `process_date`, nikoli research `effective_at`/`ex_date`. Adapter proto research interval nepředává jako process-date interval: načítá historii pro symbol s `data_quality=all`, stránkuje všechny vrácené kolekce a teprve lokálně filtruje ekonomické datum. Nepodporovaný ekonomicky relevantní typ v požadovaném období failne closed místo falešného `COMPLETE`.
 
+Corporate-actions inventory používá stabilní process-date horizont `1970-01-01` až `9999-12-31`. Tím zahrne i aktuálně známou akci, jejíž ekonomické `ex_date` již spadá do research intervalu, ale provider ji zpracuje až pozdějším `process_date`; horizont nemění původ `known_at` ze SSE `received_at`.
+
 `AlpacaCorporateActionStream` používá `Last-Event-Id` pro reconnect/replay. Protože replay je inkluzivní, znovu doručený cursor event se přeskočí a persistentní `event_id` zůstává idempotentní. Reconnect je bounded; transientní/provider chyby nevedou k nekonečnému retry. Standardní CI používá pouze fixture transport, nikoli externí síť.
 
 SSE evidence se v provozu ingestuje samostatným procesem `quantlab-alpaca-events` (v developmentu lze ekvivalentně spustit `python -m quantlab.alpaca_event_worker`). Produkční Compose jej spouští jako `alpaca-events` pouze s DB a market-data egress sítí. Proces používá standardní aplikací validovanou konfiguraci a pro `MARKET_DATA_PROVIDER=alpaca` vyžaduje credentials `ALPACA_KEY_ID`/`ALPACA_SECRET_KEY`. Pro jiného providera skončí úspěšně; Compose politika `on-failure` jej proto ve Stooq režimu nerestartuje. V Alpaca režimu načte poslední persistentní event a použije jeho `event_id` jako replay cursor; i čisté vyčerpání bounded SSE reconnectů skončí chybou, aby `on-failure` worker obnovil. Event-worker je oddělen od paper-trading workeru a nevytváří žádnou broker/order cestu. Produkční paper worker získává market-data provider přes společný credential-gated provider factory; live trading path tím nevzniká.
 
-Alpaca provider metadata má po změně tohoto kauzálního kontraktu verzi `4`, takže readiness evidence vytvořená starší implementací se nepovažuje za ekvivalentní.
+Alpaca provider metadata má po změně úplnosti corporate-actions inventory verzi `5`, takže readiness evidence vytvořená starší implementací se nepovažuje za ekvivalentní. Persistentní lineage nadále obsahuje zvolený feed jako `alpaca:<feed>`.
 
 ## Snapshoty
 Snapshot ukládá `as_of`, provider, calendar identity, PIT universe, rozsah, coverage, seřazený manifest observation revisions a SHA-256. Hash nezávisí na pořadí DB řádků. Pozdější correction vytvoří jiný snapshot, nikdy nezmění manifest starého. Snapshot pod minimální coverage (default 80 %) má stav `INVALID` a nesmí spustit experiment.
