@@ -122,6 +122,21 @@ def test_supported_b1_control_plane_reaches_active_monitoring(monkeypatch) -> No
         },
     )
     assert snapshot.status_code == 200, snapshot.text
+    mean_reversion = client.post(
+        "/operator/research/experiments",
+        json={
+            "snapshot_id": snapshot.json()["snapshot_id"],
+            "strategy_name": "multi_asset_mean_reversion",
+            "strategy_version": "1.0.0",
+            "parameter_configs": [{"lookback": 20, "threshold": "0.95"}],
+            "code_sha": "a" * 40,
+            "reason": reason,
+        },
+    )
+    assert mean_reversion.status_code == 200, mean_reversion.text
+    assert mean_reversion.json()["selected_parameters_json"] == (
+        '{"lookback":20,"threshold":"0.95"}'
+    )
     experiment = client.post(
         "/operator/research/experiments",
         json={
