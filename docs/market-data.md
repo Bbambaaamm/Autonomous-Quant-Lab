@@ -19,6 +19,8 @@ REST parametry `start` a `end` Alpaca corporate-actions API filtrují `process_d
 
 `AlpacaCorporateActionStream` používá `Last-Event-Id` pro reconnect/replay. Protože replay je inkluzivní, znovu doručený cursor event se přeskočí a persistentní `event_id` zůstává idempotentní. Reconnect je bounded; transientní/provider chyby nevedou k nekonečnému retry. Standardní CI používá pouze fixture transport, nikoli externí síť.
 
+SSE evidence se v provozu ingestuje samostatným procesem `quantlab-alpaca-events` (v developmentu lze ekvivalentně spustit `python -m quantlab.alpaca_event_worker`). Proces používá `DATABASE_URL` z běžné konfigurace a vyžaduje pouze secrets `ALPACA_KEY_ID` a `ALPACA_SECRET_KEY` z prostředí. Při startu načte poslední persistentní Alpaca event a použije jeho `event_id` jako replay cursor. Event-worker je oddělen od paper-trading workeru a nevytváří žádnou broker/order cestu.
+
 ## Snapshoty
 Snapshot ukládá `as_of`, provider, calendar identity, PIT universe, rozsah, coverage, seřazený manifest observation revisions a SHA-256. Hash nezávisí na pořadí DB řádků. Pozdější correction vytvoří jiný snapshot, nikdy nezmění manifest starého. Snapshot pod minimální coverage (default 80 %) má stav `INVALID` a nesmí spustit experiment.
 
