@@ -22,6 +22,7 @@ from quantlab.market_data import (
     ProviderMetadata,
     ProviderUnavailable,
     StooqProvider,
+    corporate_action_logical_id,
 )
 from quantlab.market_data_service import (
     CorporateActionCancellationRecord,
@@ -258,7 +259,11 @@ def test_event_persistence_separates_provider_time_from_first_local_receipt(scop
     service = PersistentMarketDataService(factory)
 
     service.record_corporate_action_event("alpaca", event)
-    loaded = next(item for item in service.corporate_action_events("alpaca") if item.event_id == event.event_id)
+    loaded = next(
+        item
+        for item in service.corporate_action_events("alpaca")
+        if item.event_id == event.event_id
+    )
 
     assert loaded.at == provider_at
     assert loaded.received_at == received_at
@@ -351,8 +356,9 @@ def test_updated_action_creates_immutable_revision_and_updates_current_projectio
 def test_delete_event_tombstones_current_projection_and_persists_cancellation(scope) -> None:
     factory, instrument = scope
     suffix = uuid4().hex
-    action_id = uuid4().hex
+    provider = "h2-True-False-False"
     provider_action_id = f"provider-{suffix}"
+    action_id = corporate_action_logical_id(provider, provider_action_id)
     action = CorporateAction(
         action_id,
         instrument.instrument_id,
@@ -383,7 +389,7 @@ def test_delete_event_tombstones_current_projection_and_persists_cancellation(sc
         date(2026, 8, 25),
     )
 
-    service.record_corporate_action_event("h2-True-False-False", delete)
+    service.record_corporate_action_event(provider, delete)
 
     with factory() as session:
         current = session.get(CorporateActionRecord, action_id)
