@@ -9,7 +9,7 @@ from uuid import uuid4
 import pytest
 from fastapi.testclient import TestClient
 from phase6_audit_helpers import CALENDAR, MappingProvider, daily_bar
-from sqlalchemy import select, text
+from sqlalchemy import delete, select, text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session
 
@@ -20,6 +20,7 @@ from quantlab.persistence import (
     DatasetSnapshotRecord,
     ExperimentRecord,
     InstrumentRecord,
+    InstrumentSymbolRecord,
     StrategyDeploymentRecord,
     UniverseMembershipRecord,
 )
@@ -72,6 +73,17 @@ def test_failed_ingestion_api_returns_json_502_with_iso_dates(monkeypatch) -> No
     assert response.json()["detail"]["requested_start"] == "2026-06-01"
     assert response.json()["detail"]["requested_end"] == "2026-08-28"
     assert response.json()["detail"]["error"] == "provider unavailable"
+    # Acceptance job sdílí databázi s navazujícími scénáři. Syntetický instrument
+    # proto po API regresi odstraníme, aby neměnil jejich market-data universe.
+    with Session(api_module.repository.engine) as session, session.begin():
+        session.execute(
+            delete(InstrumentSymbolRecord).where(
+                InstrumentSymbolRecord.instrument_id == instrument_id
+            )
+        )
+        session.execute(
+            delete(InstrumentRecord).where(InstrumentRecord.instrument_id == instrument_id)
+        )
 
 
 def test_supported_b1_control_plane_reaches_active_monitoring(monkeypatch) -> None:
