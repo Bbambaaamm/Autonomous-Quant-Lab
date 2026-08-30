@@ -11,12 +11,13 @@ Všechny timestampy jsou timezone-aware UTC. Provider datum se mapuje přes `XNY
 ## Ceny a corporate actions
 Raw OHLC je jediná execution série. Signal adjustment je explicitní a používá pouze split/dividend známý (`known_at`) a účinný (`effective_at`) nejpozději k `as_of`. Split upraví quantity i unit basis; cash dividend je samostatný cash event a nesmí se současně započítat do total-return série. Symbol change zachovává instrument ID. Delisting bez executable ceny zůstává unresolved; cena se nevymýšlí.
 
-Alpaca adapter vyžaduje oddělené zdroje důkazu: REST poskytuje raw OHLCV a aktuální fakta
-corporate actions, zatímco `known_at` se smí odvodit pouze z času `at` odpovídajícího Alpaca SSE
-eventu. Envelope `event_id`, `at`, `action` (`insert`/`update`/`delete`) a identita akce se ukládá
-neměnně spolu s hashem původních bajtů. REST historická akce bez takové evidence skončí
-`CORPORATE_ACTION_KNOWLEDGE_UNAVAILABLE`; readiness je `FAILED` a prázdná domněnka ani datum
-účinnosti nesmí chybějící knowledge timestamp nahradit.
+Alpaca adapter používá oddělené zdroje faktu a času znalosti. REST `/v1/corporate-actions` poskytuje aktuální corporate-action fakta v dokumentovaném vnořeném objektu `corporate_actions` (např. `forward_splits`, `reverse_splits`, `cash_dividends`, `name_changes` a `worthless_removals`). SSE stream `/v1beta1/events/corporate-actions` poskytuje immutable envelope `event_id`, `at`, `action`, `region`, `event_type` a vnořený objekt `ca`. `known_at` se smí odvodit pouze z `at` nejnovějšího nedeklarovaného `delete` eventu pro stejnou corporate action.
+
+Evidence ukládá `event_id`, provider, `at`, `action`, `ca.id` a SHA-256 kanonické podoby konkrétního `ca` objektu. Aktuální REST fakt dostane SSE `known_at` pouze tehdy, když jeho kanonický hash přesně odpovídá uložené SSE verzi. Chybějící evidence, `delete` nebo REST/SSE version mismatch skončí `CORPORATE_ACTION_KNOWLEDGE_UNAVAILABLE`; readiness je `FAILED`. Novější opravená REST hodnota tedy nikdy nesmí zdědit starší knowledge timestamp.
+
+REST parametry `start` a `end` Alpaca corporate-actions API filtrují `process_date`, nikoli research `effective_at`/`ex_date`. Adapter proto research interval nepředává jako process-date interval: vyčerpá stránkovanou historii podporovaných typů pro symbol a teprve lokálně filtruje ekonomické datum (`ex_date` pro split/dividend, `process_date` pro name change/worthless removal). Tím readiness interval neprohlašuje za kompletní na základě jiného časového významu provider filtru.
+
+`AlpacaCorporateActionStream` používá `Last-Event-Id` pro reconnect/replay. Protože replay je inkluzivní, znovu doručený cursor event se přeskočí a persistentní `event_id` zůstává idempotentní. Reconnect je bounded; transientní/provider chyby nevedou k nekonečnému retry. Standardní CI používá pouze fixture transport, nikoli externí síť.
 
 ## Snapshoty
 Snapshot ukládá `as_of`, provider, calendar identity, PIT universe, rozsah, coverage, seřazený manifest observation revisions a SHA-256. Hash nezávisí na pořadí DB řádků. Pozdější correction vytvoří jiný snapshot, nikdy nezmění manifest starého. Snapshot pod minimální coverage (default 80 %) má stav `INVALID` a nesmí spustit experiment.
