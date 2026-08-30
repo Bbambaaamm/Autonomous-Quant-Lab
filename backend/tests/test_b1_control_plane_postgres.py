@@ -137,6 +137,10 @@ def test_supported_b1_control_plane_reaches_active_monitoring(monkeypatch) -> No
     assert mean_reversion.json()["selected_parameters_json"] == (
         '{"lookback":20,"threshold":"0.95"}'
     )
+    # Regresní request nesmí spotřebovat mutation budget dlouhého B1 acceptance workflow.
+    # Rate-limit samotný má oddělené security testy; zde ověřujeme Phase 6 datový průchod.
+    with limiter.lock:
+        limiter.events.clear()
     experiment = client.post(
         "/operator/research/experiments",
         json={
