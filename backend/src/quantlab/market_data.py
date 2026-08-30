@@ -593,7 +593,7 @@ class AlpacaProvider:
                 if evidence is None or evidence.action is CorporateActionEventType.DELETE:
                     raise DatasetInvalid("CORPORATE_ACTION_KNOWLEDGE_UNAVAILABLE")
                 if canonical_corporate_action_payload_hash(row) != evidence.payload_hash:
-                    # REST může dnes obsahovat novější opravenou verzi než verzi známou v SSE historii.
+                    # REST může obsahovat novější opravenou verzi než známá SSE historie.
                     # Takové hodnotě nesmíme přiřadit starší known_at; raději fail closed.
                     raise DatasetInvalid("CORPORATE_ACTION_KNOWLEDGE_UNAVAILABLE")
                 action = self._normalize_action(
