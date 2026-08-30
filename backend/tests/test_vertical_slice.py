@@ -1,14 +1,17 @@
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
 
+import quantlab.api as api_module
 from quantlab.api import app
 from quantlab.data import DataValidationError, validate_bars
 from quantlab.demo import load_fixture, run_demo
 from quantlab.domain import Bar
+from quantlab.market_data import IngestionResult
 from quantlab.strategy import MovingAverageStrategy
 
 FIXTURE = Path(__file__).parent / "fixtures" / "sample_market_data.csv"
@@ -73,6 +76,48 @@ def test_api_and_dashboard() -> None:
     response = client.post("/api/backtests/demo")
     assert response.status_code == 200
     assert response.json()["fills"]
+
+
+def test_failed_ingestion_api_returns_json_502_with_iso_dates(monkeypatch) -> None:
+    suffix = uuid4().hex
+    instrument_id = f"failed-ingestion-{suffix}"
+    client = TestClient(app)
+    instrument = client.post(
+        "/operator/instruments",
+        json={
+            "instrument_id": instrument_id,
+            "symbol": f"F{suffix[:7]}".upper(),
+            "active_from": "2020-01-01",
+            "reason": "příprava failed ingestion regrese",
+        },
+    )
+    assert instrument.status_code == 200, instrument.text
+    failed = IngestionResult(
+        f"failed-ingestion-{suffix}",
+        date(2026, 6, 1),
+        date(2026, 8, 28),
+        "FAILED",
+        (),
+        "provider unavailable",
+    )
+    monkeypatch.setattr(api_module, "build_market_data_provider", lambda settings, engine: object())
+    monkeypatch.setattr(api_module.market_data_service, "ingest", lambda *args: failed)
+
+    response = client.post(
+        "/operator/market-data/ingestions",
+        json={
+            "instrument_id": instrument_id,
+            "start": "2026-06-01",
+            "end": "2026-08-28",
+            "reason": "ověření JSON chyby ingestion",
+        },
+    )
+
+    assert response.status_code == 502
+    assert response.headers["content-type"].startswith("application/json")
+    assert response.json()["detail"]["requested_start"] == "2026-06-01"
+    assert response.json()["detail"]["requested_end"] == "2026-08-28"
+    assert response.json()["detail"]["error"] == "provider unavailable"
 
 
 def test_research_api_persists_experiment_and_exposes_report() -> None:

@@ -22,17 +22,29 @@ class RebalanceFrequency(StrEnum):
     MONTHLY = "MONTHLY"
 
 
+class ObservationKnowledgeMode(StrEnum):
+    """Určuje, zda revision knowledge řídí snapshot, nebo decision time."""
+
+    CURRENT_AS_KNOWN = "CURRENT_AS_KNOWN"
+    SNAPSHOT_PINNED = "SNAPSHOT_PINNED"
+
+
 @dataclass(frozen=True)
 class StrategyContext:
     decision_time: datetime
     history: Mapping[str, tuple[Observation, ...]]
     eligible_instruments: tuple[str, ...]
     signal_prices: Mapping[str, tuple[Decimal, ...]]
+    observation_knowledge_mode: ObservationKnowledgeMode = ObservationKnowledgeMode.CURRENT_AS_KNOWN
 
     def __post_init__(self) -> None:
         cutoff = require_utc(self.decision_time)
         if any(
-            bar.timestamp > cutoff or bar.observed_at > cutoff
+            bar.timestamp > cutoff
+            or (
+                self.observation_knowledge_mode is ObservationKnowledgeMode.CURRENT_AS_KNOWN
+                and bar.observed_at > cutoff
+            )
             for bars in self.history.values()
             for bar in bars
         ):
@@ -269,6 +281,9 @@ def run_multi_asset(
     currencies: Mapping[str, str] | None = None,
     corporate_actions: Sequence[CorporateAction] = (),
     evaluation_start: datetime | None = None,
+    observation_knowledge_mode: ObservationKnowledgeMode = (
+        ObservationKnowledgeMode.CURRENT_AS_KNOWN
+    ),
 ) -> MultiAssetResult:
     if currencies and len(set(currencies.values())) > 1:
         raise ValueError("Multi-currency portfolio bez FX konverze není podporováno")
@@ -277,6 +292,10 @@ def run_multi_asset(
         observations, key=lambda item: (item.timestamp, item.observed_at, item.revision)
     ):
         revisions.setdefault((row.instrument_id, row.timestamp), []).append(row)
+    if observation_knowledge_mode is ObservationKnowledgeMode.SNAPSHOT_PINNED and any(
+        len(rows) != 1 for rows in revisions.values()
+    ):
+        raise ValueError("Snapshot-pinned research vyžaduje právě jednu připnutou revision")
     times = sorted({row.timestamp for row in observations})
     portfolio = MultiAssetPortfolio(initial_cash)
     pending: TargetPortfolio | None = None
@@ -291,14 +310,17 @@ def run_multi_asset(
         corporate_actions, key=lambda action: (action.effective_at, action.action_id)
     )
     for index, when in enumerate(times):
-        known_rows = {
-            key: max(
-                (row for row in rows if row.observed_at <= when),
-                key=lambda row: (row.observed_at, row.revision),
-            )
-            for key, rows in revisions.items()
-            if key[1] <= when and any(row.observed_at <= when for row in rows)
-        }
+        if observation_knowledge_mode is ObservationKnowledgeMode.SNAPSHOT_PINNED:
+            known_rows = {key: rows[0] for key, rows in revisions.items() if key[1] <= when}
+        else:
+            known_rows = {
+                key: max(
+                    (row for row in rows if row.observed_at <= when),
+                    key=lambda row: (row.observed_at, row.revision),
+                )
+                for key, rows in revisions.items()
+                if key[1] <= when and any(row.observed_at <= when for row in rows)
+            }
         current = {
             instrument: row
             for (instrument, timestamp), row in known_rows.items()
@@ -388,7 +410,13 @@ def run_multi_asset(
                 )
                 for instrument, bars in causal_history.items()
             }
-            context = StrategyContext(when, causal_history, fresh, signal_prices)
+            context = StrategyContext(
+                when,
+                causal_history,
+                fresh,
+                signal_prices,
+                observation_knowledge_mode,
+            )
             pending = strategy.generate_targets(context)
             decisions.append((when, pending))
             last_rebalance = when

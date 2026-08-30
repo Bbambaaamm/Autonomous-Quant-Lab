@@ -29,6 +29,7 @@ from quantlab.multi_asset import (
     MeanReversionStrategy,
     MultiAssetFill,
     MultiAssetPortfolio,
+    ObservationKnowledgeMode,
     RebalanceFrequency,
     StrategyContext,
     TargetPortfolio,
@@ -428,6 +429,69 @@ def test_revision_known_later_does_not_change_earlier_decision():
     assert [(when, target.weights) for when, target in baseline.decisions if when <= cutoff] == [
         (when, target.weights) for when, target in revised.decisions if when <= cutoff
     ]
+
+
+def test_snapshot_pinned_research_uses_bars_ingested_after_historical_sessions():
+    days = [date(2024, 1, day) for day in (3, 4, 5, 8)]
+    ingested_at = datetime(2024, 2, 1, tzinfo=UTC)
+    rows = [obs("a", day, str(10 + index), observed=ingested_at) for index, day in enumerate(days)]
+
+    result = run_multi_asset(
+        rows,
+        single_asset_universe(),
+        TrendStrategy(1, 2, rebalance_frequency=RebalanceFrequency.DAILY),
+        initial_cash=Decimal("1000"),
+        commission_bps=Decimal("0"),
+        observation_knowledge_mode=ObservationKnowledgeMode.SNAPSHOT_PINNED,
+    )
+
+    assert result.decisions
+    assert result.fills
+    assert all(when < ingested_at for when, _ in result.decisions)
+
+
+def test_static_universe_is_snapshot_current_and_explicitly_bias_prone():
+    snapshot_as_of = datetime(2024, 2, 1, tzinfo=UTC)
+    definition = UniverseDefinition("static", "current constituents", UniverseKind.STATIC)
+    universe = PointInTimeUniverse(
+        definition,
+        [UniverseMembership("static", "a", snapshot_as_of, None, snapshot_as_of)],
+        static_knowledge_as_of=snapshot_as_of,
+    )
+
+    assert universe.eligible(CAL.session_close(date(2024, 1, 3))) == ("a",)
+    assert definition.survivorship_bias_status == "BIAS_PRONE_STATIC"
+    assert definition.survivorship_bias_status != "POINT_IN_TIME_SAFE"
+
+
+def test_static_universe_requires_explicit_snapshot_cutoff():
+    with pytest.raises(ValueError, match="explicitní snapshot knowledge cutoff"):
+        PointInTimeUniverse(
+            UniverseDefinition("static", "current constituents", UniverseKind.STATIC),
+            [],
+        )
+
+
+def test_snapshot_pinned_research_rejects_multiple_revisions_for_same_bar():
+    day = date(2024, 1, 3)
+    rows = [
+        obs("a", day, "10", observed=datetime(2024, 2, 1, tzinfo=UTC)),
+        obs(
+            "a",
+            day,
+            "11",
+            observed=datetime(2024, 2, 2, tzinfo=UTC),
+            ingestion="correction",
+        ),
+    ]
+
+    with pytest.raises(ValueError, match="právě jednu připnutou revision"):
+        run_multi_asset(
+            rows,
+            single_asset_universe(),
+            TrendStrategy(1, 2),
+            observation_knowledge_mode=ObservationKnowledgeMode.SNAPSHOT_PINNED,
+        )
 
 
 def test_runner_uses_adjusted_signals_and_applies_actions():

@@ -104,6 +104,36 @@ def test_phase6_experiment_runner_postgres_race_is_exactly_once(factory) -> None
         )
 
 
+def test_postgres_snapshot_pinned_runner_trades_delayed_historical_ingestion(factory) -> None:
+    as_of = datetime(2026, 2, 2, tzinfo=UTC)
+    _, _, sessions, snapshot, request = seed_phase6_snapshot(
+        factory,
+        suffix=f"delayed-{uuid4().hex}",
+        as_of=as_of,
+        delayed_historical_ingestion=True,
+    )
+    assert CALENDAR.session_close(sessions[-1]) < as_of
+    with factory() as session:
+        manifest = json.loads(
+            session.get(DatasetSnapshotRecord, snapshot.snapshot_id).manifest_json
+        )
+        ids = [item["id"] for item in manifest["observations"]]
+        rows = tuple(
+            session.scalars(
+                select(MarketObservationRecord).where(
+                    MarketObservationRecord.observation_id.in_(ids)
+                )
+            )
+        )
+    assert rows and all(row.observed_at == as_of for row in rows)
+
+    replay = Phase6ExperimentRunner(factory).replay(request)
+
+    assert replay.oos.trade_count > 0
+    assert replay.oos_equity
+    assert all(when < as_of for when in replay.oos_sessions)
+
+
 def test_postgres_snapshot_correction_replay_is_immutable(factory) -> None:
     instrument, provider, sessions, first, request = seed_phase6_snapshot(
         factory, suffix=f"replay-{uuid4().hex}"

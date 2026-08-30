@@ -27,6 +27,7 @@ from quantlab.market_data_service import _database_utc, _lock, _observation
 from quantlab.multi_asset import (
     STRATEGY_REGISTRY,
     MultiAssetResult,
+    ObservationKnowledgeMode,
     RebalanceFrequency,
     run_multi_asset,
 )
@@ -310,7 +311,14 @@ class Phase6ExperimentRunner:
                 raise DatasetInvalid(
                     "Snapshot corporate actions neodpovídají persistentní evidence"
                 )
-            immutable_content = {"observations": entries, "corporate_actions": action_entries}
+            universe_lineage = manifest.get("universe")
+            immutable_content = {
+                "observations": entries,
+                "corporate_actions": action_entries,
+            }
+            if universe_lineage is not None:
+                if not isinstance(universe_lineage, dict):
+                    raise DatasetInvalid("Snapshot universe lineage není konzistentní")
             manifest_hash = hashlib.sha256(self._canonical(immutable_content).encode()).hexdigest()
             if manifest_hash != snapshot.content_hash:
                 raise DatasetInvalid("Snapshot manifest neodpovídá uloženému content hash")
@@ -322,6 +330,17 @@ class Phase6ExperimentRunner:
             definition_row = session.get(UniverseDefinitionRecord, snapshot.universe_id)
             if definition_row is None:
                 raise RuntimeError("Universe definition pro snapshot nebyla nalezena")
+            expected_bias = (
+                "BIAS_PRONE_STATIC"
+                if definition_row.kind == UniverseKind.STATIC
+                else "POINT_IN_TIME_SAFE"
+            )
+            if universe_lineage is not None and universe_lineage != {
+                "kind": definition_row.kind,
+                "survivorship_bias_status": expected_bias,
+                "knowledge_as_of": _database_utc(snapshot.as_of).isoformat(),
+            }:
+                raise DatasetInvalid("Snapshot universe lineage neodpovídá universe a cutoffu")
             membership_rows = tuple(
                 session.scalars(
                     select(UniverseMembershipRecord).where(
@@ -347,6 +366,7 @@ class Phase6ExperimentRunner:
                     )
                     for row in membership_rows
                 ],
+                static_knowledge_as_of=_database_utc(snapshot.as_of),
             )
             instrument_ids = {item.instrument_id for item in observations}
             instrument_rows = tuple(
@@ -377,6 +397,7 @@ class Phase6ExperimentRunner:
                     currencies=currencies,
                     corporate_actions=corporate_actions,
                     evaluation_start=evaluation_start,
+                    observation_knowledge_mode=ObservationKnowledgeMode.SNAPSHOT_PINNED,
                 )
                 return multi_asset_metrics(result, request.initial_cash), result
 
@@ -951,7 +972,12 @@ class Phase6EligibilityService:
             row = session.get(ExperimentRecord, experiment_id, with_for_update=True)
             if row is None:
                 raise DatasetInvalid("Experiment neexistuje")
-            DeploymentService.validate_experiment(session, row)
+            snapshot, _, _ = DeploymentService.validate_experiment(session, row)
+            universe = session.get(UniverseDefinitionRecord, snapshot.universe_id)
+            if universe is None or universe.kind != UniverseKind.POINT_IN_TIME_MEMBERSHIP:
+                raise DatasetInvalid(
+                    "BIAS_PRONE_STATIC experiment zůstává RESEARCH_ONLY a nelze jej povýšit"
+                )
             decision = session.scalar(
                 select(Phase6EligibilityDecisionRecord).where(
                     Phase6EligibilityDecisionRecord.experiment_id == row.id,
@@ -1038,6 +1064,9 @@ class DeploymentService:
             if experiment is None or experiment.decision != "PAPER_CANDIDATE":
                 raise DatasetInvalid("Deployment lze vytvořit pouze z PAPER_CANDIDATE")
             snapshot, _, _ = self.validate_experiment(session, experiment)
+            universe = session.get(UniverseDefinitionRecord, snapshot.universe_id)
+            if universe is None or universe.kind != UniverseKind.POINT_IN_TIME_MEMBERSHIP:
+                raise DatasetInvalid("Paper deployment vyžaduje POINT_IN_TIME_SAFE universe")
             parameters = self._evidence(experiment.selected_parameters_json, "parameters")
             manifest = build_runtime_manifest(
                 risk=risk_config,
