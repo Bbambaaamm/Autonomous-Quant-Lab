@@ -276,9 +276,7 @@ def test_alpaca_daily_bars_request_covers_entire_final_day() -> None:
         calls.append(urllib.parse.parse_qs(urllib.parse.urlsplit(url).query))
         return 200, {}, body
 
-    provider = AlpacaProvider(
-        "key", "secret", lambda _: (), {"AAPL": "instrument-aapl"}, transport
-    )
+    provider = AlpacaProvider("key", "secret", lambda _: (), {"AAPL": "instrument-aapl"}, transport)
 
     bars = provider.historical_daily("AAPL", date(2026, 9, 2), date(2026, 9, 2))
 
@@ -303,9 +301,7 @@ def test_alpaca_duplicate_daily_sessions_are_rejected() -> None:
     ) -> tuple[int, dict[str, str], bytes]:
         return 200, {}, body
 
-    provider = AlpacaProvider(
-        "key", "secret", lambda _: (), {"AAPL": "instrument-aapl"}, transport
-    )
+    provider = AlpacaProvider("key", "secret", lambda _: (), {"AAPL": "instrument-aapl"}, transport)
 
     with pytest.raises(InvalidProviderResponse, match="duplicitní daily session"):
         provider.historical_daily("AAPL", date(2026, 9, 2), date(2026, 9, 2))
