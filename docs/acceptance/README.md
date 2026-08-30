@@ -45,6 +45,8 @@ Template:
 - Merge SHA:
 - CI run:
 - Staging SHA:
+- Database migration/version state: <exact version/state or N/A>
+- Service/runtime state: <services/images/runtime status or N/A>
 - UTC timestamp:
 - Result: PASS | FAIL | BLOCKED
 
@@ -62,6 +64,8 @@ Template:
 
 ## Invalidation notes
 ```
+
+The database and service/runtime fields are mandatory placeholders in every record. Use `N/A` only when the acceptance scenario genuinely does not depend on database schema/migrations or deployed runtime/service state.
 
 ## Do not record secrets
 
