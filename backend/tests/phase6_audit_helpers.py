@@ -61,6 +61,7 @@ def seed_phase6_snapshot(
     suffix: str | None = None,
     closes: list[Decimal] | None = None,
     as_of: datetime | None = None,
+    delayed_historical_ingestion: bool = False,
 ):
     suffix = suffix or uuid4().hex
     sessions = list(CALENDAR.sessions_between(date(2026, 1, 2), date(2026, 1, 30)))[:15]
@@ -88,13 +89,16 @@ def seed_phase6_snapshot(
     observed_at = as_of or CALENDAR.session_close(sessions[-1])
     market_data = PersistentMarketDataService(factory)
     for day in sessions:
-        # PIT research fixture zveřejní každý bar až na jeho skutečném session close.
+        # Standardní fixture modeluje průběžný ingest; delayed varianta modeluje
+        # production bootstrap, kdy celý historický rozsah dorazí až po poslední session.
         result = market_data.ingest(
             provider,
             instrument,
             day,
             day,
-            min(observed_at, CALENDAR.session_close(day)),
+            observed_at
+            if delayed_historical_ingestion
+            else min(observed_at, CALENDAR.session_close(day)),
         )
         assert result.status == "SUCCEEDED"
     market_data.verify_corporate_action_readiness(

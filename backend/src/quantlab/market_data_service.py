@@ -49,6 +49,7 @@ from quantlab.persistence import (
     UniverseDefinitionRecord,
     UniverseMembershipRecord,
 )
+from quantlab.universe import UniverseKind
 
 
 def _instant(day: date) -> datetime:
@@ -746,18 +747,31 @@ class DatasetSnapshotService:
             instruments = {
                 row.instrument_id: row for row in session.scalars(select(InstrumentRecord))
             }
+            universe_kind = UniverseKind(universe.kind)
             expected = {
                 (instrument_id, day)
                 for day in self.calendar.sessions_between(start, end)
                 for instrument_id, instrument in instruments.items()
                 if instrument.active_from.date() <= day
                 and (instrument.active_to is None or day < instrument.active_to.date())
-                and any(
-                    membership.instrument_id == instrument_id
-                    and _database_utc(membership.known_at) <= self.calendar.session_close(day)
-                    and membership.valid_from.date() <= day
-                    and (membership.valid_to is None or day < membership.valid_to.date())
-                    for membership in memberships
+                and (
+                    (
+                        universe_kind is UniverseKind.STATIC
+                        and any(
+                            membership.instrument_id == instrument_id for membership in memberships
+                        )
+                    )
+                    or (
+                        universe_kind is UniverseKind.POINT_IN_TIME_MEMBERSHIP
+                        and any(
+                            membership.instrument_id == instrument_id
+                            and _database_utc(membership.known_at)
+                            <= self.calendar.session_close(day)
+                            and membership.valid_from.date() <= day
+                            and (membership.valid_to is None or day < membership.valid_to.date())
+                            for membership in memberships
+                        )
+                    )
                 )
             }
             selected = tuple(
@@ -861,7 +875,20 @@ class DatasetSnapshotService:
                     }
                 )
             canonical_actions.sort(key=lambda item: str(item["action_id"]))
-            immutable_content = {"observations": canonical, "corporate_actions": canonical_actions}
+            universe_lineage = {
+                "kind": universe_kind.value,
+                "survivorship_bias_status": (
+                    "BIAS_PRONE_STATIC"
+                    if universe_kind is UniverseKind.STATIC
+                    else "POINT_IN_TIME_SAFE"
+                ),
+                "knowledge_as_of": cutoff.isoformat(),
+            }
+            immutable_content = {
+                "observations": canonical,
+                "corporate_actions": canonical_actions,
+                "universe": universe_lineage,
+            }
             content_hash = hashlib.sha256(
                 json.dumps(immutable_content, sort_keys=True, separators=(",", ":")).encode()
             ).hexdigest()
@@ -871,6 +898,7 @@ class DatasetSnapshotService:
                 {
                     "schema_version": "3",
                     "logical_identity": logical,
+                    "universe": universe_lineage,
                     "observations": canonical,
                     "corporate_actions": canonical_actions,
                     "expected_count": len(expected),

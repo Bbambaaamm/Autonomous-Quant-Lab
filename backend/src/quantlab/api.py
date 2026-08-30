@@ -7,6 +7,7 @@ from typing import Annotated
 from uuid import uuid4
 
 from fastapi import FastAPI, Header, HTTPException, Query, Request
+from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select, text
@@ -626,7 +627,9 @@ def ingest_market_data(body: IngestionCreate, request: Request) -> dict[str, obj
         body.reason,
         _correlation(request),
     )
-    payload = vars(result)
+    # HTTPException detail obchází Pydantic response serializaci; proto zde datumy
+    # převádíme explicitně a deterministicky, stejně jako úspěšná JSON response.
+    payload: dict[str, object] = jsonable_encoder(result)
     if result.status != "SUCCEEDED":
         raise HTTPException(502, payload)
     return payload

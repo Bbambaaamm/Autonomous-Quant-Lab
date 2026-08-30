@@ -61,6 +61,8 @@ def _canonical_hash(manifest: dict[str, object]) -> str:
         "observations": manifest["observations"],
         "corporate_actions": manifest["corporate_actions"],
     }
+    if "universe" in manifest:
+        immutable["universe"] = manifest["universe"]
     return hashlib.sha256(
         json.dumps(immutable, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
@@ -78,6 +80,7 @@ def _canonical_hash(manifest: dict[str, object]) -> str:
         "revision_mismatch",
         "source_hash_mismatch",
         "missing_corporate_actions",
+        "altered_universe_lineage",
         "malformed_corporate_action",
         "altered_corporate_action",
         "missing_corporate_action_evidence",
@@ -126,6 +129,8 @@ def test_phase6_manifest_tampering_fails_before_research(
                 row.content_hash = _canonical_hash(manifest)
             elif case == "missing_corporate_actions":
                 del manifest["corporate_actions"]
+            elif case == "altered_universe_lineage":
+                manifest["universe"]["survivorship_bias_status"] = "BIAS_PRONE_STATIC"
             elif case == "malformed_corporate_action":
                 manifest["corporate_actions"] = [{"kind": "SPLIT"}]
                 row.content_hash = _canonical_hash(manifest)

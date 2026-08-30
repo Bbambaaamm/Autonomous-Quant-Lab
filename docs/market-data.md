@@ -29,8 +29,33 @@ SSE evidence se v provozu ingestuje samostatným procesem `quantlab-alpaca-event
 
 Alpaca provider metadata má po změně úplnosti corporate-actions inventory verzi `5`, takže readiness evidence vytvořená starší implementací se nepovažuje za ekvivalentní. Persistentní lineage nadále obsahuje zvolený feed jako `alpaca:<feed>`.
 
-## Snapshoty
-Snapshot ukládá `as_of`, provider, calendar identity, PIT universe, rozsah, coverage, seřazený manifest observation revisions a SHA-256. Hash nezávisí na pořadí DB řádků. Pozdější correction vytvoří jiný snapshot, nikdy nezmění manifest starého. Snapshot pod minimální coverage (default 80 %) má stav `INVALID` a nesmí spustit experiment.
+## Snapshoty a tři časové režimy znalosti
+`observed_at` je lokální čas přijetí provider observation a určuje, kterou revision smí
+`DatasetSnapshotService` vybrat při `observed_at <= snapshot.as_of`. Není to providerem
+garantovaný publication timestamp a systém jej nebackdatuje na historickou session.
+
+Po vytvoření je research snapshot immutable, připnutý seznam konkrétních observation ID,
+revision a hashů. Phase 6 replay proto nad tímto seznamem omezuje strategii podle ekonomického
+`timestamp <= decision_time`, ale znovu nepoužívá ingestion `observed_at` jako decision-time
+bránu. Jinak by legitimní historie ingestovaná dnes nebyla v retrospektivním výzkumu viditelná.
+Budoucí bary zůstávají neviditelné; corporate actions nadále samostatně respektují
+`known_at` i `effective_at`. Starý snapshot po correction ingestu zachová původní revision,
+zatímco nový snapshot s pozdějším `as_of` může připnout opravu.
+
+Mutable/current execution data je třetí, oddělený režim: používá revision skutečně známou v
+aktuálním knowledge cutoffu, vyžaduje úspěšný ingest a znovu validuje executable raw open. Research
+snapshot se k current execution nikdy nepoužívá.
+
+Snapshot ukládá `as_of`, provider, calendar identity, universe, rozsah, coverage, seřazený
+manifest observation revisions a SHA-256. Hash nezávisí na pořadí DB řádků. Manifest navíc uvádí
+universe kind, knowledge cutoff a bias status. `POINT_IN_TIME_MEMBERSHIP` při každém historickém
+rozhodnutí striktně vyžaduje `known_at <= decision_time`, `valid_from <= decision_time` a
+half-open `valid_to`. `STATIC` naproti tomu aplikuje seznam členů známý k `snapshot.as_of` na celé
+retrospektivní období; ignoruje historické membership intervaly, je úmyslně survivorship-bias-prone
+a vždy se označuje `BIAS_PRONE_STATIC`, nikdy `POINT_IN_TIME_SAFE`. Membership knowledge se tím
+nebackdatuje: cutoff výběru statického seznamu zůstává dohledatelný v lineage.
+
+Snapshot pod minimální coverage (default 80 %) má stav `INVALID` a nesmí spustit experiment.
 
 ## Persistentní runtime a známé omezení
 Produkční `PersistentMarketDataService` zapisuje ingestion, immutable revisions a corporate actions v jedné DB transakci. Deterministický scope identifikátor dělá restart stejného požadavku idempotentní; PostgreSQL advisory transaction lock serializuje stejný scope. Selhání se audituje jako `FAILED` bez observation řádků. In-memory adapter je pouze testovací/reference adapter.
@@ -41,7 +66,7 @@ instrument, interval a knowledge cutoff. Prázdný seznam je complete pouze po �
 provideru s `supports_actions=True`; podrobnosti popisuje
 [`operational-readiness-remediation-h2-corporate-action-gate.md`](operational-readiness-remediation-h2-corporate-action-gate.md).
 
-`DatasetSnapshotService` vybírá přes SQL window autoritativní observation revision známou k `as_of`; u corporate actions vybírá odpovídající immutable action revision a respektuje cancellation tombstones známé k `as_of`. Coverage denominator je průnik session, active intervalu instrumentu a membership intervalu známého k `as_of`, nikoli kartézský součin. Prázdný nebo nedostatečně pokrytý snapshot je `INVALID`.
+`DatasetSnapshotService` vybírá přes SQL window autoritativní observation revision známou k `as_of`; u corporate actions vybírá odpovídající immutable action revision a respektuje cancellation tombstones známé k `as_of`. Coverage denominator PIT universe je průnik session, active intervalu instrumentu a membership intervalu známého v dané session. Pro explicitní STATIC universe je denominator current seznam známý k snapshot cutoffu aplikovaný na celý rozsah. Prázdný nebo nedostatečně pokrytý snapshot je `INVALID`.
 
 Kalendář zachovává interní XNYS adapter, ale autoritativní schedule poskytuje zamknutá maintained knihovna `exchange-calendars`.
 

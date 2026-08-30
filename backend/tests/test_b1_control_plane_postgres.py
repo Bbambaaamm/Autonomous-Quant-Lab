@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 
 import quantlab.api as api_module
 from quantlab.automation import JobRun, RunStatus, ScheduledJob
+from quantlab.market_data import IngestionResult
 from quantlab.persistence import (
     DatasetSnapshotRecord,
     ExperimentRecord,
@@ -29,6 +30,51 @@ from quantlab.security import limiter
 pytestmark = pytest.mark.skipif(
     os.getenv("RUN_POSTGRES_TESTS") != "1", reason="vyžaduje PostgreSQL CI"
 )
+
+
+def test_failed_ingestion_api_returns_json_502_with_iso_dates(monkeypatch) -> None:
+    suffix = uuid4().hex
+    instrument_id = f"failed-{suffix[:32]}"
+    with Session(api_module.repository.engine) as session, session.begin():
+        session.add(
+            InstrumentRecord(
+                instrument_id=instrument_id,
+                symbol=f"F{suffix[:7]}".upper(),
+                exchange="XNYS",
+                calendar="XNYS",
+                currency="USD",
+                asset_type="EQUITY",
+                active_from=datetime(2020, 1, 1, tzinfo=UTC),
+                active_to=None,
+                created_at=datetime.now(UTC),
+            )
+        )
+    failed = IngestionResult(
+        f"failed-{suffix}",
+        date(2026, 6, 1),
+        date(2026, 8, 28),
+        "FAILED",
+        (),
+        "provider unavailable",
+    )
+    monkeypatch.setattr(api_module, "build_market_data_provider", lambda settings, engine: object())
+    monkeypatch.setattr(api_module.market_data_service, "ingest", lambda *args: failed)
+
+    response = TestClient(api_module.app).post(
+        "/operator/market-data/ingestions",
+        json={
+            "instrument_id": instrument_id,
+            "start": "2026-06-01",
+            "end": "2026-08-28",
+            "reason": "ověření JSON chyby ingestion",
+        },
+    )
+
+    assert response.status_code == 502
+    assert response.headers["content-type"].startswith("application/json")
+    assert response.json()["detail"]["requested_start"] == "2026-06-01"
+    assert response.json()["detail"]["requested_end"] == "2026-08-28"
+    assert response.json()["detail"]["error"] == "provider unavailable"
 
 
 def test_supported_b1_control_plane_reaches_active_monitoring(monkeypatch) -> None:

@@ -41,18 +41,33 @@ class UniverseMembership:
 
 class PointInTimeUniverse:
     def __init__(
-        self, definition: UniverseDefinition, memberships: list[UniverseMembership]
+        self,
+        definition: UniverseDefinition,
+        memberships: list[UniverseMembership],
+        *,
+        static_knowledge_as_of: datetime | None = None,
     ) -> None:
         if any(m.universe_id != definition.universe_id for m in memberships):
             raise ValueError("Membership patří do jiného universe")
         self.definition = definition
         self._memberships = tuple(memberships)
+        self._static_knowledge_as_of = (
+            require_utc(static_knowledge_as_of) if static_knowledge_as_of is not None else None
+        )
 
     def eligible(
         self, decision_time: datetime, *, knowledge_as_of: datetime | None = None
     ) -> tuple[str, ...]:
         decision = require_utc(decision_time)
         knowledge = require_utc(knowledge_as_of or decision)
+        if self.definition.kind is UniverseKind.STATIC:
+            # STATIC je explicitně current/snapshot seznam aplikovaný na celé historické
+            # období. known_at se nebackdatuje: seznam smí obsahovat jen membership známé
+            # k explicitnímu snapshot cutoffu (nebo knowledge_as_of volajícího).
+            cutoff = self._static_knowledge_as_of or knowledge
+            return tuple(
+                sorted({m.instrument_id for m in self._memberships if m.known_at <= cutoff})
+            )
         return tuple(
             sorted(
                 {
