@@ -782,11 +782,11 @@ class DatasetSnapshotService:
                 )
             )
             latest_revisions: dict[str, CorporateActionRevisionRecord] = {}
-            for action in sorted(
+            for revision_action in sorted(
                 revision_rows,
                 key=lambda item: (_database_utc(item.known_at), item.revision_id),
             ):
-                latest_revisions[action.action_id] = action
+                latest_revisions[revision_action.action_id] = revision_action
             fallback_actions = tuple(
                 session.scalars(
                     select(CorporateActionRecord).where(
@@ -818,42 +818,48 @@ class DatasetSnapshotService:
                     latest_cancel[cancellation.action_id] = when
 
             canonical_actions: list[dict[str, object]] = []
-            for action in sorted(latest_revisions.values(), key=lambda item: item.action_id):
-                known_at = _database_utc(action.known_at)
+            for revision_action in sorted(
+                latest_revisions.values(), key=lambda item: item.action_id
+            ):
+                known_at = _database_utc(revision_action.known_at)
                 if (
-                    latest_cancel.get(action.action_id, datetime.min.replace(tzinfo=UTC))
+                    latest_cancel.get(
+                        revision_action.action_id, datetime.min.replace(tzinfo=UTC)
+                    )
                     >= known_at
                 ):
                     continue
                 canonical_actions.append(
                     {
-                        "action_id": action.action_id,
-                        "instrument_id": action.instrument_id,
-                        "kind": action.kind,
-                        "effective_at": action.effective_at.isoformat(),
-                        "known_at": action.known_at.isoformat(),
-                        "value": action.value,
-                        "new_symbol": action.new_symbol,
+                        "action_id": revision_action.action_id,
+                        "instrument_id": revision_action.instrument_id,
+                        "kind": revision_action.kind,
+                        "effective_at": revision_action.effective_at.isoformat(),
+                        "known_at": revision_action.known_at.isoformat(),
+                        "value": revision_action.value,
+                        "new_symbol": revision_action.new_symbol,
                     }
                 )
-            for action in sorted(fallback_actions, key=lambda item: item.action_id):
-                if action.action_id in latest_revisions:
+            for fallback_action in sorted(fallback_actions, key=lambda item: item.action_id):
+                if fallback_action.action_id in latest_revisions:
                     continue
-                known_at = _database_utc(action.known_at)
+                known_at = _database_utc(fallback_action.known_at)
                 if (
-                    latest_cancel.get(action.action_id, datetime.min.replace(tzinfo=UTC))
+                    latest_cancel.get(
+                        fallback_action.action_id, datetime.min.replace(tzinfo=UTC)
+                    )
                     >= known_at
                 ):
                     continue
                 canonical_actions.append(
                     {
-                        "action_id": action.action_id,
-                        "instrument_id": action.instrument_id,
-                        "kind": action.kind,
-                        "effective_at": action.effective_at.isoformat(),
-                        "known_at": action.known_at.isoformat(),
-                        "value": action.value,
-                        "new_symbol": action.new_symbol,
+                        "action_id": fallback_action.action_id,
+                        "instrument_id": fallback_action.instrument_id,
+                        "kind": fallback_action.kind,
+                        "effective_at": fallback_action.effective_at.isoformat(),
+                        "known_at": fallback_action.known_at.isoformat(),
+                        "value": fallback_action.value,
+                        "new_symbol": fallback_action.new_symbol,
                     }
                 )
             canonical_actions.sort(key=lambda item: str(item["action_id"]))
