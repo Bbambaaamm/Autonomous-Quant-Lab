@@ -823,9 +823,7 @@ class DatasetSnapshotService:
             ):
                 known_at = _database_utc(revision_action.known_at)
                 if (
-                    latest_cancel.get(
-                        revision_action.action_id, datetime.min.replace(tzinfo=UTC)
-                    )
+                    latest_cancel.get(revision_action.action_id, datetime.min.replace(tzinfo=UTC))
                     >= known_at
                 ):
                     continue
@@ -845,9 +843,7 @@ class DatasetSnapshotService:
                     continue
                 known_at = _database_utc(fallback_action.known_at)
                 if (
-                    latest_cancel.get(
-                        fallback_action.action_id, datetime.min.replace(tzinfo=UTC)
-                    )
+                    latest_cancel.get(fallback_action.action_id, datetime.min.replace(tzinfo=UTC))
                     >= known_at
                 ):
                     continue
