@@ -3,8 +3,8 @@ from __future__ import annotations
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections.abc import Iterator
 
+from sqlalchemy import select
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
@@ -72,7 +72,7 @@ def build_market_data_provider(settings: Settings, engine: Engine) -> MarketData
         return Session(engine)
 
     with sessions() as session:
-        instruments = tuple(session.query(InstrumentRecord).all())
+        instruments = tuple(session.scalars(select(InstrumentRecord)))
     instrument_ids = {row.symbol.upper(): row.instrument_id for row in instruments}
     service = PersistentMarketDataService(sessions)
     return AlpacaProvider(
