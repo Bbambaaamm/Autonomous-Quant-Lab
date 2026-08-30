@@ -45,6 +45,16 @@ def _cash_dividend(action_id: str = "ca-div") -> dict[str, Any]:
     }
 
 
+def _dma_cash_dividend() -> dict[str, Any]:
+    return {
+        "id": "d0f50368-2964-499c-988c-ebfe01faeb0b",
+        "symbol": "DMA",
+        "rate": 0.1125,
+        "process_date": "2026-08-31",
+        "ex_date": "2026-08-21",
+    }
+
+
 def _sse_payload(
     ca: dict[str, Any],
     *,
@@ -235,9 +245,94 @@ def test_alpaca_rest_uses_nested_collections_and_exhausts_pagination() -> None:
         CorporateActionKind.CASH_DIVIDEND,
     ]
     assert calls[0]["start"] == ["1970-01-01"]
+    assert calls[0]["end"] == ["9999-12-31"]
+    assert calls[0]["limit"] == ["1000"]
     assert calls[0]["data_quality"] == ["all"]
     assert "page_token" not in calls[0]
     assert calls[1]["page_token"] == ["page-2"]
+
+
+def test_alpaca_future_process_date_is_included_by_full_inventory_horizon() -> None:
+    row = _dma_cash_dividend()
+    received_at = datetime(2026, 8, 30, 15, 0, 1, tzinfo=UTC)
+    event = CorporateActionEvent.from_sse(
+        _sse_payload(
+            row,
+            event_type="cash_dividend_corporateaction_event",
+            at="2026-08-30T15:00:00Z",
+        ),
+        received_at=received_at,
+    )
+    calls: list[dict[str, list[str]]] = []
+    provider = AlpacaProvider(
+        "key",
+        "secret",
+        lambda name: (event,) if name == "alpaca" else (),
+        {"DMA": "instrument-dma"},
+        _transport({None: _response({"cash_dividends": [row]})}, calls),
+        timeout=1,
+    )
+
+    actions = provider.corporate_actions("DMA", date(2026, 8, 20), date(2026, 8, 22))
+
+    assert calls[0]["end"] == ["9999-12-31"]
+    assert len(actions) == 1
+    assert actions[0].kind is CorporateActionKind.CASH_DIVIDEND
+    assert actions[0].effective_at == datetime(2026, 8, 21, tzinfo=UTC)
+    assert actions[0].known_at == received_at
+    assert actions[0].known_at != event.at
+    assert actions[0].known_at.date() != date.fromisoformat(row["process_date"])
+
+
+def test_alpaca_future_process_date_without_sse_evidence_fails_closed() -> None:
+    row = _dma_cash_dividend()
+    provider = AlpacaProvider(
+        "key",
+        "secret",
+        lambda _: (),
+        {"DMA": "instrument-dma"},
+        _transport({None: _response({"cash_dividends": [row]})}, []),
+        timeout=1,
+    )
+
+    with pytest.raises(DatasetInvalid, match="^CORPORATE_ACTION_KNOWLEDGE_UNAVAILABLE$"):
+        provider.corporate_actions("DMA", date(2026, 8, 20), date(2026, 8, 22))
+
+
+def test_alpaca_future_process_date_revision_mismatch_fails_closed() -> None:
+    rest_row = _dma_cash_dividend()
+    sse_row = {**rest_row, "rate": 0.1}
+    event = CorporateActionEvent.from_sse(
+        _sse_payload(sse_row, event_type="cash_dividend_corporateaction_event")
+    )
+    provider = AlpacaProvider(
+        "key",
+        "secret",
+        lambda _: (event,),
+        {"DMA": "instrument-dma"},
+        _transport({None: _response({"cash_dividends": [rest_row]})}, []),
+        timeout=1,
+    )
+
+    with pytest.raises(DatasetInvalid, match="^CORPORATE_ACTION_KNOWLEDGE_UNAVAILABLE$"):
+        provider.corporate_actions("DMA", date(2026, 8, 20), date(2026, 8, 22))
+
+
+def test_alpaca_future_process_date_is_filtered_by_economic_effective_date() -> None:
+    row = _dma_cash_dividend()
+    event = CorporateActionEvent.from_sse(
+        _sse_payload(row, event_type="cash_dividend_corporateaction_event")
+    )
+    provider = AlpacaProvider(
+        "key",
+        "secret",
+        lambda _: (event,),
+        {"DMA": "instrument-dma"},
+        _transport({None: _response({"cash_dividends": [row]})}, []),
+        timeout=1,
+    )
+
+    assert provider.corporate_actions("DMA", date(2026, 8, 22), date(2026, 8, 23)) == []
 
 
 def test_alpaca_research_interval_is_not_sent_as_process_date_filter() -> None:

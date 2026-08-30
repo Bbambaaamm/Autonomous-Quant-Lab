@@ -428,6 +428,7 @@ class AlpacaProvider:
     """REST adapter; ``known_at`` je lokální receipt time přesně odpovídající SSE revize."""
 
     _base_url = "https://data.alpaca.markets"
+    _corporate_actions_inventory_end = "9999-12-31"
     _supported_collections = frozenset(
         {
             "forward_splits",
@@ -458,7 +459,7 @@ class AlpacaProvider:
         if feed not in {"iex", "sip", "delayed_sip", "otc", "boats", "overnight"}:
             raise ValueError("Alpaca feed není na allowlistu")
         self._feed = feed
-        self.metadata = ProviderMetadata("alpaca", "4", True, True, f"alpaca:{feed}")
+        self.metadata = ProviderMetadata("alpaca", "5", True, True, f"alpaca:{feed}")
 
     def resolve(self, symbol: str) -> dict[str, str]:
         normalized = symbol.strip().upper()
@@ -501,15 +502,12 @@ class AlpacaProvider:
             tokens.add(token)
             query = {**query, "page_token": token}
 
-    def _get_corporate_action_rows(
-        self, symbol: str, requested_end: date
-    ) -> list[tuple[str, dict[str, Any]]]:
+    def _get_corporate_action_rows(self, symbol: str) -> list[tuple[str, dict[str, Any]]]:
         """Načte všechny CA typy; research interval se nepředstírá jako process-date interval."""
-        provider_end = max(requested_end, datetime.now(UTC).date())
         query = {
             "symbols": symbol,
             "start": "1970-01-01",
-            "end": provider_end.isoformat(),
+            "end": self._corporate_actions_inventory_end,
             "limit": "1000",
             "data_quality": "all",
         }
@@ -670,7 +668,7 @@ class AlpacaProvider:
             latest[event.provider_action_id] = event
 
         result: list[CorporateAction] = []
-        rows = self._get_corporate_action_rows(normalized, end)
+        rows = self._get_corporate_action_rows(normalized)
         returned_ids = {
             str(row.get("id"))
             for _, row in rows

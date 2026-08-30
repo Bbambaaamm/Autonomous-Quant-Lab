@@ -47,7 +47,7 @@ def test_alpaca_feed_is_part_of_persistent_provider_lineage() -> None:
     sip = AlpacaProvider(*common, feed="sip")
 
     assert iex.metadata.name == sip.metadata.name == "alpaca"
-    assert iex.metadata.version == sip.metadata.version == "4"
+    assert iex.metadata.version == sip.metadata.version == "5"
     assert iex.metadata.persistent_name == "alpaca:iex"
     assert sip.metadata.persistent_name == "alpaca:sip"
 
