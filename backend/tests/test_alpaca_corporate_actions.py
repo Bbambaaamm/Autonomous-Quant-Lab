@@ -22,7 +22,7 @@ from quantlab.market_data import (
 Transport = Callable[[str, dict[str, str], float], tuple[int, dict[str, str], bytes]]
 
 
-def _split(action_id: str = "ca-1", *, new_rate: int = 4) -> dict[str, Any]:
+def _split(action_id: str = "ca-1", *, new_rate: int | str = 4) -> dict[str, Any]:
     return {
         "id": action_id,
         "symbol": "AAPL",
@@ -117,6 +117,19 @@ def test_alpaca_action_known_at_comes_only_from_matching_sse_version() -> None:
     assert actions[0].value == Decimal("4")
 
 
+def test_alpaca_known_at_uses_local_receipt_not_provider_timestamp() -> None:
+    row = _split()
+    received_at = datetime(2026, 8, 29, 17, tzinfo=UTC)
+    event = CorporateActionEvent.from_sse(_sse_payload(row), received_at=received_at)
+    provider = _provider({None: _response({"forward_splits": [row]})}, (event,))
+
+    action = provider.corporate_actions("AAPL", date(2026, 9, 1), date(2026, 9, 1))[0]
+
+    assert event.at == datetime(2026, 8, 29, 15, tzinfo=UTC)
+    assert event.received_at == received_at
+    assert action.known_at == received_at
+
+
 def test_alpaca_historical_action_without_sse_evidence_fails_closed() -> None:
     provider = _provider({None: _response({"forward_splits": [_split()]})})
 
@@ -146,6 +159,15 @@ def test_alpaca_delete_event_cannot_prove_current_rest_fact() -> None:
         provider.corporate_actions("AAPL", date(2026, 8, 1), date(2026, 9, 2))
 
 
+def test_alpaca_delete_event_missing_from_rest_fails_closed() -> None:
+    row = _split()
+    event = CorporateActionEvent.from_sse(_sse_payload(row, action="delete"))
+    provider = _provider({None: _response({"forward_splits": []})}, (event,))
+
+    with pytest.raises(DatasetInvalid, match="^CORPORATE_ACTION_KNOWLEDGE_UNAVAILABLE$"):
+        provider.corporate_actions("AAPL", date(2026, 9, 1), date(2026, 9, 1))
+
+
 def test_alpaca_sse_envelope_uses_nested_ca_identity_and_version_hash() -> None:
     ca = _split()
     event = CorporateActionEvent.from_sse(
@@ -157,6 +179,29 @@ def test_alpaca_sse_envelope_uses_nested_ca_identity_and_version_hash() -> None:
     assert event.at == datetime(2026, 8, 29, 16, tzinfo=UTC)
     assert event.action is CorporateActionEventType.UPDATE
     assert event.payload_hash == canonical_corporate_action_payload_hash(ca)
+    assert event.symbols == ("AAPL",)
+    assert event.scope_date == date(2026, 9, 1)
+
+
+def test_alpaca_long_provider_id_maps_to_stable_internal_id() -> None:
+    provider_action_id = "a" * 100
+    row = _split(provider_action_id)
+    event = CorporateActionEvent.from_sse(_sse_payload(row))
+    provider = _provider({None: _response({"forward_splits": [row]})}, (event,))
+
+    action = provider.corporate_actions("AAPL", date(2026, 9, 1), date(2026, 9, 1))[0]
+
+    assert len(action.action_id) == 64
+    assert action.provider_action_id == provider_action_id
+
+
+def test_alpaca_non_finite_split_is_rejected() -> None:
+    row = _split(new_rate="Infinity")
+    event = CorporateActionEvent.from_sse(_sse_payload(row))
+    provider = _provider({None: _response({"forward_splits": [row]})}, (event,))
+
+    with pytest.raises(InvalidProviderResponse, match="split má neplatný poměr"):
+        provider.corporate_actions("AAPL", date(2026, 9, 1), date(2026, 9, 1))
 
 
 def test_alpaca_rest_uses_nested_collections_and_exhausts_pagination() -> None:
@@ -190,6 +235,7 @@ def test_alpaca_rest_uses_nested_collections_and_exhausts_pagination() -> None:
         CorporateActionKind.CASH_DIVIDEND,
     ]
     assert calls[0]["start"] == ["1970-01-01"]
+    assert calls[0]["data_quality"] == ["all"]
     assert "page_token" not in calls[0]
     assert calls[1]["page_token"] == ["page-2"]
 
@@ -204,6 +250,47 @@ def test_alpaca_research_interval_is_not_sent_as_process_date_filter() -> None:
 
     assert calls[0]["start"] != ["2026-09-01"]
     assert calls[0]["start"] == ["1970-01-01"]
+
+
+def test_alpaca_daily_bars_request_covers_entire_final_day() -> None:
+    calls: list[dict[str, list[str]]] = []
+    body = json.dumps(
+        {
+            "bars": [
+                {"t": "2026-09-02T04:00:00Z", "o": 10, "h": 11, "l": 9, "c": 10.5, "v": 100}
+            ],
+            "next_page_token": None,
+        }
+    ).encode()
+
+    def transport(
+        url: str, headers: dict[str, str], timeout: float
+    ) -> tuple[int, dict[str, str], bytes]:
+        calls.append(urllib.parse.parse_qs(urllib.parse.urlsplit(url).query))
+        return 200, {}, body
+
+    provider = AlpacaProvider("key", "secret", lambda _: (), {"AAPL": "instrument-aapl"}, transport)
+
+    bars = provider.historical_daily("AAPL", date(2026, 9, 2), date(2026, 9, 2))
+
+    assert len(bars) == 1
+    assert calls[0]["start"] == ["2026-09-02T00:00:00Z"]
+    assert calls[0]["end"] == ["2026-09-03T00:00:00Z"]
+
+
+def test_alpaca_duplicate_daily_sessions_are_rejected() -> None:
+    duplicate = {"t": "2026-09-02T04:00:00Z", "o": 10, "h": 11, "l": 9, "c": 10.5, "v": 100}
+    body = json.dumps({"bars": [duplicate, duplicate], "next_page_token": None}).encode()
+
+    def transport(
+        url: str, headers: dict[str, str], timeout: float
+    ) -> tuple[int, dict[str, str], bytes]:
+        return 200, {}, body
+
+    provider = AlpacaProvider("key", "secret", lambda _: (), {"AAPL": "instrument-aapl"}, transport)
+
+    with pytest.raises(InvalidProviderResponse, match="duplicitní daily session"):
+        provider.historical_daily("AAPL", date(2026, 9, 2), date(2026, 9, 2))
 
 
 def test_alpaca_name_change_and_worthless_removal_map_to_canonical_kinds() -> None:
@@ -274,6 +361,12 @@ def test_alpaca_sse_reconnect_uses_last_event_id_and_skips_inclusive_replay() ->
             return interrupted()
         return (json.dumps([json.loads(first), json.loads(second)]).encode(),)
 
+    receipts = iter(
+        (
+            datetime(2026, 8, 29, 17, tzinfo=UTC),
+            datetime(2026, 8, 29, 18, tzinfo=UTC),
+        )
+    )
     stored: list[CorporateActionEvent] = []
     consumer = AlpacaCorporateActionStream(
         "key",
@@ -283,11 +376,14 @@ def test_alpaca_sse_reconnect_uses_last_event_id_and_skips_inclusive_replay() ->
         timeout=1,
         max_reconnects=2,
         sleep=lambda _: None,
+        clock=lambda: next(receipts),
     )
 
     cursor = consumer.run(max_events=2)
 
     assert cursor == "e-2"
     assert [event.event_id for event in stored] == ["e-1", "e-2"]
+    assert stored[0].received_at == datetime(2026, 8, 29, 17, tzinfo=UTC)
+    assert stored[1].received_at == datetime(2026, 8, 29, 18, tzinfo=UTC)
     assert "Last-Event-Id" not in headers_seen[0]
     assert headers_seen[1]["Last-Event-Id"] == "e-1"
