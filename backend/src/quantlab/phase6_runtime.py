@@ -130,10 +130,8 @@ _STRATEGY_PARAMETER_TYPES: dict[str, dict[str, type[object]]] = {
 
 
 def _normalize_integer(value: object, parameter: str) -> int:
-    if isinstance(value, bool) or not isinstance(value, (int, float, Decimal)):
+    if isinstance(value, bool) or isinstance(value, float) or not isinstance(value, (int, Decimal)):
         raise DatasetInvalid(f"Parametr {parameter} musí být celé číslo")
-    if isinstance(value, float) and not math.isfinite(value):
-        raise DatasetInvalid(f"Parametr {parameter} musí být konečné celé číslo")
     try:
         decimal_value = Decimal(str(value))
     except (InvalidOperation, ValueError) as exc:
@@ -153,6 +151,19 @@ def _normalize_decimal(value: object, parameter: str) -> Decimal:
     if not normalized.is_finite():
         raise DatasetInvalid(f"Parametr {parameter} musí být konečné desetinné číslo")
     return normalized
+
+
+def _canonical_decimal(value: Decimal) -> Decimal:
+    if value.is_zero():
+        return Decimal(0)
+    sign, digits, exponent = value.as_tuple()
+    if not isinstance(exponent, int):
+        raise DatasetInvalid("Decimal strategy parametr musí být konečný")
+    canonical_digits = list(digits)
+    while canonical_digits[-1] == 0:
+        canonical_digits.pop()
+        exponent += 1
+    return Decimal((sign, tuple(canonical_digits), exponent))
 
 
 def normalize_strategy_config(
@@ -188,7 +199,14 @@ def normalize_strategy_config(
         raise DatasetInvalid("Strategy parametry jsou mimo povolené meze") from exc
     if implementation.name != strategy_name or implementation.version != strategy_version:
         raise DatasetInvalid("Implementace strategy version neodpovídá allowlistu")
-    return normalized
+    canonical: dict[str, object] = {
+        parameter: getattr(implementation, parameter) for parameter in parameter_types
+    }
+    canonical["rebalance_frequency"] = implementation.rebalance_frequency
+    for parameter, value in canonical.items():
+        if isinstance(value, Decimal):
+            canonical[parameter] = _canonical_decimal(value)
+    return canonical
 
 
 def persisted_execution_open_scope(

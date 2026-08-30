@@ -10,7 +10,11 @@ nekonečné hodnoty. Ekonomické Decimal parametry (například `threshold`) jso
 kanonické `Decimal`; JSON transport může použít přesný string (`"0.95"`) nebo number (`0.95`),
 který se převádí přes jeho deterministickou desetinnou reprezentaci. Oba transportní tvary tak
 mají stejnou experiment identity a replay konfiguraci. Neznámé parametry a nepovolené dvojice
-strategie/verze jsou odmítnuty fail closed.
+strategie/verze jsou odmítnuty fail closed. Canonical konfigurace materializuje také všechny
+dataclass defaulty a Decimal hodnotám odstraní nevýznamné koncové nuly, takže vynechaný default
+versus jeho explicitní hodnota ani `"0.95"` versus `"0.950"` nemění experiment identity.
+Integer parametry musí JSON transport poslat jako integer, nikoli jako float, protože float již
+mohl před validací nevratně ztratit přesnost.
 
 Engine vede společnou USD hotovost, více pozic, cost basis, fills a portfolio equity. Nejde o součet single-symbol backtestů. Sells proběhnou deterministicky před buys, množství jsou whole-share a buy je ořezán dostupnou hotovostí včetně fee. Nově obchodovat lze jen asset s čerstvým raw open; existing stale valuation starší než policy limit selže. Multi-currency universe bez FX selže uzavřeně.
 

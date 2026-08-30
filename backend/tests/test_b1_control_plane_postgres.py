@@ -135,7 +135,7 @@ def test_supported_b1_control_plane_reaches_active_monitoring(monkeypatch) -> No
     )
     assert mean_reversion.status_code == 200, mean_reversion.text
     assert mean_reversion.json()["selected_parameters_json"] == (
-        '{"lookback":20,"threshold":"0.95"}'
+        '{"lookback":20,"rebalance_frequency":"WEEKLY","threshold":"0.95"}'
     )
     # Regresní request nesmí spotřebovat mutation budget dlouhého B1 acceptance workflow.
     # Rate-limit samotný má oddělené security testy; zde ověřujeme Phase 6 datový průchod.

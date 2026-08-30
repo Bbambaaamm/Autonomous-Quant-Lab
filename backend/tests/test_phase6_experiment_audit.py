@@ -86,12 +86,44 @@ def test_mean_reversion_decimal_transport_has_one_canonical_identity() -> None:
             code_sha="a" * 40,
         )
 
-    from_string = runner.run(request("0.95"))
+    from_string = runner.run(request("0.950"))
     from_number = runner.run(request(0.95))
+    with_default_omitted = runner.run(
+        Phase6ExperimentRequest(
+            snapshot.snapshot_id,
+            "multi_asset_mean_reversion",
+            "1.0.0",
+            ({"threshold": "0.95"},),
+            code_sha="a" * 40,
+        )
+    )
     replay = runner.replay(request(0.95))
-    assert from_string.id == from_number.id
-    assert from_string.selected_parameters_json == '{"lookback":20,"threshold":"0.95"}'
-    assert replay.selected_parameters == {"lookback": 20, "threshold": Decimal("0.95")}
+    assert from_string.id == from_number.id == with_default_omitted.id
+    assert from_string.selected_parameters_json == (
+        '{"lookback":20,"rebalance_frequency":"WEEKLY","threshold":"0.95"}'
+    )
+    assert replay.selected_parameters == {
+        "lookback": 20,
+        "rebalance_frequency": runtime.RebalanceFrequency.WEEKLY,
+        "threshold": Decimal("0.95"),
+    }
+
+
+def test_strategy_config_materializes_defaults_canonically() -> None:
+    omitted = normalize_strategy_config(
+        "multi_asset_mean_reversion", "1.0.0", {"threshold": "0.9500"}
+    )
+    explicit = normalize_strategy_config(
+        "multi_asset_mean_reversion",
+        "1.0.0",
+        {"lookback": 20, "threshold": Decimal("0.95")},
+    )
+    assert omitted == explicit
+    assert omitted == {
+        "lookback": 20,
+        "rebalance_frequency": runtime.RebalanceFrequency.WEEKLY,
+        "threshold": Decimal("0.95"),
+    }
 
 
 @pytest.mark.parametrize(
@@ -100,6 +132,8 @@ def test_mean_reversion_decimal_transport_has_one_canonical_identity() -> None:
         ({"lookback": 20, "threshold": "abc"}, "desetinné číslo"),
         ({"lookback": True, "threshold": "0.95"}, "celé číslo"),
         ({"lookback": 20.5, "threshold": "0.95"}, "celé číslo"),
+        ({"lookback": 20.0, "threshold": "0.95"}, "celé číslo"),
+        ({"lookback": 9007199254740993.0, "threshold": "0.95"}, "celé číslo"),
         (
             {"lookback": 20, "threshold": "0.95", "threshhold": "0.9"},
             "Neznámé strategy parametry",
@@ -157,11 +191,16 @@ def test_experiment_api_returns_domain_error_for_invalid_config(
 def test_trend_and_momentum_configs_remain_typed() -> None:
     assert normalize_strategy_config("multi_asset_trend", "1.0.0", {"fast": 2, "slow": 3}) == {
         "fast": 2,
+        "rebalance_frequency": runtime.RebalanceFrequency.MONTHLY,
         "slow": 3,
     }
     assert normalize_strategy_config(
         "cross_sectional_momentum", "1.0.0", {"lookback": 20, "top_n": 3}
-    ) == {"lookback": 20, "top_n": 3}
+    ) == {
+        "lookback": 20,
+        "rebalance_frequency": runtime.RebalanceFrequency.MONTHLY,
+        "top_n": 3,
+    }
 
 
 def _canonical_hash(manifest: dict[str, object]) -> str:
