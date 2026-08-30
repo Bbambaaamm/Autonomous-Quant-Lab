@@ -7,7 +7,18 @@ from dataclasses import replace
 from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 
-from sqlalchemy import DateTime, ForeignKey, Select, String, Text, UniqueConstraint, and_, func, select, text
+from sqlalchemy import (
+    DateTime,
+    ForeignKey,
+    Select,
+    String,
+    Text,
+    UniqueConstraint,
+    and_,
+    func,
+    select,
+    text,
+)
 from sqlalchemy.orm import Mapped, Session, mapped_column
 
 from quantlab.domain import require_utc
@@ -213,6 +224,12 @@ class PersistentMarketDataService:
                         known_at=received_at,
                     )
                 )
+                current = session.get(CorporateActionRecord, action_id)
+                if current is not None and received_at >= _database_utc(current.known_at):
+                    # Current projection is mutable; immutable history remains in revision tables.
+                    # A far-future effective time prevents stale accounting without losing lineage.
+                    current.known_at = received_at
+                    current.effective_at = datetime(9999, 12, 31, tzinfo=UTC)
 
     def corporate_action_events(self, provider: str) -> tuple[CorporateActionEvent, ...]:
         """Načte persistentní stream evidence v pořadí prvního lokálního receipt času."""
@@ -677,7 +694,9 @@ class PersistentMarketDataService:
         )
         if action.known_at == current_known:
             if current_values != new_values:
-                raise DatasetInvalid("Corporate-action current version koliduje ve stejném known_at")
+                raise DatasetInvalid(
+                    "Corporate-action current version koliduje ve stejném known_at"
+                )
             return
         current.instrument_id = action.instrument_id
         current.kind = action.kind.value
@@ -768,26 +787,43 @@ class DatasetSnapshotService:
                 key=lambda item: (_database_utc(item.known_at), item.revision_id),
             ):
                 latest_revisions[action.action_id] = action
-            cancellations = tuple(
+            fallback_actions = tuple(
                 session.scalars(
-                    select(CorporateActionCancellationRecord).where(
-                        CorporateActionCancellationRecord.action_id.in_(
-                            set(latest_revisions) | selected_instruments
-                        ),
-                        CorporateActionCancellationRecord.known_at <= cutoff,
+                    select(CorporateActionRecord).where(
+                        CorporateActionRecord.instrument_id.in_(selected_instruments),
+                        CorporateActionRecord.known_at <= cutoff,
+                        CorporateActionRecord.effective_at <= _instant(end + timedelta(days=1)),
                     )
                 )
+            )
+            action_ids = set(latest_revisions) | {action.action_id for action in fallback_actions}
+            cancellations = (
+                tuple(
+                    session.scalars(
+                        select(CorporateActionCancellationRecord).where(
+                            CorporateActionCancellationRecord.action_id.in_(action_ids),
+                            CorporateActionCancellationRecord.known_at <= cutoff,
+                        )
+                    )
+                )
+                if action_ids
+                else ()
             )
             latest_cancel: dict[str, datetime] = {}
             for cancellation in cancellations:
                 when = _database_utc(cancellation.known_at)
-                if when > latest_cancel.get(cancellation.action_id, datetime.min.replace(tzinfo=UTC)):
+                if when > latest_cancel.get(
+                    cancellation.action_id, datetime.min.replace(tzinfo=UTC)
+                ):
                     latest_cancel[cancellation.action_id] = when
 
             canonical_actions: list[dict[str, object]] = []
             for action in sorted(latest_revisions.values(), key=lambda item: item.action_id):
                 known_at = _database_utc(action.known_at)
-                if latest_cancel.get(action.action_id, datetime.min.replace(tzinfo=UTC)) >= known_at:
+                if (
+                    latest_cancel.get(action.action_id, datetime.min.replace(tzinfo=UTC))
+                    >= known_at
+                ):
                     continue
                 canonical_actions.append(
                     {
@@ -800,20 +836,14 @@ class DatasetSnapshotService:
                         "new_symbol": action.new_symbol,
                     }
                 )
-            fallback_actions = tuple(
-                session.scalars(
-                    select(CorporateActionRecord).where(
-                        CorporateActionRecord.instrument_id.in_(selected_instruments),
-                        CorporateActionRecord.known_at <= cutoff,
-                        CorporateActionRecord.effective_at <= _instant(end + timedelta(days=1)),
-                    )
-                )
-            )
             for action in sorted(fallback_actions, key=lambda item: item.action_id):
                 if action.action_id in latest_revisions:
                     continue
                 known_at = _database_utc(action.known_at)
-                if latest_cancel.get(action.action_id, datetime.min.replace(tzinfo=UTC)) >= known_at:
+                if (
+                    latest_cancel.get(action.action_id, datetime.min.replace(tzinfo=UTC))
+                    >= known_at
+                ):
                     continue
                 canonical_actions.append(
                     {
@@ -835,7 +865,7 @@ class DatasetSnapshotService:
             status = "VALID" if expected and coverage >= minimum_coverage else "INVALID"
             manifest = json.dumps(
                 {
-                    "schema_version": "4",
+                    "schema_version": "3",
                     "logical_identity": logical,
                     "observations": canonical,
                     "corporate_actions": canonical_actions,
