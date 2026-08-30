@@ -76,7 +76,8 @@ class AlpacaCorporateActionStream:
     @staticmethod
     def _http(url: str, headers: dict[str, str], timeout: float) -> Iterator[bytes]:
         _validate_alpaca_stream_url(url)
-        request = urllib.request.Request(url, headers=headers, method="GET")
+        # URL byl výše omezen na jediný HTTPS Alpaca endpoint; S310 je zde auditovaný.
+        request = urllib.request.Request(url, headers=headers, method="GET")  # noqa: S310
         try:
             with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310
                 status = getattr(response, "status", 200)
