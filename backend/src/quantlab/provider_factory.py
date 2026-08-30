@@ -82,4 +82,5 @@ def build_market_data_provider(settings: Settings, engine: Engine) -> MarketData
         instrument_ids,
         alpaca_rest_transport,
         timeout=settings.market_data_timeout,
+        feed=settings.alpaca_feed,
     )

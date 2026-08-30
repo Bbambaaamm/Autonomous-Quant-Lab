@@ -281,6 +281,9 @@ def test_alpaca_daily_bars_request_covers_entire_final_day() -> None:
     bars = provider.historical_daily("AAPL", date(2026, 9, 2), date(2026, 9, 2))
 
     assert len(bars) == 1
+    assert calls[0]["feed"] == ["iex"]
+    assert calls[0]["timeframe"] == ["1Day"]
+    assert calls[0]["adjustment"] == ["raw"]
     assert calls[0]["start"] == ["2026-09-02T00:00:00Z"]
     assert calls[0]["end"] == ["2026-09-03T00:00:00Z"]
 

@@ -12,11 +12,15 @@ nebo Node runtime, nikoli pomocí `sh`, `id`, `apt` či `npm` uvnitř běžící
 3. Nastavte `APP_ENV=production`, PostgreSQL `DATABASE_URL`, unikátní API tokeny, silný
    `SESSION_SECRET`, scrypt hash hesla, HTTPS `PUBLIC_BASE_URL` a explicitní hosts.
 4. Spusťte explicitní migration job, pak `make production-up`. Compose automaticky spustí také
-   samostatný `worker` příkazem `/app/backend/.venv/bin/quantlab-worker`; používá tentýž hardened
-   backend image a čeká na PostgreSQL healthcheck, nikoli na API. Frontend na loopbacku je jediný
+   samostatný `worker` příkazem `/app/backend/.venv/bin/quantlab-worker` a corporate-action
+   ingest `alpaca-events` příkazem `/app/backend/.venv/bin/quantlab-alpaca-events`; oba používají hardened
+   backend image a čekají na PostgreSQL healthcheck, nikoli na API. Frontend na loopbacku je jediný
    publikovaný port; backend, worker a PostgreSQL nemají host port.
    Compose nastavuje `AUTOMATION_ENABLED=true` shodně pro API i worker; jde pouze o globální engine
    a jednotlivé deploymenty nadále vyžadují samostatný explicitní autonomous opt-in.
+   Pro Alpaca nastavte canonical credentials `ALPACA_KEY_ID`/`ALPACA_SECRET_KEY` a ponechte
+   `ALPACA_FEED=iex` pro Basic/Paper účet. Ve Stooq režimu `alpaca-events` skončí s kódem 0 a
+   politika `on-failure` jej znovu nespouští.
 5. `GET /healthz` je liveness a `GET /readyz` ověřuje DB bez citlivých detailů.
 
 Worker má `restart: unless-stopped`, read-only filesystem, non-root UID a pouze interní datovou

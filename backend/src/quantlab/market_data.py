@@ -441,6 +441,7 @@ class AlpacaProvider:
         instrument_ids: dict[str, str],
         transport: AlpacaTransport,
         timeout: float = 10,
+        feed: str = "iex",
     ) -> None:
         if not key_id or not secret_key:
             raise ValueError("Alpaca credentials jsou povinné")
@@ -449,6 +450,9 @@ class AlpacaProvider:
         self._instrument_ids = {key.upper(): value for key, value in instrument_ids.items()}
         self._transport = transport
         self._timeout = timeout
+        if feed not in {"iex", "sip", "delayed_sip", "otc", "boats", "overnight"}:
+            raise ValueError("Alpaca feed není na allowlistu")
+        self._feed = feed
 
     def resolve(self, symbol: str) -> dict[str, str]:
         normalized = symbol.strip().upper()
@@ -537,6 +541,7 @@ class AlpacaProvider:
                 "start": f"{start.isoformat()}T00:00:00Z",
                 "end": exclusive_end,
                 "adjustment": "raw",
+                "feed": self._feed,
             },
             "bars",
         )
