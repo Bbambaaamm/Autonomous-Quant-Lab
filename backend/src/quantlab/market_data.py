@@ -694,7 +694,7 @@ class AlpacaProvider:
                     continue
                 if evidence.scope_date is not None and not start <= evidence.scope_date <= end:
                     continue
-                # DELETE, který odstranil fakt z REST, nesmí být zaměněn za prázdný COMPLETE interval.
+                # DELETE z REST nesmí znamenat prázdný COMPLETE interval.
                 raise DatasetInvalid("CORPORATE_ACTION_KNOWLEDGE_UNAVAILABLE")
         except DatasetInvalid:
             raise
