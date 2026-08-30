@@ -121,6 +121,15 @@ class PaperExecutionTiming:
     execution_time: datetime
 
 
+def persisted_execution_open_scope(
+    intent_instruments: set[str], held_instruments: set[str]
+) -> tuple[str, ...]:
+    """Vrátí minimální raw-open scope pro persisted-intent risk a execution."""
+    if not intent_instruments:
+        raise DatasetInvalid("Persisted execution vyžaduje alespoň jeden economic intent")
+    return tuple(sorted(intent_instruments | held_instruments))
+
+
 class Phase6ExperimentRunner:
     """Snapshot-only Phase 6 runner s persistentní, exactly-once OOS identitou."""
 
@@ -1448,7 +1457,17 @@ class Phase6PaperExecutionService:
                     )
                 )
             }
-            execution_instruments = tuple(sorted(set(eligible) | held))
+            if persisted_intents is None:
+                execution_instruments = tuple(sorted(set(eligible) | held))
+            else:
+                intent_instruments = {intent.symbol for intent in persisted_intents}
+                if not intent_instruments or not intent_instruments <= (set(eligible) | held):
+                    raise DatasetInvalid(
+                        "Persisted intent instrument neodpovídá PIT universe ani held scope"
+                    )
+                # Open-time risk potřebuje pouze instrumenty s ekonomickým intentem
+                # a držené instrumenty pro úplné portfolio marking.
+                execution_instruments = persisted_execution_open_scope(intent_instruments, held)
             if any(len(instrument_id) > 40 for instrument_id in execution_instruments):
                 raise DatasetInvalid("Paper execution instrument ID překračuje Phase 4 limit")
             instruments = {
@@ -1632,6 +1651,7 @@ class Phase6PaperExecutionService:
             executable_session,
             decision_time,
             persisted_intents,
+            risk_evaluation_time=as_of if persisted_intents is not None else None,
         )
         self._ensure_cycle_lineage(
             monitoring.monitoring_id,

@@ -215,7 +215,12 @@ def test_persisted_intent_quantity_is_invariant_to_opening_print(
     repository = Phase4Repository()
     repository.seed_account()
     persisted = OrderIntent(
-        "SPY", Side.BUY, Decimal("37"), NOW, "persisted-preopen", "preopen-intent"
+        "SPY",
+        Side.BUY,
+        Decimal("37"),
+        NOW + timedelta(hours=1),
+        "persisted-preopen",
+        "preopen-intent",
     )
     executable = Bar(
         "SPY",
@@ -235,6 +240,7 @@ def test_persisted_intent_quantity_is_invariant_to_opening_print(
         date(2026, 8, 12),
         NOW,
         (persisted,),
+        risk_evaluation_time=executable.timestamp + timedelta(milliseconds=100),
     )
     with Session(repository.engine) as session:
         order = session.scalar(select(PaperOrderRecord))
@@ -242,6 +248,13 @@ def test_persisted_intent_quantity_is_invariant_to_opening_print(
         assert order.side == Side.BUY
         assert order.quantity == Decimal("37")
         assert order.order_intent_id == "preopen-intent"
+        decision = session.scalar(select(RiskDecisionRecord))
+        assert decision is not None
+        assert decision.timestamp == executable.timestamp + timedelta(milliseconds=100)
+        assert NOW < persisted.decision_time < executable.timestamp
+        assert decision.timestamp >= executable.timestamp
+        assert decision.timestamp >= persisted.decision_time
+        assert RiskReason.STALE_DATA.value not in json.loads(decision.reasons_json)
 
 
 def test_partial_fill_cancel_and_invalid_transition() -> None:

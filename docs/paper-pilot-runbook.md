@@ -88,6 +88,8 @@ Production worker rezervuje nejbližší materializované XNYS occurrence před 
 - pozdní nebo porušený intent vrátí `NO_ACTION / PREOPEN_EXECUTION_INTENT_INVALID`;
 - raw opening print se nesmí použít k vytvoření nového ekonomického intentu;
 - validní `xnys:` run smí raw open použít jen pro risk, kapacitu a fill, nikoli pro side/quantity;
+- persisted-intent execution načítá raw open pro všechny intent instrumenty a všechny držené instrumenty potřebné pro portfolio/risk marking; zero-delta neheld člen universe raw open nevyžaduje;
+- execution-time risk decision používá skutečný open-time knowledge čas, nikdy previous-session signal close;
 - žádný backdating `scheduled_for` nevytváří pre-open objednávku;
 - po cutoff se nikdy nedělá retroaktivní fill ani ruční backfill.
 

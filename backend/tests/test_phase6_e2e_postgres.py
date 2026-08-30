@@ -15,9 +15,11 @@ from phase6_audit_helpers import (
     daily_bar,
     seed_phase6_snapshot,
 )
-from sqlalchemy import create_engine, func, select
+from sqlalchemy import create_engine, delete, func, select, update
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session, sessionmaker
 
+from quantlab.automation import PreOpenExecutionIntentRecord
 from quantlab.domain import ReconciliationStatus, SystemTradingState
 from quantlab.market_data import AssetType, CorporateAction, CorporateActionKind, Instrument
 from quantlab.market_data_service import DatasetSnapshotService, PersistentMarketDataService
@@ -567,6 +569,47 @@ def test_postgres_research_to_paper_authoritative_e2e(factory, engine) -> None:
                 session.get(DatasetSnapshotRecord, snapshot.snapshot_id).manifest_json
             )["observations"]
         }
+
+    execution_open = CALENDAR.session_open(fill.timestamp.date())
+    immutable_id = uuid4().hex.ljust(64, "0")
+    with Session(engine) as session, session.begin():
+        session.add(
+            PreOpenExecutionIntentRecord(
+                intent_id=immutable_id,
+                deployment_id=deployment.deployment_id,
+                account_id=account_id,
+                strategy_id=f"phase6:{deployment.deployment_id}",
+                instrument_id=instrument.instrument_id,
+                side="BUY",
+                quantity=Decimal("1"),
+                order_type="MARKET",
+                execution_session=execution_open.date(),
+                intended_execution_open=execution_open,
+                decision_time=execution_open - timedelta(hours=1),
+                created_at=execution_open - timedelta(hours=1),
+                sizing_reference_price=Decimal("100"),
+                sizing_reference_known_at=execution_open - timedelta(hours=1),
+                snapshot_id=snapshot.snapshot_id,
+                universe_id=snapshot.universe_id,
+                signal_observation_ids_json="[]",
+                evidence_json="{}",
+                integrity_hash="0" * 64,
+            )
+        )
+    with pytest.raises(DBAPIError, match="pre-open execution intents are immutable"):
+        with Session(engine) as session, session.begin():
+            session.execute(
+                update(PreOpenExecutionIntentRecord)
+                .where(PreOpenExecutionIntentRecord.intent_id == immutable_id)
+                .values(quantity=Decimal("2"))
+            )
+    with pytest.raises(DBAPIError, match="pre-open execution intents are immutable"):
+        with Session(engine) as session, session.begin():
+            session.execute(
+                delete(PreOpenExecutionIntentRecord).where(
+                    PreOpenExecutionIntentRecord.intent_id == immutable_id
+                )
+            )
     matching = next(
         item
         for item in lineage

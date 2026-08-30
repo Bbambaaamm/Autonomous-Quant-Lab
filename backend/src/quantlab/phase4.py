@@ -1142,6 +1142,8 @@ class TradingCycleService:
         session_date: date,
         decision_time: datetime,
         persisted_intents: tuple[OrderIntent, ...] | None = None,
+        *,
+        risk_evaluation_time: datetime | None = None,
     ) -> str:
         if not bars:
             raise ValueError("Chybí market data")
@@ -1393,8 +1395,21 @@ class TradingCycleService:
                 daily_notional,
                 account.trading_state,
             )
+            evaluation_time = risk_evaluation_time or decision_time
+            if persisted_intent is not None and (
+                evaluation_time < intent.decision_time or evaluation_time < bar.timestamp
+            ):
+                raise ValueError(
+                    "Risk evaluation nesmí předcházet persisted intent ani executable open"
+                )
             decision = self.risk.evaluate(
-                intent, bar.open, snapshot, cycle_id, correlation_id, decision_time, bar.timestamp
+                intent,
+                bar.open,
+                snapshot,
+                cycle_id,
+                correlation_id,
+                evaluation_time,
+                bar.timestamp,
             )
             if persisted_intent is not None and decision.status is RiskDecisionStatus.MODIFIED:
                 decision = RiskDecision(

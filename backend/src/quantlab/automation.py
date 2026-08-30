@@ -1515,9 +1515,11 @@ class JobExecutor:
     ) -> dict[str, str | None]:
         from quantlab.market_data import DatasetInvalid, StooqProvider
         from quantlab.persistence import StrategyDeploymentRecord
+        from quantlab.phase4 import PositionRecord
         from quantlab.phase6_runtime import (
             Phase6PaperExecutionService,
             ValidatedCurrentDataAccessor,
+            persisted_execution_open_scope,
         )
         from quantlab.phase7 import PaperMonitoringRunRecord
 
@@ -1636,14 +1638,27 @@ class JobExecutor:
                 }
             provider = self.provider_factory() if self.provider_factory else StooqProvider()
             with sessions() as session:
-                instrument_rows = tuple(
+                held_instruments = set(
                     session.scalars(
-                        select(InstrumentRecord).where(
-                            InstrumentRecord.instrument_id.in_([row.instrument_id for row in rows])
+                        select(PositionRecord.instrument_id).where(
+                            PositionRecord.account_id == account_id,
+                            PositionRecord.quantity > 0,
                         )
                     )
                 )
-            if len(instrument_rows) != len(rows):
+                required_open_instruments = set(
+                    persisted_execution_open_scope(
+                        {row.instrument_id for row in rows}, held_instruments
+                    )
+                )
+                instrument_rows = tuple(
+                    session.scalars(
+                        select(InstrumentRecord).where(
+                            InstrumentRecord.instrument_id.in_(required_open_instruments)
+                        )
+                    )
+                )
+            if {item.instrument_id for item in instrument_rows} != required_open_instruments:
                 raise PermanentJobError(PREOPEN_EXECUTION_INTENT_INVALID)
             for item in instrument_rows:
                 instrument = Instrument(
