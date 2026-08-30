@@ -162,9 +162,7 @@ class AlpacaCorporateActionStream:
                     return cursor
         return cursor
 
-    def run(
-        self, last_event_id: str | None = None, *, max_events: int | None = None
-    ) -> str | None:
+    def run(self, last_event_id: str | None = None, *, max_events: int | None = None) -> str | None:
         """Reconnectne nejvýše ``max_reconnects`` krát a pokračuje inkluzivním replayem."""
         if max_events is not None and max_events < 0:
             raise ValueError("max_events nesmí být záporné")
