@@ -574,7 +574,9 @@ def _research_to_paper(
                     instrument_id=late_instrument_id,
                     valid_from=snapshot.as_of,
                     valid_to=None,
-                    known_at=snapshot.as_of + timedelta(microseconds=1),
+                    # Simuluje poškozenou/backdated PIT evidence vloženou až po approvalu.
+                    # Runtime ji proto musí zachytit před jakýmkoli economic execution krokem.
+                    known_at=snapshot.as_of,
                 )
             )
         with pytest.raises(DatasetInvalid, match="RISK_ALLOWLIST_COVERAGE_MISMATCH"):
