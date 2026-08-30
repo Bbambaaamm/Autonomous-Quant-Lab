@@ -17,16 +17,19 @@ The project adopts the following constitutional separation of powers:
 Data / Intelligence
 → Research Engine
 → Independent Validation
+→ Independent Risk & Governance authorization gate
 → Paper Execution
-→ Independent Risk & Governance
+→ Post-trade monitoring / reconciliation / governance
 ```
+
+`Independent Risk & Governance authorization gate` is a pre-execution authority. It must not be interpreted as a post-trade-only check. Runtime economic execution remains subject to the mandatory path `Strategy → Portfolio → RiskEngine → ExecutionEngine → Broker`. Post-trade monitoring, reconciliation, incident handling, degradation, and suspension are additional controls after execution; they do not replace the pre-execution risk gate.
 
 The following invariants are mandatory:
 
 1. **Causality** — no component may use information before it was causally available at the relevant decision time.
 2. **Reproducibility** — material research and execution decisions must be reconstructable from immutable/versioned inputs and code/artifact lineage.
 3. **Independent validation** — Research Engine must not be able to approve its own hypotheses by changing eligibility, validation, benchmark, or anti-overfitting rules.
-4. **Independent risk authority** — research/strategy logic cannot bypass, disable, or increase hard Risk/Governance limits.
+4. **Independent risk authority** — research/strategy logic cannot bypass, disable, or increase hard Risk/Governance limits; required risk authorization occurs before execution/broker submission.
 5. **Controlled execution path** — every order path remains Strategy → Portfolio → RiskEngine → ExecutionEngine → Broker.
 6. **Paper-only current project** — CI, development, staging acceptance, and autonomous execution use PaperBroker only. No live broker, live role, live endpoint, live flag, or other live execution path may be introduced under the current project scope.
 7. **Immutable audit history** — failed experiments, rejected strategies, incidents, revisions, and prior approvals are historical evidence and must not be silently rewritten.
@@ -58,7 +61,8 @@ The following invariants are mandatory:
 - chronological validation;
 - deterministic decision auditability;
 - PaperBroker-only current execution;
-- independent Risk/Governance;
+- independent pre-execution Risk/Governance authority;
+- post-trade monitoring and reconciliation remain additional independent controls;
 - no direct strategy-to-broker path.
 
 ## Related roadmap
