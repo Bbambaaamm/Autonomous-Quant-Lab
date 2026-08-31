@@ -8,6 +8,7 @@ from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 
 from sqlalchemy import (
+    ColumnElement,
     DateTime,
     ForeignKey,
     Select,
@@ -716,7 +717,9 @@ class PersistentMarketDataService:
         canonical_known = _database_utc(canonical.known_at)
         current = session.get(CorporateActionRecord, action.action_id)
         if current is None:
-            session.add(self._action_record(action))
+            projection = self._action_record(action)
+            projection.known_at = canonical_known
+            session.add(projection)
             return
         current_known = _database_utc(current.known_at)
         current_values = (
@@ -733,13 +736,9 @@ class PersistentMarketDataService:
             str(action.value) if action.value is not None else None,
             action.new_symbol,
         )
-        if canonical_known < current_known and current_values == new_values:
-            # Pouze identický aktivní ekonomický fakt smí opravit příliš pozdní projection čas.
-            current.known_at = canonical_known
+        if canonical_known < current_known:
             return
-        if action.known_at < current_known:
-            return
-        if action.known_at == current_known:
+        if canonical_known == current_known:
             if current_values != new_values:
                 raise DatasetInvalid(
                     "Corporate-action current version koliduje ve stejném known_at"
@@ -748,7 +747,7 @@ class PersistentMarketDataService:
         current.instrument_id = action.instrument_id
         current.kind = action.kind.value
         current.effective_at = action.effective_at
-        current.known_at = action.known_at
+        current.known_at = canonical_known
         current.value = str(action.value) if action.value is not None else None
         current.new_symbol = action.new_symbol
 
@@ -894,7 +893,7 @@ class PersistentMarketDataService:
 
 
 def canonical_corporate_action_revisions(
-    session: Session, *criteria: object
+    session: Session, *criteria: ColumnElement[bool]
 ) -> tuple[CorporateActionRevisionRecord, ...]:
     """Jediný accessor pro PIT historii; raw tabulka je pouze immutable evidence."""
     superseded = select(CorporateActionRevisionCanonicalizationRecord.superseded_revision_id)
