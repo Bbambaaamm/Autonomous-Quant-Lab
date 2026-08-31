@@ -43,10 +43,10 @@ def downgrade() -> None:
         .first()
     )
     if duplicate_incarnations is not None:
-        # Starý invariant neumí novou legitimní historii vyjádřit. Při downgrade směrem
-        # k base ji proto nepřepisujeme ani nemažeme; následující starší migrace tabulku
-        # bezpečně odstraní. Mezistupeň si ponechá novější bezpečnější UNIQUE constraint.
-        return
+        raise RuntimeError(
+            "Downgrade 20260831_01 není možný bez destrukce legitimní immutable "
+            "corporate-action historie s více kauzálními incarnacemi"
+        )
     op.drop_constraint(
         "uq_corporate_action_revision_provider_payload",
         "corporate_action_revisions",

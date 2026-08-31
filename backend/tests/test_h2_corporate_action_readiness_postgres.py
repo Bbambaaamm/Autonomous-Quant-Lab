@@ -4,10 +4,13 @@ import os
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from decimal import Decimal
+from pathlib import Path
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import create_engine, select, text
+from alembic import command
+from alembic.config import Config
+from sqlalchemy import create_engine, func, select, text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import sessionmaker
 
@@ -616,6 +619,47 @@ def test_delete_then_reinsert_same_payload_preserves_cancellation_and_both_revis
         assert len(cancellations) == 1
         assert cancellations[0].known_at == datetime(2026, 8, 20, 11, tzinfo=UTC)
         assert current is not None and current.known_at == reinserted.known_at
+
+
+def test_downgrade_with_repeated_payload_incarnation_fails_without_moving_revision(scope) -> None:
+    factory, instrument = scope
+    provider_action_id = f"downgrade-{uuid4().hex}"
+    action_id = corporate_action_logical_id("alpaca:iex", provider_action_id)
+    with factory() as session, session.begin():
+        for suffix, known_at in (
+            ("first", datetime(2026, 8, 20, 10, tzinfo=UTC)),
+            ("second", datetime(2026, 8, 20, 12, tzinfo=UTC)),
+        ):
+            session.add(
+                CorporateActionRevisionRecord(
+                    revision_id=f"{suffix}-{uuid4().hex}".ljust(64, "0"),
+                    action_id=action_id,
+                    provider="alpaca:iex",
+                    provider_action_id=provider_action_id,
+                    payload_hash="a" * 64,
+                    instrument_id=instrument.instrument_id,
+                    kind=CorporateActionKind.CASH_DIVIDEND.value,
+                    effective_at=datetime(2026, 8, 25, tzinfo=UTC),
+                    known_at=known_at,
+                    value="1.69",
+                    new_symbol=None,
+                )
+            )
+
+    config = Config(str(Path(__file__).parents[2] / "alembic.ini"))
+    with pytest.raises(RuntimeError, match="není možný bez destrukce legitimní immutable"):
+        command.downgrade(config, "20260830_02")
+
+    with factory() as session:
+        assert session.scalar(text("SELECT version_num FROM alembic_version")) == "20260831_01"
+        assert (
+            session.scalar(
+                select(func.count())
+                .select_from(CorporateActionRevisionRecord)
+                .where(CorporateActionRevisionRecord.action_id == action_id)
+            )
+            == 2
+        )
 
 
 def test_standard_stooq_is_explicitly_unsupported(scope) -> None:
