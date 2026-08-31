@@ -1,3 +1,5 @@
+import hashlib
+import json
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from unittest.mock import Mock
@@ -12,16 +14,19 @@ from quantlab.persistence import (
     Base,
     DatasetSnapshotRecord,
     ExperimentRecord,
+    InstrumentRecord,
     StrategyDeploymentRecord,
     StrategyRecord,
     UniverseDefinitionRecord,
+    UniverseMembershipRecord,
 )
-from quantlab.phase4 import PaperAccountRecord
+from quantlab.phase4 import PaperAccountRecord, ProductionRiskConfig
 from quantlab.phase6_runtime import (
     DeploymentService,
     Phase6EligibilityService,
     Phase6PaperExecutionService,
 )
+from quantlab.runtime_identity import build_runtime_manifest, canonical_json, manifest_hash
 
 
 def _factory():
@@ -32,10 +37,50 @@ def _factory():
 
 def _seed(factory, *, decision="RESEARCH_ONLY") -> None:
     now = datetime(2026, 1, 2, tzinfo=UTC)
+    snapshot_manifest = {
+        "schema_version": "4",
+        "observations": [],
+        "corporate_actions": [],
+        "universe_memberships": [
+            {
+                "instrument_id": "inst-ibm-us-equity",
+                "valid_from": now.isoformat(),
+                "valid_to": None,
+                "known_at": now.isoformat(),
+            }
+        ],
+    }
+    snapshot_content = {
+        key: snapshot_manifest[key]
+        for key in ("observations", "corporate_actions", "universe_memberships")
+    }
+    snapshot_hash = hashlib.sha256(canonical_json(snapshot_content).encode()).hexdigest()
     with factory() as session, session.begin():
+        session.add(
+            InstrumentRecord(
+                instrument_id="inst-ibm-us-equity",
+                symbol="IBM",
+                exchange="XNYS",
+                calendar="XNYS",
+                currency="USD",
+                asset_type="EQUITY",
+                active_from=now,
+                active_to=None,
+                created_at=now,
+            )
+        )
         session.add(
             UniverseDefinitionRecord(
                 universe_id="u", name="PIT", kind="POINT_IN_TIME_MEMBERSHIP", created_at=now
+            )
+        )
+        session.add(
+            UniverseMembershipRecord(
+                universe_id="u",
+                instrument_id="inst-ibm-us-equity",
+                valid_from=now,
+                valid_to=None,
+                known_at=now,
             )
         )
         session.add(
@@ -49,10 +94,10 @@ def _seed(factory, *, decision="RESEARCH_ONLY") -> None:
                 start_at=now,
                 end_at=now,
                 timeframe="1d",
-                content_hash="a" * 64,
+                content_hash=snapshot_hash,
                 status="VALID",
                 coverage="1",
-                manifest_json="{}",
+                manifest_json=canonical_json(snapshot_manifest),
             )
         )
         session.add(
@@ -130,9 +175,139 @@ def test_explicit_deployment_creation_and_approval() -> None:
     service = DeploymentService(factory)
     deployment = service.create("e", "paper")
     assert deployment.status == "PENDING_REVIEW"
+    manifest = json.loads(deployment.runtime_manifest_json)
+    assert manifest["risk"]["instrument_allowlist"] == ["inst-ibm-us-equity"]
     service.approve(deployment.deployment_id, datetime(2026, 1, 3, tzinfo=UTC))
     with factory() as session:
         assert session.get(StrategyDeploymentRecord, deployment.deployment_id).status == "APPROVED"
+
+
+def test_deployment_allowlist_contains_all_canonical_ids_in_sorted_order() -> None:
+    factory = _factory()
+    _seed(factory)
+    now = datetime(2026, 1, 2, tzinfo=UTC)
+    with factory() as session, session.begin():
+        session.add(
+            InstrumentRecord(
+                instrument_id="inst-apple-us-equity",
+                symbol="AAPL",
+                exchange="XNYS",
+                calendar="XNYS",
+                currency="USD",
+                asset_type="EQUITY",
+                active_from=now,
+                active_to=None,
+                created_at=now,
+            )
+        )
+        session.add(
+            UniverseMembershipRecord(
+                universe_id="u",
+                instrument_id="inst-apple-us-equity",
+                valid_from=now,
+                valid_to=None,
+                known_at=now,
+            )
+        )
+        snapshot = session.get(DatasetSnapshotRecord, "s")
+        assert snapshot is not None
+        manifest = json.loads(snapshot.manifest_json)
+        manifest["universe_memberships"].append(
+            {
+                "instrument_id": "inst-apple-us-equity",
+                "valid_from": now.isoformat(),
+                "valid_to": None,
+                "known_at": now.isoformat(),
+            }
+        )
+        manifest["universe_memberships"].sort(key=lambda item: item["instrument_id"])
+        immutable = {
+            key: manifest[key]
+            for key in ("observations", "corporate_actions", "universe_memberships")
+        }
+        snapshot.manifest_json = canonical_json(manifest)
+        snapshot.content_hash = hashlib.sha256(canonical_json(immutable).encode()).hexdigest()
+    deployment = _approved_candidate(factory)
+    manifest = json.loads(deployment.runtime_manifest_json)
+    assert manifest["risk"]["instrument_allowlist"] == [
+        "inst-apple-us-equity",
+        "inst-ibm-us-equity",
+    ]
+
+
+def test_deployment_does_not_expand_explicit_operator_allowlist() -> None:
+    factory = _factory()
+    _seed(factory)
+    service = Phase6EligibilityService(factory)
+    service.evaluate_eligibility("e", actor={"id": "test"}, reason="test eligibility")
+    service.promote("e", actor={"id": "test"}, reason="test promotion")
+
+    with pytest.raises(DatasetInvalid, match="RISK_ALLOWLIST_COVERAGE_MISMATCH"):
+        DeploymentService(factory).create(
+            "e",
+            "paper",
+            risk_config=ProductionRiskConfig(instrument_allowlist=frozenset({"SPY"})),
+        )
+
+
+def test_deployment_ignores_membership_added_after_immutable_snapshot() -> None:
+    factory = _factory()
+    _seed(factory)
+    now = datetime(2026, 1, 2, tzinfo=UTC)
+    with factory() as session, session.begin():
+        session.add(
+            InstrumentRecord(
+                instrument_id="inst-backdated-us-equity",
+                symbol="BACK",
+                exchange="XNYS",
+                calendar="XNYS",
+                currency="USD",
+                asset_type="EQUITY",
+                active_from=now,
+                active_to=None,
+                created_at=now,
+            )
+        )
+        session.add(
+            UniverseMembershipRecord(
+                universe_id="u",
+                instrument_id="inst-backdated-us-equity",
+                valid_from=now,
+                valid_to=None,
+                known_at=now,
+            )
+        )
+
+    deployment = _approved_candidate(factory)
+    manifest = json.loads(deployment.runtime_manifest_json)
+    assert manifest["risk"]["instrument_allowlist"] == ["inst-ibm-us-equity"]
+
+
+def test_approval_rejects_legacy_ticker_allowlist_with_valid_identity() -> None:
+    factory = _factory()
+    _seed(factory)
+    deployment = _approved_candidate(factory)
+    legacy = build_runtime_manifest(code_sha="b" * 40)
+    legacy_hash = manifest_hash(legacy)
+    legacy_id = hashlib.sha256(
+        canonical_json(
+            {
+                "experiment_id": "e",
+                "account_id": "paper",
+                "currency": "USD",
+                "timeframe": "1d",
+                "runtime_manifest_hash": legacy_hash,
+            }
+        ).encode()
+    ).hexdigest()
+    with factory() as session, session.begin():
+        row = session.get(StrategyDeploymentRecord, deployment.deployment_id)
+        assert row is not None
+        row.deployment_id = legacy_id
+        row.runtime_manifest_json = canonical_json(legacy)
+        row.runtime_manifest_hash = legacy_hash
+    with pytest.raises(DatasetInvalid, match="RISK_ALLOWLIST_COVERAGE_MISMATCH"):
+        DeploymentService(factory).approve(legacy_id, datetime.now(UTC))
 
 
 @pytest.mark.parametrize(
