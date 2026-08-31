@@ -53,15 +53,17 @@ class ActionProvider:
     actions: list[CorporateAction]
     fails: bool = False
     knowledge_unavailable: bool = False
-    persistent_name: str | None = None
+    name: str | None = None
+    lineage: str | None = None
 
     @property
     def metadata(self) -> ProviderMetadata:
         return ProviderMetadata(
-            self.persistent_name or f"h2-{self.supports}-{self.fails}-{self.knowledge_unavailable}",
+            self.name or f"h2-{self.supports}-{self.fails}-{self.knowledge_unavailable}",
             "1",
             self.supports,
             False,
+            self.lineage,
         )
 
     def resolve(self, symbol: str) -> dict[str, str]:
@@ -502,9 +504,10 @@ def test_legacy_revision_id_is_reused_by_semantic_incarnation_identity(scope) ->
 
 def test_ibm_legacy_revision_is_canonicalized_and_projection_repaired(scope) -> None:
     factory, instrument = scope
-    provider = "alpaca:iex"
+    evidence_provider = "alpaca"
+    revision_provider = "alpaca:iex"
     provider_action_id = "fa45827c-2bfb-454f-8107-23852efbaae6"
-    action_id = corporate_action_logical_id(provider, provider_action_id)
+    action_id = corporate_action_logical_id(evidence_provider, provider_action_id)
     first_receipt = datetime(2026, 8, 30, 11, 12, 36, 213520, tzinfo=UTC)
     legacy_receipt = datetime(2026, 8, 30, 11, 31, 6, 378413, tzinfo=UTC)
     payload_hash = "d7d7b91079f6282dd921bd570d0949d6c3eece5cb232cc144f5360b963003d6b"
@@ -522,7 +525,7 @@ def test_ibm_legacy_revision_is_canonicalized_and_projection_repaired(scope) -> 
     service = PersistentMarketDataService(factory, clock=lambda: datetime(2026, 8, 31, tzinfo=UTC))
     for event_id, received_at in (("ibm-first", first_receipt), ("ibm-legacy", legacy_receipt)):
         service.record_corporate_action_event(
-            provider,
+            evidence_provider,
             CorporateActionEvent(
                 event_id,
                 received_at,
@@ -550,7 +553,7 @@ def test_ibm_legacy_revision_is_canonicalized_and_projection_repaired(scope) -> 
                 CorporateActionRevisionRecord(
                     revision_id=revision_id,
                     action_id=action_id,
-                    provider=provider,
+                    provider=revision_provider,
                     provider_action_id=provider_action_id,
                     payload_hash=payload_hash,
                     instrument_id=instrument.instrument_id,
@@ -576,7 +579,12 @@ def test_ibm_legacy_revision_is_canonicalized_and_projection_repaired(scope) -> 
     readiness = None
     for _ in range(3):
         result = service.verify_corporate_action_readiness(
-            ActionProvider(True, [action], persistent_name=provider),
+            ActionProvider(
+                True,
+                [action],
+                name=evidence_provider,
+                lineage=revision_provider,
+            ),
             instrument,
             date(2026, 8, 1),
             date(2026, 8, 26),
@@ -601,6 +609,9 @@ def test_ibm_legacy_revision_is_canonicalized_and_projection_repaired(scope) -> 
         assert [(row.superseded_revision_id, row.canonical_revision_id) for row in links] == [
             (rows[1][0], rows[0][0])
         ]
+        assert links[0].provider == revision_provider
+        source_event = session.get(CorporateActionEventRecord, links[0].source_event_id)
+        assert source_event is not None and source_event.provider == evidence_provider
         assert current is not None and current.known_at == first_receipt
 
     with factory() as session, pytest.raises(DBAPIError, match="immutable"):

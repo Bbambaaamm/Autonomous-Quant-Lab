@@ -337,9 +337,16 @@ class PersistentMarketDataService:
         cutoff = require_utc(knowledge_cutoff)
         # Oprava staré DB nesmí záviset na vytvoření nového readiness evidence řádku.
         with self._sessions() as session, session.begin():
-            _lock(session, f"corporate-action-canonicalize:{provider.metadata.persistent_name}")
+            _lock(
+                session,
+                "corporate-action-canonicalize:"
+                f"{provider.metadata.persistent_name}:{provider.metadata.name}",
+            )
             self._canonicalize_legacy_revisions(
-                session, provider.metadata.persistent_name, instrument.instrument_id
+                session,
+                revision_provider=provider.metadata.persistent_name,
+                evidence_provider=provider.metadata.name,
+                instrument_id=instrument.instrument_id,
             )
         identity = "|".join(
             (
@@ -410,7 +417,12 @@ class PersistentMarketDataService:
                     )
                 )
                 for action in actions:
-                    self._persist_action(session, provider.metadata.persistent_name, action)
+                    self._persist_action(
+                        session,
+                        revision_provider=provider.metadata.persistent_name,
+                        evidence_provider=provider.metadata.name,
+                        action=action,
+                    )
         if status != "COMPLETE":
             if error is not None:
                 raise error
@@ -558,7 +570,12 @@ class PersistentMarketDataService:
                     )
                     added.append(item)
                 for action in actions:
-                    self._persist_action(session, persistent_provider, action)
+                    self._persist_action(
+                        session,
+                        revision_provider=persistent_provider,
+                        evidence_provider=provider.metadata.name,
+                        action=action,
+                    )
                 existing.status = "SUCCEEDED"
                 existing.finished_at = datetime.now(UTC)
                 existing.row_count = len(added)
@@ -648,18 +665,24 @@ class PersistentMarketDataService:
             json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
         ).hexdigest()
 
-    def _persist_action(self, session: Session, provider: str, action: CorporateAction) -> None:
+    def _persist_action(
+        self,
+        session: Session,
+        revision_provider: str,
+        evidence_provider: str,
+        action: CorporateAction,
+    ) -> None:
         provider_action_id = action.provider_action_id or action.action_id
         if len(provider_action_id) > 128:
             raise DatasetInvalid("Provider corporate-action ID překračuje persistentní limit")
         payload_hash = action.payload_hash or self._action_payload_hash(action)
         known_at = require_utc(action.known_at)
         revision_id = hashlib.sha256(
-            f"{provider}|{provider_action_id}|{payload_hash}|{known_at.isoformat()}".encode()
+            f"{revision_provider}|{provider_action_id}|{payload_hash}|{known_at.isoformat()}".encode()
         ).hexdigest()
         revision = session.scalar(
             select(CorporateActionRevisionRecord).where(
-                CorporateActionRevisionRecord.provider == provider,
+                CorporateActionRevisionRecord.provider == revision_provider,
                 CorporateActionRevisionRecord.provider_action_id == provider_action_id,
                 CorporateActionRevisionRecord.payload_hash == payload_hash,
                 CorporateActionRevisionRecord.known_at == known_at,
@@ -667,7 +690,7 @@ class PersistentMarketDataService:
         )
         values = (
             action.action_id,
-            provider,
+            revision_provider,
             provider_action_id,
             payload_hash,
             action.instrument_id,
@@ -682,7 +705,7 @@ class PersistentMarketDataService:
                 CorporateActionRevisionRecord(
                     revision_id=revision_id,
                     action_id=action.action_id,
-                    provider=provider,
+                    provider=revision_provider,
                     provider_action_id=provider_action_id,
                     payload_hash=payload_hash,
                     instrument_id=action.instrument_id,
@@ -710,7 +733,12 @@ class PersistentMarketDataService:
             if persisted != values:
                 raise DatasetInvalid("Corporate-action revision identity koliduje s jiným obsahem")
 
-        self._canonicalize_legacy_revisions(session, provider, action.instrument_id)
+        self._canonicalize_legacy_revisions(
+            session,
+            revision_provider=revision_provider,
+            evidence_provider=evidence_provider,
+            instrument_id=action.instrument_id,
+        )
         canonical = self._canonical_revision_for(
             session, revision.revision_id if revision is not None else revision_id
         )
@@ -781,13 +809,18 @@ class PersistentMarketDataService:
         return revision
 
     def _canonicalize_legacy_revisions(
-        self, session: Session, provider: str, instrument_id: str
+        self,
+        session: Session,
+        *,
+        revision_provider: str,
+        evidence_provider: str,
+        instrument_id: str,
     ) -> None:
         """Sloučí jen revize uvnitř jednoznačně souvislé SSE payload incarnation."""
         events = tuple(
             session.scalars(
                 select(CorporateActionEventRecord)
-                .where(CorporateActionEventRecord.provider == provider)
+                .where(CorporateActionEventRecord.provider == evidence_provider)
                 .order_by(
                     CorporateActionEventRecord.occurred_at, CorporateActionEventRecord.event_id
                 )
@@ -808,7 +841,7 @@ class PersistentMarketDataService:
             revisions = tuple(
                 session.scalars(
                     select(CorporateActionRevisionRecord).where(
-                        CorporateActionRevisionRecord.provider == provider,
+                        CorporateActionRevisionRecord.provider == revision_provider,
                         CorporateActionRevisionRecord.provider_action_id == provider_action_id,
                         CorporateActionRevisionRecord.instrument_id == instrument_id,
                     )
@@ -853,7 +886,7 @@ class PersistentMarketDataService:
                         CorporateActionRevisionCanonicalizationRecord(
                             superseded_revision_id=legacy.revision_id,
                             canonical_revision_id=canonical.revision_id,
-                            provider=provider,
+                            provider=revision_provider,
                             provider_action_id=provider_action_id,
                             reason="LEGACY_DUPLICATE_SAME_SSE_INCARNATION",
                             source_event_id=start_event.event_id,
