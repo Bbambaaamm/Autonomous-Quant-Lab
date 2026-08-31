@@ -207,6 +207,7 @@ def _canonical_hash(manifest: dict[str, object]) -> str:
     immutable = {
         "observations": manifest["observations"],
         "corporate_actions": manifest["corporate_actions"],
+        "universe_memberships": manifest["universe_memberships"],
     }
     return hashlib.sha256(
         json.dumps(immutable, sort_keys=True, separators=(",", ":")).encode()

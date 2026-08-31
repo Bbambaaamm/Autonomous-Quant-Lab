@@ -875,6 +875,26 @@ class DatasetSnapshotService:
                     }
                 )
             canonical_actions.sort(key=lambda item: str(item["action_id"]))
+            canonical_memberships = [
+                {
+                    "instrument_id": membership.instrument_id,
+                    "valid_from": _database_utc(membership.valid_from).isoformat(),
+                    "valid_to": (
+                        _database_utc(membership.valid_to).isoformat()
+                        if membership.valid_to is not None
+                        else None
+                    ),
+                    "known_at": _database_utc(membership.known_at).isoformat(),
+                }
+                for membership in sorted(
+                    memberships,
+                    key=lambda item: (
+                        item.instrument_id,
+                        _database_utc(item.valid_from),
+                        _database_utc(item.known_at),
+                    ),
+                )
+            ]
             universe_lineage = {
                 "kind": universe_kind.value,
                 "survivorship_bias_status": (
@@ -887,6 +907,7 @@ class DatasetSnapshotService:
             immutable_content = {
                 "observations": canonical,
                 "corporate_actions": canonical_actions,
+                "universe_memberships": canonical_memberships,
             }
             content_hash = hashlib.sha256(
                 json.dumps(immutable_content, sort_keys=True, separators=(",", ":")).encode()
@@ -895,11 +916,12 @@ class DatasetSnapshotService:
             status = "VALID" if expected and coverage >= minimum_coverage else "INVALID"
             manifest = json.dumps(
                 {
-                    "schema_version": "3",
+                    "schema_version": "4",
                     "logical_identity": logical,
                     "universe": universe_lineage,
                     "observations": canonical,
                     "corporate_actions": canonical_actions,
+                    "universe_memberships": canonical_memberships,
                     "expected_count": len(expected),
                     "present_count": len(present),
                 },

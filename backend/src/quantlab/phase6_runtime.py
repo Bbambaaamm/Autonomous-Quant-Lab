@@ -6,7 +6,7 @@ import math
 import shutil
 import subprocess
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, time
 from decimal import Decimal, InvalidOperation
 from uuid import uuid4
@@ -318,7 +318,7 @@ class Phase6ExperimentRunner:
                 raise DatasetInvalid("Snapshot manifest není validní JSON") from exc
             if not isinstance(manifest, dict):
                 raise DatasetInvalid("Snapshot manifest musí být objekt")
-            if manifest.get("schema_version") != "3":
+            if manifest.get("schema_version") != "4":
                 raise DatasetInvalid("Snapshot manifest má nepodporovanou schema version")
             entries = manifest.get("observations")
             if not isinstance(entries, list) or not entries:
@@ -406,6 +406,7 @@ class Phase6ExperimentRunner:
             immutable_content = {
                 "observations": entries,
                 "corporate_actions": action_entries,
+                "universe_memberships": manifest.get("universe_memberships"),
             }
             if universe_lineage is not None:
                 if not isinstance(universe_lineage, dict):
@@ -432,14 +433,29 @@ class Phase6ExperimentRunner:
                 "knowledge_as_of": _database_utc(snapshot.as_of).isoformat(),
             }:
                 raise DatasetInvalid("Snapshot universe lineage neodpovídá universe a cutoffu")
-            membership_rows = tuple(
-                session.scalars(
-                    select(UniverseMembershipRecord).where(
-                        UniverseMembershipRecord.universe_id == snapshot.universe_id,
-                        UniverseMembershipRecord.known_at <= snapshot.as_of,
+            membership_entries = manifest.get("universe_memberships")
+            if not isinstance(membership_entries, list):
+                raise DatasetInvalid("Snapshot neobsahuje immutable universe memberships")
+            try:
+                immutable_memberships = [
+                    UniverseMembership(
+                        snapshot.universe_id,
+                        entry["instrument_id"],
+                        require_utc(datetime.fromisoformat(entry["valid_from"])),
+                        (
+                            require_utc(datetime.fromisoformat(entry["valid_to"]))
+                            if entry["valid_to"] is not None
+                            else None
+                        ),
+                        require_utc(datetime.fromisoformat(entry["known_at"])),
                     )
-                )
-            )
+                    for entry in membership_entries
+                    if isinstance(entry, dict)
+                ]
+            except (KeyError, TypeError, ValueError) as exc:
+                raise DatasetInvalid("Snapshot universe memberships nejsou konzistentní") from exc
+            if len(immutable_memberships) != len(membership_entries):
+                raise DatasetInvalid("Snapshot universe memberships nejsou konzistentní")
             universe = PointInTimeUniverse(
                 UniverseDefinition(
                     definition_row.universe_id,
@@ -447,16 +463,7 @@ class Phase6ExperimentRunner:
                     UniverseKind(definition_row.kind),
                     _database_utc(definition_row.created_at),
                 ),
-                [
-                    UniverseMembership(
-                        row.universe_id,
-                        row.instrument_id,
-                        _database_utc(row.valid_from),
-                        _database_utc(row.valid_to) if row.valid_to is not None else None,
-                        _database_utc(row.known_at),
-                    )
-                    for row in membership_rows
-                ],
+                immutable_memberships,
                 static_knowledge_as_of=_database_utc(snapshot.as_of),
             )
             instrument_ids = {item.instrument_id for item in observations}
@@ -1159,8 +1166,18 @@ class DeploymentService:
             if universe is None or universe.kind != UniverseKind.POINT_IN_TIME_MEMBERSHIP:
                 raise DatasetInvalid("Paper deployment vyžaduje POINT_IN_TIME_SAFE universe")
             parameters = self._evidence(experiment.selected_parameters_json, "parameters")
+            canonical_instruments = self._deployment_universe_instruments(snapshot)
+            if risk_config is not None and risk_config.instrument_allowlist != frozenset(
+                canonical_instruments
+            ):
+                raise DatasetInvalid("RISK_ALLOWLIST_COVERAGE_MISMATCH")
+            # Pouze implicitní legacy default nahrazujeme immutable canonical evidencí.
+            # Explicitní operátorskou hranici nikdy tiše nerozšiřujeme.
+            deployment_risk = risk_config or replace(
+                ProductionRiskConfig(), instrument_allowlist=frozenset(canonical_instruments)
+            )
             manifest = build_runtime_manifest(
-                risk=risk_config,
+                risk=deployment_risk,
                 costs=costs,
                 slippage=slippage,
                 volume_fraction=volume_fraction,
@@ -1274,6 +1291,10 @@ class DeploymentService:
             )
             if persisted_parameters != parameters:
                 raise DatasetInvalid("Deployment parameters neodpovídají experiment evidence")
+            approved_instruments = set(self._deployment_universe_instruments(snapshot))
+            runtime_instruments = components_from_manifest(manifest).risk.instrument_allowlist
+            if not approved_instruments <= runtime_instruments:
+                raise DatasetInvalid("RISK_ALLOWLIST_COVERAGE_MISMATCH")
             if already_approved:
                 return
             row.status = "APPROVED"
@@ -1332,6 +1353,66 @@ class DeploymentService:
         except (KeyError, TypeError, ValueError) as exc:
             raise DatasetInvalid(str(exc)) from exc
         return manifest
+
+    @staticmethod
+    def _deployment_universe_instruments(
+        snapshot: DatasetSnapshotRecord,
+    ) -> tuple[str, ...]:
+        """Vrátí canonical identity výhradně z hashované snapshot evidence."""
+        try:
+            manifest = json.loads(snapshot.manifest_json)
+            memberships = manifest["universe_memberships"]
+        except (TypeError, json.JSONDecodeError, KeyError) as exc:
+            raise DatasetInvalid("Snapshot neobsahuje immutable universe memberships") from exc
+        if not isinstance(memberships, list) or any(
+            not isinstance(item, dict)
+            or not isinstance(item.get("instrument_id"), str)
+            or not isinstance(item.get("valid_from"), str)
+            or (item.get("valid_to") is not None and not isinstance(item.get("valid_to"), str))
+            or not isinstance(item.get("known_at"), str)
+            for item in memberships
+        ):
+            raise DatasetInvalid("Snapshot immutable universe memberships nejsou validní")
+        immutable_content = {
+            "observations": manifest.get("observations"),
+            "corporate_actions": manifest.get("corporate_actions"),
+            "universe_memberships": memberships,
+        }
+        if hashlib.sha256(canonical_json(immutable_content).encode()).hexdigest() != (
+            snapshot.content_hash
+        ):
+            raise DatasetInvalid("Snapshot universe memberships neodpovídají content hash")
+        try:
+            evidence_times = [
+                (
+                    datetime.fromisoformat(item["valid_from"]),
+                    datetime.fromisoformat(item["valid_to"])
+                    if item["valid_to"] is not None
+                    else None,
+                    datetime.fromisoformat(item["known_at"]),
+                )
+                for item in memberships
+            ]
+        except (KeyError, TypeError, ValueError) as exc:
+            raise DatasetInvalid("Snapshot immutable universe memberships nejsou validní") from exc
+        if any(
+            valid_from.tzinfo is None
+            or (valid_to is not None and valid_to.tzinfo is None)
+            or known_at.tzinfo is None
+            or known_at > _database_utc(snapshot.as_of)
+            or (valid_to is not None and valid_from >= valid_to)
+            for valid_from, valid_to, known_at in evidence_times
+        ):
+            raise DatasetInvalid("Snapshot immutable universe memberships nejsou validní")
+        instrument_ids = tuple(sorted({item["instrument_id"] for item in memberships}))
+        if not instrument_ids:
+            raise DatasetInvalid("PIT universe nemá canonical instrument identity pro deployment")
+        if any(
+            not instrument_id or instrument_id.strip() != instrument_id or len(instrument_id) > 40
+            for instrument_id in instrument_ids
+        ):
+            raise DatasetInvalid("PIT universe instrument ID překračuje Phase 4 podporovaný limit")
+        return instrument_ids
 
     @classmethod
     def validate_experiment(
@@ -1580,6 +1661,9 @@ class Phase6PaperExecutionService:
             )
             if not eligible:
                 raise DatasetInvalid("PIT universe nemá v decision time eligible instrument")
+            approved_allowlist = components_from_manifest(manifest).risk.instrument_allowlist
+            if not set(eligible) <= approved_allowlist:
+                raise DatasetInvalid("RISK_ALLOWLIST_COVERAGE_MISMATCH")
             held = {
                 item.instrument_id
                 for item in session.scalars(
@@ -1597,6 +1681,8 @@ class Phase6PaperExecutionService:
                     raise DatasetInvalid(
                         "Persisted intent instrument neodpovídá PIT universe ani held scope"
                     )
+                if not intent_instruments <= approved_allowlist:
+                    raise DatasetInvalid("RISK_ALLOWLIST_COVERAGE_MISMATCH")
                 # Open-time risk potřebuje pouze instrumenty s ekonomickým intentem
                 # a držené instrumenty pro úplné portfolio marking.
                 execution_instruments = persisted_execution_open_scope(intent_instruments, held)
