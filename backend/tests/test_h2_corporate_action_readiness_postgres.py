@@ -30,8 +30,10 @@ from quantlab.market_data import (
 from quantlab.market_data_service import (
     CorporateActionCancellationRecord,
     CorporateActionEventAuditRecord,
+    CorporateActionRevisionCanonicalizationRecord,
     CorporateActionRevisionRecord,
     PersistentMarketDataService,
+    canonical_corporate_action_revisions,
 )
 from quantlab.persistence import (
     CorporateActionEventRecord,
@@ -51,14 +53,17 @@ class ActionProvider:
     actions: list[CorporateAction]
     fails: bool = False
     knowledge_unavailable: bool = False
+    name: str | None = None
+    lineage: str | None = None
 
     @property
     def metadata(self) -> ProviderMetadata:
         return ProviderMetadata(
-            f"h2-{self.supports}-{self.fails}-{self.knowledge_unavailable}",
+            self.name or f"h2-{self.supports}-{self.fails}-{self.knowledge_unavailable}",
             "1",
             self.supports,
             False,
+            self.lineage,
         )
 
     def resolve(self, symbol: str) -> dict[str, str]:
@@ -497,6 +502,129 @@ def test_legacy_revision_id_is_reused_by_semantic_incarnation_identity(scope) ->
         assert revisions[0].known_at == known_at
 
 
+def test_ibm_legacy_revision_is_canonicalized_and_projection_repaired(scope) -> None:
+    factory, instrument = scope
+    evidence_provider = "alpaca"
+    revision_provider = "alpaca:iex"
+    provider_action_id = "fa45827c-2bfb-454f-8107-23852efbaae6"
+    action_id = corporate_action_logical_id(evidence_provider, provider_action_id)
+    first_receipt = datetime(2026, 8, 30, 11, 12, 36, 213520, tzinfo=UTC)
+    legacy_receipt = datetime(2026, 8, 30, 11, 31, 6, 378413, tzinfo=UTC)
+    payload_hash = "d7d7b91079f6282dd921bd570d0949d6c3eece5cb232cc144f5360b963003d6b"
+    action = CorporateAction(
+        action_id,
+        instrument.instrument_id,
+        CorporateActionKind.CASH_DIVIDEND,
+        datetime(2026, 8, 10, tzinfo=UTC),
+        first_receipt,
+        Decimal("1.69"),
+        None,
+        provider_action_id,
+        payload_hash,
+    )
+    service = PersistentMarketDataService(factory, clock=lambda: datetime(2026, 8, 31, tzinfo=UTC))
+    for event_id, received_at in (("ibm-first", first_receipt), ("ibm-legacy", legacy_receipt)):
+        service.record_corporate_action_event(
+            evidence_provider,
+            CorporateActionEvent(
+                event_id,
+                received_at,
+                CorporateActionEventType.UPDATE,
+                provider_action_id,
+                payload_hash,
+                received_at,
+                (instrument.symbol,),
+                date(2026, 8, 10),
+            ),
+        )
+    rows = (
+        (
+            "b6e9de44b2f1ef56200c007241ac74a51f38f45393cc2428cecc716859317b3b",
+            first_receipt,
+        ),
+        (
+            "bc4ccd4bc9339cca8c9168f7aa7ab1b4a0be941f090545470b06f9abf72f2916",
+            legacy_receipt,
+        ),
+    )
+    with factory() as session, session.begin():
+        for revision_id, known_at in rows:
+            session.add(
+                CorporateActionRevisionRecord(
+                    revision_id=revision_id,
+                    action_id=action_id,
+                    provider=revision_provider,
+                    provider_action_id=provider_action_id,
+                    payload_hash=payload_hash,
+                    instrument_id=instrument.instrument_id,
+                    kind=action.kind.value,
+                    effective_at=action.effective_at,
+                    known_at=known_at,
+                    value="1.69",
+                    new_symbol=None,
+                )
+            )
+        session.add(
+            CorporateActionRecord(
+                action_id=action_id,
+                instrument_id=instrument.instrument_id,
+                kind=action.kind.value,
+                effective_at=action.effective_at,
+                known_at=legacy_receipt,
+                value="1.69",
+                new_symbol=None,
+            )
+        )
+
+    readiness = None
+    for _ in range(3):
+        result = service.verify_corporate_action_readiness(
+            ActionProvider(
+                True,
+                [action],
+                name=evidence_provider,
+                lineage=revision_provider,
+            ),
+            instrument,
+            date(2026, 8, 1),
+            date(2026, 8, 26),
+            datetime(2026, 8, 31, tzinfo=UTC),
+        )
+        readiness = readiness or result
+        assert result == readiness
+
+    with factory() as session:
+        raw = session.scalars(
+            select(CorporateActionRevisionRecord).where(
+                CorporateActionRevisionRecord.action_id == action_id
+            )
+        ).all()
+        canonical = canonical_corporate_action_revisions(
+            session, CorporateActionRevisionRecord.action_id == action_id
+        )
+        links = session.scalars(select(CorporateActionRevisionCanonicalizationRecord)).all()
+        current = session.get(CorporateActionRecord, action_id)
+        assert len(raw) == 2
+        assert [(row.revision_id, row.known_at) for row in canonical] == [rows[0]]
+        assert [(row.superseded_revision_id, row.canonical_revision_id) for row in links] == [
+            (rows[1][0], rows[0][0])
+        ]
+        assert links[0].provider == revision_provider
+        source_event = session.get(CorporateActionEventRecord, links[0].source_event_id)
+        assert source_event is not None and source_event.provider == evidence_provider
+        assert current is not None and current.known_at == first_receipt
+
+    with factory() as session, pytest.raises(DBAPIError, match="immutable"):
+        session.execute(
+            text(
+                "UPDATE corporate_action_revision_canonicalizations "
+                "SET reason='tampered' WHERE superseded_revision_id=:revision_id"
+            ),
+            {"revision_id": rows[1][0]},
+        )
+        session.commit()
+
+
 def test_delete_event_tombstones_current_projection_and_persists_cancellation(scope) -> None:
     factory, instrument = scope
     suffix = uuid4().hex
@@ -621,7 +749,7 @@ def test_delete_then_reinsert_same_payload_preserves_cancellation_and_both_revis
         assert current is not None and current.known_at == reinserted.known_at
 
 
-def test_downgrade_with_repeated_payload_incarnation_fails_without_moving_revision(scope) -> None:
+def test_downgrade_preserves_immutable_canonicalization_and_revisions(scope) -> None:
     factory, instrument = scope
     provider_action_id = f"downgrade-{uuid4().hex}"
     action_id = corporate_action_logical_id("alpaca:iex", provider_action_id)
@@ -647,11 +775,17 @@ def test_downgrade_with_repeated_payload_incarnation_fails_without_moving_revisi
             )
 
     config = Config(str(Path(__file__).parents[2] / "alembic.ini"))
-    with pytest.raises(RuntimeError, match="není možný bez destrukce legitimní immutable"):
+    with pytest.raises(RuntimeError, match="není možný bez ztráty immutable"):
         command.downgrade(config, "20260830_02")
 
     with factory() as session:
-        assert session.scalar(text("SELECT version_num FROM alembic_version")) == "20260831_01"
+        assert session.scalar(text("SELECT version_num FROM alembic_version")) == "20260831_02"
+        assert (
+            session.scalar(
+                select(func.count()).select_from(CorporateActionRevisionCanonicalizationRecord)
+            )
+            == 1
+        )
         assert (
             session.scalar(
                 select(func.count())

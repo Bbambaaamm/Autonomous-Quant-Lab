@@ -8,6 +8,7 @@ from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 
 from sqlalchemy import (
+    ColumnElement,
     DateTime,
     ForeignKey,
     Select,
@@ -144,6 +145,25 @@ class CorporateActionCancellationRecord(Base):
         unique=True,
     )
     known_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class CorporateActionRevisionCanonicalizationRecord(Base):
+    """Immutable audit vazba legacy evidence na kauzálně kanonickou revizi."""
+
+    __tablename__ = "corporate_action_revision_canonicalizations"
+    superseded_revision_id: Mapped[str] = mapped_column(
+        ForeignKey("corporate_action_revisions.revision_id", ondelete="RESTRICT"), primary_key=True
+    )
+    canonical_revision_id: Mapped[str] = mapped_column(
+        ForeignKey("corporate_action_revisions.revision_id", ondelete="RESTRICT"), nullable=False
+    )
+    provider: Mapped[str] = mapped_column(String(40), nullable=False)
+    provider_action_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    reason: Mapped[str] = mapped_column(String(80), nullable=False)
+    source_event_id: Mapped[str] = mapped_column(
+        ForeignKey("corporate_action_events.event_id", ondelete="RESTRICT"), nullable=False
+    )
+    repaired_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
 class PersistentMarketDataService:
@@ -315,6 +335,19 @@ class PersistentMarketDataService:
     ) -> str:
         """Připne úplnost intervalu; prázdný výsledek je úplný jen u capable provideru."""
         cutoff = require_utc(knowledge_cutoff)
+        # Oprava staré DB nesmí záviset na vytvoření nového readiness evidence řádku.
+        with self._sessions() as session, session.begin():
+            _lock(
+                session,
+                "corporate-action-canonicalize:"
+                f"{provider.metadata.persistent_name}:{provider.metadata.name}",
+            )
+            self._canonicalize_legacy_revisions(
+                session,
+                revision_provider=provider.metadata.persistent_name,
+                evidence_provider=provider.metadata.name,
+                instrument_id=instrument.instrument_id,
+            )
         identity = "|".join(
             (
                 provider.metadata.persistent_name,
@@ -384,7 +417,12 @@ class PersistentMarketDataService:
                     )
                 )
                 for action in actions:
-                    self._persist_action(session, provider.metadata.persistent_name, action)
+                    self._persist_action(
+                        session,
+                        revision_provider=provider.metadata.persistent_name,
+                        evidence_provider=provider.metadata.name,
+                        action=action,
+                    )
         if status != "COMPLETE":
             if error is not None:
                 raise error
@@ -532,7 +570,12 @@ class PersistentMarketDataService:
                     )
                     added.append(item)
                 for action in actions:
-                    self._persist_action(session, persistent_provider, action)
+                    self._persist_action(
+                        session,
+                        revision_provider=persistent_provider,
+                        evidence_provider=provider.metadata.name,
+                        action=action,
+                    )
                 existing.status = "SUCCEEDED"
                 existing.finished_at = datetime.now(UTC)
                 existing.row_count = len(added)
@@ -622,18 +665,24 @@ class PersistentMarketDataService:
             json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
         ).hexdigest()
 
-    def _persist_action(self, session: Session, provider: str, action: CorporateAction) -> None:
+    def _persist_action(
+        self,
+        session: Session,
+        revision_provider: str,
+        evidence_provider: str,
+        action: CorporateAction,
+    ) -> None:
         provider_action_id = action.provider_action_id or action.action_id
         if len(provider_action_id) > 128:
             raise DatasetInvalid("Provider corporate-action ID překračuje persistentní limit")
         payload_hash = action.payload_hash or self._action_payload_hash(action)
         known_at = require_utc(action.known_at)
         revision_id = hashlib.sha256(
-            f"{provider}|{provider_action_id}|{payload_hash}|{known_at.isoformat()}".encode()
+            f"{revision_provider}|{provider_action_id}|{payload_hash}|{known_at.isoformat()}".encode()
         ).hexdigest()
         revision = session.scalar(
             select(CorporateActionRevisionRecord).where(
-                CorporateActionRevisionRecord.provider == provider,
+                CorporateActionRevisionRecord.provider == revision_provider,
                 CorporateActionRevisionRecord.provider_action_id == provider_action_id,
                 CorporateActionRevisionRecord.payload_hash == payload_hash,
                 CorporateActionRevisionRecord.known_at == known_at,
@@ -641,7 +690,7 @@ class PersistentMarketDataService:
         )
         values = (
             action.action_id,
-            provider,
+            revision_provider,
             provider_action_id,
             payload_hash,
             action.instrument_id,
@@ -656,7 +705,7 @@ class PersistentMarketDataService:
                 CorporateActionRevisionRecord(
                     revision_id=revision_id,
                     action_id=action.action_id,
-                    provider=provider,
+                    provider=revision_provider,
                     provider_action_id=provider_action_id,
                     payload_hash=payload_hash,
                     instrument_id=action.instrument_id,
@@ -667,6 +716,7 @@ class PersistentMarketDataService:
                     new_symbol=action.new_symbol,
                 )
             )
+            session.flush()
         else:
             persisted = (
                 revision.action_id,
@@ -683,13 +733,23 @@ class PersistentMarketDataService:
             if persisted != values:
                 raise DatasetInvalid("Corporate-action revision identity koliduje s jiným obsahem")
 
+        self._canonicalize_legacy_revisions(
+            session,
+            revision_provider=revision_provider,
+            evidence_provider=evidence_provider,
+            instrument_id=action.instrument_id,
+        )
+        canonical = self._canonical_revision_for(
+            session, revision.revision_id if revision is not None else revision_id
+        )
+        canonical_known = _database_utc(canonical.known_at)
         current = session.get(CorporateActionRecord, action.action_id)
         if current is None:
-            session.add(self._action_record(action))
+            projection = self._action_record(action)
+            projection.known_at = canonical_known
+            session.add(projection)
             return
         current_known = _database_utc(current.known_at)
-        if action.known_at < current_known:
-            return
         current_values = (
             current.instrument_id,
             current.kind,
@@ -704,7 +764,9 @@ class PersistentMarketDataService:
             str(action.value) if action.value is not None else None,
             action.new_symbol,
         )
-        if action.known_at == current_known:
+        if canonical_known < current_known:
+            return
+        if canonical_known == current_known:
             if current_values != new_values:
                 raise DatasetInvalid(
                     "Corporate-action current version koliduje ve stejném known_at"
@@ -713,9 +775,165 @@ class PersistentMarketDataService:
         current.instrument_id = action.instrument_id
         current.kind = action.kind.value
         current.effective_at = action.effective_at
-        current.known_at = action.known_at
+        current.known_at = canonical_known
         current.value = str(action.value) if action.value is not None else None
         current.new_symbol = action.new_symbol
+
+    @staticmethod
+    def _same_revision_economics(
+        left: CorporateActionRevisionRecord, right: CorporateActionRevisionRecord
+    ) -> bool:
+        return (
+            left.instrument_id,
+            left.kind,
+            _database_utc(left.effective_at),
+            left.value,
+            left.new_symbol,
+        ) == (
+            right.instrument_id,
+            right.kind,
+            _database_utc(right.effective_at),
+            right.value,
+            right.new_symbol,
+        )
+
+    @staticmethod
+    def _canonical_revision_for(
+        session: Session, revision_id: str
+    ) -> CorporateActionRevisionRecord:
+        link = session.get(CorporateActionRevisionCanonicalizationRecord, revision_id)
+        target = link.canonical_revision_id if link is not None else revision_id
+        revision = session.get(CorporateActionRevisionRecord, target)
+        if revision is None:
+            raise DatasetInvalid("Canonical corporate-action revision chybí")
+        return revision
+
+    def _canonicalize_legacy_revisions(
+        self,
+        session: Session,
+        *,
+        revision_provider: str,
+        evidence_provider: str,
+        instrument_id: str,
+    ) -> None:
+        """Sloučí jen revize uvnitř jednoznačně souvislé SSE payload incarnation."""
+        events = tuple(
+            session.scalars(
+                select(CorporateActionEventRecord)
+                .where(CorporateActionEventRecord.provider == evidence_provider)
+                .order_by(
+                    CorporateActionEventRecord.occurred_at, CorporateActionEventRecord.event_id
+                )
+            )
+        )
+        by_action: dict[str, list[CorporateActionEventRecord]] = {}
+        for event in events:
+            by_action.setdefault(event.provider_action_id, []).append(event)
+        for provider_action_id, stream in by_action.items():
+            starts: list[tuple[int, CorporateActionEventRecord]] = []
+            active_hash: str | None = None
+            for index, event in enumerate(stream):
+                if event.action == CorporateActionEventType.DELETE.value:
+                    active_hash = None
+                elif active_hash != event.payload_hash:
+                    starts.append((index, event))
+                    active_hash = event.payload_hash
+            revisions = tuple(
+                session.scalars(
+                    select(CorporateActionRevisionRecord).where(
+                        CorporateActionRevisionRecord.provider == revision_provider,
+                        CorporateActionRevisionRecord.provider_action_id == provider_action_id,
+                        CorporateActionRevisionRecord.instrument_id == instrument_id,
+                    )
+                )
+            )
+            for position, (event_index, start_event) in enumerate(starts):
+                start = _database_utc(start_event.occurred_at)
+                boundary = next(
+                    (
+                        event
+                        for event in stream[event_index + 1 :]
+                        if event.action == CorporateActionEventType.DELETE.value
+                        or event.payload_hash != start_event.payload_hash
+                    ),
+                    None,
+                )
+                end = _database_utc(boundary.occurred_at) if boundary is not None else None
+                members = [
+                    row
+                    for row in revisions
+                    if row.payload_hash == start_event.payload_hash
+                    and _database_utc(row.known_at) >= start
+                    and (end is None or _database_utc(row.known_at) < end)
+                ]
+                canonical_matches = [row for row in members if _database_utc(row.known_at) == start]
+                if len(canonical_matches) != 1:
+                    continue
+                canonical = canonical_matches[0]
+                for legacy in members:
+                    if legacy.revision_id == canonical.revision_id:
+                        continue
+                    if not self._same_revision_economics(legacy, canonical):
+                        raise DatasetInvalid("Nejednoznačný legacy corporate-action lineage")
+                    existing = session.get(
+                        CorporateActionRevisionCanonicalizationRecord, legacy.revision_id
+                    )
+                    if existing is not None:
+                        if existing.canonical_revision_id != canonical.revision_id:
+                            raise DatasetInvalid("Legacy revision má kolidující canonicalizaci")
+                        continue
+                    session.add(
+                        CorporateActionRevisionCanonicalizationRecord(
+                            superseded_revision_id=legacy.revision_id,
+                            canonical_revision_id=canonical.revision_id,
+                            provider=revision_provider,
+                            provider_action_id=provider_action_id,
+                            reason="LEGACY_DUPLICATE_SAME_SSE_INCARNATION",
+                            source_event_id=start_event.event_id,
+                            repaired_at=require_utc(self.clock()),
+                        )
+                    )
+                # Current projection smí odrážet jen poslední stále aktivní incarnation.
+                is_current_incarnation = (
+                    position == len(starts) - 1
+                    and stream[-1].action != CorporateActionEventType.DELETE.value
+                )
+                current = (
+                    session.get(CorporateActionRecord, canonical.action_id)
+                    if is_current_incarnation
+                    else None
+                )
+                if current is not None:
+                    current_economics = (
+                        current.instrument_id,
+                        current.kind,
+                        _database_utc(current.effective_at),
+                        current.value,
+                        current.new_symbol,
+                    )
+                    canonical_economics = (
+                        canonical.instrument_id,
+                        canonical.kind,
+                        _database_utc(canonical.effective_at),
+                        canonical.value,
+                        canonical.new_symbol,
+                    )
+                    if (
+                        current_economics == canonical_economics
+                        and _database_utc(current.known_at) > start
+                    ):
+                        current.known_at = start
+
+
+def canonical_corporate_action_revisions(
+    session: Session, *criteria: ColumnElement[bool]
+) -> tuple[CorporateActionRevisionRecord, ...]:
+    """Jediný accessor pro PIT historii; raw tabulka je pouze immutable evidence."""
+    superseded = select(CorporateActionRevisionCanonicalizationRecord.superseded_revision_id)
+    statement = select(CorporateActionRevisionRecord).where(
+        CorporateActionRevisionRecord.revision_id.not_in(superseded), *criteria
+    )
+    return tuple(session.scalars(statement))
 
 
 class DatasetSnapshotService:
@@ -795,16 +1013,12 @@ class DatasetSnapshotService:
                 )
             ]
             selected_instruments = {row.instrument_id for row in selected}
-            revision_rows = tuple(
-                session.scalars(
-                    select(CorporateActionRevisionRecord).where(
-                        CorporateActionRevisionRecord.instrument_id.in_(selected_instruments),
-                        CorporateActionRevisionRecord.provider == provider,
-                        CorporateActionRevisionRecord.known_at <= cutoff,
-                        CorporateActionRevisionRecord.effective_at
-                        <= _instant(end + timedelta(days=1)),
-                    )
-                )
+            revision_rows = canonical_corporate_action_revisions(
+                session,
+                CorporateActionRevisionRecord.instrument_id.in_(selected_instruments),
+                CorporateActionRevisionRecord.provider == provider,
+                CorporateActionRevisionRecord.known_at <= cutoff,
+                CorporateActionRevisionRecord.effective_at <= _instant(end + timedelta(days=1)),
             )
             latest_revisions: dict[str, CorporateActionRevisionRecord] = {}
             for revision_action in sorted(
