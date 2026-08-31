@@ -329,8 +329,8 @@ def test_historical_superseded_revision_remains_replayable_and_immutable() -> No
         assert persisted_snapshot.content_hash == _canonical_hash(
             json.loads(persisted_snapshot.manifest_json)
         )
-        assert legacy is not None and legacy.known_at == legacy_at
-        assert current is not None and current.known_at == canonical_at
+        assert legacy is not None and runtime._database_utc(legacy.known_at) == legacy_at
+        assert current is not None and runtime._database_utc(current.known_at) == canonical_at
 
 
 def test_historical_snapshot_without_exact_legacy_revision_fails_closed() -> None:
