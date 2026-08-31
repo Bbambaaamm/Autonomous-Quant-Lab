@@ -4,6 +4,7 @@ Revision ID: 20260831_01
 Revises: 20260830_02
 """
 
+import sqlalchemy as sa
 from alembic import op
 
 revision = "20260831_01"
@@ -28,8 +29,24 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    # Downgrade je bezpečný jen bez více incarnations stejného payloadu; databáze při
-    # porušení původního invariantu transakčně odmítne vytvoření constraintu.
+    duplicate_incarnations = (
+        op.get_bind()
+        .execute(
+            sa.text(
+                """SELECT 1
+            FROM corporate_action_revisions
+            GROUP BY provider, provider_action_id, payload_hash
+            HAVING COUNT(*) > 1
+            LIMIT 1"""
+            )
+        )
+        .first()
+    )
+    if duplicate_incarnations is not None:
+        # Starý invariant neumí novou legitimní historii vyjádřit. Při downgrade směrem
+        # k base ji proto nepřepisujeme ani nemažeme; následující starší migrace tabulku
+        # bezpečně odstraní. Mezistupeň si ponechá novější bezpečnější UNIQUE constraint.
+        return
     op.drop_constraint(
         "uq_corporate_action_revision_provider_payload",
         "corporate_action_revisions",
