@@ -156,7 +156,9 @@ jobs:
         run: uv run pytest -q tests/test_h3_runtime_identity_postgres.py
       - name: Recreate clean application schema for M1 acceptance
         run: |
-          uv run alembic -c ../alembic.ini downgrade base
+          # H2 záměrně ověřuje historii, kterou starší UNIQUE invariant neumí reprezentovat.
+          # Ephemeral CI databázi proto resetujeme bez destruktivního downgrade této historie.
+          uv run python -c "from sqlalchemy import create_engine, text; engine=create_engine('${DATABASE_URL}'); connection=engine.connect(); connection.execution_options(isolation_level='AUTOCOMMIT').execute(text('DROP SCHEMA public CASCADE')); connection.execute(text('CREATE SCHEMA public')); connection.close(); engine.dispose()"
           uv run alembic -c ../alembic.ini upgrade head
       - name: M1 Phase6 eligibility decision acceptance
         run: uv run pytest -q tests/test_b1_control_plane_postgres.py tests/test_m1_eligibility.py

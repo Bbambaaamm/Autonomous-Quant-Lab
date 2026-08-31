@@ -4,10 +4,13 @@ import os
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from decimal import Decimal
+from pathlib import Path
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import create_engine, select, text
+from alembic import command
+from alembic.config import Config
+from sqlalchemy import create_engine, func, select, text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import sessionmaker
 
@@ -387,6 +390,113 @@ def test_updated_action_creates_immutable_revision_and_updates_current_projectio
         assert current.known_at == revised.known_at
 
 
+def test_a_to_b_to_a_persists_three_causal_incarnations_idempotently(scope) -> None:
+    factory, instrument = scope
+    provider = "h2-True-False-False"
+    provider_action_id = f"provider-{uuid4().hex}"
+    action_id = corporate_action_logical_id(provider, provider_action_id)
+
+    def action(payload_hash: str, value: str, hour: int) -> CorporateAction:
+        return CorporateAction(
+            action_id,
+            instrument.instrument_id,
+            CorporateActionKind.SPLIT,
+            datetime(2026, 8, 25, tzinfo=UTC),
+            datetime(2026, 8, 20, hour, tzinfo=UTC),
+            Decimal(value),
+            None,
+            provider_action_id,
+            payload_hash,
+        )
+
+    incarnations = (
+        action("a" * 64, "2", 10),
+        action("b" * 64, "4", 11),
+        action("a" * 64, "2", 12),
+    )
+    service = PersistentMarketDataService(factory)
+    for index, incarnation in enumerate(incarnations):
+        service.verify_corporate_action_readiness(
+            ActionProvider(True, [incarnation]),
+            instrument,
+            date(2026, 8, 1),
+            date(2026, 8, 26),
+            datetime(2026, 8, 21 + index, tzinfo=UTC),
+        )
+    # Opakovaný readiness nad stejnou aktivní incarnation nesmí přidat revizi.
+    service.verify_corporate_action_readiness(
+        ActionProvider(True, [incarnations[-1]]),
+        instrument,
+        date(2026, 8, 1),
+        date(2026, 8, 26),
+        datetime(2026, 8, 23, tzinfo=UTC),
+    )
+
+    with factory() as session:
+        revisions = session.scalars(
+            select(CorporateActionRevisionRecord)
+            .where(CorporateActionRevisionRecord.action_id == action_id)
+            .order_by(CorporateActionRevisionRecord.known_at)
+        ).all()
+        assert [(row.payload_hash, row.known_at) for row in revisions] == [
+            (incarnation.payload_hash, incarnation.known_at) for incarnation in incarnations
+        ]
+
+
+def test_legacy_revision_id_is_reused_by_semantic_incarnation_identity(scope) -> None:
+    factory, instrument = scope
+    provider = "h2-True-False-False"
+    provider_action_id = f"legacy-{uuid4().hex}"
+    action_id = corporate_action_logical_id(provider, provider_action_id)
+    known_at = datetime(2026, 8, 30, 11, 31, 6, 378413, tzinfo=UTC)
+    action = CorporateAction(
+        action_id,
+        instrument.instrument_id,
+        CorporateActionKind.CASH_DIVIDEND,
+        datetime(2026, 8, 10, tzinfo=UTC),
+        known_at,
+        Decimal("1.69"),
+        None,
+        provider_action_id,
+        "d" * 64,
+    )
+    legacy_revision_id = uuid4().hex.ljust(64, "0")
+    with factory() as session, session.begin():
+        session.add(
+            CorporateActionRevisionRecord(
+                revision_id=legacy_revision_id,
+                action_id=action_id,
+                provider=provider,
+                provider_action_id=provider_action_id,
+                payload_hash=action.payload_hash,
+                instrument_id=instrument.instrument_id,
+                kind=action.kind.value,
+                effective_at=action.effective_at,
+                known_at=known_at,
+                value="1.69",
+                new_symbol=None,
+            )
+        )
+
+    PersistentMarketDataService(factory).verify_corporate_action_readiness(
+        ActionProvider(True, [action]),
+        instrument,
+        date(2026, 8, 1),
+        date(2026, 8, 26),
+        datetime(2026, 8, 31, tzinfo=UTC),
+    )
+
+    with factory() as session:
+        revisions = session.scalars(
+            select(CorporateActionRevisionRecord).where(
+                CorporateActionRevisionRecord.action_id == action_id
+            )
+        ).all()
+        assert len(revisions) == 1
+        assert revisions[0].revision_id == legacy_revision_id
+        assert revisions[0].known_at == known_at
+
+
 def test_delete_event_tombstones_current_projection_and_persists_cancellation(scope) -> None:
     factory, instrument = scope
     suffix = uuid4().hex
@@ -435,6 +545,121 @@ def test_delete_event_tombstones_current_projection_and_persists_cancellation(sc
         assert current is not None and current.effective_at.year == 9999
         assert len(cancellations) == 1
         assert cancellations[0].known_at == datetime(2026, 8, 21, 16, tzinfo=UTC)
+
+
+def test_delete_then_reinsert_same_payload_preserves_cancellation_and_both_revisions(scope) -> None:
+    factory, instrument = scope
+    provider = "h2-True-False-False"
+    provider_action_id = f"provider-{uuid4().hex}"
+    action_id = corporate_action_logical_id(provider, provider_action_id)
+    first = CorporateAction(
+        action_id,
+        instrument.instrument_id,
+        CorporateActionKind.CASH_DIVIDEND,
+        datetime(2026, 8, 25, tzinfo=UTC),
+        datetime(2026, 8, 20, 10, tzinfo=UTC),
+        Decimal("1.25"),
+        None,
+        provider_action_id,
+        "e" * 64,
+    )
+    reinserted = CorporateAction(
+        action_id,
+        instrument.instrument_id,
+        CorporateActionKind.CASH_DIVIDEND,
+        first.effective_at,
+        datetime(2026, 8, 20, 12, tzinfo=UTC),
+        first.value,
+        None,
+        provider_action_id,
+        first.payload_hash,
+    )
+    service = PersistentMarketDataService(factory)
+    service.verify_corporate_action_readiness(
+        ActionProvider(True, [first]),
+        instrument,
+        date(2026, 8, 1),
+        date(2026, 8, 26),
+        datetime(2026, 8, 21, tzinfo=UTC),
+    )
+    service.record_corporate_action_event(
+        provider,
+        CorporateActionEvent(
+            f"delete-{uuid4().hex}",
+            datetime(2026, 8, 20, 9, tzinfo=UTC),
+            CorporateActionEventType.DELETE,
+            provider_action_id,
+            "f" * 64,
+            datetime(2026, 8, 20, 11, tzinfo=UTC),
+            (instrument.symbol,),
+            date(2026, 8, 25),
+        ),
+    )
+    service.verify_corporate_action_readiness(
+        ActionProvider(True, [reinserted]),
+        instrument,
+        date(2026, 8, 1),
+        date(2026, 8, 26),
+        datetime(2026, 8, 22, tzinfo=UTC),
+    )
+
+    with factory() as session:
+        revisions = session.scalars(
+            select(CorporateActionRevisionRecord)
+            .where(CorporateActionRevisionRecord.action_id == action_id)
+            .order_by(CorporateActionRevisionRecord.known_at)
+        ).all()
+        cancellations = session.scalars(
+            select(CorporateActionCancellationRecord).where(
+                CorporateActionCancellationRecord.action_id == action_id
+            )
+        ).all()
+        current = session.get(CorporateActionRecord, action_id)
+        assert [row.known_at for row in revisions] == [first.known_at, reinserted.known_at]
+        assert len(cancellations) == 1
+        assert cancellations[0].known_at == datetime(2026, 8, 20, 11, tzinfo=UTC)
+        assert current is not None and current.known_at == reinserted.known_at
+
+
+def test_downgrade_with_repeated_payload_incarnation_fails_without_moving_revision(scope) -> None:
+    factory, instrument = scope
+    provider_action_id = f"downgrade-{uuid4().hex}"
+    action_id = corporate_action_logical_id("alpaca:iex", provider_action_id)
+    with factory() as session, session.begin():
+        for suffix, known_at in (
+            ("first", datetime(2026, 8, 20, 10, tzinfo=UTC)),
+            ("second", datetime(2026, 8, 20, 12, tzinfo=UTC)),
+        ):
+            session.add(
+                CorporateActionRevisionRecord(
+                    revision_id=f"{suffix}-{uuid4().hex}".ljust(64, "0"),
+                    action_id=action_id,
+                    provider="alpaca:iex",
+                    provider_action_id=provider_action_id,
+                    payload_hash="a" * 64,
+                    instrument_id=instrument.instrument_id,
+                    kind=CorporateActionKind.CASH_DIVIDEND.value,
+                    effective_at=datetime(2026, 8, 25, tzinfo=UTC),
+                    known_at=known_at,
+                    value="1.69",
+                    new_symbol=None,
+                )
+            )
+
+    config = Config(str(Path(__file__).parents[2] / "alembic.ini"))
+    with pytest.raises(RuntimeError, match="není možný bez destrukce legitimní immutable"):
+        command.downgrade(config, "20260830_02")
+
+    with factory() as session:
+        assert session.scalar(text("SELECT version_num FROM alembic_version")) == "20260831_01"
+        assert (
+            session.scalar(
+                select(func.count())
+                .select_from(CorporateActionRevisionRecord)
+                .where(CorporateActionRevisionRecord.action_id == action_id)
+            )
+            == 2
+        )
 
 
 def test_standard_stooq_is_explicitly_unsupported(scope) -> None:

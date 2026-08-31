@@ -664,7 +664,20 @@ class AlpacaProvider:
         normalized = self.resolve(symbol)["provider_symbol"]
         events = self._evidence_loader("alpaca")
         latest: dict[str, CorporateActionEvent] = {}
-        for event in sorted(events, key=lambda item: (item.at, item.event_id)):
+        for event in sorted(
+            events,
+            key=lambda item: (cast(datetime, item.received_at), item.event_id),
+        ):
+            previous = latest.get(event.provider_action_id)
+            if (
+                previous is not None
+                and previous.action is not CorporateActionEventType.DELETE
+                and event.action is not CorporateActionEventType.DELETE
+                and previous.payload_hash == event.payload_hash
+            ):
+                # Consecutive replay stejného aktivního faktu je stále tatáž incarnation.
+                # První lokální receipt proto zůstává jejím kauzálním knowledge time.
+                continue
             latest[event.provider_action_id] = event
 
         result: list[CorporateAction] = []

@@ -140,6 +140,109 @@ def test_alpaca_known_at_uses_local_receipt_not_provider_timestamp() -> None:
     assert action.known_at == received_at
 
 
+def test_alpaca_staging_duplicate_receipt_preserves_first_causal_receipt() -> None:
+    row = _split()
+    first_receipt = datetime(2026, 8, 30, 11, 31, tzinfo=UTC)
+    duplicate_receipt = datetime(2026, 8, 31, 5, 6, tzinfo=UTC)
+    events = (
+        CorporateActionEvent.from_sse(
+            _sse_payload(row, event_id="event-first"), received_at=first_receipt
+        ),
+        CorporateActionEvent.from_sse(
+            _sse_payload(row, event_id="event-duplicate"), received_at=duplicate_receipt
+        ),
+    )
+    provider = _provider({None: _response({"forward_splits": [row]})}, events)
+
+    action = provider.corporate_actions("AAPL", date(2026, 9, 1), date(2026, 9, 1))[0]
+
+    assert action.known_at == first_receipt
+
+
+def test_alpaca_causal_order_uses_receipt_before_provider_timestamp() -> None:
+    old = _split(new_rate=2)
+    current = _split(new_rate=4)
+    events = (
+        CorporateActionEvent.from_sse(
+            _sse_payload(
+                old,
+                event_id="provider-late",
+                at="2026-08-31T20:00:00Z",
+            ),
+            received_at=datetime(2026, 8, 30, 10, tzinfo=UTC),
+        ),
+        CorporateActionEvent.from_sse(
+            _sse_payload(
+                current,
+                event_id="provider-early",
+                action="update",
+                at="2026-08-29T20:00:00Z",
+            ),
+            received_at=datetime(2026, 8, 30, 11, tzinfo=UTC),
+        ),
+    )
+    provider = _provider({None: _response({"forward_splits": [current]})}, events)
+
+    action = provider.corporate_actions("AAPL", date(2026, 9, 1), date(2026, 9, 1))[0]
+
+    assert action.value == Decimal("4")
+    assert action.known_at == datetime(2026, 8, 30, 11, tzinfo=UTC)
+
+
+def test_alpaca_a_to_b_to_a_creates_new_active_causal_incarnation() -> None:
+    payload_a = _split(new_rate=2)
+    payload_b = _split(new_rate=4)
+    events = tuple(
+        CorporateActionEvent.from_sse(payload, received_at=received_at)
+        for payload, received_at in (
+            (
+                _sse_payload(payload_a, event_id="a-first"),
+                datetime(2026, 8, 30, 10, tzinfo=UTC),
+            ),
+            (
+                _sse_payload(payload_b, event_id="b", action="update"),
+                datetime(2026, 8, 30, 11, tzinfo=UTC),
+            ),
+            (
+                _sse_payload(payload_a, event_id="a-second", action="update"),
+                datetime(2026, 8, 30, 12, tzinfo=UTC),
+            ),
+        )
+    )
+    provider = _provider({None: _response({"forward_splits": [payload_a]})}, events)
+
+    action = provider.corporate_actions("AAPL", date(2026, 9, 1), date(2026, 9, 1))[0]
+
+    assert action.value == Decimal("2")
+    assert action.known_at == datetime(2026, 8, 30, 12, tzinfo=UTC)
+
+
+def test_alpaca_delete_then_reinsert_same_payload_uses_reinsert_receipt() -> None:
+    row = _split()
+    events = tuple(
+        CorporateActionEvent.from_sse(payload, received_at=received_at)
+        for payload, received_at in (
+            (
+                _sse_payload(row, event_id="insert"),
+                datetime(2026, 8, 30, 10, tzinfo=UTC),
+            ),
+            (
+                _sse_payload(row, event_id="delete", action="delete"),
+                datetime(2026, 8, 30, 11, tzinfo=UTC),
+            ),
+            (
+                _sse_payload(row, event_id="reinsert"),
+                datetime(2026, 8, 30, 12, tzinfo=UTC),
+            ),
+        )
+    )
+    provider = _provider({None: _response({"forward_splits": [row]})}, events)
+
+    action = provider.corporate_actions("AAPL", date(2026, 9, 1), date(2026, 9, 1))[0]
+
+    assert action.known_at == datetime(2026, 8, 30, 12, tzinfo=UTC)
+
+
 def test_alpaca_historical_action_without_sse_evidence_fails_closed() -> None:
     provider = _provider({None: _response({"forward_splits": [_split()]})})
 
