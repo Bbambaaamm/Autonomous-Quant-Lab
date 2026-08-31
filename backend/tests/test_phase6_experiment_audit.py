@@ -8,7 +8,7 @@ from decimal import Decimal
 
 import pytest
 from fastapi.testclient import TestClient
-from phase6_audit_helpers import seed_phase6_snapshot
+from phase6_audit_helpers import CALENDAR, seed_phase6_snapshot
 from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import sessionmaker
 
@@ -18,6 +18,7 @@ from quantlab.market_data import DatasetInvalid
 from quantlab.market_data_service import (
     CorporateActionRevisionCanonicalizationRecord,
     CorporateActionRevisionRecord,
+    DatasetSnapshotService,
 )
 from quantlab.persistence import (
     CorporateActionEventRecord,
@@ -225,14 +226,17 @@ def _canonical_hash(manifest: dict[str, object]) -> str:
     ).hexdigest()
 
 
-def _historical_action_fixture(sessions, *, include_legacy: bool = True):
-    instrument, _, _, snapshot, request = seed_phase6_snapshot(
+def _historical_action_fixture(
+    sessions, *, include_legacy: bool = True, matching_provider: bool = True
+):
+    instrument, provider, _, snapshot, request = seed_phase6_snapshot(
         sessions, suffix=f"historical-action-{include_legacy}"
     )
     action_id = "a" * 64
     canonical_at = datetime(2026, 1, 10, 12, tzinfo=UTC)
     legacy_at = canonical_at + timedelta(hours=1)
     effective_at = datetime(2026, 1, 20, tzinfo=UTC)
+    revision_provider = provider.metadata.name if matching_provider else "different-lineage"
     action_entry = {
         "action_id": action_id,
         "instrument_id": instrument.instrument_id,
@@ -251,9 +255,9 @@ def _historical_action_fixture(sessions, *, include_legacy: bool = True):
         session.add(
             CorporateActionEventRecord(
                 event_id="legacy-canonicalization-event",
-                provider="fixture",
+                provider=revision_provider,
                 occurred_at=legacy_at,
-                action="UPDATE",
+                action="update",
                 provider_action_id="provider-action",
                 payload_hash="b" * 64,
             )
@@ -262,7 +266,7 @@ def _historical_action_fixture(sessions, *, include_legacy: bool = True):
             CorporateActionRevisionRecord(
                 revision_id="1" * 64,
                 action_id=action_id,
-                provider="fixture",
+                provider=revision_provider,
                 provider_action_id="provider-action",
                 payload_hash="b" * 64,
                 instrument_id=instrument.instrument_id,
@@ -278,7 +282,7 @@ def _historical_action_fixture(sessions, *, include_legacy: bool = True):
                 CorporateActionRevisionRecord(
                     revision_id="2" * 64,
                     action_id=action_id,
-                    provider="fixture",
+                    provider=revision_provider,
                     provider_action_id="provider-action",
                     payload_hash="b" * 64,
                     instrument_id=instrument.instrument_id,
@@ -306,7 +310,7 @@ def _historical_action_fixture(sessions, *, include_legacy: bool = True):
                 CorporateActionRevisionCanonicalizationRecord(
                     superseded_revision_id="2" * 64,
                     canonical_revision_id="1" * 64,
-                    provider="fixture",
+                    provider=revision_provider,
                     provider_action_id="provider-action",
                     reason="LEGACY_DUPLICATE_SAME_SSE_INCARNATION",
                     source_event_id="legacy-canonicalization-event",
@@ -341,6 +345,14 @@ def test_historical_snapshot_without_exact_legacy_revision_fails_closed() -> Non
         Phase6ExperimentRunner(sessions).replay(request)
 
 
+def test_historical_snapshot_requires_revision_from_its_provider_lineage() -> None:
+    sessions = factory()
+    _, request, _, _ = _historical_action_fixture(sessions, matching_provider=False)
+
+    with pytest.raises(DatasetInvalid, match="persistentní evidence"):
+        Phase6ExperimentRunner(sessions).replay(request)
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [
@@ -364,6 +376,50 @@ def test_historical_snapshot_requires_every_semantic_field(field: str, value: ob
 
     with pytest.raises(DatasetInvalid, match="persistentní evidence"):
         Phase6ExperimentRunner(sessions).replay(request)
+
+
+@pytest.mark.parametrize(("field", "value"), [("instrument_id", []), ("new_symbol", {})])
+def test_historical_snapshot_rejects_unhashable_field_types(field: str, value: object) -> None:
+    sessions = factory()
+    snapshot, request, _, _ = _historical_action_fixture(sessions)
+    with sessions() as session, session.begin():
+        row = session.get(DatasetSnapshotRecord, snapshot.snapshot_id)
+        manifest = json.loads(row.manifest_json)
+        manifest["corporate_actions"][0][field] = value
+        row.manifest_json = json.dumps(manifest, sort_keys=True, separators=(",", ":"))
+        row.content_hash = _canonical_hash(manifest)
+
+    with pytest.raises(DatasetInvalid, match="nejsou konzistentní"):
+        Phase6ExperimentRunner(sessions).replay(request)
+
+
+def test_new_snapshot_rejects_current_action_without_immutable_revision() -> None:
+    sessions = factory()
+    instrument, provider, days, snapshot, _ = seed_phase6_snapshot(
+        sessions, suffix="missing-new-snapshot-revision"
+    )
+    with sessions() as session, session.begin():
+        session.add(
+            CorporateActionRecord(
+                action_id="legacy-current-only",
+                instrument_id=instrument.instrument_id,
+                kind="CASH_DIVIDEND",
+                effective_at=CALENDAR.session_open(days[-1]),
+                known_at=CALENDAR.session_close(days[-2]),
+                value="1.69",
+                new_symbol=None,
+            )
+        )
+
+    with pytest.raises(DatasetInvalid, match="immutable corporate-action revision evidence"):
+        DatasetSnapshotService(sessions).build(
+            as_of=snapshot.as_of,
+            provider=provider.metadata.name,
+            universe_id=snapshot.universe_id,
+            start=snapshot.start,
+            end=snapshot.end,
+            minimum_coverage=Decimal("1"),
+        )
 
 
 @pytest.mark.parametrize(
