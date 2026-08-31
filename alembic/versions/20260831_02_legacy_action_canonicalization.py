@@ -20,17 +20,13 @@ def upgrade() -> None:
         sa.Column(
             "superseded_revision_id",
             sa.String(64),
-            sa.ForeignKey(
-                "corporate_action_revisions.revision_id", ondelete="RESTRICT"
-            ),
+            sa.ForeignKey("corporate_action_revisions.revision_id", ondelete="RESTRICT"),
             primary_key=True,
         ),
         sa.Column(
             "canonical_revision_id",
             sa.String(64),
-            sa.ForeignKey(
-                "corporate_action_revisions.revision_id", ondelete="RESTRICT"
-            ),
+            sa.ForeignKey("corporate_action_revisions.revision_id", ondelete="RESTRICT"),
             nullable=False,
         ),
         sa.Column("provider", sa.String(40), nullable=False),
@@ -62,6 +58,16 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    canonicalization_exists = (
+        op.get_bind()
+        .execute(sa.text("SELECT 1 FROM corporate_action_revision_canonicalizations LIMIT 1"))
+        .first()
+    )
+    if canonicalization_exists is not None:
+        raise RuntimeError(
+            "Downgrade 20260831_02 není možný bez ztráty immutable corporate-action "
+            "canonicalization evidence"
+        )
     if op.get_bind().dialect.name == "postgresql":
         op.execute(
             "DROP TRIGGER IF EXISTS corporate_action_revision_canonicalizations_immutable "

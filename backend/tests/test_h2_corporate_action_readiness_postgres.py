@@ -738,7 +738,7 @@ def test_delete_then_reinsert_same_payload_preserves_cancellation_and_both_revis
         assert current is not None and current.known_at == reinserted.known_at
 
 
-def test_downgrade_with_repeated_payload_incarnation_fails_without_moving_revision(scope) -> None:
+def test_downgrade_preserves_immutable_canonicalization_and_revisions(scope) -> None:
     factory, instrument = scope
     provider_action_id = f"downgrade-{uuid4().hex}"
     action_id = corporate_action_logical_id("alpaca:iex", provider_action_id)
@@ -764,11 +764,17 @@ def test_downgrade_with_repeated_payload_incarnation_fails_without_moving_revisi
             )
 
     config = Config(str(Path(__file__).parents[2] / "alembic.ini"))
-    with pytest.raises(RuntimeError, match="není možný bez destrukce legitimní immutable"):
+    with pytest.raises(RuntimeError, match="není možný bez ztráty immutable"):
         command.downgrade(config, "20260830_02")
 
     with factory() as session:
-        assert session.scalar(text("SELECT version_num FROM alembic_version")) == "20260831_01"
+        assert session.scalar(text("SELECT version_num FROM alembic_version")) == "20260831_02"
+        assert (
+            session.scalar(
+                select(func.count()).select_from(CorporateActionRevisionCanonicalizationRecord)
+            )
+            == 1
+        )
         assert (
             session.scalar(
                 select(func.count())
