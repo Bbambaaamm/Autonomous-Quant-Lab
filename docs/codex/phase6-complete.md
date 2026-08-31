@@ -3264,14 +3264,17 @@ Nevracej pouze implementační plán.
 Production-like acceptance odhalila, že standardní operator deployment přebíral legacy
 `ProductionRiskConfig` allowlist `SPY`, zatímco celý Phase 6 runtime používá jako ekonomickou
 identitu canonical `instrument_id`. Deployment nyní při vytvoření deterministicky odvodí
-seřazený allowlist ze všech PIT memberships známých nejpozději v immutable snapshot cutoffu.
+seřazený allowlist z PIT memberships uložených přímo v hashované immutable snapshot evidence.
 Prázdná identita, whitespace nebo identita delší než Phase 4 persistentní limit 40 znaků
 creation fail-closed zastaví; ticker ani wildcard nejsou náhradou canonical identity.
+Snapshot manifest schema 4 zahrnuje canonical membership intervaly do content hash; starší
+snapshot evidence bez této lineage není zpětně reinterpretována a deployment fail-closed odmítne.
 
-Explicitní risk konfigurace může nadále měnit numerické a provozní limity, její procesní
-allowlist je však pro Phase 6 deployment nahrazen canonical množinou ze schválené universe
-evidence. Výsledný allowlist zůstává součástí immutable runtime manifest hash i deployment
-identity. Approval znovu ověří pokrytí stejné snapshot evidence a PAPER runtime před načtením
+Explicitní risk konfigurace může nadále měnit numerické a provozní limity, její operátorský
+allowlist se však nikdy tiše nerozšiřuje: musí přesně odpovídat canonical množině schválené
+snapshot evidence, jinak creation skončí fail-closed. Implicitní legacy default se canonical
+množinou nahradí. Výsledný allowlist zůstává součástí immutable runtime manifest hash i
+deployment identity. Approval znovu ověří pokrytí stejné snapshot evidence a PAPER runtime před načtením
 execution dat, tvorbou targetů nebo voláním `TradingCycleService` ověří všechny aktuálně
 eligible a persisted-intent identity. Drift končí deterministickým
 `DatasetInvalid("RISK_ALLOWLIST_COVERAGE_MISMATCH")`; jednotlivé pozdější risk rejectiony
