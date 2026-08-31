@@ -18,6 +18,7 @@ from phase6_audit_helpers import (
 from sqlalchemy import create_engine, delete, func, select, update
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session, sessionmaker
+from test_phase6_experiment_audit import _historical_action_fixture
 
 from quantlab.automation import PreOpenExecutionIntentRecord
 from quantlab.domain import OrderIntent, ReconciliationStatus, Side, SystemTradingState
@@ -109,6 +110,41 @@ def test_phase6_experiment_runner_postgres_race_is_exactly_once(factory) -> None
             )
             == 1
         )
+
+
+def test_postgres_replays_snapshot_backed_by_superseded_raw_revision(factory) -> None:
+    snapshot, request, canonical_at, legacy_at = _historical_action_fixture(factory)
+
+    runner = Phase6ExperimentRunner(factory)
+    replay = runner.replay(request)
+    experiment = runner.run(request)
+    eligibility = Phase6EligibilityService(factory)
+    eligibility.evaluate_eligibility(experiment.id, actor={"id": "pr81"}, reason="PR81")
+    eligibility.promote(experiment.id, actor={"id": "pr81"}, reason="PR81")
+    account_id = f"paper-pr81-{uuid4().hex}"
+    Phase4Repository(
+        factory.kw["bind"].url.render_as_string(hide_password=False),
+        bootstrap_test_schema=False,
+    ).seed_account(account_id, Decimal("100000"))
+    deployment_service = DeploymentService(factory)
+    deployment = deployment_service.create(experiment.id, account_id)
+    deployment_service.approve(deployment.deployment_id, datetime.now(UTC))
+    monitoring_service = PaperMonitoringService(factory)
+    policy = monitoring_service.create_policy(
+        f"pr81-{uuid4().hex}", DEFAULT_POLICY.copy(), datetime.now(UTC)
+    )
+    monitoring = monitoring_service.enroll(
+        deployment.deployment_id, policy.policy_id, datetime.now(UTC)
+    )
+
+    assert replay.oos_sessions
+    assert monitoring.state == MonitoringState.ACTIVE
+    with factory() as session:
+        persisted_snapshot = session.get(DatasetSnapshotRecord, snapshot.snapshot_id)
+        current = session.get(CorporateActionRecord, "a" * 64)
+        assert persisted_snapshot is not None and persisted_snapshot.status == "VALID"
+        assert current is not None and current.known_at == canonical_at
+        assert current.known_at != legacy_at
 
 
 def test_postgres_snapshot_pinned_runner_trades_delayed_historical_ingestion(factory) -> None:

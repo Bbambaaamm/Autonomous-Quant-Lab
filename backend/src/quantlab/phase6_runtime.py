@@ -23,7 +23,12 @@ from quantlab.market_data import (
     XNYSCalendar,
     causal_adjusted_close,
 )
-from quantlab.market_data_service import _database_utc, _lock, _observation
+from quantlab.market_data_service import (
+    CorporateActionRevisionRecord,
+    _database_utc,
+    _lock,
+    _observation,
+)
 from quantlab.multi_asset import (
     STRATEGY_REGISTRY,
     MultiAssetResult,
@@ -381,22 +386,36 @@ class Phase6ExperimentRunner:
             action_ids = [item.action_id for item in corporate_actions]
             if len(set(action_ids)) != len(action_ids):
                 raise DatasetInvalid("Snapshot corporate actions obsahují duplicity")
-            persisted_actions = {
-                item.action_id: item
-                for item in session.scalars(
-                    select(CorporateActionRecord).where(
-                        CorporateActionRecord.action_id.in_(action_ids)
+            immutable_revisions = tuple(
+                session.scalars(
+                    select(CorporateActionRevisionRecord).where(
+                        CorporateActionRevisionRecord.action_id.in_(action_ids)
                     )
                 )
+            )
+            revision_evidence = {
+                (
+                    revision.action_id,
+                    revision.instrument_id,
+                    revision.kind,
+                    _database_utc(revision.effective_at),
+                    _database_utc(revision.known_at),
+                    revision.value,
+                    revision.new_symbol,
+                )
+                for revision in immutable_revisions
             }
-            if set(persisted_actions) != set(action_ids) or any(
-                persisted_actions[item.action_id].instrument_id != item.instrument_id
-                or persisted_actions[item.action_id].kind != item.kind.value
-                or persisted_actions[item.action_id].effective_at != item.effective_at
-                or persisted_actions[item.action_id].known_at != item.known_at
-                or persisted_actions[item.action_id].value
-                != (str(item.value) if item.value is not None else None)
-                or persisted_actions[item.action_id].new_symbol != item.new_symbol
+            if any(
+                (
+                    item.action_id,
+                    item.instrument_id,
+                    item.kind.value,
+                    item.effective_at,
+                    item.known_at,
+                    str(item.value) if item.value is not None else None,
+                    item.new_symbol,
+                )
+                not in revision_evidence
                 for item in corporate_actions
             ):
                 raise DatasetInvalid(
