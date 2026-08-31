@@ -306,6 +306,8 @@ def _historical_action_fixture(
             )
         )
         if include_legacy:
+            # PostgreSQL musí před sidecarem vidět obě FK revision evidence i source event.
+            session.flush()
             session.add(
                 CorporateActionRevisionCanonicalizationRecord(
                     superseded_revision_id="2" * 64,
