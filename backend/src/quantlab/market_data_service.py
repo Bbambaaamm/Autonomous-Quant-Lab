@@ -124,6 +124,7 @@ class CorporateActionRevisionRecord(Base):
             "provider",
             "provider_action_id",
             "payload_hash",
+            "known_at",
             name="uq_corporate_action_revision_provider_payload",
         ),
     )
@@ -626,10 +627,18 @@ class PersistentMarketDataService:
         if len(provider_action_id) > 128:
             raise DatasetInvalid("Provider corporate-action ID překračuje persistentní limit")
         payload_hash = action.payload_hash or self._action_payload_hash(action)
+        known_at = require_utc(action.known_at)
         revision_id = hashlib.sha256(
-            f"{provider}|{provider_action_id}|{payload_hash}".encode()
+            f"{provider}|{provider_action_id}|{payload_hash}|{known_at.isoformat()}".encode()
         ).hexdigest()
-        revision = session.get(CorporateActionRevisionRecord, revision_id)
+        revision = session.scalar(
+            select(CorporateActionRevisionRecord).where(
+                CorporateActionRevisionRecord.provider == provider,
+                CorporateActionRevisionRecord.provider_action_id == provider_action_id,
+                CorporateActionRevisionRecord.payload_hash == payload_hash,
+                CorporateActionRevisionRecord.known_at == known_at,
+            )
+        )
         values = (
             action.action_id,
             provider,
@@ -638,7 +647,7 @@ class PersistentMarketDataService:
             action.instrument_id,
             action.kind.value,
             action.effective_at,
-            action.known_at,
+            known_at,
             str(action.value) if action.value is not None else None,
             action.new_symbol,
         )
@@ -653,7 +662,7 @@ class PersistentMarketDataService:
                     instrument_id=action.instrument_id,
                     kind=action.kind.value,
                     effective_at=action.effective_at,
-                    known_at=action.known_at,
+                    known_at=known_at,
                     value=str(action.value) if action.value is not None else None,
                     new_symbol=action.new_symbol,
                 )
