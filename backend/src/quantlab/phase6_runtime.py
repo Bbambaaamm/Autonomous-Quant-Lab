@@ -23,7 +23,12 @@ from quantlab.market_data import (
     XNYSCalendar,
     causal_adjusted_close,
 )
-from quantlab.market_data_service import _database_utc, _lock, _observation
+from quantlab.market_data_service import (
+    CorporateActionRevisionRecord,
+    _database_utc,
+    _lock,
+    _observation,
+)
 from quantlab.multi_asset import (
     STRATEGY_REGISTRY,
     MultiAssetResult,
@@ -361,42 +366,74 @@ class Phase6ExperimentRunner:
             if not isinstance(action_entries, list):
                 raise DatasetInvalid("Snapshot manifest neobsahuje immutable corporate actions")
             try:
-                corporate_actions = tuple(
-                    CorporateAction(
-                        action_id=entry["action_id"],
-                        instrument_id=entry["instrument_id"],
-                        kind=CorporateActionKind(entry["kind"]),
-                        effective_at=datetime.fromisoformat(entry["effective_at"]),
-                        known_at=datetime.fromisoformat(entry["known_at"]),
-                        value=Decimal(entry["value"]) if entry["value"] is not None else None,
-                        new_symbol=entry["new_symbol"],
+                corporate_actions_list: list[CorporateAction] = []
+                for entry in action_entries:
+                    if not isinstance(entry, dict):
+                        raise TypeError
+                    if (
+                        not isinstance(entry.get("action_id"), str)
+                        or not isinstance(entry.get("instrument_id"), str)
+                        or not isinstance(entry.get("kind"), str)
+                        or not isinstance(entry.get("effective_at"), str)
+                        or not isinstance(entry.get("known_at"), str)
+                        or (
+                            entry.get("value") is not None
+                            and not isinstance(entry.get("value"), str)
+                        )
+                        or (
+                            entry.get("new_symbol") is not None
+                            and not isinstance(entry.get("new_symbol"), str)
+                        )
+                    ):
+                        raise TypeError
+                    corporate_actions_list.append(
+                        CorporateAction(
+                            action_id=entry["action_id"],
+                            instrument_id=entry["instrument_id"],
+                            kind=CorporateActionKind(entry["kind"]),
+                            effective_at=datetime.fromisoformat(entry["effective_at"]),
+                            known_at=datetime.fromisoformat(entry["known_at"]),
+                            value=(Decimal(entry["value"]) if entry["value"] is not None else None),
+                            new_symbol=entry["new_symbol"],
+                        )
                     )
-                    for entry in action_entries
-                    if isinstance(entry, dict)
-                )
+                corporate_actions = tuple(corporate_actions_list)
             except (KeyError, TypeError, ValueError) as exc:
                 raise DatasetInvalid("Snapshot corporate actions nejsou konzistentní") from exc
-            if len(corporate_actions) != len(action_entries):
-                raise DatasetInvalid("Snapshot corporate actions nejsou konzistentní")
             action_ids = [item.action_id for item in corporate_actions]
             if len(set(action_ids)) != len(action_ids):
                 raise DatasetInvalid("Snapshot corporate actions obsahují duplicity")
-            persisted_actions = {
-                item.action_id: item
-                for item in session.scalars(
-                    select(CorporateActionRecord).where(
-                        CorporateActionRecord.action_id.in_(action_ids)
+            immutable_revisions = tuple(
+                session.scalars(
+                    select(CorporateActionRevisionRecord).where(
+                        CorporateActionRevisionRecord.action_id.in_(action_ids),
+                        CorporateActionRevisionRecord.provider == snapshot.provider,
                     )
                 )
+            )
+            revision_evidence = {
+                (
+                    revision.action_id,
+                    revision.instrument_id,
+                    revision.kind,
+                    _database_utc(revision.effective_at),
+                    _database_utc(revision.known_at),
+                    revision.value,
+                    revision.new_symbol,
+                )
+                for revision in immutable_revisions
             }
-            if set(persisted_actions) != set(action_ids) or any(
-                persisted_actions[item.action_id].instrument_id != item.instrument_id
-                or persisted_actions[item.action_id].kind != item.kind.value
-                or persisted_actions[item.action_id].effective_at != item.effective_at
-                or persisted_actions[item.action_id].known_at != item.known_at
-                or persisted_actions[item.action_id].value
-                != (str(item.value) if item.value is not None else None)
-                or persisted_actions[item.action_id].new_symbol != item.new_symbol
+            if any(
+                (
+                    item.action_id,
+                    item.instrument_id,
+                    item.kind.value,
+                    item.effective_at,
+                    item.known_at,
+                    str(item.value) if item.value is not None else None,
+                    item.new_symbol,
+                )
+                not in revision_evidence
                 for item in corporate_actions
             ):
                 raise DatasetInvalid(

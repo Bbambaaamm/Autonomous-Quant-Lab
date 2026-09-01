@@ -3,18 +3,30 @@ from __future__ import annotations
 import hashlib
 import json
 from copy import deepcopy
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
 from fastapi.testclient import TestClient
-from phase6_audit_helpers import seed_phase6_snapshot
+from phase6_audit_helpers import CALENDAR, seed_phase6_snapshot
 from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import sessionmaker
 
 import quantlab.phase6_runtime as runtime
 from quantlab import api
 from quantlab.market_data import DatasetInvalid
-from quantlab.persistence import DatasetSnapshotRecord, ExperimentRecord, StrategyRecord
+from quantlab.market_data_service import (
+    CorporateActionRevisionCanonicalizationRecord,
+    CorporateActionRevisionRecord,
+    DatasetSnapshotService,
+)
+from quantlab.persistence import (
+    CorporateActionEventRecord,
+    CorporateActionRecord,
+    DatasetSnapshotRecord,
+    ExperimentRecord,
+    StrategyRecord,
+)
 from quantlab.phase6_runtime import (
     Phase6ExperimentRequest,
     Phase6ExperimentRunner,
@@ -212,6 +224,206 @@ def _canonical_hash(manifest: dict[str, object]) -> str:
     return hashlib.sha256(
         json.dumps(immutable, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
+
+
+def _historical_action_fixture(
+    sessions, *, include_legacy: bool = True, matching_provider: bool = True
+):
+    instrument, provider, _, snapshot, request = seed_phase6_snapshot(
+        sessions, suffix=f"historical-action-{include_legacy}"
+    )
+    action_id = "a" * 64
+    # Akce je stejně jako stagingová dividenda známa až po effective_at, ale ještě
+    # před research intervalem; enrollment test tak izoluje replay od výnosové policy.
+    canonical_at = datetime(2026, 1, 1, 12, tzinfo=UTC)
+    legacy_at = canonical_at + timedelta(hours=1)
+    effective_at = datetime(2025, 12, 30, tzinfo=UTC)
+    revision_provider = provider.metadata.name if matching_provider else "different-lineage"
+    action_entry = {
+        "action_id": action_id,
+        "instrument_id": instrument.instrument_id,
+        "kind": "CASH_DIVIDEND",
+        "effective_at": effective_at.isoformat(),
+        "known_at": legacy_at.isoformat(),
+        "value": "1.69",
+        "new_symbol": None,
+    }
+    with sessions() as session, session.begin():
+        row = session.get(DatasetSnapshotRecord, snapshot.snapshot_id)
+        manifest = json.loads(row.manifest_json)
+        manifest["corporate_actions"] = [action_entry]
+        row.manifest_json = json.dumps(manifest, sort_keys=True, separators=(",", ":"))
+        row.content_hash = _canonical_hash(manifest)
+        session.add(
+            CorporateActionEventRecord(
+                event_id="legacy-canonicalization-event",
+                provider=revision_provider,
+                occurred_at=legacy_at,
+                action="update",
+                provider_action_id="provider-action",
+                payload_hash="b" * 64,
+            )
+        )
+        revisions = [
+            CorporateActionRevisionRecord(
+                revision_id="1" * 64,
+                action_id=action_id,
+                provider=revision_provider,
+                provider_action_id="provider-action",
+                payload_hash="b" * 64,
+                instrument_id=instrument.instrument_id,
+                kind="CASH_DIVIDEND",
+                effective_at=effective_at,
+                known_at=canonical_at,
+                value="1.69",
+                new_symbol=None,
+            )
+        ]
+        if include_legacy:
+            revisions.append(
+                CorporateActionRevisionRecord(
+                    revision_id="2" * 64,
+                    action_id=action_id,
+                    provider=revision_provider,
+                    provider_action_id="provider-action",
+                    payload_hash="b" * 64,
+                    instrument_id=instrument.instrument_id,
+                    kind="CASH_DIVIDEND",
+                    effective_at=effective_at,
+                    known_at=legacy_at,
+                    value="1.69",
+                    new_symbol=None,
+                )
+            )
+        session.add_all(revisions)
+        session.add(
+            CorporateActionRecord(
+                action_id=action_id,
+                instrument_id=instrument.instrument_id,
+                kind="CASH_DIVIDEND",
+                effective_at=effective_at,
+                known_at=canonical_at,
+                value="1.69",
+                new_symbol=None,
+            )
+        )
+        if include_legacy:
+            # PostgreSQL musí před sidecarem vidět obě FK revision evidence i source event.
+            session.flush()
+            session.add(
+                CorporateActionRevisionCanonicalizationRecord(
+                    superseded_revision_id="2" * 64,
+                    canonical_revision_id="1" * 64,
+                    provider=revision_provider,
+                    provider_action_id="provider-action",
+                    reason="LEGACY_DUPLICATE_SAME_SSE_INCARNATION",
+                    source_event_id="legacy-canonicalization-event",
+                    repaired_at=legacy_at,
+                )
+            )
+    return snapshot, request, canonical_at, legacy_at
+
+
+def test_historical_superseded_revision_remains_replayable_and_immutable() -> None:
+    sessions = factory()
+    snapshot, request, canonical_at, legacy_at = _historical_action_fixture(sessions)
+    runner = Phase6ExperimentRunner(sessions)
+
+    assert runner.replay(request) == runner.replay(request)
+    with sessions() as session:
+        persisted_snapshot = session.get(DatasetSnapshotRecord, snapshot.snapshot_id)
+        legacy = session.get(CorporateActionRevisionRecord, "2" * 64)
+        current = session.get(CorporateActionRecord, "a" * 64)
+        assert persisted_snapshot.content_hash == _canonical_hash(
+            json.loads(persisted_snapshot.manifest_json)
+        )
+        assert legacy is not None and runtime._database_utc(legacy.known_at) == legacy_at
+        assert current is not None and runtime._database_utc(current.known_at) == canonical_at
+
+
+def test_historical_snapshot_without_exact_legacy_revision_fails_closed() -> None:
+    sessions = factory()
+    _, request, _, _ = _historical_action_fixture(sessions, include_legacy=False)
+
+    with pytest.raises(DatasetInvalid, match="persistentní evidence"):
+        Phase6ExperimentRunner(sessions).replay(request)
+
+
+def test_historical_snapshot_requires_revision_from_its_provider_lineage() -> None:
+    sessions = factory()
+    _, request, _, _ = _historical_action_fixture(sessions, matching_provider=False)
+
+    with pytest.raises(DatasetInvalid, match="persistentní evidence"):
+        Phase6ExperimentRunner(sessions).replay(request)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("instrument_id", "different-instrument"),
+        ("kind", "SPLIT"),
+        ("effective_at", "2025-12-31T00:00:00+00:00"),
+        ("known_at", "2026-01-01T14:00:00+00:00"),
+        ("value", "1.70"),
+        ("new_symbol", "IBM2"),
+    ],
+)
+def test_historical_snapshot_requires_every_semantic_field(field: str, value: object) -> None:
+    sessions = factory()
+    snapshot, request, _, _ = _historical_action_fixture(sessions)
+    with sessions() as session, session.begin():
+        row = session.get(DatasetSnapshotRecord, snapshot.snapshot_id)
+        manifest = json.loads(row.manifest_json)
+        manifest["corporate_actions"][0][field] = value
+        row.manifest_json = json.dumps(manifest, sort_keys=True, separators=(",", ":"))
+        row.content_hash = _canonical_hash(manifest)
+
+    with pytest.raises(DatasetInvalid, match="persistentní evidence"):
+        Phase6ExperimentRunner(sessions).replay(request)
+
+
+@pytest.mark.parametrize(("field", "value"), [("instrument_id", []), ("new_symbol", {})])
+def test_historical_snapshot_rejects_unhashable_field_types(field: str, value: object) -> None:
+    sessions = factory()
+    snapshot, request, _, _ = _historical_action_fixture(sessions)
+    with sessions() as session, session.begin():
+        row = session.get(DatasetSnapshotRecord, snapshot.snapshot_id)
+        manifest = json.loads(row.manifest_json)
+        manifest["corporate_actions"][0][field] = value
+        row.manifest_json = json.dumps(manifest, sort_keys=True, separators=(",", ":"))
+        row.content_hash = _canonical_hash(manifest)
+
+    with pytest.raises(DatasetInvalid, match="nejsou konzistentní"):
+        Phase6ExperimentRunner(sessions).replay(request)
+
+
+def test_new_snapshot_rejects_current_action_without_immutable_revision() -> None:
+    sessions = factory()
+    instrument, provider, days, snapshot, _ = seed_phase6_snapshot(
+        sessions, suffix="missing-new-snapshot-revision"
+    )
+    with sessions() as session, session.begin():
+        session.add(
+            CorporateActionRecord(
+                action_id="legacy-current-only",
+                instrument_id=instrument.instrument_id,
+                kind="CASH_DIVIDEND",
+                effective_at=CALENDAR.session_open(days[-1]),
+                known_at=CALENDAR.session_close(days[-2]),
+                value="1.69",
+                new_symbol=None,
+            )
+        )
+
+    with pytest.raises(DatasetInvalid, match="immutable corporate-action revision evidence"):
+        DatasetSnapshotService(sessions).build(
+            as_of=snapshot.as_of,
+            provider=provider.metadata.name,
+            universe_id=snapshot.universe_id,
+            start=snapshot.start,
+            end=snapshot.end,
+            minimum_coverage=Decimal("1"),
+        )
 
 
 @pytest.mark.parametrize(

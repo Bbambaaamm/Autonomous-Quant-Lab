@@ -1035,7 +1035,11 @@ class DatasetSnapshotService:
                     )
                 )
             )
-            action_ids = set(latest_revisions) | {action.action_id for action in fallback_actions}
+            if any(action.action_id not in latest_revisions for action in fallback_actions):
+                raise DatasetInvalid(
+                    "Nový snapshot nelze vytvořit bez immutable corporate-action revision evidence"
+                )
+            action_ids = set(latest_revisions)
             cancellations = (
                 tuple(
                     session.scalars(
@@ -1075,26 +1079,6 @@ class DatasetSnapshotService:
                         "known_at": revision_action.known_at.isoformat(),
                         "value": revision_action.value,
                         "new_symbol": revision_action.new_symbol,
-                    }
-                )
-            for fallback_action in sorted(fallback_actions, key=lambda item: item.action_id):
-                if fallback_action.action_id in latest_revisions:
-                    continue
-                known_at = _database_utc(fallback_action.known_at)
-                if (
-                    latest_cancel.get(fallback_action.action_id, datetime.min.replace(tzinfo=UTC))
-                    >= known_at
-                ):
-                    continue
-                canonical_actions.append(
-                    {
-                        "action_id": fallback_action.action_id,
-                        "instrument_id": fallback_action.instrument_id,
-                        "kind": fallback_action.kind,
-                        "effective_at": fallback_action.effective_at.isoformat(),
-                        "known_at": fallback_action.known_at.isoformat(),
-                        "value": fallback_action.value,
-                        "new_symbol": fallback_action.new_symbol,
                     }
                 )
             canonical_actions.sort(key=lambda item: str(item["action_id"]))
