@@ -233,9 +233,11 @@ def _historical_action_fixture(
         sessions, suffix=f"historical-action-{include_legacy}"
     )
     action_id = "a" * 64
-    canonical_at = datetime(2026, 1, 10, 12, tzinfo=UTC)
+    # Akce je stejně jako stagingová dividenda známa až po effective_at, ale ještě
+    # před research intervalem; enrollment test tak izoluje replay od výnosové policy.
+    canonical_at = datetime(2026, 1, 1, 12, tzinfo=UTC)
     legacy_at = canonical_at + timedelta(hours=1)
-    effective_at = datetime(2026, 1, 20, tzinfo=UTC)
+    effective_at = datetime(2025, 12, 30, tzinfo=UTC)
     revision_provider = provider.metadata.name if matching_provider else "different-lineage"
     action_entry = {
         "action_id": action_id,
@@ -360,8 +362,8 @@ def test_historical_snapshot_requires_revision_from_its_provider_lineage() -> No
     [
         ("instrument_id", "different-instrument"),
         ("kind", "SPLIT"),
-        ("effective_at", "2026-01-21T00:00:00+00:00"),
-        ("known_at", "2026-01-10T14:00:00+00:00"),
+        ("effective_at", "2025-12-31T00:00:00+00:00"),
+        ("known_at", "2026-01-01T14:00:00+00:00"),
         ("value", "1.70"),
         ("new_symbol", "IBM2"),
     ],
