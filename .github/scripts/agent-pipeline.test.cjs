@@ -134,7 +134,7 @@ test("trigger routing rozlišuje CI, review signal a vadné reusable inputs fail
   }).kind, "review-signal");
   assert.equal(pipeline.verificationTriggerDecision({
     workflowRun: { ...base, name: "Agent Codex review", event: "workflow_run", head_sha: "a".repeat(40) },
-  }).kind, "codex-review");
+  }).reason, "UNTRUSTED_WORKFLOW_RUN_TRIGGER");
   assert.equal(pipeline.verificationTriggerDecision({
     workflowCallInputs: { prNumber: "202", headSha: "stale" },
   }).reason, "INVALID_WORKFLOW_CALL_INPUTS");
@@ -189,6 +189,12 @@ test("CI joby musí všechny uspět na ověřovaném SHA", () => {
   assert.equal(pipeline.successfulRequiredJobs(jobs, ["quality"], "abc"), true);
   assert.equal(pipeline.successfulRequiredJobs(jobs, ["quality", "api"], "abc"), false);
   assert.equal(pipeline.successfulRequiredJobs(jobs, ["quality"], "other"), false);
+});
+
+test("GitHub jobs payload bez head_sha je SHA-bound přes již ověřený workflow run", () => {
+  const jobs = [{ id: 7, name: "quality", conclusion: "success", run_attempt: 1,
+    steps: [{ name: "ruff check", conclusion: "success" }] }];
+  assert.equal(pipeline.successfulRequiredJobs(jobs, ["quality"], "a".repeat(40)), true);
 });
 
 test("re-run failed jobs skládá nejnovější výsledky ze všech attempts", () => {
@@ -281,7 +287,7 @@ test("review acknowledgement i native approval dávají verifieru trusted re-eva
   const signal = fs.readFileSync(`${__dirname}/../workflows/agent-review-signal.yml`, "utf8");
   assert.match(signal, /pull_request_review:\s*\n\s+types: \[submitted\]/);
   assert.match(signal, /permissions: \{\}/);
-  assert.match(verify, /workflows: \[CI, Agent review signal, Agent Codex review\]/);
+  assert.match(verify, /workflows: \[CI, Agent review signal\]/);
   assert.match(verify, /workflow_call:/);
   assert.match(verify, /listWorkflowRunsForRepo/);
   assert.match(acknowledgement, /uses: \.\/\.github\/workflows\/agent-verify\.yml/);
@@ -296,12 +302,40 @@ test("dokumentace popisuje jediný state label, ne jediný label na objektu", ()
 });
 
 test("v2 classifier je jednoznačný a unsafe failures fail-closed", () => {
-  const config = require("../agent-pipeline.json").v2;
-  const job = (name, id = 1) => ({ name, id, head_sha: "a", run_attempt: 1, conclusion: "failure" });
-  assert.deepEqual(pipeline.classifyCiFailure({ jobs: [job("quality")], headSha: "a", fixableJobs: config.fixableCiJobs, prohibitedJobs: config.prohibitedCiJobs }),
-    { disposition: "FIX", job: "quality", evidence: "a:1:1" });
-  assert.equal(pipeline.classifyCiFailure({ jobs: [job("security")], headSha: "a", fixableJobs: config.fixableCiJobs, prohibitedJobs: config.prohibitedCiJobs }).disposition, "NEEDS_HUMAN");
-  assert.equal(pipeline.classifyCiFailure({ jobs: [job("quality"), job("api", 2)], headSha: "a", fixableJobs: config.fixableCiJobs, prohibitedJobs: config.prohibitedCiJobs }).reason, "AMBIGUOUS_FAILURE_SET");
+  const sha = "a".repeat(40);
+  // Real listJobsForWorkflowRun shape deliberately has no head_sha.
+  const job = (name, id = 1, steps = []) => ({ name, id, run_attempt: 1, conclusion: "failure", steps });
+  const classified = pipeline.classifyCiFailure({ jobs: [job("quality", 1, [{ name: "ruff check", conclusion: "failure" }])], runHeadSha: sha, expectedHeadSha: sha });
+  assert.equal(classified.disposition, "FIX");
+  assert.equal(classified.failureClass, "lint-format");
+  assert.equal(pipeline.classifyCiFailure({ jobs: [job("security")], runHeadSha: sha, expectedHeadSha: sha }).disposition, "NEEDS_HUMAN");
+  assert.equal(pipeline.classifyCiFailure({ jobs: [job("quality"), job("api", 2)], runHeadSha: sha, expectedHeadSha: sha }).failureClass, "multiple-failures");
+  assert.equal(pipeline.classifyCiFailure({ jobs: [job("api")], runHeadSha: sha, expectedHeadSha: "b".repeat(40) }).disposition, "NO_WRITE");
+});
+
+test("v2 classes, diagnostics and trusted command map are deterministic", () => {
+  assert.deepEqual(pipeline.FAILURE_CLASSES, ["lint-format", "typecheck", "unit-test", "api-test", "integration-postgres", "frontend-test-build", "security", "container-build", "production-smoke", "dependency-lock", "infra-transient", "multiple-failures", "unknown"]);
+  assert.equal(pipeline.normalizedFailureClass({ name: "quality", steps: [{ name: "mypy", conclusion: "failure" }] }), "typecheck");
+  assert.match(pipeline.redactDiagnostic("token=ghp_abcdefgh secret=hello"), /\[REDACTED\]/);
+  assert.match(pipeline.validationCommands("api-test")[0], /test_vertical_slice\.py/);
+  assert.equal(pipeline.validationCommands("security"), null);
+});
+
+test("v2 lifecycle and two-sided durable linkage fail closed", () => {
+  const marker = "<!-- agent-link:v1 repo=o/r issue=88 pr=99 -->";
+  const bot = [{ user: { login: "github-actions[bot]" }, body: marker }];
+  assert.deepEqual(pipeline.lifecycleAtAgentPr(["agent:pr"], ["agent:pr"]), { ok: true });
+  assert.equal(pipeline.lifecycleAtAgentPr(["agent:pr", "agent:needs-human"], ["agent:pr"]).reason, "NEEDS_HUMAN_PRESENT");
+  assert.equal(pipeline.lifecycleAtAgentPr(["agent:running"], ["agent:pr"]).reason, "NOT_EXACT_AGENT_PR");
+  assert.deepEqual(pipeline.fullLinkageDecision({ prBody: "Agent-Issue: #88", prComments: bot, issueComments: bot, owner: "o", repo: "r", issueNumber: 88, prNumber: 99 }), { ok: true });
+  assert.equal(pipeline.fullLinkageDecision({ prBody: "Agent-Issue: #88", prComments: bot, issueComments: [], owner: "o", repo: "r", issueNumber: 88, prNumber: 99 }).ok, false);
+});
+
+test("validated artifact binds checksum, byte bound, and exact allowed paths", () => {
+  const c = require("../agent-pipeline.json").v2;
+  assert.deepEqual(pipeline.trustedArtifactDecision({ patchBytes: 20, actualChecksum: "x", metadataChecksum: "x", actualPaths: ["backend/a.py"], metadataPaths: ["backend/a.py"], config: c }), { ok: true });
+  assert.equal(pipeline.trustedArtifactDecision({ patchBytes: 20, actualChecksum: "x", metadataChecksum: "y", actualPaths: ["backend/a.py"], metadataPaths: ["backend/a.py"], config: c }).ok, false);
+  assert.equal(pipeline.trustedArtifactDecision({ patchBytes: 20, actualChecksum: "x", metadataChecksum: "x", actualPaths: ["docs/ROADMAP.md"], metadataPaths: ["docs/ROADMAP.md"], config: c }).ok, false);
 });
 
 test("v2 fixer budget, exact evidence a idempotence jsou bounded", () => {
@@ -333,9 +367,19 @@ test("v2 workflow wiring odděluje secret, validation a write trust domains", ()
   const reviewer = fs.readFileSync(".github/workflows/agent-codex-review.yml", "utf8");
   assert.match(fixer, /openai\/codex-action@[0-9a-f]{40}/);
   assert.match(reviewer, /openai\/codex-action@[0-9a-f]{40}/);
+  for (const workflow of [fixer, reviewer]) {
+    assert.match(workflow, /openai\/codex-action@86365089eb2b84e0a8fb0717b304f8bdcb13b20e/);
+    assert.doesNotMatch(workflow, /openai\/codex-action@(main|v[0-9]+)/);
+  }
   assert.match(fixer, /maxFixCommits/);
   assert.match(fixer, /persist-credentials: false/);
   assert.match(fixer, /concurrency:/);
-  assert.match(reviewer, /sandbox: read-only/);
+  assert.match(reviewer, /permission-profile: ':read-only'/);
+  assert.match(fixer, /permission-profile: ":workspace"/);
+  assert.match(fixer, /allow-bots: "github-actions\[bot\]"/);
+  assert.match(reviewer, /output-schema:/);
+  assert.match(reviewer, /uses: \.\/\.github\/workflows\/agent-verify\.yml/);
+  assert.match(reviewer, /workflow_dispatch:/);
+  assert.match(fixer, /validated-checksum/);
   assert.doesNotMatch(fixer.slice(fixer.indexOf("validate-patch:"), fixer.indexOf("trusted-publish:")), /OPENAI_API_KEY|contents: write/);
 });

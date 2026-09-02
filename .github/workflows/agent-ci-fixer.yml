@@ -23,6 +23,8 @@ jobs:
       pr_number: ${{ steps.classify.outputs.pr_number }}
       issue_number: ${{ steps.classify.outputs.issue_number }}
       evidence: ${{ steps.classify.outputs.evidence }}
+      failure_class: ${{ steps.classify.outputs.failure_class }}
+      diagnostic: ${{ steps.classify.outputs.diagnostic }}
       attempt: ${{ steps.classify.outputs.attempt }}
       escalation: ${{ steps.classify.outputs.escalation }}
       reason: ${{ steps.classify.outputs.reason }}
@@ -40,18 +42,31 @@ jobs:
             if (!issueNumber || pr.head.sha!==run.head_sha || pr.state!=="open" || pr.base.ref!==context.payload.repository.default_branch) return core.notice("NO_WRITE: stale nebo neplatný PR");
             const {data:issue}=await github.rest.issues.get({...context.repo,issue_number:issueNumber});
             const comments=await github.paginate(github.rest.issues.listComments,{...context.repo,issue_number:prNumber,per_page:100});
-            if (!p.isImplementation(issue.labels) || !p.hasDurableLink(comments,{...context.repo,issueNumber,prNumber})) return core.notice("NO_WRITE: neplatná eligibility/linkage");
+            const issueComments=await github.paginate(github.rest.issues.listComments,{...context.repo,issue_number:issueNumber,per_page:100});
+            const lifecycle=p.lifecycleAtAgentPr(pr.labels,issue.labels);
+            const linkage=p.fullLinkageDecision({prBody:pr.body,prComments:comments,issueComments,...context.repo,issueNumber,prNumber});
+            if (!p.isImplementation(issue.labels) || !lifecycle.ok || !linkage.ok) return core.notice(`NO_WRITE: ${lifecycle.reason||linkage.reason||"INELIGIBLE"}`);
             for (const [key,value] of Object.entries({source_sha:run.head_sha,pr_number:prNumber,issue_number:issueNumber})) core.setOutput(key,value);
             let classification;
             if (run.name==="CI") {
               const jobs=await github.paginate(github.rest.actions.listJobsForWorkflowRun,{...context.repo,run_id:run.id,filter:"latest",per_page:100});
-              classification=p.classifyCiFailure({jobs,headSha:run.head_sha,fixableJobs:c.v2.fixableCiJobs,prohibitedJobs:c.v2.prohibitedCiJobs});
-            } else classification={disposition:"FIX",job:"independent-review",evidence:`${run.head_sha}:${run.id}:${run.run_attempt}`};
+              classification=p.classifyCiFailure({jobs,runHeadSha:run.head_sha,expectedHeadSha:pr.head.sha});
+            } else classification={disposition:"NEEDS_HUMAN",failureClass:"unknown",reason:"INDEPENDENT_REVIEW_BLOCK"};
             if (classification.disposition!=="FIX") { core.setOutput("escalation","true"); core.setOutput("reason",classification.reason); return; }
             const budget=p.fixAttemptDecision({comments,sourceSha:run.head_sha,evidence:classification.evidence,maxAttempts:c.v2.maxFixCommits});
             if (budget.action==="NEEDS_HUMAN") { core.setOutput("escalation","true"); core.setOutput("reason",budget.reason); return; }
             if (budget.action!=="FIX") return core.notice(`NO_WRITE: ${budget.reason}`);
-            for (const [key,value] of Object.entries({eligible:"true",source_sha:run.head_sha,pr_number:prNumber,issue_number:issueNumber,evidence:classification.evidence,attempt:budget.attempt})) core.setOutput(key,value);
+            for (const [key,value] of Object.entries({eligible:"true",source_sha:run.head_sha,pr_number:prNumber,issue_number:issueNumber,evidence:classification.evidence,failure_class:classification.failureClass,diagnostic:classification.diagnostic,attempt:budget.attempt})) core.setOutput(key,value);
+      - name: Materialize bounded trusted diagnostic
+        if: steps.classify.outputs.eligible == 'true'
+        env: {DIAGNOSTIC: '${{ steps.classify.outputs.diagnostic }}'}
+        run: |
+          printf '%s' "$DIAGNOSTIC" > "$RUNNER_TEMP/diagnostic.json"
+          test "$(stat -c%s "$RUNNER_TEMP/diagnostic.json")" -le 8192
+          jq -e 'has("failureClass") and has("failedSteps")' "$RUNNER_TEMP/diagnostic.json"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: steps.classify.outputs.eligible == 'true'
+        with: {name: 'trusted-diagnostic-${{ github.run_id }}', path: '${{ runner.temp }}/diagnostic.json', if-no-files-found: error, retention-days: 1}
 
   escalate:
     needs: classify
@@ -68,7 +83,12 @@ jobs:
             const p=require('./.github/scripts/agent-pipeline.cjs');
             const prNumber=Number(process.env.PR), issueNumber=Number(process.env.ISSUE);
             const {data:pr}=await github.rest.pulls.get({...context.repo,pull_number:prNumber});
-            if(pr.head.sha!==process.env.SHA) return core.setFailed("TOCTOU_REJECTED");
+            const {data:issue}=await github.rest.issues.get({...context.repo,issue_number:issueNumber});
+            const prComments=await github.paginate(github.rest.issues.listComments,{...context.repo,issue_number:prNumber,per_page:100});
+            const issueComments=await github.paginate(github.rest.issues.listComments,{...context.repo,issue_number:issueNumber,per_page:100});
+            if(pr.head.sha!==process.env.SHA||!p.lifecycleAtAgentPr(pr.labels,issue.labels).ok||
+              !p.fullLinkageDecision({prBody:pr.body,prComments,issueComments,...context.repo,issueNumber,prNumber}).ok)
+              return core.setFailed("TOCTOU_REJECTED");
             for(const number of [prNumber,issueNumber]) {
               const {data:item}=await github.rest.issues.get({...context.repo,issue_number:number});
               const plan=p.escalationMutationPlan(item.labels); if(!plan.ok) return core.setFailed(plan.reason);
@@ -87,26 +107,29 @@ jobs:
         with: {ref: '${{ needs.classify.outputs.source_sha }}', persist-credentials: false}
       - run: test "$(git rev-parse HEAD)" = "${SOURCE_SHA}"
         env: {SOURCE_SHA: '${{ needs.classify.outputs.source_sha }}'}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with: {name: 'trusted-diagnostic-${{ github.run_id }}', path: '${{ runner.temp }}'}
       - name: Vygeneruj pouze omezený patch; nespouštěj repository kód
-        uses: openai/codex-action@3a4b7e67d3f7fd20d203b6daddb9e3d91a2df1d7 # immutable pin
+        uses: openai/codex-action@86365089eb2b84e0a8fb0717b304f8bdcb13b20e # immutable pin
         with:
           openai-api-key: ${{ secrets.OPENAI_API_KEY }}
-          sandbox: workspace-write
+          permission-profile: ":workspace"
+          allow-bots: "github-actions[bot]"
           output-file: ${{ runner.temp }}/codex-output.json
           prompt: >-
-            Vytvoř pouze unified diff pro selhání ${{ needs.classify.outputs.evidence }} na exact SHA
+            Vytvoř pouze unified diff pro normalizovanou třídu ${{ needs.classify.outputs.failure_class }} a bounded trusted diagnostiku v $RUNNER_TEMP/diagnostic.json na exact SHA
             ${{ needs.classify.outputs.source_sha }}. Respektuj AGENTS.md. Neměň governance, závislosti,
             security, databázové schema, broker/execution ani live trading. Nespouštěj příkazy ani testy.
             Vrať JSON s poli result, patch a paths; při nejistotě result=BLOCK.
       - name: Připrav bounded artifact
-        env: {SOURCE_SHA: '${{ needs.classify.outputs.source_sha }}', EVIDENCE: '${{ needs.classify.outputs.evidence }}'}
+        env: {SOURCE_SHA: '${{ needs.classify.outputs.source_sha }}', EVIDENCE: '${{ needs.classify.outputs.evidence }}', FAILURE_CLASS: '${{ needs.classify.outputs.failure_class }}'}
         run: |
           test -s "$RUNNER_TEMP/codex-output.json"
           test "$(stat -c%s "$RUNNER_TEMP/codex-output.json")" -le 131072
           mkdir "$RUNNER_TEMP/generated"
           cp "$RUNNER_TEMP/codex-output.json" "$RUNNER_TEMP/generated/output.json"
           sha256sum "$RUNNER_TEMP/generated/output.json" | cut -d' ' -f1 > "$RUNNER_TEMP/generated/checksum"
-          jq -n --arg sha "$SOURCE_SHA" --arg evidence "$EVIDENCE" '{source_sha:$sha,evidence:$evidence}' > "$RUNNER_TEMP/generated/metadata.json"
+          jq -n --arg sha "$SOURCE_SHA" --arg evidence "$EVIDENCE" --arg class "$FAILURE_CLASS" '{source_sha:$sha,evidence:$evidence,failure_class:$class}' > "$RUNNER_TEMP/generated/metadata.json"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with: {name: 'generated-patch-${{ github.run_id }}', path: '${{ runner.temp }}/generated', if-no-files-found: error, retention-days: 1}
 
@@ -135,9 +158,30 @@ jobs:
           git diff --check
           git diff --binary > "$RUNNER_TEMP/validated.patch"
           test "$(stat -c%s "$RUNNER_TEMP/validated.patch")" -le 131072
+          mapfile -t paths < <(git diff --name-only)
+          printf '%s\n' "${paths[@]}" | jq -Rsc 'split("\n")[:-1]' > "$RUNNER_TEMP/validated-paths.json"
+          sha256sum "$RUNNER_TEMP/validated.patch" | cut -d' ' -f1 > "$RUNNER_TEMP/validated-checksum"
+          jq -n --arg sha "$SOURCE_SHA" --arg class "$(jq -r .failure_class "$RUNNER_TEMP/generated/metadata.json")" --arg checksum "$(cat "$RUNNER_TEMP/validated-checksum")" --slurpfile paths "$RUNNER_TEMP/validated-paths.json" '{source_sha:$sha,failure_class:$class,checksum:$checksum,paths:$paths[0]}' > "$RUNNER_TEMP/validated-metadata.json"
+          case "$(jq -r .failure_class "$RUNNER_TEMP/generated/metadata.json")" in
+            lint-format) (cd backend && uv run ruff check . && uv run ruff format --check .) ;;
+            typecheck) (cd backend && uv run mypy src/quantlab) ;;
+            unit-test) (cd backend && uv run pytest -q tests/test_research.py tests/test_research_engine.py tests/test_phase6.py tests/test_alpaca_corporate_actions.py tests/test_xnys_calendar.py tests/test_paper_only_architecture.py tests/test_phase6_runtime.py tests/test_phase6_audit_fixes.py tests/test_phase6_experiment_audit.py tests/test_phase7.py tests/test_pre_pilot_review_remediation.py) ;;
+            api-test) (cd backend && uv run pytest -q tests/test_vertical_slice.py tests/test_phase7_api.py tests/test_phase8_api.py tests/test_phase9_security.py) ;;
+            frontend-test-build) (cd frontend && npm ci && npm run lint && npm run typecheck && npm test && npm run build) ;;
+            dependency-lock) (cd backend && uv lock --check && uv sync --locked --all-groups) ;;
+            *) echo 'Untrusted validation class' >&2; exit 1 ;;
+          esac
           node --test .github/scripts/agent-pipeline.test.cjs
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with: {name: 'validated-patch-${{ github.run_id }}', path: '${{ runner.temp }}/validated.patch', if-no-files-found: error, retention-days: 1}
+        with:
+          name: validated-patch-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/validated.patch
+            ${{ runner.temp }}/validated-checksum
+            ${{ runner.temp }}/validated-metadata.json
+            ${{ runner.temp }}/validated-paths.json
+          if-no-files-found: error
+          retention-days: 1
 
   trusted-publish:
     needs: [classify, validate-patch]
@@ -157,12 +201,22 @@ jobs:
             const {data:pr}=await github.rest.pulls.get({...context.repo,pull_number:Number(process.env.PR)});
             const {data:issue}=await github.rest.issues.get({...context.repo,issue_number:Number(process.env.ISSUE)});
             const comments=await github.paginate(github.rest.issues.listComments,{...context.repo,issue_number:Number(process.env.PR),per_page:100});
-            if(pr.head.sha!==process.env.SHA||pr.state!=="open"||pr.base.ref!==context.payload.repository.default_branch||p.parseAgentIssue(pr.body)!==Number(process.env.ISSUE)||!p.isImplementation(issue.labels)||!p.hasDurableLink(comments,{...context.repo,issueNumber:Number(process.env.ISSUE),prNumber:Number(process.env.PR)})) core.setFailed("TOCTOU_REJECTED");
+            const issueComments=await github.paginate(github.rest.issues.listComments,{...context.repo,issue_number:Number(process.env.ISSUE),per_page:100});
+            const linkage=p.fullLinkageDecision({prBody:pr.body,prComments:comments,issueComments,...context.repo,issueNumber:Number(process.env.ISSUE),prNumber:Number(process.env.PR)});
+            if(pr.head.sha!==process.env.SHA||pr.state!=="open"||pr.base.ref!==context.payload.repository.default_branch||!p.isImplementation(issue.labels)||!p.lifecycleAtAgentPr(pr.labels,issue.labels).ok||!linkage.ok) core.setFailed("TOCTOU_REJECTED");
       - name: Publikuj přesně validovaný patch bez force-push
         env: {SHA: '${{ needs.classify.outputs.source_sha }}', ATTEMPT: '${{ needs.classify.outputs.attempt }}'}
         run: |
           test "$(git rev-parse HEAD)" = "$SHA"
+          test "$(sha256sum "$RUNNER_TEMP/validated.patch"|cut -d' ' -f1)" = "$(cat "$RUNNER_TEMP/validated-checksum")"
+          test "$(jq -r .checksum "$RUNNER_TEMP/validated-metadata.json")" = "$(cat "$RUNNER_TEMP/validated-checksum")"
+          test "$(jq -r .source_sha "$RUNNER_TEMP/validated-metadata.json")" = "$SHA"
+          test "$(stat -c%s "$RUNNER_TEMP/validated.patch")" -le 131072
           git apply --check "$RUNNER_TEMP/validated.patch" && git apply "$RUNNER_TEMP/validated.patch"
+          git diff --name-only | sort > "$RUNNER_TEMP/publisher-paths"
+          jq -r '.paths[]' "$RUNNER_TEMP/validated-metadata.json" | sort > "$RUNNER_TEMP/metadata-paths"
+          cmp "$RUNNER_TEMP/publisher-paths" "$RUNNER_TEMP/metadata-paths"
+          node -e 'const p=require("./.github/scripts/agent-pipeline.cjs"),c=require("./.github/agent-pipeline.json"),fs=require("fs");const paths=fs.readFileSync(process.argv[1],"utf8").trim().split("\n");if(!p.validatePatchPaths(paths,c.v2))process.exit(1)' "$RUNNER_TEMP/publisher-paths"
           git diff --check
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com

@@ -125,14 +125,97 @@ function independentReviewSatisfied(comments, headSha) {
   return parseTrustedMarker(comments, "agent-codex-review", headSha)?.includes(" result=PASS ") === true;
 }
 
-function classifyCiFailure({ jobs, headSha, fixableJobs, prohibitedJobs }) {
-  const failed = jobs.filter((job) => job.head_sha === headSha && ["failure", "timed_out"].includes(job.conclusion));
-  if (failed.length !== 1) return { disposition: "NEEDS_HUMAN", reason: "AMBIGUOUS_FAILURE_SET" };
-  const name = failed[0].name;
-  if (prohibitedJobs.includes(name) || !fixableJobs.includes(name)) {
-    return { disposition: "NEEDS_HUMAN", reason: "UNSUPPORTED_OR_UNSAFE_FAILURE" };
+const FAILURE_CLASSES = ["lint-format", "typecheck", "unit-test", "api-test", "integration-postgres",
+  "frontend-test-build", "security", "container-build", "production-smoke", "dependency-lock",
+  "infra-transient", "multiple-failures", "unknown"];
+
+function lifecycleAtAgentPr(prLabels, issueLabels) {
+  const states = (labels) => labelNames(labels).filter((label) => STATES.includes(label));
+  const pr = states(prLabels), issue = states(issueLabels);
+  if (pr.includes("agent:needs-human") || issue.includes("agent:needs-human")) {
+    return { ok: false, reason: "NEEDS_HUMAN_PRESENT" };
   }
-  return { disposition: "FIX", job: name, evidence: `${headSha}:${failed[0].id}:${failed[0].run_attempt}` };
+  return pr.length === 1 && pr[0] === "agent:pr" && issue.length === 1 && issue[0] === "agent:pr"
+    ? { ok: true } : { ok: false, reason: "NOT_EXACT_AGENT_PR" };
+}
+
+function fullLinkageDecision({ prBody, prComments, issueComments, owner, repo, issueNumber, prNumber }) {
+  if (parseAgentIssue(prBody) !== issueNumber) return { ok: false, reason: "BODY_MARKER_MISMATCH" };
+  const prSide = durableIssueLinkDecision(prComments, { owner, repo, prNumber });
+  const issueSide = durablePrLinkDecision(issueComments, { owner, repo, issueNumber });
+  if (!prSide.ok || !issueSide.ok) return { ok: false, reason: "AMBIGUOUS_DURABLE_LINK" };
+  return prSide.issueNumber === issueNumber && issueSide.prNumber === prNumber
+    ? { ok: true } : { ok: false, reason: "DURABLE_LINK_MISMATCH" };
+}
+
+function failedStepNames(job) {
+  return (job.steps || []).filter((step) => ["failure", "timed_out"].includes(step.conclusion))
+    .map((step) => step.name.toLowerCase());
+}
+
+function normalizedFailureClass(job) {
+  const name = job.name.toLowerCase();
+  const steps = failedStepNames(job).join(" ");
+  const metadata = `${name} ${steps}`;
+  if (/dependenc|lock|npm ci|uv lock|uv sync/.test(metadata)) return "dependency-lock";
+  if (/security|audit|bandit|pip-audit/.test(metadata)) return "security";
+  if (/integration-postgres|postgres/.test(metadata)) return "integration-postgres";
+  if (/container-build|docker/.test(metadata)) return "container-build";
+  if (/production-smoke|smoke/.test(metadata)) return "production-smoke";
+  if (/frontend|npm test|next build/.test(metadata)) return "frontend-test-build";
+  if (/mypy|typecheck|type check/.test(metadata)) return "typecheck";
+  if (/ruff|lint|format/.test(metadata)) return "lint-format";
+  if (/\bapi\b/.test(metadata)) return "api-test";
+  if (/unit|pytest/.test(metadata)) return "unit-test";
+  if (job.conclusion === "timed_out" || /runner|network|download|service unavailable/.test(metadata)) return "infra-transient";
+  return "unknown";
+}
+
+function redactDiagnostic(value, maxBytes = 8192) {
+  return String(value || "")
+    .replace(/(authorization|token|secret|password|api[_-]?key)\s*[:=]\s*\S+/gi, "$1=[REDACTED]")
+    .replace(/gh[pousr]_[A-Za-z0-9_]+|sk-[A-Za-z0-9_-]+/g, "[REDACTED]")
+    .slice(0, maxBytes);
+}
+
+function classifyCiFailure({ jobs, runHeadSha, expectedHeadSha }) {
+  if (!/^[0-9a-f]{40}$/.test(runHeadSha || "") || runHeadSha !== expectedHeadSha) {
+    return { disposition: "NO_WRITE", failureClass: "unknown", reason: "WORKFLOW_RUN_SHA_MISMATCH" };
+  }
+  const failed = jobs.filter((job) => ["failure", "timed_out"].includes(job.conclusion));
+  if (failed.length !== 1) return { disposition: "NEEDS_HUMAN", failureClass: failed.length > 1 ? "multiple-failures" : "unknown", reason: "FAILURE_SET_NOT_SINGLE" };
+  const job = failed[0], failureClass = normalizedFailureClass(job);
+  const prohibited = new Set(["security", "container-build", "production-smoke", "integration-postgres", "infra-transient", "multiple-failures", "unknown"]);
+  return {
+    disposition: prohibited.has(failureClass) ? "NEEDS_HUMAN" : "FIX",
+    failureClass,
+    job: job.name,
+    jobId: job.id,
+    evidence: `${runHeadSha}:${job.id}:${job.run_attempt || 1}`,
+    diagnostic: redactDiagnostic(JSON.stringify({ failureClass, job: job.name, conclusion: job.conclusion,
+      failedSteps: failedStepNames(job), jobId: job.id, runAttempt: job.run_attempt || 1 })),
+    reason: prohibited.has(failureClass) ? "PROHIBITED_OR_UNKNOWN_FAILURE_CLASS" : undefined,
+  };
+}
+
+function validationCommands(failureClass) {
+  const commands = {
+    "lint-format": ["cd backend && uv run ruff check .", "cd backend && uv run ruff format --check ."],
+    typecheck: ["cd backend && uv run mypy src/quantlab"],
+    "unit-test": ["cd backend && uv run pytest -q tests/test_research.py tests/test_research_engine.py tests/test_phase6.py tests/test_alpaca_corporate_actions.py tests/test_xnys_calendar.py tests/test_paper_only_architecture.py tests/test_phase6_runtime.py tests/test_phase6_audit_fixes.py tests/test_phase6_experiment_audit.py tests/test_phase7.py tests/test_pre_pilot_review_remediation.py"],
+    "api-test": ["cd backend && uv run pytest -q tests/test_vertical_slice.py tests/test_phase7_api.py tests/test_phase8_api.py tests/test_phase9_security.py"],
+    "frontend-test-build": ["cd frontend && npm ci", "cd frontend && npm run lint", "cd frontend && npm run typecheck", "cd frontend && npm test", "cd frontend && npm run build"],
+    "dependency-lock": ["cd backend && uv lock --check", "cd backend && uv sync --locked --all-groups"],
+  };
+  return commands[failureClass] ? [...commands[failureClass]] : null;
+}
+
+function trustedArtifactDecision({ patchBytes, actualChecksum, metadataChecksum, actualPaths, metadataPaths, config }) {
+  if (patchBytes < 1 || patchBytes > config.maxPatchBytes || actualChecksum !== metadataChecksum) return { ok: false, reason: "ARTIFACT_MISMATCH" };
+  if (JSON.stringify([...actualPaths].sort()) !== JSON.stringify([...metadataPaths].sort()) || !validatePatchPaths(actualPaths, config)) {
+    return { ok: false, reason: "PATH_SET_MISMATCH" };
+  }
+  return { ok: true };
 }
 
 function fixAttemptDecision({ comments, sourceSha, evidence, maxAttempts }) {
@@ -206,7 +289,8 @@ function invalidationLifecycleDecision({ prLabels, issueLabels = [], issueLoaded
 function successfulRequiredJobs(jobs, requiredNames, headSha) {
   const latest = new Map();
   for (const job of jobs) {
-    if (job.head_sha !== headSha) continue;
+    // listJobsForWorkflowRun jobs have no head_sha; callers bind the containing run to headSha.
+    if (job.head_sha !== undefined && job.head_sha !== headSha) continue;
     const old = latest.get(job.name);
     if (!old || job.run_attempt >= old.run_attempt) latest.set(job.name, job);
   }
@@ -233,9 +317,6 @@ function verificationTriggerDecision({ workflowRun, workflowCallInputs = {} }) {
     }
     if (workflowRun.name === "Agent review signal" && workflowRun.event === "pull_request_review") {
       return { ok: true, kind: "review-signal", prNumber, headSha: null };
-    }
-    if (workflowRun.name === "Agent Codex review" && workflowRun.event === "workflow_run") {
-      return { ok: true, kind: "codex-review", prNumber, headSha: workflowRun.head_sha };
     }
     return { ok: false, reason: "UNTRUSTED_WORKFLOW_RUN_TRIGGER" };
   }
@@ -264,6 +345,7 @@ function verificationDecision(input) {
 
 module.exports = {
   STATES,
+  FAILURE_CLASSES,
   currentState,
   authoritativeCiRunCandidates,
   durablePrLinkDecision,
@@ -279,6 +361,12 @@ module.exports = {
   independentReviewSatisfied,
   parseTrustedMarker,
   classifyCiFailure,
+  normalizedFailureClass,
+  redactDiagnostic,
+  validationCommands,
+  lifecycleAtAgentPr,
+  fullLinkageDecision,
+  trustedArtifactDecision,
   fixAttemptDecision,
   validatePatchPaths,
   stateMutationPlan,

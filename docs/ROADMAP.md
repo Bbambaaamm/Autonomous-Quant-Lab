@@ -217,10 +217,3 @@ human and does not alter this roadmap's promotion gates or authorize merge.
 ## Planning principle
 
 The project optimizes for the probability of discovering and safely validating durable net edge — not for producing the highest historical backtest.
-
-## Autonomous Development Pipeline v2
-
-Issue #88 extends the v1 handoff with a bounded two-commit CI fixer and an independent exact-SHA
-Codex PASS gate. It preserves human opt-in, human exact-SHA review and human-only merge; it does
-not authorize Phase 10, deployment, staging or live trading. See
-[ADR 0003](adr/0003-autonomous-development-pipeline-v2.md).

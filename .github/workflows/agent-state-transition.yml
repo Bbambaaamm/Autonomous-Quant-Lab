@@ -43,6 +43,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      actions: write
       issues: write
       pull-requests: write
     steps:
@@ -196,3 +197,12 @@ jobs:
             ].filter(Boolean).join("\n\n");
             await github.rest.issues.createComment({ ...context.repo, issue_number: issueNumber, body: evidence });
             if (pull) await github.rest.issues.createComment({ ...context.repo, issue_number: effectivePrNumber, body: evidence });
+            // A CI run may have completed while the PR was still pre-link. Re-evaluate deterministically
+            // after both durable-link comments and agent:pr labels exist; no manual CI rerun is needed.
+            if (pull && nextState === "agent:pr") {
+              await github.rest.actions.createWorkflowDispatch({
+                ...context.repo, workflow_id: "agent-codex-review.yml",
+                ref: context.payload.repository.default_branch,
+                inputs: { pr_number: String(effectivePrNumber), head_sha: pull.head.sha },
+              });
+            }
