@@ -179,10 +179,17 @@ function redactDiagnostic(value, maxBytes = 8192) {
     .replace(/gh[pousr]_[A-Za-z0-9_]+|sk-[A-Za-z0-9_-]+/g, "[REDACTED]")
     .replace(/AKIA[0-9A-Z]{16}/g, "[REDACTED]")
     .replace(/([?&](?:token|key|secret|signature)=)[^&\s]+/gi, "$1[REDACTED]")
-    .slice(0, maxBytes);
+    .slice(-maxBytes);
 }
 
-function classifyCiFailure({ jobs, runHeadSha, expectedHeadSha, sourceRunId, logExcerpt }) {
+function extractFailureDiagnostic(value, maxBytes = 4096) {
+  const input = String(value || "");
+  const meaningful = input.split(/\r?\n/).filter((line) =>
+    /error|fail|assert|exception|traceback|fatal|denied|mismatch|expected|actual|timed out/i.test(line));
+  return redactDiagnostic(meaningful.length ? meaningful.slice(-80).join("\n") : input.slice(-maxBytes), maxBytes);
+}
+
+function classifyCiFailure({ jobs, runHeadSha, expectedHeadSha, sourceRunId, logExcerpt, config = {} }) {
   if (!/^[0-9a-f]{40}$/.test(runHeadSha || "") || runHeadSha !== expectedHeadSha) {
     return { disposition: "NO_WRITE", failureClass: "unknown", reason: "WORKFLOW_RUN_SHA_MISMATCH" };
   }
@@ -190,7 +197,11 @@ function classifyCiFailure({ jobs, runHeadSha, expectedHeadSha, sourceRunId, log
   if (failed.length !== 1) return { disposition: "NEEDS_HUMAN", failureClass: failed.length > 1 ? "multiple-failures" : "unknown", reason: "FAILURE_SET_NOT_SINGLE" };
   const job = failed[0], failureClass = normalizedFailureClass(job);
   const prohibited = new Set(["security", "container-build", "production-smoke", "integration-postgres", "dependency-lock", "infra-transient", "multiple-failures", "unknown"]);
-  const excerpt = redactDiagnostic(logExcerpt, 4096);
+  const excerpt = extractFailureDiagnostic(logExcerpt, 4096);
+  const protectedPatterns = config.protectedDiagnosticPatterns || [];
+  if (protectedPatterns.some((pattern) => new RegExp(pattern, "i").test(excerpt))) {
+    return { disposition: "NEEDS_HUMAN", failureClass, reason: "PROTECTED_TEST_OR_INVARIANT" };
+  }
   if (!prohibited.has(failureClass) && (!Number.isSafeInteger(sourceRunId) || sourceRunId < 1 || !excerpt.trim())) {
     return { disposition: "NEEDS_HUMAN", failureClass, reason: "SAFE_DIAGNOSTIC_UNAVAILABLE" };
   }
@@ -230,19 +241,23 @@ function trustedArtifactDecision({ patchBytes, actualChecksum, metadataChecksum,
   return { ok: true };
 }
 
-function fixAttemptDecision({ comments, sourceSha, evidence, maxAttempts }) {
+function fixAttemptDecision({ comments, commits = [], sourceSha, evidence, maxAttempts }) {
   const prefix = `<!-- agent-fix:v2 source=${sourceSha} evidence=${evidence} `;
   const exact = comments.filter((comment) => comment.user?.login === "github-actions[bot]")
     .flatMap((comment) => (comment.body || "").split("\n")).filter((line) => line.startsWith(prefix));
   if (exact.length) return { action: "NO_WRITE", reason: "EXACT_EVIDENCE_ALREADY_PROCESSED" };
-  const attempts = comments.filter((comment) => comment.user?.login === "github-actions[bot]")
+  const commentAttempts = comments.filter((comment) => comment.user?.login === "github-actions[bot]")
     .flatMap((comment) => (comment.body || "").split("\n")).filter((line) => line.startsWith("<!-- agent-fix:v2 ")).length;
+  const commitAttempts = commits.filter((commit) => commit.author?.login === "github-actions[bot]" &&
+    /(^|\n)Agent-Fix-Attempt: [1-9][0-9]*($|\n)/.test(commit.commit?.message || "")).length;
+  const attempts = Math.max(commentAttempts, commitAttempts);
   return attempts >= maxAttempts ? { action: "NEEDS_HUMAN", reason: "FIX_BUDGET_EXHAUSTED" } : { action: "FIX", attempt: attempts + 1 };
 }
 
 function validatePatchPaths(paths, config) {
   if (!Array.isArray(paths) || paths.length === 0 || paths.length > config.maxPatchFiles) return false;
   return paths.every((path) => typeof path === "string" && !path.startsWith("/") && !path.includes("..") &&
+    !(config.protectedPaths || []).includes(path) &&
     !config.deniedPathPrefixes.some((prefix) => path.startsWith(prefix)) &&
     !config.deniedPathBasenames.includes(path.split("/").at(-1)) &&
     !config.deniedPathFragments.some((fragment) => path.toLowerCase().includes(fragment)));
@@ -375,6 +390,7 @@ module.exports = {
   classifyCiFailure,
   normalizedFailureClass,
   redactDiagnostic,
+  extractFailureDiagnostic,
   validationCommands,
   lifecycleAtAgentPr,
   fullLinkageDecision,

@@ -401,3 +401,49 @@ test("v2 workflow wiring odděluje secret, validation a write trust domains", ()
   assert.match(fixer, /validated-checksum/);
   assert.doesNotMatch(fixer.slice(fixer.indexOf("validate-patch:"), fixer.indexOf("trusted-publish:")), /OPENAI_API_KEY|contents: write/);
 });
+
+test("v2 crash-safe budget reconciles a pushed fixer commit without final comment", () => {
+  const commits = [{ author: { login: "github-actions[bot]" }, commit: { message: "Automatická oprava\n\nAgent-Fix-Attempt: 1" } }];
+  assert.deepEqual(pipeline.fixAttemptDecision({ comments: [], commits, sourceSha: "b", evidence: "next", maxAttempts: 2 }), { action: "FIX", attempt: 2 });
+  commits.push({ author: { login: "github-actions[bot]" }, commit: { message: "fix\n\nAgent-Fix-Attempt: 2" } });
+  assert.equal(pipeline.fixAttemptDecision({ comments: [], commits, sourceSha: "c", evidence: "next", maxAttempts: 2 }).reason, "FIX_BUDGET_EXHAUSTED");
+});
+
+test("v2 protected tests and concrete risk/security modules fail closed", () => {
+  const config = require("../agent-pipeline.json").v2, sha = "a".repeat(40);
+  for (const excerpt of ["FAILED tests/test_paper_only_architecture.py", "ERROR tests/test_phase9_security.py RBAC"])
+    assert.equal(pipeline.classifyCiFailure({ jobs: [{name:"api",id:1,conclusion:"failure",steps:[]}], runHeadSha:sha, expectedHeadSha:sha, sourceRunId:1, logExcerpt:excerpt, config }).reason, "PROTECTED_TEST_OR_INVARIANT");
+  for (const path of ["backend/src/quantlab/trading.py", "backend/src/quantlab/phase4.py", "backend/src/quantlab/security.py"])
+    assert.equal(pipeline.validatePatchPaths([path], config), false, path);
+});
+
+test("v2 diagnostics select bounded relevant tail rather than setup prefix", () => {
+  const setup = "setup output\n".repeat(1000), excerpt = pipeline.extractFailureDiagnostic(`${setup}AssertionError: expected safe value\ntoken=secret`, 256);
+  assert.match(excerpt, /AssertionError/);
+  assert.ok(Buffer.byteLength(excerpt) <= 256);
+  assert.doesNotMatch(excerpt, /setup output/);
+});
+
+test("v2 third-audit workflow wiring is fail-closed and injection safe", () => {
+  const fixer=fs.readFileSync(".github/workflows/agent-ci-fixer.yml","utf8");
+  const reviewer=fs.readFileSync(".github/workflows/agent-codex-review.yml","utf8");
+  const transition=fs.readFileSync(".github/workflows/agent-state-transition.yml","utf8");
+  assert.match(transition,/ci\.conclusion==="success"[\s\S]*agent-codex-review\.yml[\s\S]*agent-ci-fixer\.yml/);
+  assert.match(transition,/POST_LINK_CI_IN_PROGRESS_NO_WRITE/);
+  assert.match(transition,/POST_LINK_CI_AMBIGUOUS_NO_WRITE/);
+  assert.match(fixer,/workflow_dispatch:[\s\S]*ci_run_id/);
+  assert.match(fixer,/git diff --cached --binary/);
+  assert.match(fixer,/git diff --cached --name-only/);
+  assert.match(fixer,/git check-ref-format --branch "\$HEAD_REF"/);
+  assert.match(fixer,/git push origin "HEAD:\$\{HEAD_REF\}"/);
+  assert.doesNotMatch(fixer,/git push[^\n]*\$\{\{[^\n]*head\.ref/);
+  assert.match(fixer,/pr\.head\.repo\?\.full_name!==process\.env\.EXPECTED_REPO/);
+  assert.match(fixer,/token: '\$\{\{ secrets\.AGENT_PUBLISH_TOKEN \}\}'/);
+  assert.match(fixer,/Agent-Fix-Attempt:/);
+  assert.match(fixer,/output-schema:[\s\S]*"BLOCK"/);
+  assert.match(fixer,/fail-closed-finalizer:[\s\S]*if: always\(\)/);
+  assert.match(reviewer,/trusted-governance\.json/);
+  assert.match(reviewer,/base_sha:pr\.base\.sha/);
+  assert.match(reviewer,/git diff --quiet "\$BASE_SHA" "\$HEAD_SHA" -- AGENTS\.md/);
+  assert.doesNotMatch(fixer+reviewer,/pull-requests: write/);
+});

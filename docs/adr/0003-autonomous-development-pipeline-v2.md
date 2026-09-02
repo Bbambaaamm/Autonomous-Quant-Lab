@@ -47,3 +47,7 @@ failures require a human. Codex reads workspace-local deterministic prompt files
 BLOCK uses an explicit reusable-controller call with PR/SHA inputs and repeats all trusted
 lifecycle/linkage checks; no second-level `workflow_run.pull_requests` inference is permitted. Both
 Codex actions narrowly allow only `github-actions[bot]` through `allow-bot-users`.
+
+## Third security audit decisions
+
+The controller distinguishes exact-head CI success, failure, in-progress, and ambiguous/no-evidence states after linkage. Fix publication rejects forks, treats the validated head ref only as a checked environment argument, includes staged additions in the artifact, uses a non-`GITHUB_TOKEN` publication credential to trigger the next CI cycle, and reconciles the two-commit budget from durable commit trailers. Protected paths and test/log patterns prevent mixed safety jobs from entering free-form repair. Trusted default-branch governance plus the exact base SHA bound the independent review, and exact-head finalizers escalate generation, validation, or publication failures without allowing stale runs to affect newer commits.

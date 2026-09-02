@@ -9,9 +9,11 @@
     "fixMarker": "agent-fix:v2",
     "fixableCiJobs": ["agent-pipeline", "quality", "unit-research", "api", "frontend"],
     "prohibitedCiJobs": ["security", "integration-postgres", "container-build", "production-smoke"],
+    "protectedPaths": ["backend/src/quantlab/trading.py", "backend/src/quantlab/phase4.py", "backend/src/quantlab/security.py"],
+    "protectedDiagnosticPatterns": ["test_paper_only_architecture.py", "test_phase9_security.py", "authentication", "authorization", "RBAC", "PaperBroker", "RiskEngine", "ExecutionEngine"],
     "deniedPathPrefixes": [".github/", "docs/ROADMAP.md", "backend/alembic/", "backend/src/quantlab/api/auth", "deploy/", "infra/"],
     "deniedPathBasenames": ["AGENTS.md", "package.json", "package-lock.json", "pyproject.toml", "uv.lock"],
-    "deniedPathFragments": ["migration", "schema", "secret", "credential", "broker", "execution", "live"]
+    "deniedPathFragments": ["migration", "schema", "secret", "security", "credential", "broker", "execution", "trading", "risk", "live"]
   },
   "implementationLabel": "type:implementation",
   "epicLabels": ["type:epic", "type:roadmap", "type:capability"],

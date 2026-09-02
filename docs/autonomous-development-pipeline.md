@@ -311,3 +311,9 @@ runner-temporary path that the action may not read. The bot allowance is restric
 `github-actions[bot]`. A Reviewer BLOCK calls the reusable controller with the already validated PR
 number and exact head SHA; the controller independently re-fetches lifecycle, two-sided linkage, and
 SHA before performing the fail-closed escalation.
+
+### v2 crash, trust, and pre-link guarantees
+
+The post-link controller re-queries a unique authoritative CI run for the exact PR head. A completed success routes to independent review, a completed failure routes to the classifier with its exact run ID, an active run is left to its normal completion event, and missing or ambiguous evidence performs no write. Fixer publication is limited to same-repository PR heads, validates the ref as data, and uses the narrowly scoped `AGENT_PUBLISH_TOKEN` so the resulting push deterministically emits the next pull-request CI cycle.
+
+Validated patches are exported from the staged index, including new files. Concrete trading, risk, execution, security, paper-only, authentication, and RBAC surfaces are protected by machine-readable path and diagnostic patterns. Fix commits carry a durable `Agent-Fix-Attempt` trailer, allowing budget reconciliation even if post-push audit recording crashes. All model, validation, and publication failures use an exact-head fail-closed finalizer; stale failures never mutate a newer head. Reviewer governance and the base SHA come from the trusted default-branch preparation checkout.
