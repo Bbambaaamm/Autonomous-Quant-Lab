@@ -25,13 +25,7 @@ jobs:
           script: |
             // Workflow používá pouze trusted helper z default branch; nikdy nenačítá ani nespouští PR kód.
             const pipeline = require(`${process.env.GITHUB_WORKSPACE}/.github/scripts/agent-pipeline.cjs`);
-            const STATES = ["agent:ready", "agent:running", "agent:pr", "agent:needs-human", "agent:verified"];
-            const labels = (item) => item.labels.map((label) => label.name);
-            const state = (item) => labels(item).filter((label) => STATES.includes(label));
-            const escalate = async (number) => {
-              const { data: fresh } = await github.rest.issues.get({ ...context.repo, issue_number: number });
-              const plan = pipeline.escalationMutationPlan(fresh.labels);
-              if (!plan.ok) throw new Error(`${plan.reason} na #${number}`);
+            const mutate = async (number, plan) => {
               if (plan.add.length) {
                 await github.rest.issues.addLabels({ ...context.repo, issue_number: number, labels: plan.add });
               }
@@ -39,67 +33,70 @@ jobs:
                 await github.rest.issues.removeLabel({ ...context.repo, issue_number: number, name: label });
               }
             };
-            const markerIssue = (body) => {
-              const matches = [...(body || "").matchAll(/^\s*-?\s*Agent-Issue:\s*#([1-9][0-9]*)\s*$/gim)];
-              return matches.length === 1 ? Number(matches[0][1]) : null;
-            };
             const pull = context.payload.pull_request;
             const prNumber = pull.number;
+            const { data: freshPull } = await github.rest.pulls.get({ ...context.repo, pull_number: prNumber });
             const comments = await github.paginate(github.rest.issues.listComments, {
               ...context.repo, issue_number: prNumber, per_page: 100,
             });
-            const prefix = `<!-- agent-link:v1 repo=${context.repo.owner}/${context.repo.repo} issue=`;
-            const suffix = ` pr=${prNumber} -->`;
-            const linkedIssues = comments.filter((comment) => comment.user?.login === "github-actions[bot]")
-              .flatMap((comment) => (comment.body || "").split("\n"))
-              .filter((line) => line.startsWith(prefix) && line.endsWith(suffix))
-              .map((line) => Number(line.slice(prefix.length, -suffix.length)))
-              .filter((number) => Number.isSafeInteger(number) && number > 0);
-            const uniqueIssues = [...new Set(linkedIssues)];
-            if (uniqueIssues.length !== 1) {
-              await escalate(prNumber);
+            const durableLink = pipeline.durableIssueLinkDecision(comments, { ...context.repo, prNumber });
+            let freshIssue = null;
+            if (durableLink.ok && durableLink.issueNumber !== null) {
+              ({ data: freshIssue } = await github.rest.issues.get({
+                ...context.repo, issue_number: durableLink.issueNumber,
+              }));
+            }
+            const decision = pipeline.invalidationLifecycleDecision({
+              prLabels: freshPull.labels,
+              issueLabels: freshIssue?.labels,
+              issueLoaded: freshIssue !== null && !freshIssue.pull_request,
+              durableLink,
+              markerIssueNumber: pipeline.parseAgentIssue(freshPull.body),
+            });
+            if (["PRELINK_NO_WRITE", "LINKED_PR_NO_WRITE", "NEEDS_HUMAN_NO_WRITE"].includes(decision.action)) {
+              core.notice(`NO_WRITE: ${decision.action}`); return;
+            }
+            if (decision.action === "ESCALATE_CONFLICT") {
+              const prPlan = pipeline.escalationMutationPlan(freshPull.labels);
+              const issuePlan = freshIssue ? pipeline.escalationMutationPlan(freshIssue.labels) : null;
+              if (!prPlan.ok || (issuePlan && !issuePlan.ok)) {
+                return core.setFailed(`${decision.reason}: conflicting stav nelze bezpečně eskalovat`);
+              }
+              await mutate(prNumber, prPlan);
+              if (issuePlan) await mutate(durableLink.issueNumber, issuePlan);
               await github.rest.issues.createComment({ ...context.repo, issue_number: prNumber,
-                body: "Verification invalidation selhala zavřeně: durable linkage není jednoznačná. Vyžaduje zásah maintaineru." });
+                body: `Verification invalidation selhala zavřeně: ${decision.reason}. Vyžaduje zásah maintaineru.` });
               return;
             }
-            const issueNumber = uniqueIssues[0];
-            const { data: freshPull } = await github.rest.pulls.get({ ...context.repo, pull_number: prNumber });
-            const { data: freshIssue } = await github.rest.issues.get({ ...context.repo, issue_number: issueNumber });
-            const pullStates = state(freshPull);
-            const issueStates = state(freshIssue);
-            if ([...pullStates, ...issueStates].includes("agent:needs-human")) {
-              core.notice("NO_WRITE: agent:needs-human má prioritu."); return;
-            }
-            if (markerIssue(freshPull.body) !== issueNumber) {
-              await escalate(prNumber);
-              await escalate(issueNumber);
-              await github.rest.issues.createComment({ ...context.repo, issue_number: prNumber,
-                body: `Verification invalidation selhala zavřeně: PR marker nesouhlasí s durable linkage na Issue #${issueNumber}.` });
-              return;
-            }
-            const allowed = (states) => states.length >= 1 && states.every((value) =>
-              value === "agent:verified" || value === "agent:pr");
-            if (!allowed(pullStates) || !allowed(issueStates)) {
-              core.notice("NO_WRITE: stav není bezpečně reconciliable verified → pr."); return;
-            }
-            if (![...pullStates, ...issueStates].includes("agent:verified")) {
-              core.notice("NO_WRITE: není přítomen verified stav k invalidaci."); return;
-            }
-            const invalidate = async (number, states) => {
-              if (!states.includes("agent:pr")) {
-                await github.rest.issues.addLabels({ ...context.repo, issue_number: number, labels: ["agent:pr"] });
-              }
-              if (states.includes("agent:verified")) {
-                await github.rest.issues.removeLabel({ ...context.repo, issue_number: number, name: "agent:verified" });
-              }
-            };
-            await invalidate(prNumber, pullStates);
+            const issueNumber = decision.issueNumber;
+            const prPlan = pipeline.stateMutationPlan(freshPull.labels, "agent:verified", "agent:pr");
+            const issuePlan = pipeline.stateMutationPlan(freshIssue.labels, "agent:verified", "agent:pr");
+            if (!prPlan.ok || !issuePlan.ok) return core.setFailed("INVALIDATION_PLAN_CONFLICT");
+            await mutate(prNumber, prPlan);
+            const { data: writeFreshPull } = await github.rest.pulls.get({
+              ...context.repo, pull_number: prNumber,
+            });
             const { data: writeFreshIssue } = await github.rest.issues.get({ ...context.repo, issue_number: issueNumber });
-            const writeIssueStates = state(writeFreshIssue);
-            if (writeIssueStates.includes("agent:needs-human") || !allowed(writeIssueStates)) {
+            const writeFreshComments = await github.paginate(github.rest.issues.listComments, {
+              ...context.repo, issue_number: prNumber, per_page: 100,
+            });
+            const writeFreshDurableLink = pipeline.durableIssueLinkDecision(writeFreshComments, {
+              ...context.repo, prNumber,
+            });
+            const writeDecision = pipeline.invalidationLifecycleDecision({
+              prLabels: writeFreshPull.labels,
+              issueLabels: writeFreshIssue.labels,
+              issueLoaded: !writeFreshIssue.pull_request,
+              durableLink: writeFreshDurableLink,
+              markerIssueNumber: pipeline.parseAgentIssue(writeFreshPull.body),
+            });
+            if (writeFreshDurableLink.issueNumber !== issueNumber ||
+                (writeDecision.action !== "INVALIDATE_VERIFIED" && writeDecision.action !== "LINKED_PR_NO_WRITE")) {
               return core.setFailed("ISSUE_CHANGED_DURING_INVALIDATION: PR může být v partial agent:pr stavu");
             }
-            await invalidate(issueNumber, writeIssueStates);
+            const writeIssuePlan = pipeline.stateMutationPlan(writeFreshIssue.labels, "agent:verified", "agent:pr");
+            if (!writeIssuePlan.ok) return core.setFailed("ISSUE_CHANGED_DURING_INVALIDATION");
+            await mutate(issueNumber, writeIssuePlan);
             const evidence = `Verification invalidated po změně PR head SHA na \`${freshPull.head.sha}\`. Nový SHA vyžaduje nové exact-SHA review evidence a nový CI run.\n\nWorkflow run: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
             await github.rest.issues.createComment({ ...context.repo, issue_number: prNumber, body: evidence });
             await github.rest.issues.createComment({ ...context.repo, issue_number: issueNumber, body: `PR #${prNumber}: ${evidence}` });

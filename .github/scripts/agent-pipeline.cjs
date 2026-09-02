@@ -57,9 +57,7 @@ function parseAgentIssue(body) {
 }
 
 function hasDurableLink(comments, { owner, repo, issueNumber, prNumber }) {
-  const marker = `<!-- agent-link:v1 repo=${owner}/${repo} issue=${issueNumber} pr=${prNumber} -->`;
-  return comments.some((comment) => comment.user?.login === "github-actions[bot]" &&
-    comment.body?.split("\n").includes(marker));
+  return parseDurableLink(comments, { owner, repo, prNumber }) === issueNumber;
 }
 
 function parseDurableLink(comments, { owner, repo, prNumber }) {
@@ -73,6 +71,34 @@ function parseDurableLink(comments, { owner, repo, prNumber }) {
     .filter((number) => Number.isSafeInteger(number) && number > 0);
   const unique = [...new Set(issueNumbers)];
   return unique.length === 1 ? unique[0] : null;
+}
+
+function durablePrLinkDecision(comments, { owner, repo, issueNumber }) {
+  const prefix = `<!-- agent-link:v1 repo=${owner}/${repo} issue=${issueNumber} pr=`;
+  const suffix = " -->";
+  const prNumbers = comments
+    .filter((comment) => comment.user?.login === "github-actions[bot]")
+    .flatMap((comment) => (comment.body || "").split("\n"))
+    .filter((line) => line.startsWith(prefix) && line.endsWith(suffix))
+    .map((line) => Number(line.slice(prefix.length, -suffix.length)))
+    .filter((number) => Number.isSafeInteger(number) && number > 0);
+  const unique = [...new Set(prNumbers)];
+  if (unique.length > 1) return { ok: false, reason: "AMBIGUOUS_DURABLE_LINK" };
+  return { ok: true, prNumber: unique[0] ?? null };
+}
+
+function durableIssueLinkDecision(comments, { owner, repo, prNumber }) {
+  const prefix = `<!-- agent-link:v1 repo=${owner}/${repo} issue=`;
+  const suffix = ` pr=${prNumber} -->`;
+  const issueNumbers = comments
+    .filter((comment) => comment.user?.login === "github-actions[bot]")
+    .flatMap((comment) => (comment.body || "").split("\n"))
+    .filter((line) => line.startsWith(prefix) && line.endsWith(suffix))
+    .map((line) => Number(line.slice(prefix.length, -suffix.length)))
+    .filter((number) => Number.isSafeInteger(number) && number > 0);
+  const unique = [...new Set(issueNumbers)];
+  if (unique.length > 1) return { ok: false, reason: "AMBIGUOUS_DURABLE_LINK" };
+  return { ok: true, issueNumber: unique[0] ?? null };
 }
 
 function hasExactShaReviewAcknowledgement(comments, headSha) {
@@ -111,6 +137,32 @@ function escalationMutationPlan(labels) {
   };
 }
 
+function invalidationLifecycleDecision({ prLabels, issueLabels = [], issueLoaded, durableLink, markerIssueNumber }) {
+  const prStates = labelNames(prLabels).filter((label) => STATES.includes(label));
+  const issueStates = labelNames(issueLabels).filter((label) => STATES.includes(label));
+  if ([...prStates, ...issueStates].includes("agent:needs-human")) {
+    return { action: "NEEDS_HUMAN_NO_WRITE" };
+  }
+  if (!durableLink.ok) return { action: "ESCALATE_CONFLICT", reason: durableLink.reason };
+  if (durableLink.issueNumber === null) {
+    return prStates.length === 0
+      ? { action: "PRELINK_NO_WRITE" }
+      : { action: "ESCALATE_CONFLICT", reason: "LINKED_STATE_WITHOUT_DURABLE_LINK" };
+  }
+  if (!issueLoaded || markerIssueNumber !== durableLink.issueNumber) {
+    return { action: "ESCALATE_CONFLICT", reason: "LINKAGE_MISMATCH" };
+  }
+  const validLinkedStates = (states) => states.length >= 1 &&
+    states.every((state) => state === "agent:pr" || state === "agent:verified");
+  if (!validLinkedStates(prStates) || !validLinkedStates(issueStates)) {
+    return { action: "ESCALATE_CONFLICT", reason: "INVALID_LINKED_STATE" };
+  }
+  if (![...prStates, ...issueStates].includes("agent:verified")) {
+    return { action: "LINKED_PR_NO_WRITE" };
+  }
+  return { action: "INVALIDATE_VERIFIED", issueNumber: durableLink.issueNumber };
+}
+
 function successfulRequiredJobs(jobs, requiredNames, headSha) {
   const latest = new Map();
   for (const job of jobs) {
@@ -119,6 +171,38 @@ function successfulRequiredJobs(jobs, requiredNames, headSha) {
     if (!old || job.run_attempt >= old.run_attempt) latest.set(job.name, job);
   }
   return requiredNames.every((name) => latest.get(name)?.conclusion === "success");
+}
+
+function authoritativeCiRunCandidates(runs, { workflowName, headSha, prNumber }) {
+  return runs
+    .filter((run) => run.name === workflowName && run.event === "pull_request" &&
+      run.status === "completed" && run.conclusion === "success" && run.head_sha === headSha &&
+      run.pull_requests?.length === 1 && run.pull_requests[0].number === prNumber)
+    .sort((left, right) => right.id - left.id);
+}
+
+function verificationTriggerDecision({ workflowRun, workflowCallInputs = {} }) {
+  if (workflowRun) {
+    if (workflowRun.status !== "completed" || workflowRun.conclusion !== "success" ||
+        workflowRun.pull_requests?.length !== 1) {
+      return { ok: false, reason: "INVALID_WORKFLOW_RUN_TRIGGER" };
+    }
+    const prNumber = workflowRun.pull_requests[0].number;
+    if (workflowRun.name === "CI" && workflowRun.event === "pull_request") {
+      return { ok: true, kind: "ci", prNumber, headSha: workflowRun.head_sha };
+    }
+    if (workflowRun.name === "Agent review signal" && workflowRun.event === "pull_request_review") {
+      return { ok: true, kind: "review-signal", prNumber, headSha: null };
+    }
+    return { ok: false, reason: "UNTRUSTED_WORKFLOW_RUN_TRIGGER" };
+  }
+
+  const prNumber = Number(workflowCallInputs.prNumber);
+  const headSha = workflowCallInputs.headSha || "";
+  if (!Number.isSafeInteger(prNumber) || prNumber < 1 || !/^[0-9a-f]{40}$/.test(headSha)) {
+    return { ok: false, reason: "INVALID_WORKFLOW_CALL_INPUTS" };
+  }
+  return { ok: true, kind: "workflow-call", prNumber, headSha };
 }
 
 function verificationDecision(input) {
@@ -137,9 +221,13 @@ function verificationDecision(input) {
 module.exports = {
   STATES,
   currentState,
+  authoritativeCiRunCandidates,
+  durablePrLinkDecision,
+  durableIssueLinkDecision,
   escalationMutationPlan,
   hasDurableLink,
   isImplementation,
+  invalidationLifecycleDecision,
   hasExactShaReviewAcknowledgement,
   parseAgentIssue,
   parseDurableLink,
@@ -149,4 +237,5 @@ module.exports = {
   transitionProgress,
   validateManualTransition,
   verificationDecision,
+  verificationTriggerDecision,
 };
