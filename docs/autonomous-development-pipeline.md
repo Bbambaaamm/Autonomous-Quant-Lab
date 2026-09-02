@@ -1,0 +1,153 @@
+# Autonomous Development Pipeline v1
+
+## Purpose and boundary
+
+This pipeline is a GitHub-native, fail-closed handoff protocol for one
+human-approved implementation Issue. It does not select work, write code, fix CI,
+merge, deploy, or authorize an economic/runtime change. Labels, comments, commits,
+workflow runs, and an exact Issue/PR marker form the audit record; there is no
+parallel state database.
+
+```text
+human-approved implementation Issue
+  → agent:ready → agent:running → Draft PR → agent:pr
+  → ready-for-review PR + approval + exact-head CI → agent:verified
+  → HUMAN MERGE
+
+agent:running / agent:pr → agent:needs-human
+```
+
+## Classification and human opt-in
+
+`type:implementation` is mandatory and the mutually exclusive labels
+`type:epic`, `type:roadmap`, and `type:capability` deny eligibility. The
+implementation Issue template supplies only the classification label. A maintainer
+with `write`, `maintain`, or `admin` permission must separately run **Agent state
+transition** to add `agent:ready`. Thus creating or opening an Issue never starts
+work. Text/title heuristics are not used. Missing, contradictory, or multiple state
+labels produce `NO WRITE`.
+
+Roadmap/capability Issues are specifications under `docs/ROADMAP.md`, not work
+items. They must be split into a concrete Issue satisfying Definition of Ready,
+classified `type:implementation`, and then explicitly opted in by a human.
+
+## State semantics
+
+Exactly zero or one `agent:*` state label may exist on a participating object.
+
+| State | Meaning | Explicitly does not mean |
+|---|---|---|
+| `agent:ready` | A maintainer explicitly authorizes this classified Issue for takeover. | Work has started, CI passed, or merge is authorized. |
+| `agent:running` | Work on that Issue has been claimed/started. | A PR exists or its output is correct. |
+| `agent:pr` | The Issue and its single linked open PR passed structural linkage validation. | Review/CI passed or merge is authorized. |
+| `agent:needs-human` | Progress is stopped pending the reason recorded in the transition comment. | Failure is waived or the previous state is forgotten. |
+| `agent:verified` | Automated handoff conditions passed for the recorded final PR head SHA. | Merge authorization, auto-merge, review/check bypass, deployment, or Issue closure. |
+
+Labels are workflow state only. They never substitute for CI conclusions, approved
+review, repository rulesets, required checks, or a human merge decision.
+
+## Allowed transitions and actors
+
+The manually dispatched state workflow permits only:
+
+| From | To | Actor / additional evidence |
+|---|---|---|
+| no state | `agent:ready` | Human maintainer; unambiguous implementation classification. |
+| `agent:ready` | `agent:running` | Human maintainer initiating/assigning a run. |
+| `agent:running` | `agent:pr` | Human maintainer; open PR against the default branch with exact linkage. The workflow labels both Issue and PR. |
+| `agent:running`, `agent:pr` | `agent:needs-human` | Human maintainer; non-empty escalation reason. From `agent:pr`, the linked PR number is required and both objects are updated. |
+| `agent:needs-human` | `agent:ready`, `agent:running`, `agent:pr` | Human maintainer after remediation; the dispatch and comment document recovery. `agent:pr` again requires linkage. |
+| `agent:pr` | `agent:verified` | Only **Agent verification gate**, after all conditions below. |
+
+The transition workflow verifies the dispatching actor's repository permission,
+replaces the sole old state label, and comments with actor, workflow run, transition,
+PR/SHA where applicable, and escalation reason. Direct label edits are not valid
+pipeline transitions and must be recovered through a maintainer-reviewed state
+reset (remove conflicting state labels, retain the audit history, then dispatch a
+valid transition). Invalid transitions perform no write.
+
+Before first use, a maintainer runs **Agent label setup** once. It idempotently
+creates only the configured classification and state labels and cannot transition
+an Issue. Existing label definitions are not silently rewritten. This makes the
+Issue-template classification available without coupling setup writes to an
+otherwise invalid transition.
+
+## Deterministic Issue → PR linkage
+
+A participating PR body contains exactly one standalone marker:
+
+```text
+- Agent-Issue: #82
+```
+
+The number must identify the concrete `type:implementation` Issue. Zero, duplicate,
+malformed, or conflicting markers fail closed. Title similarity, branch names, and
+free-form references are never linkage. `Closes #N` is deliberately not required:
+v1 never automatically closes an Issue. On `agent:pr`, both objects receive that
+state and audit comments record the PR and its then-current head SHA.
+
+## Automated verification gate
+
+The write-capable verifier runs only after the authoritative workflow named `CI`
+completes successfully for a pull request. It checks metadata through the GitHub
+API and never checks out or executes PR code. It writes `agent:verified` to the
+linked Issue and PR only when all of these are true:
+
+1. the CI run refers to exactly one PR and its conclusion is `success`;
+2. the PR is open, non-draft, and its current head SHA exactly equals the CI run SHA;
+3. GitHub's current review decision is `APPROVED`;
+4. exactly one valid `Agent-Issue` marker points to a non-PR Issue;
+5. that Issue is unambiguously `type:implementation`, not epic/roadmap/capability;
+6. both Issue and PR have exactly the state `agent:pr`;
+7. neither object has `agent:needs-human`;
+8. every configured authoritative CI job succeeded on that exact SHA: `quality`,
+   `unit-research`, `api`, `integration-postgres`, `frontend`, `security`,
+   `container-build`, and `production-smoke`; and
+9. a final API read immediately before writing still observes the same SHA,
+   non-draft state, and `agent:pr` state.
+
+An unknown/ambiguous event or failed condition produces `NO WRITE`, never inferred
+success. A new commit changes the head SHA; normal GitHub CI and review-dismissal
+policy apply, and the PR must return to `agent:pr` before a later run can verify it.
+The list in `.github/agent-pipeline.json` must be reviewed whenever authoritative
+CI job names change. Repository branch protection remains the ultimate required
+check/review authority.
+
+## Recovery, rollback, and escalation
+
+Escalate a blocked or ambiguous run with a reason rather than guessing. Recovery is
+a deliberate maintainer transition out of `agent:needs-human`; comments preserve
+both transitions. If only one of the Issue/PR label writes succeeds because GitHub
+fails between API operations, the mismatch blocks verification. A maintainer must
+inspect the workflow/comments, restore one consistent prior state, record the
+reason, and rerun the intended transition.
+
+Rollback is disabling the three agent workflows and removing current state labels;
+comments, commits, reviews, and workflow history remain immutable audit evidence.
+Rollback never changes CI or branch protection. The workflows do not close Issues,
+push branches, merge, or deploy.
+
+## Security and authority
+
+Read-only verification and state writes are separated by jobs/workflows and explicit
+permissions. The verifier is triggered by `workflow_run` on trusted default-branch
+code and consumes only GitHub metadata; it never uses `pull_request_target` and
+never runs untrusted PR content with a write token. State management has only
+`contents:read`, `issues:write`, and `pull-requests:write`; verification additionally
+needs `actions:read` to inspect the exact CI jobs. Both fail closed.
+
+Existing CI remains authoritative and unchanged. In particular, pipeline labels do
+not bypass quality, backend, PostgreSQL, frontend, security, container, or
+production-smoke gates. There is no automatic merge and `agent:verified` always
+ends at **HUMAN MERGE** under repository branch protection.
+
+## Version boundary and future compatibility
+
+v1 provides classification, opt-in, transitions, deterministic linkage, escalation,
+and verified handoff only. It intentionally omits autonomous selection/building,
+fixer loops, independent AI review, staging deployment/acceptance, automatic Issue
+closure, and merge automation. Later versions may add bounded failure
+classification/review (v2), exact-merge-SHA staging evidence (v3), or a role-based
+ready queue (v4) while retaining the same GitHub evidence and fail-closed state
+contract. Those capabilities require their own reviewed implementation; none is
+authorized by this document.

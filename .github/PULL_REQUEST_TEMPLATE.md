@@ -5,6 +5,7 @@
 ## Linked work
 
 - Issue:
+- Agent-Issue: #<implementation-issue-number>
 - Parent roadmap/capability:
 - Phase:
 

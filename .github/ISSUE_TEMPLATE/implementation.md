@@ -2,7 +2,7 @@
 name: Implementation task
 about: Implementation work derived from an approved phase or capability roadmap
 title: ""
-labels: []
+labels: ["type:implementation"]
 assignees: []
 ---
 
@@ -11,6 +11,10 @@ assignees: []
 - Parent roadmap/capability:
 - Phase:
 - Blocking dependency Issues/PRs:
+
+> `type:implementation` pouze strojově odlišuje tento konkrétní ticket od epicu.
+> Zahájení práce musí navíc výslovně autorizovat maintainer přechodem na
+> `agent:ready`; samotné otevření Issue práci neautorizuje.
 
 ## Problem
 

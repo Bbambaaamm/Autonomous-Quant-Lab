@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "implementationLabel": "type:implementation",
+  "epicLabels": ["type:epic", "type:roadmap", "type:capability"],
+  "stateLabels": [
+    "agent:ready",
+    "agent:running",
+    "agent:pr",
+    "agent:needs-human",
+    "agent:verified"
+  ],
+  "requiredCiJobs": [
+    "quality",
+    "unit-research",
+    "api",
+    "integration-postgres",
+    "frontend",
+    "security",
+    "container-build",
+    "production-smoke"
+  ]
+}

@@ -207,6 +207,13 @@ Use `docs/acceptance/README.md` for acceptance evidence conventions.
 - Failed experiments, rejected strategies, invalid data states, and operational incidents remain part of the audit history.
 - Attractive new features must not pre-empt unresolved blockers in the current workstream.
 
+Development-agent authorization is governed separately by the GitHub-native
+[Autonomous Development Pipeline v1](autonomous-development-pipeline.md). In
+particular, roadmap/capability Issues are never eligible implementation tickets:
+only an unambiguously classified `type:implementation` Issue may receive the
+separate human opt-in state `agent:ready`. Pipeline verification is a handoff to a
+human and does not alter this roadmap's promotion gates or authorize merge.
+
 ## Planning principle
 
 The project optimizes for the probability of discovering and safely validating durable net edge — not for producing the highest historical backtest.

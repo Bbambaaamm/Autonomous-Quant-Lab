@@ -1,0 +1,81 @@
+name: Agent verification gate
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    if: github.event.workflow_run.event == 'pull_request' && github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+      issues: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      - name: Ověř automatizované handoff podmínky
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        with:
+          script: |
+            const pipeline = require(`${process.env.GITHUB_WORKSPACE}/.github/scripts/agent-pipeline.cjs`);
+            const config = require(`${process.env.GITHUB_WORKSPACE}/.github/agent-pipeline.json`);
+            const run = context.payload.workflow_run;
+            if (run.pull_requests.length !== 1) {
+              core.notice("NO_WRITE: CI run nemá právě jeden PR."); return;
+            }
+            const prNumber = run.pull_requests[0].number;
+            const { data: pull } = await github.rest.pulls.get({ ...context.repo, pull_number: prNumber });
+            const issueNumber = pipeline.parseAgentIssue(pull.body);
+            if (issueNumber === null) { core.notice("NO_WRITE: chybí jednoznačný Agent-Issue marker."); return; }
+            const { data: issue } = await github.rest.issues.get({ ...context.repo, issue_number: issueNumber });
+            if (issue.pull_request) { core.notice("NO_WRITE: marker necílí na Issue."); return; }
+
+            const jobs = await github.paginate(github.rest.actions.listJobsForWorkflowRun, {
+              ...context.repo, run_id: run.id, filter: "latest", per_page: 100,
+            });
+            const reviewQuery = await github.graphql(`query($owner:String!, $repo:String!, $number:Int!) {
+              repository(owner:$owner, name:$repo) { pullRequest(number:$number) { reviewDecision } }
+            }`, { owner: context.repo.owner, repo: context.repo.repo, number: prNumber });
+            const issueState = pipeline.currentState(issue.labels);
+            const prState = pipeline.currentState(pull.labels);
+            const needsHuman = [...issue.labels, ...pull.labels].some((label) => label.name === "agent:needs-human");
+            const decision = pipeline.verificationDecision({
+              workflowName: run.name,
+              workflowConclusion: run.conclusion,
+              headSha: run.head_sha,
+              prHeadSha: pull.head.sha,
+              open: pull.state === "open",
+              correctBase: pull.base.ref === context.payload.repository.default_branch,
+              draft: pull.draft,
+              approved: reviewQuery.repository.pullRequest.reviewDecision === "APPROVED",
+              issueIsImplementation: pipeline.isImplementation(issue.labels),
+              issueState,
+              prState,
+              needsHuman,
+              requiredJobsSuccessful: pipeline.successfulRequiredJobs(jobs, config.requiredCiJobs, run.head_sha),
+            });
+            if (!decision.ok) { core.notice(`NO_WRITE: ${decision.reason}`); return; }
+
+            // Opětovné načtení uzavírá okno mezi kontrolou a zápisem; nový SHA vždy failne zavřeně.
+            const { data: freshPull } = await github.rest.pulls.get({ ...context.repo, pull_number: prNumber });
+            if (freshPull.head.sha !== run.head_sha || freshPull.draft || pipeline.currentState(freshPull.labels) !== "agent:pr") {
+              core.notice("NO_WRITE: PR se během ověření změnil."); return;
+            }
+            const replaceState = async (number, labels) => {
+              const retained = labels.map((label) => label.name).filter((label) => !config.stateLabels.includes(label));
+              await github.rest.issues.setLabels({ ...context.repo, issue_number: number, labels: [...retained, "agent:verified"] });
+            };
+            await replaceState(prNumber, freshPull.labels);
+            await replaceState(issueNumber, issue.labels);
+            const evidence = `Automatizované handoff podmínky splněny pro head SHA \`${run.head_sha}\`.\n\nCI run: ${run.html_url}\n\nTento stav **není merge authorization**. Merge smí provést pouze člověk přes branch protection.`;
+            await github.rest.issues.createComment({ ...context.repo, issue_number: prNumber, body: evidence });
+            await github.rest.issues.createComment({ ...context.repo, issue_number: issueNumber, body: `PR #${prNumber}: ${evidence}` });

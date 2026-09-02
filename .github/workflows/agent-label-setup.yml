@@ -1,0 +1,48 @@
+name: Agent label setup
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Vytvoř chybějící řízené labely
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        with:
+          script: |
+            const { data: permission } = await github.rest.repos.getCollaboratorPermissionLevel({
+              ...context.repo, username: context.actor,
+            });
+            if (!["admin", "maintain", "write"].includes(permission.permission)) {
+              return core.setFailed("ACTOR_NOT_AUTHORIZED: žádný label nebyl vytvořen");
+            }
+            const config = require(`${process.env.GITHUB_WORKSPACE}/.github/agent-pipeline.json`);
+            const labels = {
+              [config.implementationLabel]: ["1d76db", "Konkrétní implementační ticket; sám o sobě neautorizuje práci"],
+              "type:epic": ["bfdadc", "Roadmap epic; není implementační ticket"],
+              "type:roadmap": ["bfdadc", "Roadmap specifikace; není implementační ticket"],
+              "type:capability": ["bfdadc", "Capability specifikace; není implementační ticket"],
+              "agent:ready": ["0e8a16", "Maintainer explicitně autorizoval převzetí Issue"],
+              "agent:running": ["fbca04", "Autorizovaná implementace byla zahájena"],
+              "agent:pr": ["5319e7", "Issue a otevřený PR mají ověřenou přesnou vazbu"],
+              "agent:needs-human": ["d93f0b", "Pipeline je zastavena a vyžaduje lidské rozhodnutí"],
+              "agent:verified": ["006b75", "Automatizovaný handoff prošel; nejedná se o merge autorizaci"],
+            };
+            for (const [name, [color, description]] of Object.entries(labels)) {
+              try {
+                await github.rest.issues.getLabel({ ...context.repo, name });
+              } catch (error) {
+                if (error.status !== 404) throw error;
+                await github.rest.issues.createLabel({ ...context.repo, name, color, description });
+              }
+            }
