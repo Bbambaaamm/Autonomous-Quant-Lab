@@ -2,6 +2,9 @@
 
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
+const { execFileSync } = require("node:child_process");
 const test = require("node:test");
 const pipeline = require("./agent-pipeline.cjs");
 
@@ -345,6 +348,7 @@ test("validated artifact binds checksum, byte bound, and exact allowed paths", (
   assert.deepEqual(pipeline.trustedArtifactDecision({ patchBytes: 20, actualChecksum: "x", metadataChecksum: "x", actualPaths: ["backend/a.py"], metadataPaths: ["backend/a.py"], config: c }), { ok: true });
   assert.equal(pipeline.trustedArtifactDecision({ patchBytes: 20, actualChecksum: "x", metadataChecksum: "y", actualPaths: ["backend/a.py"], metadataPaths: ["backend/a.py"], config: c }).ok, false);
   assert.equal(pipeline.trustedArtifactDecision({ patchBytes: 20, actualChecksum: "x", metadataChecksum: "x", actualPaths: ["docs/ROADMAP.md"], metadataPaths: ["docs/ROADMAP.md"], config: c }).ok, false);
+  assert.deepEqual(pipeline.trustedArtifactDecision({ patchBytes: 20, actualChecksum: "x", metadataChecksum: "x", actualPaths: ["docs/ROADMAP.md"], metadataPaths: ["backend/a.py"], config: c }), { ok: false, reason: "PATH_SET_MISMATCH" });
 });
 
 test("v2 fixer budget, exact evidence a idempotence jsou bounded", () => {
@@ -384,7 +388,7 @@ test("v2 workflow wiring odděluje secret, validation a write trust domains", ()
   assert.match(fixer, /persist-credentials: false/);
   assert.match(fixer, /concurrency:/);
   assert.match(reviewer, /permission-profile: ':read-only'/);
-  assert.match(fixer, /permission-profile: ":workspace"/);
+  assert.match(fixer, /permission-profile: ":read-only"/);
   assert.match(fixer, /allow-bot-users: "github-actions\[bot\]"/);
   assert.match(reviewer, /allow-bot-users: "github-actions\[bot\]"/);
   assert.doesNotMatch(fixer + reviewer, /allow-bots:/);
@@ -446,4 +450,43 @@ test("v2 third-audit workflow wiring is fail-closed and injection safe", () => {
   assert.match(reviewer,/base_sha:pr\.base\.sha/);
   assert.match(reviewer,/git diff --quiet "\$BASE_SHA" "\$HEAD_SHA" -- AGENTS\.md/);
   assert.doesNotMatch(fixer+reviewer,/pull-requests: write/);
+});
+
+test("v2 index mode policy rejects symlinks, gitlinks, and mode transitions", () => {
+  const raw = (oldMode, newMode) => `:${oldMode} ${newMode} ${"0".repeat(40)} ${"1".repeat(40)} M\tfile`;
+  assert.equal(pipeline.validatePatchModes(raw("100644", "100644")), true);
+  assert.equal(pipeline.validatePatchModes(raw("100755", "100755")), true);
+  assert.equal(pipeline.validatePatchModes(raw("000000", "100644")), true);
+  assert.equal(pipeline.validatePatchModes(raw("000000", "120000")), false);
+  assert.equal(pipeline.validatePatchModes(raw("000000", "160000")), false);
+  assert.equal(pipeline.validatePatchModes(raw("100644", "100755")), false);
+});
+
+test("v2 cached artifact preserves a tracked edit and new regression file exactly", () => {
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),"agent-patch-")), source=path.join(root,"source"), published=path.join(root,"published");
+  fs.mkdirSync(source); execFileSync("git",["init","-q"],{cwd:source});
+  execFileSync("git",["config","user.email","test@example.invalid"],{cwd:source}); execFileSync("git",["config","user.name","test"],{cwd:source});
+  fs.writeFileSync(path.join(source,"code.txt"),"before\n"); execFileSync("git",["add","."],{cwd:source}); execFileSync("git",["commit","-qm","base"],{cwd:source});
+  fs.writeFileSync(path.join(source,"code.txt"),"after\n"); fs.writeFileSync(path.join(source,"regression.test.txt"),"covered\n");
+  execFileSync("git",["add","-A"],{cwd:source}); const patch=execFileSync("git",["diff","--cached","--binary"],{cwd:source});
+  execFileSync("git",["clone","-q",source,published]);
+  execFileSync("git",["apply","--index","-"],{cwd:published,input:patch});
+  assert.equal(execFileSync("git",["diff","--cached","--binary"],{cwd:published}).equals(patch),true);
+  assert.deepEqual(execFileSync("git",["diff","--cached","--name-only"],{cwd:published,encoding:"utf8"}).trim().split("\n"),["code.txt","regression.test.txt"]);
+  fs.rmSync(root,{recursive:true,force:true});
+});
+
+test("v2 fourth-audit wiring validates before checks and closes dispatch and push TOCTOU", () => {
+  const fixer=fs.readFileSync(".github/workflows/agent-ci-fixer.yml","utf8");
+  const validation=fixer.slice(fixer.indexOf("validate-patch:"),fixer.indexOf("trusted-publish:"));
+  assert.ok(validation.indexOf("cmp \"$RUNNER_TEMP/declared-paths\"") < validation.indexOf("case \"$(jq -r .failure_class"));
+  assert.ok(validation.indexOf("validatePatchPaths(x,c.v2)") < validation.indexOf("case \"$(jq -r .failure_class"));
+  assert.match(fixer,/run\.name!=="CI"[\s\S]*run\.event!=="pull_request"[\s\S]*run\.status!=="completed"[\s\S]*run\.conclusion!=="failure"/);
+  assert.match(fixer,/cmp "\$RUNNER_TEMP\/validated\.patch" "\$RUNNER_TEMP\/publisher\.patch"/);
+  assert.match(fixer,/git ls-remote --refs origin "refs\/heads\/\$HEAD_REF"[\s\S]*= "\$SHA"[\s\S]*git push[\s\S]*git ls-remote --refs origin/);
+  assert.match(fixer,/prepare-generation-context:[\s\S]*source-context\.json/);
+  const generation=fixer.slice(fixer.indexOf("generate-patch:"),fixer.indexOf("validate-patch:"));
+  assert.doesNotMatch(generation,/actions\/checkout|git |npm |pytest|ruff|mypy/);
+  assert.match(generation,/test -n "\$OPENAI_API_KEY"/);
+  assert.match(fixer,/test -n "\$AGENT_PUBLISH_TOKEN"/);
 });

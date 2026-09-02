@@ -263,6 +263,21 @@ function validatePatchPaths(paths, config) {
     !config.deniedPathFragments.some((fragment) => path.toLowerCase().includes(fragment)));
 }
 
+function validatePatchModes(rawDiff) {
+  const allowedModes = new Set(["100644", "100755"]);
+  const lines = String(rawDiff || "").split("\n").filter(Boolean);
+  if (!lines.length) return false;
+  return lines.every((line) => {
+    const match = /^:(\d{6}) (\d{6}) [0-9a-f]+ [0-9a-f]+ [A-Z][0-9]*\t/.exec(line);
+    if (!match) return false;
+    const [, oldMode, newMode] = match;
+    if (oldMode === newMode) return allowedModes.has(oldMode);
+    // New/deleted generated entries are narrow regular, non-executable files only.
+    return (oldMode === "000000" && newMode === "100644") ||
+      (oldMode === "100644" && newMode === "000000");
+  });
+}
+
 function stateMutationPlan(labels, previousState, nextState) {
   const progress = transitionProgress(labels, previousState, nextState);
   if (!progress.ok) return progress;
@@ -397,6 +412,7 @@ module.exports = {
   trustedArtifactDecision,
   fixAttemptDecision,
   validatePatchPaths,
+  validatePatchModes,
   stateMutationPlan,
   successfulRequiredJobs,
   transitionProgress,

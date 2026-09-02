@@ -51,3 +51,13 @@ Codex actions narrowly allow only `github-actions[bot]` through `allow-bot-users
 ## Third security audit decisions
 
 The controller distinguishes exact-head CI success, failure, in-progress, and ambiguous/no-evidence states after linkage. Fix publication rejects forks, treats the validated head ref only as a checked environment argument, includes staged additions in the artifact, uses a non-`GITHUB_TOKEN` publication credential to trigger the next CI cycle, and reconciles the two-commit budget from durable commit trailers. Protected paths and test/log patterns prevent mixed safety jobs from entering free-form repair. Trusted default-branch governance plus the exact base SHA bound the independent review, and exact-head finalizers escalate generation, validation, or publication failures without allowing stale runs to affect newer commits.
+
+## Fourth security audit decisions
+
+Actual staged paths, rather than model declarations, are authoritative before validation commands.
+Both validation and publication enforce a regular-file index-mode policy and cached-diff semantics,
+including new files. Publication compares the remote ref with the classified source immediately
+before push and verifies the expected result immediately afterward; dispatched CI evidence is fully
+reclassified. Secret-bearing generation has no repository checkout or runnable repository content:
+a credential-free predecessor supplies bounded source text as non-executable JSON. Both model and
+publisher credentials have explicit fail-closed preflight checks, with no publication-token fallback.

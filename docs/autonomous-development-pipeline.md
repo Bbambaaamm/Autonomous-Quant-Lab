@@ -317,3 +317,20 @@ SHA before performing the fail-closed escalation.
 The post-link controller re-queries a unique authoritative CI run for the exact PR head. A completed success routes to independent review, a completed failure routes to the classifier with its exact run ID, an active run is left to its normal completion event, and missing or ambiguous evidence performs no write. Fixer publication is limited to same-repository PR heads, validates the ref as data, and uses the narrowly scoped `AGENT_PUBLISH_TOKEN` so the resulting push deterministically emits the next pull-request CI cycle.
 
 Validated patches are exported from the staged index, including new files. Concrete trading, risk, execution, security, paper-only, authentication, and RBAC surfaces are protected by machine-readable path and diagnostic patterns. Fix commits carry a durable `Agent-Fix-Attempt` trailer, allowing budget reconciliation even if post-push audit recording crashes. All model, validation, and publication failures use an exact-head fail-closed finalizer; stale failures never mutate a newer head. Reviewer governance and the base SHA come from the trusted default-branch preparation checkout.
+
+### v2 fourth-audit artifact and secret boundary
+
+Before any repository check runs, credential-free validation stages the applied patch, compares the
+actual cached path set with the model declaration, applies the deny policy to that actual set, and
+rejects symlinks, gitlinks, executable additions, and mode transitions. Trusted publication repeats
+the cached path and index-mode policy, stages additions before comparison, verifies the remote head
+is still the classified source SHA immediately before push, and verifies the resulting remote SHA.
+Manual dispatch accepts a CI run only when its completed failed `CI`/`pull_request` identity, exact
+SHA, single attached PR, and PR number all agree.
+
+Patch generation has an explicit secret preflight and no repository checkout. A preceding
+credential-free job serializes bounded repairable source files as non-executable JSON; the
+secret-bearing job contains only that source context and diagnostic artifact, so repository scripts
+and tests are mechanically absent while `OPENAI_API_KEY` is present. The immutable Codex action pin
+and read-only profile are wiring-tested. Publication separately requires `AGENT_PUBLISH_TOKEN`
+before checkout and never falls back to `GITHUB_TOKEN`.

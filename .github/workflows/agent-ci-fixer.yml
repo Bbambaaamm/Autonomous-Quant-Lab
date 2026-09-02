@@ -61,6 +61,9 @@ jobs:
             const {data:pr}=await github.rest.pulls.get({...context.repo,pull_number:prNumber});
             const issueNumber=p.parseAgentIssue(pr.body);
             if (!issueNumber || pr.head.sha!==requestedSha || pr.state!=="open" || pr.base.ref!==context.payload.repository.default_branch) return core.notice("NO_WRITE: stale nebo neplatný PR");
+            if (dispatched && (run.name!=="CI" || run.event!=="pull_request" || run.status!=="completed" || run.conclusion!=="failure" ||
+              run.head_sha!==requestedSha || run.pull_requests?.length!==1 || run.pull_requests[0].number!==prNumber))
+              return core.notice("NO_WRITE: ci_run_id není autoritativní failed CI evidence");
             const {data:issue}=await github.rest.issues.get({...context.repo,issue_number:issueNumber});
             const comments=await github.paginate(github.rest.issues.listComments,{...context.repo,issue_number:prNumber,per_page:100});
             const commits=await github.paginate(github.rest.pulls.listCommits,{...context.repo,pull_number:prNumber,per_page:100});
@@ -129,7 +132,7 @@ jobs:
             }
             await github.rest.issues.createComment({...context.repo,issue_number:prNumber,body:`Automatická oprava zastavena: ${process.env.REASON} pro exact SHA \`${process.env.SHA}\`. Stav byl fail-closed předán člověku.`});
 
-  generate-patch:
+  prepare-generation-context:
     needs: classify
     if: needs.classify.outputs.eligible == 'true'
     runs-on: ubuntu-latest
@@ -137,10 +140,33 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with: {ref: '${{ needs.classify.outputs.source_sha }}', persist-credentials: false}
-      - run: test "$(git rev-parse HEAD)" = "${SOURCE_SHA}"
-        env: {SOURCE_SHA: '${{ needs.classify.outputs.source_sha }}'}
+      - name: Build bounded non-executable source context
+        run: |
+          mkdir "$RUNNER_TEMP/generation-context"
+          node - <<'NODE' > "$RUNNER_TEMP/generation-context/source-context.json"
+          const fs=require('fs'),path=require('path'),p=require('./.github/scripts/agent-pipeline.cjs'),c=require('./.github/agent-pipeline.json');
+          const roots=['backend/src','backend/tests','frontend/src','frontend/app','frontend/components'];
+          const files=[]; function walk(dir){if(!fs.existsSync(dir))return;for(const e of fs.readdirSync(dir,{withFileTypes:true})){const n=path.join(dir,e.name);if(e.isDirectory())walk(n);else if(e.isFile()&&p.validatePatchPaths([n],c.v2))files.push({path:n,content:fs.readFileSync(n,'utf8')});}}
+          roots.forEach(walk); const out=JSON.stringify({format:'source-context-v1',files});
+          if(Buffer.byteLength(out)>2097152) throw new Error('SOURCE_CONTEXT_TOO_LARGE'); process.stdout.write(out);
+          NODE
+          chmod 0444 "$RUNNER_TEMP/generation-context/source-context.json"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with: {name: 'generation-context-${{ github.run_id }}', path: '${{ runner.temp }}/generation-context/source-context.json', if-no-files-found: error, retention-days: 1}
+
+  generate-patch:
+    needs: [classify, prepare-generation-context]
+    if: needs.classify.outputs.eligible == 'true'
+    runs-on: ubuntu-latest
+    permissions: {contents: read}
+    steps:
+      - name: Fail closed when the model credential is absent
+        env: {OPENAI_API_KEY: '${{ secrets.OPENAI_API_KEY }}'}
+        run: test -n "$OPENAI_API_KEY"
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with: {name: 'trusted-diagnostic-${{ github.run_id }}', path: '.codex-input'}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with: {name: 'generation-context-${{ github.run_id }}', path: '.codex-input'}
       - name: Build deterministic bounded prompt
         env:
           SOURCE_SHA: '${{ needs.classify.outputs.source_sha }}'
@@ -152,13 +178,15 @@ jobs:
           --- BEGIN UNTRUSTED DIAGNOSTIC DATA ---
           EOF
           cat .codex-input/diagnostic.json >> .codex-input/prompt.md
-          printf '\n--- END UNTRUSTED DIAGNOSTIC DATA ---\nFailure class: %s\nExact SHA: %s\n' "$FAILURE_CLASS" "$SOURCE_SHA" >> .codex-input/prompt.md
-          test "$(stat -c%s .codex-input/prompt.md)" -le 12288
+          printf '\n--- END UNTRUSTED DIAGNOSTIC DATA ---\n--- BEGIN UNTRUSTED SOURCE DATA ---\n' >> .codex-input/prompt.md
+          cat .codex-input/source-context.json >> .codex-input/prompt.md
+          printf '\n--- END UNTRUSTED SOURCE DATA ---\nFailure class: %s\nExact SHA: %s\n' "$FAILURE_CLASS" "$SOURCE_SHA" >> .codex-input/prompt.md
+          test "$(stat -c%s .codex-input/prompt.md)" -le 2113536
       - name: Vygeneruj pouze omezený patch; nespouštěj repository kód
         uses: openai/codex-action@86365089eb2b84e0a8fb0717b304f8bdcb13b20e # immutable pin
         with:
           openai-api-key: ${{ secrets.OPENAI_API_KEY }}
-          permission-profile: ":workspace"
+          permission-profile: ":read-only"
           allow-bot-users: "github-actions[bot]"
           output-file: ${{ runner.temp }}/codex-output.json
           output-schema: >-
@@ -201,10 +229,16 @@ jobs:
           git diff --check
           git add -A
           git diff --cached --check
-          git diff --cached --binary > "$RUNNER_TEMP/validated.patch"
-          test "$(stat -c%s "$RUNNER_TEMP/validated.patch")" -le 131072
           mapfile -t paths < <(git diff --cached --name-only)
           printf '%s\n' "${paths[@]}" | jq -Rsc 'split("\n")[:-1]' > "$RUNNER_TEMP/validated-paths.json"
+          jq -r '.paths[]' "$RUNNER_TEMP/generated/output.json" | sort > "$RUNNER_TEMP/declared-paths"
+          printf '%s\n' "${paths[@]}" | sort > "$RUNNER_TEMP/actual-paths"
+          cmp "$RUNNER_TEMP/declared-paths" "$RUNNER_TEMP/actual-paths"
+          node -e 'const p=require("./.github/scripts/agent-pipeline.cjs"),c=require("./.github/agent-pipeline.json"),fs=require("fs");const x=fs.readFileSync(process.argv[1],"utf8").trim().split("\n");if(!p.validatePatchPaths(x,c.v2))process.exit(1)' "$RUNNER_TEMP/actual-paths"
+          git diff --cached --raw > "$RUNNER_TEMP/validated-modes"
+          node -e 'const p=require("./.github/scripts/agent-pipeline.cjs"),fs=require("fs");if(!p.validatePatchModes(fs.readFileSync(process.argv[1],"utf8")))process.exit(1)' "$RUNNER_TEMP/validated-modes"
+          git diff --cached --binary > "$RUNNER_TEMP/validated.patch"
+          test "$(stat -c%s "$RUNNER_TEMP/validated.patch")" -le 131072
           sha256sum "$RUNNER_TEMP/validated.patch" | cut -d' ' -f1 > "$RUNNER_TEMP/validated-checksum"
           jq -n --arg sha "$SOURCE_SHA" --arg class "$(jq -r .failure_class "$RUNNER_TEMP/generated/metadata.json")" --arg checksum "$(cat "$RUNNER_TEMP/validated-checksum")" --slurpfile paths "$RUNNER_TEMP/validated-paths.json" '{source_sha:$sha,failure_class:$class,checksum:$checksum,paths:$paths[0]}' > "$RUNNER_TEMP/validated-metadata.json"
           case "$(jq -r .failure_class "$RUNNER_TEMP/generated/metadata.json")" in
@@ -233,6 +267,9 @@ jobs:
     runs-on: ubuntu-latest
     permissions: {contents: write, issues: write, pull-requests: read}
     steps:
+      - name: Fail closed when the publication credential is absent
+        env: {AGENT_PUBLISH_TOKEN: '${{ secrets.AGENT_PUBLISH_TOKEN }}'}
+        run: test -n "$AGENT_PUBLISH_TOKEN"
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with: {ref: '${{ needs.classify.outputs.source_sha }}', persist-credentials: true, token: '${{ secrets.AGENT_PUBLISH_TOKEN }}'}
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
@@ -258,7 +295,8 @@ jobs:
             const {data:pr}=await github.rest.pulls.get({...context.repo,pull_number:Number(process.env.PR)});
             if(pr.head.repo?.full_name!==`${context.repo.owner}/${context.repo.repo}`) return core.setFailed('FORK_PR_NO_WRITE');
             core.setOutput('ref',pr.head.ref);
-      - name: Publikuj přesně validovaný patch bez force-push
+      - id: publish
+        name: Publikuj přesně validovaný patch bez force-push
         env: {SHA: '${{ needs.classify.outputs.source_sha }}', ATTEMPT: '${{ needs.classify.outputs.attempt }}', HEAD_REF: '${{ steps.head.outputs.ref }}'}
         run: |
           test "$(git rev-parse HEAD)" = "$SHA"
@@ -267,21 +305,31 @@ jobs:
           test "$(jq -r .source_sha "$RUNNER_TEMP/validated-metadata.json")" = "$SHA"
           test "$(stat -c%s "$RUNNER_TEMP/validated.patch")" -le 131072
           git apply --check "$RUNNER_TEMP/validated.patch" && git apply "$RUNNER_TEMP/validated.patch"
-          git diff --name-only | sort > "$RUNNER_TEMP/publisher-paths"
+          git add -A
+          git diff --cached --name-only | sort > "$RUNNER_TEMP/publisher-paths"
           jq -r '.paths[]' "$RUNNER_TEMP/validated-metadata.json" | sort > "$RUNNER_TEMP/metadata-paths"
           cmp "$RUNNER_TEMP/publisher-paths" "$RUNNER_TEMP/metadata-paths"
           node -e 'const p=require("./.github/scripts/agent-pipeline.cjs"),c=require("./.github/agent-pipeline.json"),fs=require("fs");const paths=fs.readFileSync(process.argv[1],"utf8").trim().split("\n");if(!p.validatePatchPaths(paths,c.v2))process.exit(1)' "$RUNNER_TEMP/publisher-paths"
-          git diff --check
+          git diff --cached --check
+          git diff --cached --binary > "$RUNNER_TEMP/publisher.patch"
+          cmp "$RUNNER_TEMP/validated.patch" "$RUNNER_TEMP/publisher.patch"
+          git diff --cached --raw > "$RUNNER_TEMP/publisher-modes"
+          node -e 'const p=require("./.github/scripts/agent-pipeline.cjs"),fs=require("fs");if(!p.validatePatchModes(fs.readFileSync(process.argv[1],"utf8")))process.exit(1)' "$RUNNER_TEMP/publisher-modes"
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
           git check-ref-format --branch "$HEAD_REF" >/dev/null
-          git add -A && git commit -m "Automatická oprava CI (pokus ${ATTEMPT}/2)" -m "Agent-Fix-Attempt: ${ATTEMPT}"
+          git commit -m "Automatická oprava CI (pokus ${ATTEMPT}/2)" -m "Agent-Fix-Attempt: ${ATTEMPT}"
+          EXPECTED_RESULT="$(git rev-parse HEAD)"
+          test "$(git ls-remote --refs origin "refs/heads/$HEAD_REF" | awk '{print $1}')" = "$SHA"
           git push origin "HEAD:${HEAD_REF}"
+          test "$(git ls-remote --refs origin "refs/heads/$HEAD_REF" | awk '{print $1}')" = "$EXPECTED_RESULT"
+          echo "expected_result=$EXPECTED_RESULT" >> "$GITHUB_OUTPUT"
       - uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
-        env: {PR: '${{ needs.classify.outputs.pr_number }}', SHA: '${{ needs.classify.outputs.source_sha }}', EVIDENCE: '${{ needs.classify.outputs.evidence }}', ATTEMPT: '${{ needs.classify.outputs.attempt }}'}
+        env: {PR: '${{ needs.classify.outputs.pr_number }}', SHA: '${{ needs.classify.outputs.source_sha }}', EXPECTED_RESULT: '${{ steps.publish.outputs.expected_result }}', EVIDENCE: '${{ needs.classify.outputs.evidence }}', ATTEMPT: '${{ needs.classify.outputs.attempt }}'}
         with:
           script: |
             const {data:pr}=await github.rest.pulls.get({...context.repo,pull_number:Number(process.env.PR)});
+            if(pr.head.sha!==process.env.EXPECTED_RESULT) return core.setFailed("POST_PUSH_HEAD_MISMATCH");
             await github.rest.issues.createComment({...context.repo,issue_number:Number(process.env.PR),body:`CI fixer: pokus ${process.env.ATTEMPT}/2, source \`${process.env.SHA}\`, result \`${pr.head.sha}\`.\n<!-- agent-fix:v2 source=${process.env.SHA} evidence=${process.env.EVIDENCE} attempt=${process.env.ATTEMPT} result=${pr.head.sha} -->`});
 
 
