@@ -1,0 +1,65 @@
+name: Agent exact-SHA review acknowledgement
+
+on:
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: Číslo PR ve stavu agent:pr
+        required: true
+        type: string
+      expected_head_sha:
+        description: Celý 40znakový head SHA, který člověk skutečně zkontroloval
+        required: true
+        type: string
+      acknowledgement:
+        description: Potvrzení, že acknowledgement není merge autorizace
+        required: true
+        type: choice
+        options:
+          - REVIEWED_EXACT_SHA_NOT_MERGE_AUTHORIZATION
+
+permissions:
+  contents: read
+
+jobs:
+  acknowledge:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Zapiš auditní acknowledgement přesného SHA
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        env:
+          PR_NUMBER: ${{ inputs.pr_number }}
+          EXPECTED_HEAD_SHA: ${{ inputs.expected_head_sha }}
+          ACKNOWLEDGEMENT: ${{ inputs.acknowledgement }}
+        with:
+          script: |
+            const prNumber = Number(process.env.PR_NUMBER);
+            const expectedSha = process.env.EXPECTED_HEAD_SHA.trim();
+            if (!Number.isSafeInteger(prNumber) || prNumber < 1 || !/^[0-9a-f]{40}$/.test(expectedSha) ||
+                process.env.ACKNOWLEDGEMENT !== "REVIEWED_EXACT_SHA_NOT_MERGE_AUTHORIZATION") {
+              return core.setFailed("INVALID_ACKNOWLEDGEMENT: žádný zápis nebyl proveden");
+            }
+            const { data: permission } = await github.rest.repos.getCollaboratorPermissionLevel({
+              ...context.repo, username: context.actor,
+            });
+            if (!["admin", "maintain", "write"].includes(permission.permission)) {
+              return core.setFailed("ACTOR_NOT_AUTHORIZED: žádný zápis nebyl proveden");
+            }
+            const { data: pull } = await github.rest.pulls.get({ ...context.repo, pull_number: prNumber });
+            const states = pull.labels.map((label) => label.name).filter((label) => label.startsWith("agent:"));
+            if (pull.state !== "open" || pull.draft || pull.head.sha !== expectedSha ||
+                pull.base.ref !== context.payload.repository.default_branch ||
+                states.length !== 1 || states[0] !== "agent:pr") {
+              return core.setFailed("PR_NOT_ACKNOWLEDGEABLE: žádný zápis nebyl proveden");
+            }
+            const body = [
+              `Review acknowledged pro exact head SHA \`${expectedSha}\`.`,
+              `Reviewer: @${context.actor}`,
+              `Workflow run: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+              "Toto potvrzení není merge autorizace a nenahrazuje required GitHub review ani branch protection.",
+              `<!-- agent-review-ack:v1 sha=${expectedSha} -->`,
+            ].join("\n\n");
+            await github.rest.issues.createComment({ ...context.repo, issue_number: prNumber, body });

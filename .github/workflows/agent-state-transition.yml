@@ -1,0 +1,167 @@
+name: Agent state transition
+
+on:
+  workflow_dispatch:
+    inputs:
+      issue_number:
+        description: Číslo konkrétního implementačního Issue
+        required: true
+        type: string
+      next_state:
+        description: Požadovaný následující stav
+        required: true
+        type: choice
+        options:
+          - agent:ready
+          - agent:running
+          - agent:pr
+          - agent:needs-human
+      previous_state:
+        description: Očekávaný předchozí stav (povinný pro bezpečný retry)
+        required: true
+        type: choice
+        options:
+          - none
+          - agent:ready
+          - agent:running
+          - agent:pr
+          - agent:needs-human
+      pr_number:
+        description: Číslo PR; povinné pouze pro přechod do agent:pr
+        required: false
+        type: string
+      reason:
+        description: Auditní důvod; povinný pro agent:needs-human
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  transition:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Ověř a zapiš přechod
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        env:
+          ISSUE_NUMBER: ${{ inputs.issue_number }}
+          NEXT_STATE: ${{ inputs.next_state }}
+          PREVIOUS_STATE: ${{ inputs.previous_state }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+          REASON: ${{ inputs.reason }}
+        with:
+          script: |
+            const pipeline = require(`${process.env.GITHUB_WORKSPACE}/.github/scripts/agent-pipeline.cjs`);
+            const issueNumber = Number(process.env.ISSUE_NUMBER);
+            const prNumber = process.env.PR_NUMBER ? Number(process.env.PR_NUMBER) : null;
+            const nextState = process.env.NEXT_STATE;
+            const previousState = process.env.PREVIOUS_STATE;
+            const reason = process.env.REASON.trim();
+            if (!Number.isSafeInteger(issueNumber) || issueNumber < 1 ||
+                (prNumber !== null && (!Number.isSafeInteger(prNumber) || prNumber < 1))) {
+              return core.setFailed("INVALID_NUMBER: žádný zápis nebyl proveden");
+            }
+
+            const { data: permission } = await github.rest.repos.getCollaboratorPermissionLevel({
+              ...context.repo, username: context.actor,
+            });
+            if (!["admin", "maintain", "write"].includes(permission.permission)) {
+              return core.setFailed("ACTOR_NOT_AUTHORIZED: žádný zápis nebyl proveden");
+            }
+
+            const { data: issue } = await github.rest.issues.get({ ...context.repo, issue_number: issueNumber });
+            if (issue.pull_request) return core.setFailed("TARGET_IS_NOT_ISSUE: žádný zápis nebyl proveden");
+            const decision = pipeline.validateManualTransition({
+              labels: issue.labels, previousState, nextState, targetKind: "issue",
+            });
+            if (!decision.ok) return core.setFailed(`${decision.reason}: žádný zápis nebyl proveden`);
+            if (nextState === "agent:needs-human" && !reason) {
+              return core.setFailed("ESCALATION_REASON_REQUIRED: žádný zápis nebyl proveden");
+            }
+            const transitionNeedsPr = nextState === "agent:pr" ||
+              (nextState === "agent:needs-human" && previousState === "agent:pr");
+            if (transitionNeedsPr && prNumber === null) {
+              return core.setFailed("PR_NUMBER_REQUIRED: žádný zápis nebyl proveden");
+            }
+            if (!transitionNeedsPr && prNumber !== null) {
+              return core.setFailed("UNEXPECTED_PR_NUMBER: žádný zápis nebyl proveden");
+            }
+
+            let pull = null;
+            if (prNumber !== null) {
+              ({ data: pull } = await github.rest.pulls.get({ ...context.repo, pull_number: prNumber }));
+              if (pull.state !== "open" || pull.base.ref !== context.payload.repository.default_branch ||
+                  pipeline.parseAgentIssue(pull.body) !== issueNumber) {
+                return core.setFailed("INVALID_PR_LINKAGE: žádný zápis nebyl proveden");
+              }
+            }
+
+            const config = require(`${process.env.GITHUB_WORKSPACE}/.github/agent-pipeline.json`);
+            const colors = { "type:implementation": "1d76db", "agent:ready": "0e8a16", "agent:running": "fbca04", "agent:pr": "5319e7", "agent:needs-human": "d93f0b", "agent:verified": "006b75" };
+            for (const label of [config.implementationLabel, ...config.stateLabels]) {
+              try {
+                await github.rest.issues.getLabel({ ...context.repo, name: label });
+              } catch (error) {
+                if (error.status !== 404) throw error;
+                await github.rest.issues.createLabel({ ...context.repo, name: label, color: colors[label], description: "Autonomous Development Pipeline v1" });
+              }
+            }
+
+            const mutateState = async (number, plan) => {
+              if (plan.add.length) {
+                await github.rest.issues.addLabels({ ...context.repo, issue_number: number, labels: plan.add });
+              }
+              for (const label of plan.remove) {
+                await github.rest.issues.removeLabel({ ...context.repo, issue_number: number, name: label });
+              }
+            };
+            // Fresh reads + explicit previous/next dovolují bezpečně dokončit pouze stejný partial transition.
+            const { data: freshIssue } = await github.rest.issues.get({ ...context.repo, issue_number: issueNumber });
+            if (!pipeline.isImplementation(freshIssue.labels)) {
+              return core.setFailed("ISSUE_CLASSIFICATION_CHANGED: žádný zápis nebyl proveden");
+            }
+            const issuePlan = pipeline.stateMutationPlan(freshIssue.labels, previousState, nextState);
+            if (!issuePlan.ok) return core.setFailed(`${issuePlan.reason}: žádný zápis nebyl proveden`);
+
+            let prPreviousState = null;
+            let freshPull = null;
+            let prPlan = null;
+            if (pull) {
+              ({ data: freshPull } = await github.rest.pulls.get({ ...context.repo, pull_number: prNumber }));
+              if (freshPull.state !== "open" || freshPull.base.ref !== context.payload.repository.default_branch ||
+                  pipeline.parseAgentIssue(freshPull.body) !== issueNumber) {
+                return core.setFailed("PR_CHANGED_BEFORE_WRITE: žádný zápis nebyl proveden");
+              }
+              prPreviousState = previousState === "agent:running" ? "none" : previousState;
+              prPlan = pipeline.stateMutationPlan(freshPull.labels, prPreviousState, nextState);
+              if (!prPlan.ok) return core.setFailed(`${prPlan.reason}: žádný zápis nebyl proveden`);
+            }
+
+            await mutateState(issueNumber, issuePlan);
+            if (freshPull) {
+              // Po selhání je retry se stejným previous/next idempotentní a doplní jen chybějící stranu.
+              const { data: retryFreshPull } = await github.rest.pulls.get({ ...context.repo, pull_number: prNumber });
+              prPlan = pipeline.stateMutationPlan(retryFreshPull.labels, prPreviousState, nextState);
+              if (!prPlan.ok) return core.setFailed(`${prPlan.reason}: Issue může být v bezpečném partial stavu; opakujte stejný přechod`);
+              await mutateState(prNumber, prPlan);
+            }
+            const evidence = [
+              `Agent transition: \`${previousState}\` → \`${nextState}\``,
+              `Actor: @${context.actor}`,
+              `Workflow run: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+              pull ? `Linked PR: #${prNumber}; head SHA: \`${pull.head.sha}\`` : null,
+              reason ? `Reason: ${reason}` : null,
+              pull && nextState === "agent:pr"
+                ? `<!-- agent-link:v1 repo=${context.repo.owner}/${context.repo.repo} issue=${issueNumber} pr=${prNumber} -->`
+                : null,
+            ].filter(Boolean).join("\n\n");
+            await github.rest.issues.createComment({ ...context.repo, issue_number: issueNumber, body: evidence });
+            if (pull) await github.rest.issues.createComment({ ...context.repo, issue_number: prNumber, body: evidence });
