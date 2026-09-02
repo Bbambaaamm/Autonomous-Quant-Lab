@@ -27,7 +27,7 @@ human-only.
 
 The official Codex Action is immutably pinned to
 `86365089eb2b84e0a8fb0717b304f8bdcb13b20e`. Its declared `permission-profile`, `output-file`,
-`output-schema`, `openai-api-key`, and narrow `allow-bots` inputs are used directly. Reviewer scope
+`output-schema`, `openai-api-key`, and narrow `allow-bot-users` inputs are used directly. Reviewer scope
 is resolved from matching PR-body and two-sided durable v1 linkage while both objects are exactly
 `agent:pr`. Transition into that state dispatches review re-evaluation; a PASS calls the verifier
 with explicit PR/SHA inputs rather than interpreting a nested `workflow_run` payload.
@@ -38,3 +38,12 @@ The pipeline can remediate narrow code failures without granting one domain all 
 It adds GitHub Actions usage and requires the repository secret `OPENAI_API_KEY`. A missing secret
 stops review/fixing and therefore verification. No auto-merge, deployment, staging, v3/v4 or live
 execution capability is introduced.
+
+## Second blocking-audit hardening
+
+CI diagnosis is now a bounded, aggressively redacted failed-job log excerpt whose checksum and
+source run/job/attempt are part of exact-SHA evidence. Missing safe evidence and dependency-lock
+failures require a human. Codex reads workspace-local deterministic prompt files only. Reviewer
+BLOCK uses an explicit reusable-controller call with PR/SHA inputs and repeats all trusted
+lifecycle/linkage checks; no second-level `workflow_run.pull_requests` inference is permitted. Both
+Codex actions narrowly allow only `github-actions[bot]` through `allow-bot-users`.

@@ -174,26 +174,39 @@ function normalizedFailureClass(job) {
 function redactDiagnostic(value, maxBytes = 8192) {
   return String(value || "")
     .replace(/(authorization|token|secret|password|api[_-]?key)\s*[:=]\s*\S+/gi, "$1=[REDACTED]")
+    .replace(/\b(bearer|basic)\s+[A-Za-z0-9+/._=-]+/gi, "$1 [REDACTED]")
+    .replace(/\b[A-Z][A-Z0-9_]*(?:TOKEN|SECRET|PASSWORD|KEY)=[^\s]+/g, "[REDACTED_ENV]")
     .replace(/gh[pousr]_[A-Za-z0-9_]+|sk-[A-Za-z0-9_-]+/g, "[REDACTED]")
+    .replace(/AKIA[0-9A-Z]{16}/g, "[REDACTED]")
+    .replace(/([?&](?:token|key|secret|signature)=)[^&\s]+/gi, "$1[REDACTED]")
     .slice(0, maxBytes);
 }
 
-function classifyCiFailure({ jobs, runHeadSha, expectedHeadSha }) {
+function classifyCiFailure({ jobs, runHeadSha, expectedHeadSha, sourceRunId, logExcerpt }) {
   if (!/^[0-9a-f]{40}$/.test(runHeadSha || "") || runHeadSha !== expectedHeadSha) {
     return { disposition: "NO_WRITE", failureClass: "unknown", reason: "WORKFLOW_RUN_SHA_MISMATCH" };
   }
   const failed = jobs.filter((job) => ["failure", "timed_out"].includes(job.conclusion));
   if (failed.length !== 1) return { disposition: "NEEDS_HUMAN", failureClass: failed.length > 1 ? "multiple-failures" : "unknown", reason: "FAILURE_SET_NOT_SINGLE" };
   const job = failed[0], failureClass = normalizedFailureClass(job);
-  const prohibited = new Set(["security", "container-build", "production-smoke", "integration-postgres", "infra-transient", "multiple-failures", "unknown"]);
+  const prohibited = new Set(["security", "container-build", "production-smoke", "integration-postgres", "dependency-lock", "infra-transient", "multiple-failures", "unknown"]);
+  const excerpt = redactDiagnostic(logExcerpt, 4096);
+  if (!prohibited.has(failureClass) && (!Number.isSafeInteger(sourceRunId) || sourceRunId < 1 || !excerpt.trim())) {
+    return { disposition: "NEEDS_HUMAN", failureClass, reason: "SAFE_DIAGNOSTIC_UNAVAILABLE" };
+  }
+  const crypto = require("crypto");
+  const diagnosticObject = { failureClass, job: job.name, conclusion: job.conclusion,
+    failedSteps: failedStepNames(job), jobId: job.id, sourceRunId, runAttempt: job.run_attempt || 1,
+    excerpt };
+  const diagnosticWithoutChecksum = JSON.stringify(diagnosticObject);
+  diagnosticObject.checksum = crypto.createHash("sha256").update(diagnosticWithoutChecksum).digest("hex");
   return {
     disposition: prohibited.has(failureClass) ? "NEEDS_HUMAN" : "FIX",
     failureClass,
     job: job.name,
     jobId: job.id,
-    evidence: `${runHeadSha}:${job.id}:${job.run_attempt || 1}`,
-    diagnostic: redactDiagnostic(JSON.stringify({ failureClass, job: job.name, conclusion: job.conclusion,
-      failedSteps: failedStepNames(job), jobId: job.id, runAttempt: job.run_attempt || 1 })),
+    evidence: `${runHeadSha}:${sourceRunId}:${job.id}:${job.run_attempt || 1}:${diagnosticObject.checksum}`,
+    diagnostic: JSON.stringify(diagnosticObject),
     reason: prohibited.has(failureClass) ? "PROHIBITED_OR_UNKNOWN_FAILURE_CLASS" : undefined,
   };
 }
@@ -205,7 +218,6 @@ function validationCommands(failureClass) {
     "unit-test": ["cd backend && uv run pytest -q tests/test_research.py tests/test_research_engine.py tests/test_phase6.py tests/test_alpaca_corporate_actions.py tests/test_xnys_calendar.py tests/test_paper_only_architecture.py tests/test_phase6_runtime.py tests/test_phase6_audit_fixes.py tests/test_phase6_experiment_audit.py tests/test_phase7.py tests/test_pre_pilot_review_remediation.py"],
     "api-test": ["cd backend && uv run pytest -q tests/test_vertical_slice.py tests/test_phase7_api.py tests/test_phase8_api.py tests/test_phase9_security.py"],
     "frontend-test-build": ["cd frontend && npm ci", "cd frontend && npm run lint", "cd frontend && npm run typecheck", "cd frontend && npm test", "cd frontend && npm run build"],
-    "dependency-lock": ["cd backend && uv lock --check", "cd backend && uv sync --locked --all-groups"],
   };
   return commands[failureClass] ? [...commands[failureClass]] : null;
 }

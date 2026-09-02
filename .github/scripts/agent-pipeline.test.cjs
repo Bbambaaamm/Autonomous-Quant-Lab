@@ -305,12 +305,12 @@ test("v2 classifier je jednoznačný a unsafe failures fail-closed", () => {
   const sha = "a".repeat(40);
   // Real listJobsForWorkflowRun shape deliberately has no head_sha.
   const job = (name, id = 1, steps = []) => ({ name, id, run_attempt: 1, conclusion: "failure", steps });
-  const classified = pipeline.classifyCiFailure({ jobs: [job("quality", 1, [{ name: "ruff check", conclusion: "failure" }])], runHeadSha: sha, expectedHeadSha: sha });
+  const classified = pipeline.classifyCiFailure({ jobs: [job("quality", 1, [{ name: "ruff check", conclusion: "failure" }])], runHeadSha: sha, expectedHeadSha: sha, sourceRunId: 42, logExcerpt: "AssertionError: expected 1" });
   assert.equal(classified.disposition, "FIX");
   assert.equal(classified.failureClass, "lint-format");
-  assert.equal(pipeline.classifyCiFailure({ jobs: [job("security")], runHeadSha: sha, expectedHeadSha: sha }).disposition, "NEEDS_HUMAN");
-  assert.equal(pipeline.classifyCiFailure({ jobs: [job("quality"), job("api", 2)], runHeadSha: sha, expectedHeadSha: sha }).failureClass, "multiple-failures");
-  assert.equal(pipeline.classifyCiFailure({ jobs: [job("api")], runHeadSha: sha, expectedHeadSha: "b".repeat(40) }).disposition, "NO_WRITE");
+  assert.equal(pipeline.classifyCiFailure({ jobs: [job("security")], runHeadSha: sha, expectedHeadSha: sha, sourceRunId: 42, logExcerpt: "AssertionError: expected 1" }).disposition, "NEEDS_HUMAN");
+  assert.equal(pipeline.classifyCiFailure({ jobs: [job("quality"), job("api", 2)], runHeadSha: sha, expectedHeadSha: sha, sourceRunId: 42, logExcerpt: "AssertionError: expected 1" }).failureClass, "multiple-failures");
+  assert.equal(pipeline.classifyCiFailure({ jobs: [job("api")], runHeadSha: sha, expectedHeadSha: "b".repeat(40), sourceRunId: 42, logExcerpt: "failure" }).disposition, "NO_WRITE");
 });
 
 test("v2 classes, diagnostics and trusted command map are deterministic", () => {
@@ -319,6 +319,15 @@ test("v2 classes, diagnostics and trusted command map are deterministic", () => 
   assert.match(pipeline.redactDiagnostic("token=ghp_abcdefgh secret=hello"), /\[REDACTED\]/);
   assert.match(pipeline.validationCommands("api-test")[0], /test_vertical_slice\.py/);
   assert.equal(pipeline.validationCommands("security"), null);
+  assert.equal(pipeline.validationCommands("dependency-lock"), null);
+  const dependency = pipeline.classifyCiFailure({ jobs: [{ name: "dependency-lock", id: 7, run_attempt: 2, conclusion: "failure", steps: [] }], runHeadSha: "a".repeat(40), expectedHeadSha: "a".repeat(40), sourceRunId: 99, logExcerpt: "uv lock failed" });
+  assert.equal(dependency.disposition, "NEEDS_HUMAN");
+  const missingLog = pipeline.classifyCiFailure({ jobs: [{ name: "quality", id: 8, conclusion: "failure", steps: [{name:"mypy",conclusion:"failure"}] }], runHeadSha: "a".repeat(40), expectedHeadSha: "a".repeat(40), sourceRunId: 99, logExcerpt: "" });
+  assert.equal(missingLog.reason, "SAFE_DIAGNOSTIC_UNAVAILABLE");
+  const diagnostic = pipeline.classifyCiFailure({ jobs: [{ name: "quality", id: 9, run_attempt: 3, conclusion: "failure", steps: [{name:"ruff",conclusion:"failure"}] }], runHeadSha: "a".repeat(40), expectedHeadSha: "a".repeat(40), sourceRunId: 100, logExcerpt: "token=topsecret\nAssertionError" });
+  assert.match(diagnostic.diagnostic, /sourceRunId/);
+  assert.match(diagnostic.diagnostic, /checksum/);
+  assert.doesNotMatch(diagnostic.diagnostic, /topsecret/);
 });
 
 test("v2 lifecycle and two-sided durable linkage fail closed", () => {
@@ -376,7 +385,16 @@ test("v2 workflow wiring odděluje secret, validation a write trust domains", ()
   assert.match(fixer, /concurrency:/);
   assert.match(reviewer, /permission-profile: ':read-only'/);
   assert.match(fixer, /permission-profile: ":workspace"/);
-  assert.match(fixer, /allow-bots: "github-actions\[bot\]"/);
+  assert.match(fixer, /allow-bot-users: "github-actions\[bot\]"/);
+  assert.match(reviewer, /allow-bot-users: "github-actions\[bot\]"/);
+  assert.doesNotMatch(fixer + reviewer, /allow-bots:/);
+  assert.match(fixer, /workflow_call:/);
+  assert.match(reviewer, /route-block:[\s\S]*uses: \.\/\.github\/workflows\/agent-ci-fixer\.yml[\s\S]*pr_number:[\s\S]*head_sha:/);
+  assert.match(fixer, /sourceRunId:run\.id,logExcerpt/);
+  assert.match(fixer, /prompt-file: \.codex-input\/prompt\.md/);
+  assert.match(reviewer, /prompt-file: \.codex-input\/review-prompt\.md/);
+  assert.doesNotMatch(fixer, /prompt:[\s\S]{0,500}\$RUNNER_TEMP\/diagnostic\.json/);
+  assert.doesNotMatch(reviewer, /prompt:[\s\S]{0,500}\$RUNNER_TEMP\/authorized-scope\.json/);
   assert.match(reviewer, /output-schema:/);
   assert.match(reviewer, /uses: \.\/\.github\/workflows\/agent-verify\.yml/);
   assert.match(reviewer, /workflow_dispatch:/);

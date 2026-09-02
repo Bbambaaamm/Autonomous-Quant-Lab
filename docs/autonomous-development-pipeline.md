@@ -296,3 +296,18 @@ the existing exact-SHA human/native evidence. Neither substitutes for the other 
 merge. Reviewer BLOCK and unsafe, ambiguous or exhausted work require a human. The `agent:pr`
 transition dispatches a trusted re-evaluation, so green CI that finished before linkage is reused
 without a manual CI rerun; a PASS explicitly invokes the reusable verifier with PR number and SHA.
+
+### V2 trusted diagnostics and Reviewer BLOCK routing
+
+The CI controller downloads only the single failed authoritative job log, aggressively redacts and
+truncates it, and binds the excerpt checksum, source workflow run ID, job ID, and run attempt to the
+exact head SHA. If that bounded diagnostic cannot be produced, or when the failure is
+`dependency-lock`, the controller fails closed to `agent:needs-human`; dependency files never enter
+the free-form fixer.
+
+Both Codex invocations receive deterministic prompt files inside the checked-out workspace. Trusted
+instructions frame bounded Issue or diagnostic JSON as untrusted data, rather than referring to a
+runner-temporary path that the action may not read. The bot allowance is restricted to
+`github-actions[bot]`. A Reviewer BLOCK calls the reusable controller with the already validated PR
+number and exact head SHA; the controller independently re-fetches lifecycle, two-sided linkage, and
+SHA before performing the fail-closed escalation.
