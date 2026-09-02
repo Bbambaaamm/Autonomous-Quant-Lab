@@ -27,7 +27,7 @@ on:
           - agent:pr
           - agent:needs-human
       pr_number:
-        description: Číslo PR; povinné pouze pro přechod do agent:pr
+        description: Číslo PR; povinné pro running → pr a pr → needs-human
         required: false
         type: string
       reason:
@@ -86,21 +86,52 @@ jobs:
             if (nextState === "agent:needs-human" && !reason) {
               return core.setFailed("ESCALATION_REASON_REQUIRED: žádný zápis nebyl proveden");
             }
-            const transitionNeedsPr = nextState === "agent:pr" ||
+            const transitionNeedsRequestedPr = nextState === "agent:pr" ||
               (nextState === "agent:needs-human" && previousState === "agent:pr");
-            if (transitionNeedsPr && prNumber === null) {
+            if (transitionNeedsRequestedPr && prNumber === null) {
               return core.setFailed("PR_NUMBER_REQUIRED: žádný zápis nebyl proveden");
             }
-            if (!transitionNeedsPr && prNumber !== null) {
+            if (!transitionNeedsRequestedPr && prNumber !== null) {
               return core.setFailed("UNEXPECTED_PR_NUMBER: žádný zápis nebyl proveden");
             }
 
+            const issueComments = await github.paginate(github.rest.issues.listComments, {
+              ...context.repo, issue_number: issueNumber, per_page: 100,
+            });
+            const durableIssueLink = pipeline.durablePrLinkDecision(issueComments, {
+              ...context.repo, issueNumber,
+            });
+            if (!durableIssueLink.ok) {
+              return core.setFailed(`${durableIssueLink.reason}: žádný zápis nebyl proveden`);
+            }
+            if (previousState === "agent:needs-human" && nextState === "agent:ready" &&
+                durableIssueLink.prNumber !== null) {
+              return core.setFailed("LINKED_RECOVERY_REQUIRES_RUNNING: žádný zápis nebyl proveden");
+            }
+            const linkedRecovery = previousState === "agent:needs-human" &&
+              nextState === "agent:running" && durableIssueLink.prNumber !== null;
+            const effectivePrNumber = linkedRecovery ? durableIssueLink.prNumber : prNumber;
             let pull = null;
-            if (prNumber !== null) {
-              ({ data: pull } = await github.rest.pulls.get({ ...context.repo, pull_number: prNumber }));
+            let pullComments = [];
+            let pullHasDurableLink = false;
+            if (effectivePrNumber !== null) {
+              ({ data: pull } = await github.rest.pulls.get({ ...context.repo, pull_number: effectivePrNumber }));
               if (pull.state !== "open" || pull.base.ref !== context.payload.repository.default_branch ||
                   pipeline.parseAgentIssue(pull.body) !== issueNumber) {
                 return core.setFailed("INVALID_PR_LINKAGE: žádný zápis nebyl proveden");
+              }
+              pullComments = await github.paginate(github.rest.issues.listComments, {
+                ...context.repo, issue_number: effectivePrNumber, per_page: 100,
+              });
+              pullHasDurableLink = pipeline.hasDurableLink(pullComments, {
+                ...context.repo, issueNumber, prNumber: effectivePrNumber,
+              });
+              if (linkedRecovery && !pullHasDurableLink) {
+                return core.setFailed("STALE_DURABLE_LINK: žádný zápis nebyl proveden");
+              }
+              if (durableIssueLink.prNumber !== null &&
+                  (durableIssueLink.prNumber !== effectivePrNumber || !pullHasDurableLink)) {
+                return core.setFailed("DURABLE_LINK_MISMATCH: žádný zápis nebyl proveden");
               }
             }
 
@@ -135,12 +166,12 @@ jobs:
             let freshPull = null;
             let prPlan = null;
             if (pull) {
-              ({ data: freshPull } = await github.rest.pulls.get({ ...context.repo, pull_number: prNumber }));
+              ({ data: freshPull } = await github.rest.pulls.get({ ...context.repo, pull_number: effectivePrNumber }));
               if (freshPull.state !== "open" || freshPull.base.ref !== context.payload.repository.default_branch ||
                   pipeline.parseAgentIssue(freshPull.body) !== issueNumber) {
                 return core.setFailed("PR_CHANGED_BEFORE_WRITE: žádný zápis nebyl proveden");
               }
-              prPreviousState = previousState === "agent:running" ? "none" : previousState;
+              prPreviousState = previousState === "agent:running" && !pullHasDurableLink ? "none" : previousState;
               prPlan = pipeline.stateMutationPlan(freshPull.labels, prPreviousState, nextState);
               if (!prPlan.ok) return core.setFailed(`${prPlan.reason}: žádný zápis nebyl proveden`);
             }
@@ -148,20 +179,20 @@ jobs:
             await mutateState(issueNumber, issuePlan);
             if (freshPull) {
               // Po selhání je retry se stejným previous/next idempotentní a doplní jen chybějící stranu.
-              const { data: retryFreshPull } = await github.rest.pulls.get({ ...context.repo, pull_number: prNumber });
+              const { data: retryFreshPull } = await github.rest.pulls.get({ ...context.repo, pull_number: effectivePrNumber });
               prPlan = pipeline.stateMutationPlan(retryFreshPull.labels, prPreviousState, nextState);
               if (!prPlan.ok) return core.setFailed(`${prPlan.reason}: Issue může být v bezpečném partial stavu; opakujte stejný přechod`);
-              await mutateState(prNumber, prPlan);
+              await mutateState(effectivePrNumber, prPlan);
             }
             const evidence = [
               `Agent transition: \`${previousState}\` → \`${nextState}\``,
               `Actor: @${context.actor}`,
               `Workflow run: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
-              pull ? `Linked PR: #${prNumber}; head SHA: \`${pull.head.sha}\`` : null,
+              pull ? `Linked PR: #${effectivePrNumber}; head SHA: \`${pull.head.sha}\`` : null,
               reason ? `Reason: ${reason}` : null,
               pull && nextState === "agent:pr"
-                ? `<!-- agent-link:v1 repo=${context.repo.owner}/${context.repo.repo} issue=${issueNumber} pr=${prNumber} -->`
+                ? `<!-- agent-link:v1 repo=${context.repo.owner}/${context.repo.repo} issue=${issueNumber} pr=${effectivePrNumber} -->`
                 : null,
             ].filter(Boolean).join("\n\n");
             await github.rest.issues.createComment({ ...context.repo, issue_number: issueNumber, body: evidence });
-            if (pull) await github.rest.issues.createComment({ ...context.repo, issue_number: prNumber, body: evidence });
+            if (pull) await github.rest.issues.createComment({ ...context.repo, issue_number: effectivePrNumber, body: evidence });

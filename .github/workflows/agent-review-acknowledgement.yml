@@ -63,3 +63,15 @@ jobs:
               `<!-- agent-review-ack:v1 sha=${expectedSha} -->`,
             ].join("\n\n");
             await github.rest.issues.createComment({ ...context.repo, issue_number: prNumber, body });
+
+  verify-existing-ci:
+    needs: acknowledge
+    uses: ./.github/workflows/agent-verify.yml
+    with:
+      pr_number: ${{ fromJSON(inputs.pr_number) }}
+      head_sha: ${{ inputs.expected_head_sha }}
+    permissions:
+      actions: read
+      contents: read
+      issues: write
+      pull-requests: write
