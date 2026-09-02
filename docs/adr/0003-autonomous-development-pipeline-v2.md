@@ -61,3 +61,12 @@ before push and verifies the expected result immediately afterward; dispatched C
 reclassified. Secret-bearing generation has no repository checkout or runnable repository content:
 a credential-free predecessor supplies bounded source text as non-executable JSON. Both model and
 publisher credentials have explicit fail-closed preflight checks, with no publication-token fallback.
+
+## Trusted policy authority and durable classification
+
+V2 policy is exclusively the versioned default-branch configuration and helper module, checked out
+separately from candidate data. Each exact failed CI evaluation receives an idempotent durable
+classification marker before fixing or escalation. The authorized fix scope is derived from the
+baseline PR file list plus narrow test additions, carried through validation, and rechecked during
+publication. Candidate `.github` code is never policy authority in classifier, preparation,
+validation, or publication jobs.

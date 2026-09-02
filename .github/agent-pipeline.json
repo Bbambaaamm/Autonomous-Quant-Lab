@@ -5,8 +5,18 @@
     "maxPatchFiles": 12,
     "maxPatchBytes": 131072,
     "codexSecret": "OPENAI_API_KEY",
+    "publishSecret": "AGENT_PUBLISH_TOKEN",
+    "reviewerRequired": true,
+    "codexAction": {"revision": "86365089eb2b84e0a8fb0717b304f8bdcb13b20e", "generationProfile": ":read-only", "reviewProfile": ":read-only"},
     "reviewMarker": "agent-codex-review:v2",
     "fixMarker": "agent-fix:v2",
+    "classificationMarker": "agent-ci-classification:v2",
+    "classificationSchema": ["repository", "issue", "pr", "sha", "ciRunId", "ciRunAttempt", "failedJobs", "failureClass", "autoFixEligible", "budgetState", "workflow", "workflowRunId"],
+    "failureClassPolicy": {
+      "eligible": ["lint-format", "typecheck", "unit-test", "api-test", "frontend-test-build"],
+      "denied": ["security", "integration-postgres", "container-build", "production-smoke", "dependency-lock", "infra-transient", "multiple-failures", "unknown"]
+    },
+    "fixScope": {"allowBaselinePrFiles": true, "testAdditionPrefixes": ["backend/tests/"], "testAdditionPatterns": ["^(frontend/(src|app|components)/).*(test|spec)\\.(ts|tsx|js|jsx)$"]},
     "fixableCiJobs": ["agent-pipeline", "quality", "unit-research", "api", "frontend"],
     "prohibitedCiJobs": ["security", "integration-postgres", "container-build", "production-smoke"],
     "protectedPaths": ["backend/src/quantlab/trading.py", "backend/src/quantlab/phase4.py", "backend/src/quantlab/security.py"],

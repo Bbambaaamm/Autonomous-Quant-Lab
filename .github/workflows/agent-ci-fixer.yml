@@ -42,9 +42,14 @@ jobs:
       attempt: ${{ steps.classify.outputs.attempt }}
       escalation: ${{ steps.classify.outputs.escalation }}
       reason: ${{ steps.classify.outputs.reason }}
+      ci_run_id: ${{ steps.classify.outputs.ci_run_id }}
+      ci_run_attempt: ${{ steps.classify.outputs.ci_run_attempt }}
+      failed_jobs: ${{ steps.classify.outputs.failed_jobs }}
+      budget_state: ${{ steps.classify.outputs.budget_state }}
+      fix_scope: ${{ steps.classify.outputs.fix_scope }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with: {ref: '${{ github.event.repository.default_branch }}', persist-credentials: false}
+        with: {ref: '${{ github.event.repository.default_branch }}', path: .trusted-policy, persist-credentials: false}
       - id: classify
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
         env:
@@ -52,7 +57,7 @@ jobs:
           REQUEST_SHA: '${{ inputs.head_sha }}'
         with:
           script: |
-            const p=require('./.github/scripts/agent-pipeline.cjs'), c=require('./.github/agent-pipeline.json');
+            const p=require(`${process.env.GITHUB_WORKSPACE}/.trusted-policy/.github/scripts/agent-pipeline.cjs`), c=require(`${process.env.GITHUB_WORKSPACE}/.trusted-policy/.github/agent-pipeline.json`);
             const called=context.eventName==="workflow_call";
             const dispatched=context.eventName==="workflow_dispatch";
             const run=dispatched ? (await github.rest.actions.getWorkflowRun({...context.repo,run_id:Number(${{ inputs.ci_run_id || 0 }})})).data : context.payload.workflow_run;
@@ -79,6 +84,9 @@ jobs:
             }
             const jobs=await github.paginate(github.rest.actions.listJobsForWorkflowRun,{...context.repo,run_id:run.id,filter:"latest",per_page:100});
             const failed=jobs.filter(j=>["failure","timed_out"].includes(j.conclusion));
+            const changed=await github.paginate(github.rest.pulls.listFiles,{...context.repo,pull_number:prNumber,per_page:100});
+            const fixScope=[...new Set(changed.map(file=>file.filename))].sort();
+            for(const [key,value] of Object.entries({ci_run_id:run.id,ci_run_attempt:run.run_attempt,failed_jobs:JSON.stringify(failed.map(j=>j.name).sort()),fix_scope:JSON.stringify(fixScope)})) core.setOutput(key,value);
             let logExcerpt="";
             if(failed.length===1) {
               try {
@@ -86,9 +94,11 @@ jobs:
                 logExcerpt=typeof response.data==="string"?response.data:Buffer.from(response.data).toString("utf8");
               } catch(error) { core.warning("Failed log could not be safely collected"); }
             }
-            const classification=p.classifyCiFailure({jobs,runHeadSha:run.head_sha,expectedHeadSha:pr.head.sha,sourceRunId:run.id,logExcerpt,config:c.v2});
+            const classification=p.classifyCiFailure({jobs,runHeadSha:run.head_sha,expectedHeadSha:pr.head.sha,sourceRunId:run.id,runAttempt:run.run_attempt,logExcerpt,config:{...c.v2,requiredCiJobs:c.requiredCiJobs}});
+            core.setOutput("failure_class",classification.failureClass);
             if (classification.disposition!=="FIX") { core.setOutput("escalation","true"); core.setOutput("reason",classification.reason); return; }
             const budget=p.fixAttemptDecision({comments,commits,sourceSha:requestedSha,evidence:classification.evidence,maxAttempts:c.v2.maxFixCommits});
+            core.setOutput("budget_state",JSON.stringify(budget));
             if (budget.action==="NEEDS_HUMAN") { core.setOutput("escalation","true"); core.setOutput("reason",budget.reason); return; }
             if (budget.action!=="FIX") return core.notice(`NO_WRITE: ${budget.reason}`);
             for (const [key,value] of Object.entries({eligible:"true",source_sha:requestedSha,pr_number:prNumber,issue_number:issueNumber,evidence:classification.evidence,failure_class:classification.failureClass,diagnostic:classification.diagnostic,attempt:budget.attempt})) core.setOutput(key,value);
@@ -103,19 +113,38 @@ jobs:
         if: steps.classify.outputs.eligible == 'true'
         with: {name: 'trusted-diagnostic-${{ github.run_id }}', path: '${{ runner.temp }}/diagnostic.json', if-no-files-found: error, retention-days: 1}
 
-  escalate:
+  record-classification:
     needs: classify
+    if: always() && needs.classify.outputs.ci_run_id != ''
+    runs-on: ubuntu-latest
+    permissions: {contents: read, issues: write, pull-requests: read}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with: {ref: '${{ github.event.repository.default_branch }}', path: .trusted-policy, persist-credentials: false}
+      - uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        env: {PR: '${{ needs.classify.outputs.pr_number }}', ISSUE: '${{ needs.classify.outputs.issue_number }}', SHA: '${{ needs.classify.outputs.source_sha }}', CI_RUN: '${{ needs.classify.outputs.ci_run_id }}', CI_ATTEMPT: '${{ needs.classify.outputs.ci_run_attempt }}', FAILED: '${{ needs.classify.outputs.failed_jobs }}', CLASS: '${{ needs.classify.outputs.failure_class }}', ELIGIBLE: '${{ needs.classify.outputs.eligible }}', BUDGET: '${{ needs.classify.outputs.budget_state }}'}
+        with:
+          script: |
+            const p=require(`${process.env.GITHUB_WORKSPACE}/.trusted-policy/.github/scripts/agent-pipeline.cjs`),c=require(`${process.env.GITHUB_WORKSPACE}/.trusted-policy/.github/agent-pipeline.json`);
+            const record={repository:`${context.repo.owner}/${context.repo.repo}`,issue:Number(process.env.ISSUE),pr:Number(process.env.PR),sha:process.env.SHA,ciRunId:Number(process.env.CI_RUN),ciRunAttempt:Number(process.env.CI_ATTEMPT),failedJobs:JSON.parse(process.env.FAILED),failureClass:process.env.CLASS,autoFixEligible:process.env.ELIGIBLE==='true',budgetState:process.env.BUDGET||'not-evaluated',workflow:context.workflow,workflowRunId:context.runId};
+            const marker=p.classificationMarker(record,c.v2);
+            const comments=await github.paginate(github.rest.issues.listComments,{...context.repo,issue_number:record.pr,per_page:100});
+            const key=`${record.sha}:${record.ciRunId}:${record.ciRunAttempt}`;
+            if(!comments.some(x=>x.user?.login==='github-actions[bot]'&&x.body?.includes(`<!-- ${c.v2.classificationMarker} evidence=${key} `))) await github.rest.issues.createComment({...context.repo,issue_number:record.pr,body:`Trusted CI classification: ${record.failureClass}; auto-fix=${record.autoFixEligible}.\n${marker}`});
+
+  escalate:
+    needs: [classify, record-classification]
     if: needs.classify.outputs.escalation == 'true'
     runs-on: ubuntu-latest
     permissions: {contents: read, issues: write, pull-requests: read}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with: {ref: '${{ github.event.repository.default_branch }}', persist-credentials: false}
+        with: {ref: '${{ github.event.repository.default_branch }}', path: .trusted-policy, persist-credentials: false}
       - uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
         env: {PR: '${{ needs.classify.outputs.pr_number }}', ISSUE: '${{ needs.classify.outputs.issue_number }}', SHA: '${{ needs.classify.outputs.source_sha }}', REASON: '${{ needs.classify.outputs.reason }}'}
         with:
           script: |
-            const p=require('./.github/scripts/agent-pipeline.cjs');
+            const p=require(`${process.env.GITHUB_WORKSPACE}/.trusted-policy/.github/scripts/agent-pipeline.cjs`);
             const prNumber=Number(process.env.PR), issueNumber=Number(process.env.ISSUE);
             const {data:pr}=await github.rest.pulls.get({...context.repo,pull_number:prNumber});
             const {data:issue}=await github.rest.issues.get({...context.repo,issue_number:issueNumber});
@@ -133,18 +162,21 @@ jobs:
             await github.rest.issues.createComment({...context.repo,issue_number:prNumber,body:`Automatická oprava zastavena: ${process.env.REASON} pro exact SHA \`${process.env.SHA}\`. Stav byl fail-closed předán člověku.`});
 
   prepare-generation-context:
-    needs: classify
+    needs: [classify, record-classification]
     if: needs.classify.outputs.eligible == 'true'
     runs-on: ubuntu-latest
     permissions: {contents: read}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with: {ref: '${{ needs.classify.outputs.source_sha }}', persist-credentials: false}
+        with: {ref: '${{ github.event.repository.default_branch }}', path: .trusted-policy, persist-credentials: false}
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with: {ref: '${{ needs.classify.outputs.source_sha }}', path: candidate, persist-credentials: false}
       - name: Build bounded non-executable source context
+        working-directory: candidate
         run: |
           mkdir "$RUNNER_TEMP/generation-context"
           node - <<'NODE' > "$RUNNER_TEMP/generation-context/source-context.json"
-          const fs=require('fs'),path=require('path'),p=require('./.github/scripts/agent-pipeline.cjs'),c=require('./.github/agent-pipeline.json');
+          const fs=require('fs'),path=require('path'),p=require('../.trusted-policy/.github/scripts/agent-pipeline.cjs'),c=require('../.trusted-policy/.github/agent-pipeline.json');
           const roots=['backend/src','backend/tests','frontend/src','frontend/app','frontend/components'];
           const files=[]; function walk(dir){if(!fs.existsSync(dir))return;for(const e of fs.readdirSync(dir,{withFileTypes:true})){const n=path.join(dir,e.name);if(e.isDirectory())walk(n);else if(e.isFile()&&p.validatePatchPaths([n],c.v2))files.push({path:n,content:fs.readFileSync(n,'utf8')});}}
           roots.forEach(walk); const out=JSON.stringify({format:'source-context-v1',files});
@@ -210,11 +242,14 @@ jobs:
     permissions: {contents: read}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with: {ref: '${{ needs.classify.outputs.source_sha }}', persist-credentials: false}
+        with: {ref: '${{ github.event.repository.default_branch }}', path: .trusted-policy, persist-credentials: false}
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with: {ref: '${{ needs.classify.outputs.source_sha }}', path: candidate, persist-credentials: false}
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with: {name: 'generated-patch-${{ github.run_id }}', path: '${{ runner.temp }}/generated'}
       - name: Ověř artifact, cesty a patch bez credentialů
-        env: {SOURCE_SHA: '${{ needs.classify.outputs.source_sha }}'}
+        env: {SOURCE_SHA: '${{ needs.classify.outputs.source_sha }}', FIX_SCOPE: '${{ needs.classify.outputs.fix_scope }}'}
+        working-directory: candidate
         run: |
           test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
           test "$(find "$RUNNER_TEMP/generated" -type f -printf '%f\n' | sort)" = $'checksum\nmetadata.json\noutput.json'
@@ -223,7 +258,7 @@ jobs:
           test "$(sha256sum "$RUNNER_TEMP/generated/output.json"|cut -d' ' -f1)" = "$(cat "$RUNNER_TEMP/generated/checksum")"
           test "$(jq -r .result "$RUNNER_TEMP/generated/output.json")" = PATCH
           jq -r .patch "$RUNNER_TEMP/generated/output.json" > "$RUNNER_TEMP/change.patch"
-          node -e 'const p=require("./.github/scripts/agent-pipeline.cjs"),c=require("./.github/agent-pipeline.json");if(!p.validatePatchPaths(JSON.parse(process.argv[1]),c.v2))process.exit(1)' "$(jq -c .paths "$RUNNER_TEMP/generated/output.json")"
+          node -e 'const p=require(process.env.GITHUB_WORKSPACE+"/.trusted-policy/.github/scripts/agent-pipeline.cjs"),c=require(process.env.GITHUB_WORKSPACE+"/.trusted-policy/.github/agent-pipeline.json");if(!p.validatePatchPaths(JSON.parse(process.argv[1]),c.v2))process.exit(1)' "$(jq -c .paths "$RUNNER_TEMP/generated/output.json")"
           git apply --check "$RUNNER_TEMP/change.patch"
           git apply "$RUNNER_TEMP/change.patch"
           git diff --check
@@ -234,13 +269,14 @@ jobs:
           jq -r '.paths[]' "$RUNNER_TEMP/generated/output.json" | sort > "$RUNNER_TEMP/declared-paths"
           printf '%s\n' "${paths[@]}" | sort > "$RUNNER_TEMP/actual-paths"
           cmp "$RUNNER_TEMP/declared-paths" "$RUNNER_TEMP/actual-paths"
-          node -e 'const p=require("./.github/scripts/agent-pipeline.cjs"),c=require("./.github/agent-pipeline.json"),fs=require("fs");const x=fs.readFileSync(process.argv[1],"utf8").trim().split("\n");if(!p.validatePatchPaths(x,c.v2))process.exit(1)' "$RUNNER_TEMP/actual-paths"
+          node -e 'const p=require(process.env.GITHUB_WORKSPACE+"/.trusted-policy/.github/scripts/agent-pipeline.cjs"),c=require(process.env.GITHUB_WORKSPACE+"/.trusted-policy/.github/agent-pipeline.json"),fs=require("fs");const x=fs.readFileSync(process.argv[1],"utf8").trim().split("\n");if(!p.validatePatchPaths(x,c.v2))process.exit(1)' "$RUNNER_TEMP/actual-paths"
+          node -e 'const p=require(process.env.GITHUB_WORKSPACE+"/.trusted-policy/.github/scripts/agent-pipeline.cjs"),c=require(process.env.GITHUB_WORKSPACE+"/.trusted-policy/.github/agent-pipeline.json"),fs=require("fs");const x=fs.readFileSync(process.argv[1],"utf8").trim().split("\n");if(!p.fixScopeDecision(x,JSON.parse(process.env.FIX_SCOPE),c.v2).ok)process.exit(1)' "$RUNNER_TEMP/actual-paths"
           git diff --cached --raw > "$RUNNER_TEMP/validated-modes"
-          node -e 'const p=require("./.github/scripts/agent-pipeline.cjs"),fs=require("fs");if(!p.validatePatchModes(fs.readFileSync(process.argv[1],"utf8")))process.exit(1)' "$RUNNER_TEMP/validated-modes"
+          node -e 'const p=require(process.env.GITHUB_WORKSPACE+"/.trusted-policy/.github/scripts/agent-pipeline.cjs"),fs=require("fs");if(!p.validatePatchModes(fs.readFileSync(process.argv[1],"utf8")))process.exit(1)' "$RUNNER_TEMP/validated-modes"
           git diff --cached --binary > "$RUNNER_TEMP/validated.patch"
           test "$(stat -c%s "$RUNNER_TEMP/validated.patch")" -le 131072
           sha256sum "$RUNNER_TEMP/validated.patch" | cut -d' ' -f1 > "$RUNNER_TEMP/validated-checksum"
-          jq -n --arg sha "$SOURCE_SHA" --arg class "$(jq -r .failure_class "$RUNNER_TEMP/generated/metadata.json")" --arg checksum "$(cat "$RUNNER_TEMP/validated-checksum")" --slurpfile paths "$RUNNER_TEMP/validated-paths.json" '{source_sha:$sha,failure_class:$class,checksum:$checksum,paths:$paths[0]}' > "$RUNNER_TEMP/validated-metadata.json"
+          jq -n --arg sha "$SOURCE_SHA" --arg class "$(jq -r .failure_class "$RUNNER_TEMP/generated/metadata.json")" --arg checksum "$(cat "$RUNNER_TEMP/validated-checksum")" --argjson scope "$FIX_SCOPE" --slurpfile paths "$RUNNER_TEMP/validated-paths.json" '{source_sha:$sha,failure_class:$class,checksum:$checksum,paths:$paths[0],authorized_scope:$scope}' > "$RUNNER_TEMP/validated-metadata.json"
           case "$(jq -r .failure_class "$RUNNER_TEMP/generated/metadata.json")" in
             lint-format) (cd backend && uv run ruff check . && uv run ruff format --check .) ;;
             typecheck) (cd backend && uv run mypy src/quantlab) ;;
@@ -267,11 +303,10 @@ jobs:
     runs-on: ubuntu-latest
     permissions: {contents: write, issues: write, pull-requests: read}
     steps:
-      - name: Fail closed when the publication credential is absent
-        env: {AGENT_PUBLISH_TOKEN: '${{ secrets.AGENT_PUBLISH_TOKEN }}'}
-        run: test -n "$AGENT_PUBLISH_TOKEN"
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with: {ref: '${{ needs.classify.outputs.source_sha }}', persist-credentials: true, token: '${{ secrets.AGENT_PUBLISH_TOKEN }}'}
+        with: {ref: '${{ github.event.repository.default_branch }}', path: .trusted-policy, persist-credentials: false}
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with: {ref: '${{ needs.classify.outputs.source_sha }}', path: candidate, persist-credentials: false}
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with: {name: 'validated-patch-${{ github.run_id }}', path: '${{ runner.temp }}'}
       - name: Fresh metadata a TOCTOU guard
@@ -279,7 +314,7 @@ jobs:
         env: {PR: '${{ needs.classify.outputs.pr_number }}', ISSUE: '${{ needs.classify.outputs.issue_number }}', SHA: '${{ needs.classify.outputs.source_sha }}', EXPECTED_REPO: '${{ github.repository }}'}
         with:
           script: |
-            const p=require('./.github/scripts/agent-pipeline.cjs');
+            const p=require(`${process.env.GITHUB_WORKSPACE}/.trusted-policy/.github/scripts/agent-pipeline.cjs`);
             const {data:pr}=await github.rest.pulls.get({...context.repo,pull_number:Number(process.env.PR)});
             const {data:issue}=await github.rest.issues.get({...context.repo,issue_number:Number(process.env.ISSUE)});
             const comments=await github.paginate(github.rest.issues.listComments,{...context.repo,issue_number:Number(process.env.PR),per_page:100});
@@ -295,8 +330,9 @@ jobs:
             const {data:pr}=await github.rest.pulls.get({...context.repo,pull_number:Number(process.env.PR)});
             if(pr.head.repo?.full_name!==`${context.repo.owner}/${context.repo.repo}`) return core.setFailed('FORK_PR_NO_WRITE');
             core.setOutput('ref',pr.head.ref);
-      - id: publish
-        name: Publikuj přesně validovaný patch bez force-push
+      - id: prepare_publish
+        name: Reconstruct and commit the validated candidate without credentials
+        working-directory: candidate
         env: {SHA: '${{ needs.classify.outputs.source_sha }}', ATTEMPT: '${{ needs.classify.outputs.attempt }}', HEAD_REF: '${{ steps.head.outputs.ref }}'}
         run: |
           test "$(git rev-parse HEAD)" = "$SHA"
@@ -309,28 +345,36 @@ jobs:
           git diff --cached --name-only | sort > "$RUNNER_TEMP/publisher-paths"
           jq -r '.paths[]' "$RUNNER_TEMP/validated-metadata.json" | sort > "$RUNNER_TEMP/metadata-paths"
           cmp "$RUNNER_TEMP/publisher-paths" "$RUNNER_TEMP/metadata-paths"
-          node -e 'const p=require("./.github/scripts/agent-pipeline.cjs"),c=require("./.github/agent-pipeline.json"),fs=require("fs");const paths=fs.readFileSync(process.argv[1],"utf8").trim().split("\n");if(!p.validatePatchPaths(paths,c.v2))process.exit(1)' "$RUNNER_TEMP/publisher-paths"
+          node -e 'const p=require(process.env.GITHUB_WORKSPACE+"/.trusted-policy/.github/scripts/agent-pipeline.cjs"),c=require(process.env.GITHUB_WORKSPACE+"/.trusted-policy/.github/agent-pipeline.json"),fs=require("fs");const paths=fs.readFileSync(process.argv[1],"utf8").trim().split("\n");if(!p.validatePatchPaths(paths,c.v2))process.exit(1)' "$RUNNER_TEMP/publisher-paths"
+          node -e 'const p=require(process.env.GITHUB_WORKSPACE+"/.trusted-policy/.github/scripts/agent-pipeline.cjs"),c=require(process.env.GITHUB_WORKSPACE+"/.trusted-policy/.github/agent-pipeline.json"),m=require(process.env.RUNNER_TEMP+"/validated-metadata.json"),fs=require("fs");const paths=fs.readFileSync(process.argv[1],"utf8").trim().split("\n");if(!p.fixScopeDecision(paths,m.authorized_scope,c.v2).ok)process.exit(1)' "$RUNNER_TEMP/publisher-paths"
           git diff --cached --check
           git diff --cached --binary > "$RUNNER_TEMP/publisher.patch"
           cmp "$RUNNER_TEMP/validated.patch" "$RUNNER_TEMP/publisher.patch"
           git diff --cached --raw > "$RUNNER_TEMP/publisher-modes"
-          node -e 'const p=require("./.github/scripts/agent-pipeline.cjs"),fs=require("fs");if(!p.validatePatchModes(fs.readFileSync(process.argv[1],"utf8")))process.exit(1)' "$RUNNER_TEMP/publisher-modes"
+          node -e 'const p=require(process.env.GITHUB_WORKSPACE+"/.trusted-policy/.github/scripts/agent-pipeline.cjs"),fs=require("fs");if(!p.validatePatchModes(fs.readFileSync(process.argv[1],"utf8")))process.exit(1)' "$RUNNER_TEMP/publisher-modes"
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
           git check-ref-format --branch "$HEAD_REF" >/dev/null
           git commit -m "Automatická oprava CI (pokus ${ATTEMPT}/2)" -m "Agent-Fix-Attempt: ${ATTEMPT}"
-          EXPECTED_RESULT="$(git rev-parse HEAD)"
-          test "$(git ls-remote --refs origin "refs/heads/$HEAD_REF" | awk '{print $1}')" = "$SHA"
-          git push origin "HEAD:${HEAD_REF}"
-          test "$(git ls-remote --refs origin "refs/heads/$HEAD_REF" | awk '{print $1}')" = "$EXPECTED_RESULT"
+          echo "expected_result=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - id: publish
+        name: Final exact-head push with the isolated publication credential
+        working-directory: candidate
+        env: {SHA: '${{ needs.classify.outputs.source_sha }}', EXPECTED_RESULT: '${{ steps.prepare_publish.outputs.expected_result }}', HEAD_REF: '${{ steps.head.outputs.ref }}', AGENT_PUBLISH_TOKEN: '${{ secrets.AGENT_PUBLISH_TOKEN }}'}
+        run: |
+          test -n "$AGENT_PUBLISH_TOKEN"
+          AUTH_HEADER="AUTHORIZATION: basic $(printf x-access-token:%s "$AGENT_PUBLISH_TOKEN" | base64 -w0)"
+          test "$(git -c http.extraheader="$AUTH_HEADER" ls-remote --refs origin "refs/heads/$HEAD_REF" | awk '{print $1}')" = "$SHA"
+          git -c http.extraheader="$AUTH_HEADER" push origin "HEAD:${HEAD_REF}"
+          test "$(git -c http.extraheader="$AUTH_HEADER" ls-remote --refs origin "refs/heads/$HEAD_REF" | awk '{print $1}')" = "$EXPECTED_RESULT"
           echo "expected_result=$EXPECTED_RESULT" >> "$GITHUB_OUTPUT"
       - uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
-        env: {PR: '${{ needs.classify.outputs.pr_number }}', SHA: '${{ needs.classify.outputs.source_sha }}', EXPECTED_RESULT: '${{ steps.publish.outputs.expected_result }}', EVIDENCE: '${{ needs.classify.outputs.evidence }}', ATTEMPT: '${{ needs.classify.outputs.attempt }}'}
+        env: {PR: '${{ needs.classify.outputs.pr_number }}', SHA: '${{ needs.classify.outputs.source_sha }}', EXPECTED_RESULT: '${{ steps.publish.outputs.expected_result }}', EVIDENCE: '${{ needs.classify.outputs.evidence }}', ATTEMPT: '${{ needs.classify.outputs.attempt }}', FAILURE_CLASS: '${{ needs.classify.outputs.failure_class }}', CI_RUN: '${{ needs.classify.outputs.ci_run_id }}', CI_ATTEMPT: '${{ needs.classify.outputs.ci_run_attempt }}'}
         with:
           script: |
             const {data:pr}=await github.rest.pulls.get({...context.repo,pull_number:Number(process.env.PR)});
             if(pr.head.sha!==process.env.EXPECTED_RESULT) return core.setFailed("POST_PUSH_HEAD_MISMATCH");
-            await github.rest.issues.createComment({...context.repo,issue_number:Number(process.env.PR),body:`CI fixer: pokus ${process.env.ATTEMPT}/2, source \`${process.env.SHA}\`, result \`${pr.head.sha}\`.\n<!-- agent-fix:v2 source=${process.env.SHA} evidence=${process.env.EVIDENCE} attempt=${process.env.ATTEMPT} result=${pr.head.sha} -->`});
+            await github.rest.issues.createComment({...context.repo,issue_number:Number(process.env.PR),body:`CI fixer: attempt ${process.env.ATTEMPT}/2, old SHA \`${process.env.SHA}\`, resulting SHA \`${pr.head.sha}\`, class \`${process.env.FAILURE_CLASS}\`, CI run ${process.env.CI_RUN} attempt ${process.env.CI_ATTEMPT}, producing workflow ${context.workflow} run ${context.runId}.\n<!-- agent-fix:v2 source=${process.env.SHA} evidence=${process.env.EVIDENCE} attempt=${process.env.ATTEMPT} result=${pr.head.sha} class=${process.env.FAILURE_CLASS} ci_run=${process.env.CI_RUN} ci_attempt=${process.env.CI_ATTEMPT} workflow_run=${context.runId} -->`});
 
 
   fail-closed-finalizer:
@@ -340,12 +384,12 @@ jobs:
     permissions: {contents: read, issues: write, pull-requests: read}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with: {ref: '${{ github.event.repository.default_branch }}', persist-credentials: false}
+        with: {ref: '${{ github.event.repository.default_branch }}', path: .trusted-policy, persist-credentials: false}
       - uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
         env: {PR: '${{ needs.classify.outputs.pr_number }}', ISSUE: '${{ needs.classify.outputs.issue_number }}', SHA: '${{ needs.classify.outputs.source_sha }}'}
         with:
           script: |
-            const p=require('./.github/scripts/agent-pipeline.cjs'),prNumber=Number(process.env.PR),issueNumber=Number(process.env.ISSUE);
+            const p=require(`${process.env.GITHUB_WORKSPACE}/.trusted-policy/.github/scripts/agent-pipeline.cjs`),prNumber=Number(process.env.PR),issueNumber=Number(process.env.ISSUE);
             const {data:pr}=await github.rest.pulls.get({...context.repo,pull_number:prNumber});
             const {data:issue}=await github.rest.issues.get({...context.repo,issue_number:issueNumber});
             const prComments=await github.paginate(github.rest.issues.listComments,{...context.repo,issue_number:prNumber,per_page:100});

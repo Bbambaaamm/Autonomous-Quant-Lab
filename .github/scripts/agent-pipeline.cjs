@@ -189,37 +189,62 @@ function extractFailureDiagnostic(value, maxBytes = 4096) {
   return redactDiagnostic(meaningful.length ? meaningful.slice(-80).join("\n") : input.slice(-maxBytes), maxBytes);
 }
 
-function classifyCiFailure({ jobs, runHeadSha, expectedHeadSha, sourceRunId, logExcerpt, config = {} }) {
+function classifyCiFailure({ jobs, runHeadSha, expectedHeadSha, sourceRunId, runAttempt, logExcerpt, config = {} }) {
   if (!/^[0-9a-f]{40}$/.test(runHeadSha || "") || runHeadSha !== expectedHeadSha) {
     return { disposition: "NO_WRITE", failureClass: "unknown", reason: "WORKFLOW_RUN_SHA_MISMATCH" };
   }
-  const failed = jobs.filter((job) => ["failure", "timed_out"].includes(job.conclusion));
+  const authoritative = new Set(config.requiredCiJobs || []);
+  const failedAll = jobs.filter((job) => ["failure", "timed_out"].includes(job.conclusion));
+  if (failedAll.some((job) => !authoritative.has(job.name))) {
+    return { disposition: "NEEDS_HUMAN", failureClass: "unknown", reason: "NON_AUTHORITATIVE_FAILED_JOB" };
+  }
+  const failed = failedAll.filter((job) => authoritative.has(job.name));
   if (failed.length !== 1) return { disposition: "NEEDS_HUMAN", failureClass: failed.length > 1 ? "multiple-failures" : "unknown", reason: "FAILURE_SET_NOT_SINGLE" };
   const job = failed[0], failureClass = normalizedFailureClass(job);
-  const prohibited = new Set(["security", "container-build", "production-smoke", "integration-postgres", "dependency-lock", "infra-transient", "multiple-failures", "unknown"]);
+  const eligible = new Set(config.failureClassPolicy?.eligible || []);
+  const denied = new Set(config.failureClassPolicy?.denied || []);
+  if (!eligible.has(failureClass) && !denied.has(failureClass)) return { disposition: "NEEDS_HUMAN", failureClass: "unknown", reason: "UNCONFIGURED_FAILURE_CLASS" };
   const excerpt = extractFailureDiagnostic(logExcerpt, 4096);
   const protectedPatterns = config.protectedDiagnosticPatterns || [];
   if (protectedPatterns.some((pattern) => new RegExp(pattern, "i").test(excerpt))) {
     return { disposition: "NEEDS_HUMAN", failureClass, reason: "PROTECTED_TEST_OR_INVARIANT" };
   }
-  if (!prohibited.has(failureClass) && (!Number.isSafeInteger(sourceRunId) || sourceRunId < 1 || !excerpt.trim())) {
+  if (eligible.has(failureClass) && (!Number.isSafeInteger(sourceRunId) || sourceRunId < 1 ||
+      !Number.isSafeInteger(runAttempt) || runAttempt < 1 || !excerpt.trim())) {
     return { disposition: "NEEDS_HUMAN", failureClass, reason: "SAFE_DIAGNOSTIC_UNAVAILABLE" };
   }
   const crypto = require("crypto");
   const diagnosticObject = { failureClass, job: job.name, conclusion: job.conclusion,
-    failedSteps: failedStepNames(job), jobId: job.id, sourceRunId, runAttempt: job.run_attempt || 1,
+    failedSteps: failedStepNames(job), jobId: job.id, sourceRunId, runAttempt,
     excerpt };
   const diagnosticWithoutChecksum = JSON.stringify(diagnosticObject);
   diagnosticObject.checksum = crypto.createHash("sha256").update(diagnosticWithoutChecksum).digest("hex");
   return {
-    disposition: prohibited.has(failureClass) ? "NEEDS_HUMAN" : "FIX",
+    disposition: denied.has(failureClass) ? "NEEDS_HUMAN" : "FIX",
     failureClass,
     job: job.name,
     jobId: job.id,
-    evidence: `${runHeadSha}:${sourceRunId}:${job.id}:${job.run_attempt || 1}:${diagnosticObject.checksum}`,
+    evidence: `${runHeadSha}:${sourceRunId}:${job.id}:${runAttempt}:${diagnosticObject.checksum}`,
     diagnostic: JSON.stringify(diagnosticObject),
-    reason: prohibited.has(failureClass) ? "PROHIBITED_OR_UNKNOWN_FAILURE_CLASS" : undefined,
+    reason: denied.has(failureClass) ? "PROHIBITED_OR_UNKNOWN_FAILURE_CLASS" : undefined,
   };
+}
+
+function fixScopeDecision(paths, baselinePaths, config) {
+  const baseline = new Set(baselinePaths || []);
+  const additions = config.fixScope?.testAdditionPrefixes || [];
+  const additionPatterns = (config.fixScope?.testAdditionPatterns || []).map((pattern) => new RegExp(pattern));
+  if (!Array.isArray(paths) || !paths.length) return { ok: false, reason: "EMPTY_FIX_SCOPE" };
+  return paths.every((path) => baseline.has(path) || additions.some((prefix) => path.startsWith(prefix)) ||
+      additionPatterns.some((pattern) => pattern.test(path)))
+    ? { ok: true, paths: [...paths].sort() } : { ok: false, reason: "OUTSIDE_AUTHORIZED_FIX_SCOPE" };
+}
+
+function classificationMarker(record, config) {
+  const keys = config.classificationSchema || [];
+  if (keys.some((key) => record[key] === undefined)) throw new Error("INCOMPLETE_CLASSIFICATION_RECORD");
+  const encoded = Buffer.from(JSON.stringify(record)).toString("base64url");
+  return `<!-- ${config.classificationMarker} evidence=${record.sha}:${record.ciRunId}:${record.ciRunAttempt} record=${encoded} -->`;
 }
 
 function validationCommands(failureClass) {
@@ -410,6 +435,8 @@ module.exports = {
   lifecycleAtAgentPr,
   fullLinkageDecision,
   trustedArtifactDecision,
+  fixScopeDecision,
+  classificationMarker,
   fixAttemptDecision,
   validatePatchPaths,
   validatePatchModes,

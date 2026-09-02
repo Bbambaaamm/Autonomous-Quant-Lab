@@ -332,5 +332,18 @@ Patch generation has an explicit secret preflight and no repository checkout. A 
 credential-free job serializes bounded repairable source files as non-executable JSON; the
 secret-bearing job contains only that source context and diagnostic artifact, so repository scripts
 and tests are mechanically absent while `OPENAI_API_KEY` is present. The immutable Codex action pin
-and read-only profile are wiring-tested. Publication separately requires `AGENT_PUBLISH_TOKEN`
-before checkout and never falls back to `GITHUB_TOKEN`.
+and read-only profile are wiring-tested. Publication exposes and requires `AGENT_PUBLISH_TOKEN` only in the final push step and never falls back to `GITHUB_TOKEN`.
+
+### Trusted policy, classification, and fix scope
+
+All v2 security decisions are loaded from a separate default-branch checkout. The pull-request
+checkout is candidate data only: it never supplies classifier, path/mode rules, or publisher code.
+Candidate checkout credentials are not persisted, and `AGENT_PUBLISH_TOKEN` is exposed only to the
+final checked push operation after trusted linkage, artifact, path, mode, and scope checks.
+
+Every exact failed authoritative CI run produces one idempotent `agent-ci-classification:v2`
+record. Its encoded payload binds repository, Issue, PR, exact SHA, CI run and attempt, failed
+jobs, normalized class, eligibility, budget state, and producing workflow/run. Unsafe outcomes are
+recorded before escalation. Repair scope comes from trusted GitHub metadata: existing files must be
+in the PR baseline file set and additions are limited to configured test paths. Validation binds
+that scope into the artifact and publication checks it again.

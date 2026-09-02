@@ -7,6 +7,8 @@ const path = require("node:path");
 const { execFileSync } = require("node:child_process");
 const test = require("node:test");
 const pipeline = require("./agent-pipeline.cjs");
+const agentConfig = require("../agent-pipeline.json");
+const classifierConfig = {...agentConfig.v2, requiredCiJobs: agentConfig.requiredCiJobs};
 
 test("ready vyžaduje jednoznačný implementační ticket", () => {
   assert.equal(pipeline.validateManualTransition({ labels: ["type:implementation"], previousState: "none", nextState: "agent:ready", targetKind: "issue" }).ok, true);
@@ -308,12 +310,12 @@ test("v2 classifier je jednoznačný a unsafe failures fail-closed", () => {
   const sha = "a".repeat(40);
   // Real listJobsForWorkflowRun shape deliberately has no head_sha.
   const job = (name, id = 1, steps = []) => ({ name, id, run_attempt: 1, conclusion: "failure", steps });
-  const classified = pipeline.classifyCiFailure({ jobs: [job("quality", 1, [{ name: "ruff check", conclusion: "failure" }])], runHeadSha: sha, expectedHeadSha: sha, sourceRunId: 42, logExcerpt: "AssertionError: expected 1" });
+  const classified = pipeline.classifyCiFailure({ jobs: [job("quality", 1, [{ name: "ruff check", conclusion: "failure" }])], runHeadSha: sha, expectedHeadSha: sha, sourceRunId: 42, runAttempt: 1, config: classifierConfig, logExcerpt: "AssertionError: expected 1" });
   assert.equal(classified.disposition, "FIX");
   assert.equal(classified.failureClass, "lint-format");
-  assert.equal(pipeline.classifyCiFailure({ jobs: [job("security")], runHeadSha: sha, expectedHeadSha: sha, sourceRunId: 42, logExcerpt: "AssertionError: expected 1" }).disposition, "NEEDS_HUMAN");
-  assert.equal(pipeline.classifyCiFailure({ jobs: [job("quality"), job("api", 2)], runHeadSha: sha, expectedHeadSha: sha, sourceRunId: 42, logExcerpt: "AssertionError: expected 1" }).failureClass, "multiple-failures");
-  assert.equal(pipeline.classifyCiFailure({ jobs: [job("api")], runHeadSha: sha, expectedHeadSha: "b".repeat(40), sourceRunId: 42, logExcerpt: "failure" }).disposition, "NO_WRITE");
+  assert.equal(pipeline.classifyCiFailure({ jobs: [job("security")], runHeadSha: sha, expectedHeadSha: sha, sourceRunId: 42, runAttempt: 1, config: classifierConfig, logExcerpt: "AssertionError: expected 1" }).disposition, "NEEDS_HUMAN");
+  assert.equal(pipeline.classifyCiFailure({ jobs: [job("quality"), job("api", 2)], runHeadSha: sha, expectedHeadSha: sha, sourceRunId: 42, runAttempt: 1, config: classifierConfig, logExcerpt: "AssertionError: expected 1" }).failureClass, "multiple-failures");
+  assert.equal(pipeline.classifyCiFailure({ jobs: [job("api")], runHeadSha: sha, expectedHeadSha: "b".repeat(40), sourceRunId: 42, runAttempt: 1, config: classifierConfig, logExcerpt: "failure" }).disposition, "NO_WRITE");
 });
 
 test("v2 classes, diagnostics and trusted command map are deterministic", () => {
@@ -323,11 +325,11 @@ test("v2 classes, diagnostics and trusted command map are deterministic", () => 
   assert.match(pipeline.validationCommands("api-test")[0], /test_vertical_slice\.py/);
   assert.equal(pipeline.validationCommands("security"), null);
   assert.equal(pipeline.validationCommands("dependency-lock"), null);
-  const dependency = pipeline.classifyCiFailure({ jobs: [{ name: "dependency-lock", id: 7, run_attempt: 2, conclusion: "failure", steps: [] }], runHeadSha: "a".repeat(40), expectedHeadSha: "a".repeat(40), sourceRunId: 99, logExcerpt: "uv lock failed" });
+  const dependency = pipeline.classifyCiFailure({ jobs: [{ name: "dependency-lock", id: 7, run_attempt: 2, conclusion: "failure", steps: [] }], runHeadSha: "a".repeat(40), expectedHeadSha: "a".repeat(40), sourceRunId: 99, runAttempt: 2, config: classifierConfig, logExcerpt: "uv lock failed" });
   assert.equal(dependency.disposition, "NEEDS_HUMAN");
-  const missingLog = pipeline.classifyCiFailure({ jobs: [{ name: "quality", id: 8, conclusion: "failure", steps: [{name:"mypy",conclusion:"failure"}] }], runHeadSha: "a".repeat(40), expectedHeadSha: "a".repeat(40), sourceRunId: 99, logExcerpt: "" });
+  const missingLog = pipeline.classifyCiFailure({ jobs: [{ name: "quality", id: 8, conclusion: "failure", steps: [{name:"mypy",conclusion:"failure"}] }], runHeadSha: "a".repeat(40), expectedHeadSha: "a".repeat(40), sourceRunId: 99, runAttempt: 2, config: classifierConfig, logExcerpt: "" });
   assert.equal(missingLog.reason, "SAFE_DIAGNOSTIC_UNAVAILABLE");
-  const diagnostic = pipeline.classifyCiFailure({ jobs: [{ name: "quality", id: 9, run_attempt: 3, conclusion: "failure", steps: [{name:"ruff",conclusion:"failure"}] }], runHeadSha: "a".repeat(40), expectedHeadSha: "a".repeat(40), sourceRunId: 100, logExcerpt: "token=topsecret\nAssertionError" });
+  const diagnostic = pipeline.classifyCiFailure({ jobs: [{ name: "quality", id: 9, run_attempt: 3, conclusion: "failure", steps: [{name:"ruff",conclusion:"failure"}] }], runHeadSha: "a".repeat(40), expectedHeadSha: "a".repeat(40), sourceRunId: 100, runAttempt: 3, config: classifierConfig, logExcerpt: "token=topsecret\nAssertionError" });
   assert.match(diagnostic.diagnostic, /sourceRunId/);
   assert.match(diagnostic.diagnostic, /checksum/);
   assert.doesNotMatch(diagnostic.diagnostic, /topsecret/);
@@ -394,7 +396,7 @@ test("v2 workflow wiring odděluje secret, validation a write trust domains", ()
   assert.doesNotMatch(fixer + reviewer, /allow-bots:/);
   assert.match(fixer, /workflow_call:/);
   assert.match(reviewer, /route-block:[\s\S]*uses: \.\/\.github\/workflows\/agent-ci-fixer\.yml[\s\S]*pr_number:[\s\S]*head_sha:/);
-  assert.match(fixer, /sourceRunId:run\.id,logExcerpt/);
+  assert.match(fixer, /sourceRunId:run\.id,runAttempt:run\.run_attempt,logExcerpt/);
   assert.match(fixer, /prompt-file: \.codex-input\/prompt\.md/);
   assert.match(reviewer, /prompt-file: \.codex-input\/review-prompt\.md/);
   assert.doesNotMatch(fixer, /prompt:[\s\S]{0,500}\$RUNNER_TEMP\/diagnostic\.json/);
@@ -416,7 +418,7 @@ test("v2 crash-safe budget reconciles a pushed fixer commit without final commen
 test("v2 protected tests and concrete risk/security modules fail closed", () => {
   const config = require("../agent-pipeline.json").v2, sha = "a".repeat(40);
   for (const excerpt of ["FAILED tests/test_paper_only_architecture.py", "ERROR tests/test_phase9_security.py RBAC"])
-    assert.equal(pipeline.classifyCiFailure({ jobs: [{name:"api",id:1,conclusion:"failure",steps:[]}], runHeadSha:sha, expectedHeadSha:sha, sourceRunId:1, logExcerpt:excerpt, config }).reason, "PROTECTED_TEST_OR_INVARIANT");
+    assert.equal(pipeline.classifyCiFailure({ jobs: [{name:"api",id:1,conclusion:"failure",steps:[]}], runHeadSha:sha, expectedHeadSha:sha, sourceRunId:1, runAttempt:1, logExcerpt:excerpt, config:{...config,requiredCiJobs:agentConfig.requiredCiJobs} }).reason, "PROTECTED_TEST_OR_INVARIANT");
   for (const path of ["backend/src/quantlab/trading.py", "backend/src/quantlab/phase4.py", "backend/src/quantlab/security.py"])
     assert.equal(pipeline.validatePatchPaths([path], config), false, path);
 });
@@ -439,10 +441,10 @@ test("v2 third-audit workflow wiring is fail-closed and injection safe", () => {
   assert.match(fixer,/git diff --cached --binary/);
   assert.match(fixer,/git diff --cached --name-only/);
   assert.match(fixer,/git check-ref-format --branch "\$HEAD_REF"/);
-  assert.match(fixer,/git push origin "HEAD:\$\{HEAD_REF\}"/);
+  assert.match(fixer,/push origin "HEAD:\$\{HEAD_REF\}"/);
   assert.doesNotMatch(fixer,/git push[^\n]*\$\{\{[^\n]*head\.ref/);
   assert.match(fixer,/pr\.head\.repo\?\.full_name!==process\.env\.EXPECTED_REPO/);
-  assert.match(fixer,/token: '\$\{\{ secrets\.AGENT_PUBLISH_TOKEN \}\}'/);
+  assert.doesNotMatch(fixer,/token: '\$\{\{ secrets\.AGENT_PUBLISH_TOKEN \}\}'/);
   assert.match(fixer,/Agent-Fix-Attempt:/);
   assert.match(fixer,/output-schema:[\s\S]*"BLOCK"/);
   assert.match(fixer,/fail-closed-finalizer:[\s\S]*if: always\(\)/);
@@ -483,10 +485,48 @@ test("v2 fourth-audit wiring validates before checks and closes dispatch and pus
   assert.ok(validation.indexOf("validatePatchPaths(x,c.v2)") < validation.indexOf("case \"$(jq -r .failure_class"));
   assert.match(fixer,/run\.name!=="CI"[\s\S]*run\.event!=="pull_request"[\s\S]*run\.status!=="completed"[\s\S]*run\.conclusion!=="failure"/);
   assert.match(fixer,/cmp "\$RUNNER_TEMP\/validated\.patch" "\$RUNNER_TEMP\/publisher\.patch"/);
-  assert.match(fixer,/git ls-remote --refs origin "refs\/heads\/\$HEAD_REF"[\s\S]*= "\$SHA"[\s\S]*git push[\s\S]*git ls-remote --refs origin/);
+  assert.match(fixer,/ls-remote --refs origin "refs\/heads\/\$HEAD_REF"[\s\S]*= "\$SHA"[\s\S]*push origin[\s\S]*ls-remote --refs origin/);
   assert.match(fixer,/prepare-generation-context:[\s\S]*source-context\.json/);
   const generation=fixer.slice(fixer.indexOf("generate-patch:"),fixer.indexOf("validate-patch:"));
   assert.doesNotMatch(generation,/actions\/checkout|git |npm |pytest|ruff|mypy/);
   assert.match(generation,/test -n "\$OPENAI_API_KEY"/);
   assert.match(fixer,/test -n "\$AGENT_PUBLISH_TOKEN"/);
+});
+
+test("v2 policy taxonomy is exhaustive, disjoint, and action identity is configured", () => {
+  const policy=agentConfig.v2.failureClassPolicy;
+  assert.deepEqual([...new Set([...policy.eligible,...policy.denied])].sort(),[...pipeline.FAILURE_CLASSES].sort());
+  assert.equal(policy.eligible.some(x=>policy.denied.includes(x)),false);
+  assert.match(agentConfig.v2.codexAction.revision,/^[0-9a-f]{40}$/);
+  assert.equal(agentConfig.v2.codexAction.generationProfile,":read-only");
+  assert.equal(agentConfig.v2.reviewerRequired,true);
+});
+
+test("v2 authoritative classifier rejects optional failures and uses workflow run attempt", () => {
+  const sha="a".repeat(40), job={name:"optional-lint",id:1,conclusion:"failure",steps:[{name:"ruff",conclusion:"failure"}]};
+  assert.equal(pipeline.classifyCiFailure({jobs:[job],runHeadSha:sha,expectedHeadSha:sha,sourceRunId:7,runAttempt:3,logExcerpt:"error",config:classifierConfig}).reason,"NON_AUTHORITATIVE_FAILED_JOB");
+  const quality={...job,name:"quality"};
+  const result=pipeline.classifyCiFailure({jobs:[quality],runHeadSha:sha,expectedHeadSha:sha,sourceRunId:7,runAttempt:3,logExcerpt:"error: lint",config:classifierConfig});
+  assert.match(result.evidence,/:3:/);
+});
+
+test("v2 fix scope and durable classification records are deterministic", () => {
+  assert.equal(pipeline.fixScopeDecision(["backend/src/a.py"],["backend/src/a.py"],agentConfig.v2).ok,true);
+  assert.equal(pipeline.fixScopeDecision(["backend/src/unrelated.py"],["backend/src/a.py"],agentConfig.v2).ok,false);
+  assert.equal(pipeline.fixScopeDecision(["backend/tests/test_new.py"],[],agentConfig.v2).ok,true);
+  const record={repository:"o/r",issue:88,pr:99,sha:"a".repeat(40),ciRunId:7,ciRunAttempt:2,failedJobs:["quality"],failureClass:"lint-format",autoFixEligible:true,budgetState:"available",workflow:"Agent CI classifier and fixer",workflowRunId:8};
+  const marker=pipeline.classificationMarker(record,agentConfig.v2);
+  assert.match(marker,/agent-ci-classification:v2 evidence=.*:7:2 record=/);
+  assert.equal(marker,pipeline.classificationMarker(record,agentConfig.v2));
+});
+
+test("v2 write job executes only trusted policy and treats candidate checkout as data", () => {
+  const fixer=fs.readFileSync(".github/workflows/agent-ci-fixer.yml","utf8");
+  const publish=fixer.slice(fixer.indexOf("trusted-publish:"),fixer.indexOf("fail-closed-finalizer:"));
+  assert.match(publish,/path: \.trusted-policy/);
+  assert.match(publish,/path: candidate, persist-credentials: false/);
+  assert.doesNotMatch(publish,/require\(['"]\.\/\.github/);
+  assert.match(publish,/\.trusted-policy\/\.github\/scripts\/agent-pipeline\.cjs/);
+  assert.match(fixer,/record-classification:[\s\S]*agent-ci-classification:v2|record-classification:[\s\S]*classificationMarker/);
+  assert.match(fixer,/authorized_scope/);
 });
