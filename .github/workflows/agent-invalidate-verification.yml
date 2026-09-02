@@ -23,6 +23,19 @@ jobs:
             const STATES = ["agent:ready", "agent:running", "agent:pr", "agent:needs-human", "agent:verified"];
             const labels = (item) => item.labels.map((label) => label.name);
             const state = (item) => labels(item).filter((label) => STATES.includes(label));
+            const escalate = async (number) => {
+              const { data: fresh } = await github.rest.issues.get({ ...context.repo, issue_number: number });
+              const states = state(fresh);
+              const permitted = states.every((value) =>
+                value === "agent:pr" || value === "agent:verified" || value === "agent:needs-human");
+              if (!permitted) throw new Error(`ESCALATION_STATE_CONFLICT na #${number}`);
+              if (!states.includes("agent:needs-human")) {
+                await github.rest.issues.addLabels({ ...context.repo, issue_number: number, labels: ["agent:needs-human"] });
+              }
+              for (const label of states.filter((value) => value !== "agent:needs-human")) {
+                await github.rest.issues.removeLabel({ ...context.repo, issue_number: number, name: label });
+              }
+            };
             const markerIssue = (body) => {
               const matches = [...(body || "").matchAll(/^\s*-?\s*Agent-Issue:\s*#([1-9][0-9]*)\s*$/gim)];
               return matches.length === 1 ? Number(matches[0][1]) : null;
@@ -41,7 +54,7 @@ jobs:
               .filter((number) => Number.isSafeInteger(number) && number > 0);
             const uniqueIssues = [...new Set(linkedIssues)];
             if (uniqueIssues.length !== 1) {
-              await github.rest.issues.addLabels({ ...context.repo, issue_number: prNumber, labels: ["agent:needs-human"] });
+              await escalate(prNumber);
               await github.rest.issues.createComment({ ...context.repo, issue_number: prNumber,
                 body: "Verification invalidation selhala zavřeně: durable linkage není jednoznačná. Vyžaduje zásah maintaineru." });
               return;
@@ -55,8 +68,8 @@ jobs:
               core.notice("NO_WRITE: agent:needs-human má prioritu."); return;
             }
             if (markerIssue(freshPull.body) !== issueNumber) {
-              await github.rest.issues.addLabels({ ...context.repo, issue_number: prNumber, labels: ["agent:needs-human"] });
-              await github.rest.issues.addLabels({ ...context.repo, issue_number: issueNumber, labels: ["agent:needs-human"] });
+              await escalate(prNumber);
+              await escalate(issueNumber);
               await github.rest.issues.createComment({ ...context.repo, issue_number: prNumber,
                 body: `Verification invalidation selhala zavřeně: PR marker nesouhlasí s durable linkage na Issue #${issueNumber}.` });
               return;

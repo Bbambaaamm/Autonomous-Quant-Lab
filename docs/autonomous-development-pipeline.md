@@ -56,7 +56,7 @@ The manually dispatched state workflow permits only:
 | `agent:ready` | `agent:running` | Human maintainer initiating/assigning a run. |
 | `agent:running` | `agent:pr` | Human maintainer; open PR against the default branch with exact linkage. The workflow labels both Issue and PR. |
 | `agent:running`, `agent:pr` | `agent:needs-human` | Human maintainer; non-empty escalation reason. From `agent:pr`, the linked PR number is required and both objects are updated. |
-| `agent:needs-human` | `agent:ready`, `agent:running`, `agent:pr` | Human maintainer after remediation; the dispatch and comment document recovery. `agent:pr` again requires linkage. |
+| `agent:needs-human` | `agent:ready`, `agent:running` | Human maintainer after remediation; the dispatch and comment document recovery. A PR recovery always continues deterministically through `agent:running` → `agent:pr`. |
 | `agent:pr` | `agent:verified` | Only **Agent verification gate**, after all conditions below; partial pair writes are safely reconciled on retry. |
 
 The transition workflow requires an explicit expected previous and next state,

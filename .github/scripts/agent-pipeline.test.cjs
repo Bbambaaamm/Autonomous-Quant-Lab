@@ -15,6 +15,13 @@ test("neplatné a nejednoznačné přechody selžou zavřeně", () => {
   assert.equal(pipeline.validateManualTransition({ labels: ["type:implementation", "agent:ready"], previousState: "agent:ready", nextState: "agent:pr", targetKind: "issue" }).reason, "INVALID_TRANSITION");
   assert.equal(pipeline.validateManualTransition({ labels: ["type:implementation", "agent:ready", "agent:running"], previousState: "agent:running", nextState: "agent:needs-human", targetKind: "issue" }).reason, "CONFLICTING_AGENT_STATE");
   assert.equal(pipeline.validateManualTransition({ labels: ["type:implementation", "agent:pr"], previousState: "agent:pr", nextState: "agent:verified", targetKind: "issue" }).reason, "VERIFIED_IS_AUTOMATED_ONLY");
+  assert.equal(pipeline.validateManualTransition({ labels: ["type:implementation", "agent:needs-human"], previousState: "agent:needs-human", nextState: "agent:pr", targetKind: "issue" }).reason, "INVALID_TRANSITION");
+});
+
+test("recovery vede přes needs-human → running → nový unlabeled PR → pr", () => {
+  assert.equal(pipeline.validateManualTransition({ labels: ["type:implementation", "agent:needs-human"], previousState: "agent:needs-human", nextState: "agent:running", targetKind: "issue" }).ok, true);
+  assert.equal(pipeline.validateManualTransition({ labels: ["type:implementation", "agent:running"], previousState: "agent:running", nextState: "agent:pr", targetKind: "issue" }).ok, true);
+  assert.deepEqual(pipeline.stateMutationPlan([], "none", "agent:pr"), { ok: true, add: ["agent:pr"], remove: [], complete: false });
 });
 
 test("PR linkage je právě jeden samostatný Agent-Issue marker", () => {
@@ -94,6 +101,15 @@ test("nový SHA invaliduje verified stav na agent:pr a staré review evidence", 
   const acknowledgements = [{ user: { login: "github-actions[bot]" }, body: "<!-- agent-review-ack:v1 sha=sha-a -->" }];
   const reviews = [{ state: "APPROVED", commit_id: "sha-a" }];
   assert.equal(pipeline.reviewSatisfied({ reviewDecision: "APPROVED", reviews, acknowledgements, headSha: "sha-b" }), false);
+});
+
+test("invalidation escalation odstraní verified a zachová cizí label", () => {
+  assert.deepEqual(pipeline.escalationMutationPlan(["agent:verified", "priority:high"]), {
+    ok: true, add: ["agent:needs-human"], remove: ["agent:verified"],
+  });
+  assert.deepEqual(pipeline.escalationMutationPlan(["agent:verified", "agent:needs-human", "priority:high"]), {
+    ok: true, add: [], remove: ["agent:verified"],
+  });
 });
 
 test("konfigurované required joby přesně odpovídají autoritativnímu CI", () => {

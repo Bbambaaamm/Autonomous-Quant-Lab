@@ -10,7 +10,6 @@ const ALLOWED = new Set([
   "agent:pr->agent:needs-human",
   "agent:needs-human->agent:ready",
   "agent:needs-human->agent:running",
-  "agent:needs-human->agent:pr",
 ]);
 
 function labelNames(labels) {
@@ -100,6 +99,18 @@ function stateMutationPlan(labels, previousState, nextState) {
   };
 }
 
+function escalationMutationPlan(labels) {
+  const names = new Set(labelNames(labels));
+  const states = [...names].filter((label) => STATES.includes(label));
+  const permitted = new Set(["agent:pr", "agent:verified", "agent:needs-human"]);
+  if (states.some((state) => !permitted.has(state))) return { ok: false, reason: "CONFLICTING_AGENT_STATE" };
+  return {
+    ok: true,
+    add: names.has("agent:needs-human") ? [] : ["agent:needs-human"],
+    remove: states.filter((state) => state !== "agent:needs-human"),
+  };
+}
+
 function successfulRequiredJobs(jobs, requiredNames, headSha) {
   const latest = new Map();
   for (const job of jobs) {
@@ -126,6 +137,7 @@ function verificationDecision(input) {
 module.exports = {
   STATES,
   currentState,
+  escalationMutationPlan,
   hasDurableLink,
   isImplementation,
   hasExactShaReviewAcknowledgement,
