@@ -24,6 +24,39 @@ test("recovery vede přes needs-human → running → nový unlabeled PR → pr"
   assert.deepEqual(pipeline.stateMutationPlan([], "none", "agent:pr"), { ok: true, add: ["agent:pr"], remove: [], complete: false });
 });
 
+test("regrese scénáře Issue #84 / PR #85: linked recovery zachová cizí labely a je idempotentní", () => {
+  const issueNumber = 101;
+  const prNumber = 202;
+  const comments = [{ user: { login: "github-actions[bot]" }, body: `audit\n<!-- agent-link:v1 repo=owner/repo issue=${issueNumber} pr=${prNumber} -->` }];
+  assert.deepEqual(pipeline.durablePrLinkDecision(comments, { owner: "owner", repo: "repo", issueNumber }),
+    { ok: true, prNumber });
+  const recovered = pipeline.stateMutationPlan(["agent:needs-human", "priority:high"], "agent:needs-human", "agent:running");
+  assert.deepEqual(recovered, { ok: true, add: ["agent:running"], remove: ["agent:needs-human"], complete: false });
+  assert.equal(recovered.remove.includes("priority:high"), false);
+  assert.deepEqual(pipeline.stateMutationPlan(["agent:running", "priority:high"], "agent:needs-human", "agent:running"),
+    { ok: true, add: [], remove: [], complete: true });
+  assert.deepEqual(pipeline.stateMutationPlan(["agent:running", "priority:high"], "agent:running", "agent:pr"),
+    { ok: true, add: ["agent:pr"], remove: ["agent:running"], complete: false });
+});
+
+test("missing, ambiguous a stale durable linkage fail-closed", () => {
+  assert.deepEqual(pipeline.durablePrLinkDecision([], { owner: "owner", repo: "repo", issueNumber: 84 }),
+    { ok: true, prNumber: null });
+  const ambiguous = [
+    { user: { login: "github-actions[bot]" }, body: "<!-- agent-link:v1 repo=owner/repo issue=84 pr=85 -->" },
+    { user: { login: "github-actions[bot]" }, body: "<!-- agent-link:v1 repo=owner/repo issue=84 pr=86 -->" },
+  ];
+  assert.equal(pipeline.durablePrLinkDecision(ambiguous, { owner: "owner", repo: "repo", issueNumber: 84 }).reason,
+    "AMBIGUOUS_DURABLE_LINK");
+  const stale = [{ user: { login: "github-actions[bot]" }, body: "<!-- agent-link:v1 repo=owner/repo issue=84 pr=85 -->" }];
+  assert.equal(pipeline.hasDurableLink(stale, { owner: "owner", repo: "repo", issueNumber: 84, prNumber: 86 }), false);
+  const ambiguousPr = [
+    ...stale,
+    { user: { login: "github-actions[bot]" }, body: "<!-- agent-link:v1 repo=owner/repo issue=83 pr=85 -->" },
+  ];
+  assert.equal(pipeline.hasDurableLink(ambiguousPr, { owner: "owner", repo: "repo", issueNumber: 84, prNumber: 85 }), false);
+});
+
 test("PR linkage je právě jeden samostatný Agent-Issue marker", () => {
   assert.equal(pipeline.parseAgentIssue("x\n- Agent-Issue: #82\ny"), 82);
   assert.equal(pipeline.parseAgentIssue("Agent-Issue: #82\nAgent-Issue: #83"), null);
@@ -33,9 +66,21 @@ test("PR linkage je právě jeden samostatný Agent-Issue marker", () => {
 test("verified vyžaduje přesný SHA, ready PR, review, stav a kompletní CI", () => {
   const valid = { workflowName: "CI", workflowConclusion: "success", headSha: "abc", prHeadSha: "abc", open: true, correctBase: true, draft: false, reviewSatisfied: true, issueIsImplementation: true, statesReconciliable: true, needsHuman: false, requiredJobsSuccessful: true };
   assert.deepEqual(pipeline.verificationDecision(valid), { ok: true });
-  for (const change of [{ draft: true }, { prHeadSha: "old" }, { reviewSatisfied: false }, { needsHuman: true }, { requiredJobsSuccessful: false }]) {
+  for (const change of [{ draft: true }, { prHeadSha: "old" }, { reviewSatisfied: false }, { correctBase: false },
+    { issueIsImplementation: false }, { statesReconciliable: false }, { needsHuman: true }, { requiredJobsSuccessful: false }]) {
     assert.equal(pipeline.verificationDecision({ ...valid, ...change }).ok, false);
   }
+});
+
+test("review event po dřívějším green CI znovu vybere pouze exact-head autoritativní run", () => {
+  const runs = [
+    { id: 10, name: "CI", event: "pull_request", status: "completed", conclusion: "success", head_sha: "old", pull_requests: [{ number: 85 }] },
+    { id: 11, name: "CI", event: "pull_request", status: "completed", conclusion: "failure", head_sha: "new", pull_requests: [{ number: 85 }] },
+    { id: 12, name: "Other", event: "pull_request", status: "completed", conclusion: "success", head_sha: "new", pull_requests: [{ number: 85 }] },
+    { id: 13, name: "CI", event: "pull_request", status: "completed", conclusion: "success", head_sha: "new", pull_requests: [{ number: 85 }] },
+  ];
+  assert.deepEqual(pipeline.authoritativeCiRunCandidates(runs, { workflowName: "CI", headSha: "new", prNumber: 85 }).map((run) => run.id), [13]);
+  assert.deepEqual(pipeline.authoritativeCiRunCandidates(runs, { workflowName: "CI", headSha: "stale", prNumber: 85 }), []);
 });
 
 test("exact-SHA review acknowledgement je explicitní a nový commit jej invaliduje", () => {
@@ -118,4 +163,23 @@ test("konfigurované required joby přesně odpovídají autoritativnímu CI", (
   const jobBlock = ci.split(/^jobs:\s*$/m)[1];
   const jobNames = [...jobBlock.matchAll(/^  ([a-z][a-z0-9-]*):\s*$/gm)].map((match) => match[1]);
   assert.deepEqual(config.requiredCiJobs, jobNames);
+});
+
+test("review acknowledgement i native approval dávají verifieru trusted re-evaluation příležitost", () => {
+  const verify = fs.readFileSync(`${__dirname}/../workflows/agent-verify.yml`, "utf8");
+  const acknowledgement = fs.readFileSync(`${__dirname}/../workflows/agent-review-acknowledgement.yml`, "utf8");
+  const signal = fs.readFileSync(`${__dirname}/../workflows/agent-review-signal.yml`, "utf8");
+  assert.match(signal, /pull_request_review:\s*\n\s+types: \[submitted\]/);
+  assert.match(signal, /permissions: \{\}/);
+  assert.match(verify, /workflows: \[CI, Agent review signal\]/);
+  assert.match(verify, /workflow_call:/);
+  assert.match(verify, /listWorkflowRunsForRepo/);
+  assert.match(acknowledgement, /uses: \.\/\.github\/workflows\/agent-verify\.yml/);
+  assert.doesNotMatch(verify, /pull_request_target/);
+});
+
+test("dokumentace popisuje jediný state label, ne jediný label na objektu", () => {
+  const docs = fs.readFileSync(`${__dirname}/../../docs/autonomous-development-pipeline.md`, "utf8");
+  assert.match(docs, /only `agent:\*` state label/);
+  assert.match(docs, /unrelated labels/);
 });

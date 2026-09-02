@@ -33,6 +33,12 @@ The transition records a durable, trusted GitHub comment binding repository, Iss
 and PR. Verification requires it to match the mutable PR-body marker. A trusted,
 metadata-only synchronization workflow invalidates `agent:verified` back to
 `agent:pr` after a new head SHA without checking out or executing PR code.
+Recovery of an already linked PR resolves that unique durable binding and
+idempotently moves both objects through `agent:running`; it never requires manual
+state-label removal. A later native review or exact-SHA acknowledgement also invokes
+the same verifier path, which queries already completed exact-SHA CI evidence. CI
+therefore remains authoritative evidence without its completion event being the
+only opportunity to verify.
 
 The complete operational contract and recovery procedure are defined in
 `docs/autonomous-development-pipeline.md`.
@@ -44,6 +50,8 @@ The complete operational contract and recovery procedure are defined in
 - Label provisioning and transitions require GitHub write API access, but PR code is
   never executed with that token.
 - CI job names are a reviewed configuration contract.
+- `agent:pr` is the sole `agent:*` state label, not the sole label on either object;
+  classification and unrelated labels are retained.
 - A partial GitHub API failure can temporarily leave both transition labels or a
   mismatched Issue/PR pair; retrying the identical operation deterministically
   completes it, while any conflicting newer state fails closed.

@@ -33,7 +33,10 @@ classified `type:implementation`, and then explicitly opted in by a human.
 
 ## State semantics
 
-Exactly zero or one `agent:*` state label may exist on a participating object.
+Exactly zero or one `agent:*` state label may exist on a participating object;
+`agent:pr` is therefore the only `agent:*` state label on a linked Issue and PR.
+It is not the object's only label: the Issue retains `type:implementation` and all
+transitions preserve unrelated labels on both objects.
 
 | State | Meaning | Explicitly does not mean |
 |---|---|---|
@@ -56,7 +59,7 @@ The manually dispatched state workflow permits only:
 | `agent:ready` | `agent:running` | Human maintainer initiating/assigning a run. |
 | `agent:running` | `agent:pr` | Human maintainer; open PR against the default branch with exact linkage. The workflow labels both Issue and PR. |
 | `agent:running`, `agent:pr` | `agent:needs-human` | Human maintainer; non-empty escalation reason. From `agent:pr`, the linked PR number is required and both objects are updated. |
-| `agent:needs-human` | `agent:ready`, `agent:running` | Human maintainer after remediation; the dispatch and comment document recovery. A PR recovery always continues deterministically through `agent:running` → `agent:pr`. |
+| `agent:needs-human` | `agent:ready`, `agent:running` | Human maintainer after remediation; the dispatch and comment document recovery. If durable linkage exists, recovery resolves its unique open PR, moves both objects to `agent:running`, and then continues through `agent:running` → `agent:pr`. |
 | `agent:pr` | `agent:verified` | Only **Agent verification gate**, after all conditions below; partial pair writes are safely reconciled on retry. |
 
 The transition workflow requires an explicit expected previous and next state,
@@ -93,9 +96,12 @@ body cannot rebind an already authorized PR.
 
 ## Automated verification gate
 
-The write-capable verifier runs only after the authoritative workflow named `CI`
-completes successfully for a pull request. It checks metadata through the GitHub
-API and never checks out or executes PR code. It writes `agent:verified` to the
+The write-capable verifier runs after the authoritative workflow named `CI`
+completes successfully for a pull request and re-evaluates after a submitted native
+review or the exact-SHA acknowledgement workflow. A review-triggered evaluation
+queries existing completed `CI` runs and accepts only complete required-job evidence
+for the same current head SHA and PR. It checks metadata through the GitHub API and
+never checks out or executes PR code. It writes `agent:verified` to the
 linked Issue and PR only when all of these are true:
 
 1. the CI run refers to exactly one PR and its conclusion is `success`;
@@ -134,7 +140,9 @@ Native approvals are read through the GitHub reviews API and count only when an
 active `APPROVED` review has `commit_id` equal to the CI/head SHA. A general
 `reviewDecision` without that exact-commit evidence is insufficient.
 
-An unknown/ambiguous event or failed condition produces `NO WRITE`, never inferred
+Thus CI may finish before review evidence without stranding the PR: the later trusted
+review event reuses CI as evidence instead of rerunning CI. It neither executes PR
+code with a write token nor recursively triggers CI. An unknown/ambiguous event or failed condition produces `NO WRITE`, never inferred
 success. A new commit changes the head SHA; normal GitHub CI and review-dismissal
 policy apply, and the PR must return to `agent:pr` before a later run can verify it.
 The list in `.github/agent-pipeline.json` must be reviewed whenever authoritative
@@ -159,7 +167,11 @@ when available) rather than guessed. Unrelated labels are preserved.
 
 Escalate a blocked or ambiguous run with a reason rather than guessing. Recovery is
 a deliberate maintainer transition out of `agent:needs-human`; comments preserve
-both transitions. Pair transitions use add/remove mutations rather than replacing
+both transitions. When the Issue audit comments contain a durable link, recovery
+requires exactly one matching, open, default-base PR whose body marker and own
+durable comment agree. Missing, stale, conflicting, or ambiguous evidence fails
+closed. A pre-PR escalation with no durable link remains an Issue-only recovery.
+Pair transitions use add/remove mutations rather than replacing
 all labels. The caller supplies exact `previous`/`next` states. The combinations
 `previous/previous`, `next/previous`, `previous/next`, `previous+next` (an interrupted
 single-object mutation), and `next/next` are accepted only for that same operation;

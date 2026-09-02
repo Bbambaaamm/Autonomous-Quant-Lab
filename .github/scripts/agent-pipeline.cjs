@@ -57,9 +57,7 @@ function parseAgentIssue(body) {
 }
 
 function hasDurableLink(comments, { owner, repo, issueNumber, prNumber }) {
-  const marker = `<!-- agent-link:v1 repo=${owner}/${repo} issue=${issueNumber} pr=${prNumber} -->`;
-  return comments.some((comment) => comment.user?.login === "github-actions[bot]" &&
-    comment.body?.split("\n").includes(marker));
+  return parseDurableLink(comments, { owner, repo, prNumber }) === issueNumber;
 }
 
 function parseDurableLink(comments, { owner, repo, prNumber }) {
@@ -73,6 +71,20 @@ function parseDurableLink(comments, { owner, repo, prNumber }) {
     .filter((number) => Number.isSafeInteger(number) && number > 0);
   const unique = [...new Set(issueNumbers)];
   return unique.length === 1 ? unique[0] : null;
+}
+
+function durablePrLinkDecision(comments, { owner, repo, issueNumber }) {
+  const prefix = `<!-- agent-link:v1 repo=${owner}/${repo} issue=${issueNumber} pr=`;
+  const suffix = " -->";
+  const prNumbers = comments
+    .filter((comment) => comment.user?.login === "github-actions[bot]")
+    .flatMap((comment) => (comment.body || "").split("\n"))
+    .filter((line) => line.startsWith(prefix) && line.endsWith(suffix))
+    .map((line) => Number(line.slice(prefix.length, -suffix.length)))
+    .filter((number) => Number.isSafeInteger(number) && number > 0);
+  const unique = [...new Set(prNumbers)];
+  if (unique.length > 1) return { ok: false, reason: "AMBIGUOUS_DURABLE_LINK" };
+  return { ok: true, prNumber: unique[0] ?? null };
 }
 
 function hasExactShaReviewAcknowledgement(comments, headSha) {
@@ -121,6 +133,14 @@ function successfulRequiredJobs(jobs, requiredNames, headSha) {
   return requiredNames.every((name) => latest.get(name)?.conclusion === "success");
 }
 
+function authoritativeCiRunCandidates(runs, { workflowName, headSha, prNumber }) {
+  return runs
+    .filter((run) => run.name === workflowName && run.event === "pull_request" &&
+      run.status === "completed" && run.conclusion === "success" && run.head_sha === headSha &&
+      run.pull_requests?.length === 1 && run.pull_requests[0].number === prNumber)
+    .sort((left, right) => right.id - left.id);
+}
+
 function verificationDecision(input) {
   if (input.workflowName !== "CI" || input.workflowConclusion !== "success") return { ok: false, reason: "CI_NOT_SUCCESSFUL" };
   if (!input.headSha || input.prHeadSha !== input.headSha) return { ok: false, reason: "HEAD_SHA_MISMATCH" };
@@ -137,6 +157,8 @@ function verificationDecision(input) {
 module.exports = {
   STATES,
   currentState,
+  authoritativeCiRunCandidates,
+  durablePrLinkDecision,
   escalationMutationPlan,
   hasDurableLink,
   isImplementation,

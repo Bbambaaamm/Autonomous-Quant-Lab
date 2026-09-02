@@ -1,0 +1,15 @@
+name: Agent review signal
+
+on:
+  pull_request_review:
+    types: [submitted]
+
+# Tento nedůvěryhodný PR event pouze vytvoří read-free completion signal. Zápis a
+# načtení CI evidence provede až trusted workflow_run verifier z default branch.
+permissions: {}
+
+jobs:
+  signal:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Review signal pro trusted verifier"
