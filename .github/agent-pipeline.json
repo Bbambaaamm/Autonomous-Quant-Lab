@@ -10,6 +10,7 @@
     "agent:verified"
   ],
   "requiredCiJobs": [
+    "agent-pipeline",
     "quality",
     "unit-research",
     "api",

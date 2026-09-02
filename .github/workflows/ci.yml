@@ -10,6 +10,23 @@ env:
   NPM_VERSION: "11.17.0"
 
 jobs:
+  agent-pipeline:
+    runs-on: ubuntu-latest
+    permissions: {contents: read}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with: {persist-credentials: false}
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with: {node-version: "24"}
+      - name: Validate agent pipeline state machine
+        run: node --test .github/scripts/agent-pipeline.test.cjs
+      - name: Validate agent pipeline JSON
+        run: python -m json.tool .github/agent-pipeline.json >/dev/null
+      - name: Validate GitHub Actions YAML syntax
+        run: >-
+          ruby -e 'require "yaml"; Dir[".github/workflows/*.yml"].sort.each {
+          |path| YAML.load_file(path, aliases: true) }'
+
   quality:
     runs-on: ubuntu-latest
     defaults: {run: {working-directory: backend}}

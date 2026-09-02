@@ -35,7 +35,16 @@ test("exact-SHA review acknowledgement je explicitní a nový commit jej invalid
   const comments = [{ user: { login: "github-actions[bot]" }, body: "Review acknowledged\n<!-- agent-review-ack:v1 sha=abc -->" }];
   assert.equal(pipeline.reviewSatisfied({ reviewDecision: null, acknowledgements: comments, headSha: "abc" }), true);
   assert.equal(pipeline.reviewSatisfied({ reviewDecision: null, acknowledgements: comments, headSha: "new" }), false);
-  assert.equal(pipeline.reviewSatisfied({ reviewDecision: "APPROVED", acknowledgements: [], headSha: "abc" }), true);
+  assert.equal(pipeline.reviewSatisfied({ reviewDecision: "APPROVED", reviews: [{ state: "APPROVED", commit_id: "abc" }], acknowledgements: [], headSha: "abc" }), true);
+  assert.equal(pipeline.reviewSatisfied({ reviewDecision: "APPROVED", reviews: [{ state: "APPROVED", commit_id: "abc" }], acknowledgements: [], headSha: "new" }), false);
+});
+
+test("durable linkage musí odpovídat repository, PR a mutable markeru", () => {
+  const comments = [{ user: { login: "github-actions[bot]" }, body: "audit\n<!-- agent-link:v1 repo=owner/repo issue=82 pr=83 -->" }];
+  assert.equal(pipeline.parseDurableLink(comments, { owner: "owner", repo: "repo", prNumber: 83 }), 82);
+  assert.equal(pipeline.hasDurableLink(comments, { owner: "owner", repo: "repo", issueNumber: 82, prNumber: 83 }), true);
+  assert.notEqual(pipeline.parseAgentIssue("- Agent-Issue: #84"), pipeline.parseDurableLink(comments, { owner: "owner", repo: "repo", prNumber: 83 }));
+  assert.equal(pipeline.hasDurableLink(comments, { owner: "owner", repo: "other", issueNumber: 82, prNumber: 83 }), false);
 });
 
 test("dismissal review před finálním čtením zastaví verifikaci", () => {
@@ -68,6 +77,23 @@ test("CI joby musí všechny uspět na ověřovaném SHA", () => {
   assert.equal(pipeline.successfulRequiredJobs(jobs, ["quality"], "abc"), true);
   assert.equal(pipeline.successfulRequiredJobs(jobs, ["quality", "api"], "abc"), false);
   assert.equal(pipeline.successfulRequiredJobs(jobs, ["quality"], "other"), false);
+});
+
+test("re-run failed jobs skládá nejnovější výsledky ze všech attempts", () => {
+  const jobs = [
+    { name: "quality", conclusion: "success", head_sha: "abc", run_attempt: 1 },
+    { name: "api", conclusion: "failure", head_sha: "abc", run_attempt: 1 },
+    { name: "api", conclusion: "success", head_sha: "abc", run_attempt: 2 },
+  ];
+  assert.equal(pipeline.successfulRequiredJobs(jobs, ["quality", "api"], "abc"), true);
+});
+
+test("nový SHA invaliduje verified stav na agent:pr a staré review evidence", () => {
+  assert.deepEqual(pipeline.stateMutationPlan(["agent:verified"], "agent:verified", "agent:pr"),
+    { ok: true, add: ["agent:pr"], remove: ["agent:verified"], complete: false });
+  const acknowledgements = [{ user: { login: "github-actions[bot]" }, body: "<!-- agent-review-ack:v1 sha=sha-a -->" }];
+  const reviews = [{ state: "APPROVED", commit_id: "sha-a" }];
+  assert.equal(pipeline.reviewSatisfied({ reviewDecision: "APPROVED", reviews, acknowledgements, headSha: "sha-b" }), false);
 });
 
 test("konfigurované required joby přesně odpovídají autoritativnímu CI", () => {

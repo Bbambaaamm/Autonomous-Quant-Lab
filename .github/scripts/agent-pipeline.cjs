@@ -57,14 +57,35 @@ function parseAgentIssue(body) {
   return matches.length === 1 ? Number(matches[0][1]) : null;
 }
 
+function hasDurableLink(comments, { owner, repo, issueNumber, prNumber }) {
+  const marker = `<!-- agent-link:v1 repo=${owner}/${repo} issue=${issueNumber} pr=${prNumber} -->`;
+  return comments.some((comment) => comment.user?.login === "github-actions[bot]" &&
+    comment.body?.split("\n").includes(marker));
+}
+
+function parseDurableLink(comments, { owner, repo, prNumber }) {
+  const prefix = `<!-- agent-link:v1 repo=${owner}/${repo} issue=`;
+  const suffix = ` pr=${prNumber} -->`;
+  const issueNumbers = comments
+    .filter((comment) => comment.user?.login === "github-actions[bot]")
+    .flatMap((comment) => (comment.body || "").split("\n"))
+    .filter((line) => line.startsWith(prefix) && line.endsWith(suffix))
+    .map((line) => Number(line.slice(prefix.length, -suffix.length)))
+    .filter((number) => Number.isSafeInteger(number) && number > 0);
+  const unique = [...new Set(issueNumbers)];
+  return unique.length === 1 ? unique[0] : null;
+}
+
 function hasExactShaReviewAcknowledgement(comments, headSha) {
   const marker = `<!-- agent-review-ack:v1 sha=${headSha} -->`;
   return comments.some((comment) => comment.user?.login === "github-actions[bot]" &&
     comment.body?.split("\n").includes(marker));
 }
 
-function reviewSatisfied({ reviewDecision, acknowledgements, headSha }) {
-  return reviewDecision === "APPROVED" || hasExactShaReviewAcknowledgement(acknowledgements, headSha);
+function reviewSatisfied({ reviewDecision, reviews = [], acknowledgements = [], headSha }) {
+  const nativeExactShaApproval = reviewDecision === "APPROVED" &&
+    reviews.some((review) => review.state === "APPROVED" && review.commit_id === headSha);
+  return nativeExactShaApproval || hasExactShaReviewAcknowledgement(acknowledgements, headSha);
 }
 
 function stateMutationPlan(labels, previousState, nextState) {
@@ -105,9 +126,11 @@ function verificationDecision(input) {
 module.exports = {
   STATES,
   currentState,
+  hasDurableLink,
   isImplementation,
   hasExactShaReviewAcknowledgement,
   parseAgentIssue,
+  parseDurableLink,
   reviewSatisfied,
   stateMutationPlan,
   successfulRequiredJobs,

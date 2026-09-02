@@ -159,6 +159,9 @@ jobs:
               `Workflow run: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
               pull ? `Linked PR: #${prNumber}; head SHA: \`${pull.head.sha}\`` : null,
               reason ? `Reason: ${reason}` : null,
+              pull && nextState === "agent:pr"
+                ? `<!-- agent-link:v1 repo=${context.repo.owner}/${context.repo.repo} issue=${issueNumber} pr=${prNumber} -->`
+                : null,
             ].filter(Boolean).join("\n\n");
             await github.rest.issues.createComment({ ...context.repo, issue_number: issueNumber, body: evidence });
             if (pull) await github.rest.issues.createComment({ ...context.repo, issue_number: prNumber, body: evidence });

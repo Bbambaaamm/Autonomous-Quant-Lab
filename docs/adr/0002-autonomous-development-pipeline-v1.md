@@ -20,13 +20,19 @@ metadata from trusted default-branch code and may mark the exact reviewed head S
 as `agent:verified`. Review evidence is either a current GitHub `APPROVED` decision
 or an authorized, audit-comment acknowledgement bound to the exact head SHA; the
 latter enables single-maintainer operation but never satisfies or bypasses required
-GitHub review. Invalid or ambiguous evidence causes no write.
+GitHub review. A native approval counts only when its review `commit_id` equals the
+current head/CI SHA. Invalid or ambiguous evidence causes no write.
 
 Because GitHub label APIs are not transactional, paired transitions declare exact
 previous/next states and use idempotent add/remove reconciliation. The workflows
 never replace the whole label set. Fresh Issue, PR, review, linkage, classification,
 and SHA metadata are revalidated before writes; automated verification never
 removes `agent:needs-human`.
+
+The transition records a durable, trusted GitHub comment binding repository, Issue,
+and PR. Verification requires it to match the mutable PR-body marker. A trusted,
+metadata-only synchronization workflow invalidates `agent:verified` back to
+`agent:pr` after a new head SHA without checking out or executing PR code.
 
 The complete operational contract and recovery procedure are defined in
 `docs/autonomous-development-pipeline.md`.

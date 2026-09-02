@@ -1,0 +1,89 @@
+name: Agent verification invalidation
+
+on:
+  pull_request_target:
+    types: [synchronize]
+
+permissions:
+  contents: read
+
+jobs:
+  invalidate:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
+    steps:
+      - name: Invaliduj verified stav po změně head SHA
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        with:
+          script: |
+            // Tento privilegovaný workflow pouze čte GitHub metadata; nikdy nenačítá ani nespouští PR kód.
+            const STATES = ["agent:ready", "agent:running", "agent:pr", "agent:needs-human", "agent:verified"];
+            const labels = (item) => item.labels.map((label) => label.name);
+            const state = (item) => labels(item).filter((label) => STATES.includes(label));
+            const markerIssue = (body) => {
+              const matches = [...(body || "").matchAll(/^\s*-?\s*Agent-Issue:\s*#([1-9][0-9]*)\s*$/gim)];
+              return matches.length === 1 ? Number(matches[0][1]) : null;
+            };
+            const pull = context.payload.pull_request;
+            const prNumber = pull.number;
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              ...context.repo, issue_number: prNumber, per_page: 100,
+            });
+            const prefix = `<!-- agent-link:v1 repo=${context.repo.owner}/${context.repo.repo} issue=`;
+            const suffix = ` pr=${prNumber} -->`;
+            const linkedIssues = comments.filter((comment) => comment.user?.login === "github-actions[bot]")
+              .flatMap((comment) => (comment.body || "").split("\n"))
+              .filter((line) => line.startsWith(prefix) && line.endsWith(suffix))
+              .map((line) => Number(line.slice(prefix.length, -suffix.length)))
+              .filter((number) => Number.isSafeInteger(number) && number > 0);
+            const uniqueIssues = [...new Set(linkedIssues)];
+            if (uniqueIssues.length !== 1) {
+              await github.rest.issues.addLabels({ ...context.repo, issue_number: prNumber, labels: ["agent:needs-human"] });
+              await github.rest.issues.createComment({ ...context.repo, issue_number: prNumber,
+                body: "Verification invalidation selhala zavřeně: durable linkage není jednoznačná. Vyžaduje zásah maintaineru." });
+              return;
+            }
+            const issueNumber = uniqueIssues[0];
+            const { data: freshPull } = await github.rest.pulls.get({ ...context.repo, pull_number: prNumber });
+            const { data: freshIssue } = await github.rest.issues.get({ ...context.repo, issue_number: issueNumber });
+            const pullStates = state(freshPull);
+            const issueStates = state(freshIssue);
+            if ([...pullStates, ...issueStates].includes("agent:needs-human")) {
+              core.notice("NO_WRITE: agent:needs-human má prioritu."); return;
+            }
+            if (markerIssue(freshPull.body) !== issueNumber) {
+              await github.rest.issues.addLabels({ ...context.repo, issue_number: prNumber, labels: ["agent:needs-human"] });
+              await github.rest.issues.addLabels({ ...context.repo, issue_number: issueNumber, labels: ["agent:needs-human"] });
+              await github.rest.issues.createComment({ ...context.repo, issue_number: prNumber,
+                body: `Verification invalidation selhala zavřeně: PR marker nesouhlasí s durable linkage na Issue #${issueNumber}.` });
+              return;
+            }
+            const allowed = (states) => states.length >= 1 && states.every((value) =>
+              value === "agent:verified" || value === "agent:pr");
+            if (!allowed(pullStates) || !allowed(issueStates)) {
+              core.notice("NO_WRITE: stav není bezpečně reconciliable verified → pr."); return;
+            }
+            if (![...pullStates, ...issueStates].includes("agent:verified")) {
+              core.notice("NO_WRITE: není přítomen verified stav k invalidaci."); return;
+            }
+            const invalidate = async (number, states) => {
+              if (!states.includes("agent:pr")) {
+                await github.rest.issues.addLabels({ ...context.repo, issue_number: number, labels: ["agent:pr"] });
+              }
+              if (states.includes("agent:verified")) {
+                await github.rest.issues.removeLabel({ ...context.repo, issue_number: number, name: "agent:verified" });
+              }
+            };
+            await invalidate(prNumber, pullStates);
+            const { data: writeFreshIssue } = await github.rest.issues.get({ ...context.repo, issue_number: issueNumber });
+            const writeIssueStates = state(writeFreshIssue);
+            if (writeIssueStates.includes("agent:needs-human") || !allowed(writeIssueStates)) {
+              return core.setFailed("ISSUE_CHANGED_DURING_INVALIDATION: PR může být v partial agent:pr stavu");
+            }
+            await invalidate(issueNumber, writeIssueStates);
+            const evidence = `Verification invalidated po změně PR head SHA na \`${freshPull.head.sha}\`. Nový SHA vyžaduje nové exact-SHA review evidence a nový CI run.\n\nWorkflow run: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            await github.rest.issues.createComment({ ...context.repo, issue_number: prNumber, body: evidence });
+            await github.rest.issues.createComment({ ...context.repo, issue_number: issueNumber, body: `PR #${prNumber}: ${evidence}` });

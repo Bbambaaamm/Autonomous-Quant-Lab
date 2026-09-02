@@ -86,7 +86,10 @@ The number must identify the concrete `type:implementation` Issue. Zero, duplica
 malformed, or conflicting markers fail closed. Title similarity, branch names, and
 free-form references are never linkage. `Closes #N` is deliberately not required:
 v1 never automatically closes an Issue. On `agent:pr`, both objects receive that
-state and audit comments record the PR and its then-current head SHA.
+state and the trusted transition workflow writes a durable PR comment marker
+`agent-link:v1` containing repository, Issue number, and PR number. The mutable PR
+body marker and durable evidence must agree on every verification; changing the PR
+body cannot rebind an already authorized PR.
 
 ## Automated verification gate
 
@@ -98,14 +101,16 @@ linked Issue and PR only when all of these are true:
 1. the CI run refers to exactly one PR and its conclusion is `success`;
 2. the PR is open, non-draft, and its current head SHA exactly equals the CI run SHA;
 3. fresh exact-SHA review evidence exists: either GitHub's current review decision
-   is `APPROVED`, or an authorized maintainer recorded the v1 review acknowledgement;
-4. exactly one valid `Agent-Issue` marker points to a non-PR Issue;
+   is `APPROVED` and an active approval explicitly records the current commit SHA,
+   or an authorized maintainer recorded the v1 review acknowledgement for that SHA;
+4. exactly one valid `Agent-Issue` marker points to a non-PR Issue and exactly
+   matches the trusted durable `agent-link:v1` evidence for this repository and PR;
 5. that Issue is unambiguously `type:implementation`, not epic/roadmap/capability;
 6. both Issue and PR have exactly the state `agent:pr`;
 7. neither object has `agent:needs-human`;
-8. every configured authoritative CI job succeeded on that exact SHA: `quality`,
-   `unit-research`, `api`, `integration-postgres`, `frontend`, `security`,
-   `container-build`, and `production-smoke`; and
+8. every configured authoritative CI job succeeded on that exact SHA:
+   `agent-pipeline`, `quality`, `unit-research`, `api`, `integration-postgres`,
+   `frontend`, `security`, `container-build`, and `production-smoke`; and
 9. fresh API reads immediately before each side of the paired write still observe
    the same linkage, classification, review evidence, SHA, open/default-base/non-draft
    PR, and a state safely reconcilable from `agent:pr` to `agent:verified`.
@@ -125,12 +130,30 @@ state, and review handoff checks passed. Neither is human merge authorization.
 Required GitHub reviews, rulesets, checks, and branch protection remain higher
 authorities: acknowledgement cannot satisfy or bypass a required GitHub approval.
 
+Native approvals are read through the GitHub reviews API and count only when an
+active `APPROVED` review has `commit_id` equal to the CI/head SHA. A general
+`reviewDecision` without that exact-commit evidence is insufficient.
+
 An unknown/ambiguous event or failed condition produces `NO WRITE`, never inferred
 success. A new commit changes the head SHA; normal GitHub CI and review-dismissal
 policy apply, and the PR must return to `agent:pr` before a later run can verify it.
 The list in `.github/agent-pipeline.json` must be reviewed whenever authoritative
 CI job names change. Repository branch protection remains the ultimate required
 check/review authority.
+
+## Verification invalidation after a push
+
+A metadata-only `pull_request_target:synchronize` workflow runs trusted base-branch
+code only; it never checks out or executes PR content. When a new commit is pushed,
+it resolves the original Issue from the durable link, requires the current body
+marker to agree, and idempotently reconciles both Issue and PR from
+`agent:verified` to `agent:pr`. It records the new SHA in audit comments. Old native
+approvals and acknowledgements cannot satisfy a later verification because both are
+matched to the new SHA, and the new CI run does not itself promote the state.
+
+`agent:needs-human` always prevents invalidation mutations. Missing or contradictory
+durable linkage is escalated on the PR (and on the deterministically linked Issue
+when available) rather than guessed. Unrelated labels are preserved.
 
 ## Recovery, rollback, and escalation
 
@@ -144,7 +167,7 @@ a retry completes missing work idempotently. Any third state fails closed, and
 `agent:needs-human` is never removed except by an explicit human recovery whose
 declared previous state is `agent:needs-human`.
 
-Rollback is disabling the four agent workflows and removing current state labels;
+Rollback is disabling the five agent workflows and removing current state labels;
 comments, commits, reviews, and workflow history remain immutable audit evidence.
 Rollback never changes CI or branch protection. The workflows do not close Issues,
 push branches, merge, or deploy.
@@ -158,9 +181,10 @@ never runs untrusted PR content with a write token. State management has only
 `contents:read`, `issues:write`, and `pull-requests:write`; verification additionally
 needs `actions:read` to inspect the exact CI jobs. Both fail closed.
 
-Existing CI remains authoritative and unchanged. In particular, pipeline labels do
-not bypass quality, backend, PostgreSQL, frontend, security, container, or
-production-smoke gates. There is no automatic merge and `agent:verified` always
+Existing CI remains authoritative; v1 only adds its dedicated validation job and
+does not weaken any existing job. In particular, pipeline labels do
+not bypass the dedicated `agent-pipeline` validation, quality, backend, PostgreSQL,
+frontend, security, container, or production-smoke gates. There is no automatic merge and `agent:verified` always
 ends at **HUMAN MERGE** under repository branch protection.
 
 ## Version boundary and future compatibility
