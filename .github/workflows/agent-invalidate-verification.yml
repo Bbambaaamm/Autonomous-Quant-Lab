@@ -73,12 +73,25 @@ jobs:
             const issuePlan = pipeline.stateMutationPlan(freshIssue.labels, "agent:verified", "agent:pr");
             if (!prPlan.ok || !issuePlan.ok) return core.setFailed("INVALIDATION_PLAN_CONFLICT");
             await mutate(prNumber, prPlan);
-            const { data: writeFreshIssue } = await github.rest.issues.get({ ...context.repo, issue_number: issueNumber });
-            const writeDecision = pipeline.invalidationLifecycleDecision({
-              prLabels: ["agent:pr"], issueLabels: writeFreshIssue.labels, issueLoaded: !writeFreshIssue.pull_request,
-              durableLink, markerIssueNumber: pipeline.parseAgentIssue(freshPull.body),
+            const { data: writeFreshPull } = await github.rest.pulls.get({
+              ...context.repo, pull_number: prNumber,
             });
-            if (writeDecision.action !== "INVALIDATE_VERIFIED" && writeDecision.action !== "LINKED_PR_NO_WRITE") {
+            const { data: writeFreshIssue } = await github.rest.issues.get({ ...context.repo, issue_number: issueNumber });
+            const writeFreshComments = await github.paginate(github.rest.issues.listComments, {
+              ...context.repo, issue_number: prNumber, per_page: 100,
+            });
+            const writeFreshDurableLink = pipeline.durableIssueLinkDecision(writeFreshComments, {
+              ...context.repo, prNumber,
+            });
+            const writeDecision = pipeline.invalidationLifecycleDecision({
+              prLabels: writeFreshPull.labels,
+              issueLabels: writeFreshIssue.labels,
+              issueLoaded: !writeFreshIssue.pull_request,
+              durableLink: writeFreshDurableLink,
+              markerIssueNumber: pipeline.parseAgentIssue(writeFreshPull.body),
+            });
+            if (writeFreshDurableLink.issueNumber !== issueNumber ||
+                (writeDecision.action !== "INVALIDATE_VERIFIED" && writeDecision.action !== "LINKED_PR_NO_WRITE")) {
               return core.setFailed("ISSUE_CHANGED_DURING_INVALIDATION: PR může být v partial agent:pr stavu");
             }
             const writeIssuePlan = pipeline.stateMutationPlan(writeFreshIssue.labels, "agent:verified", "agent:pr");
