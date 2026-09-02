@@ -16,6 +16,16 @@ on:
           - agent:running
           - agent:pr
           - agent:needs-human
+      previous_state:
+        description: Očekávaný předchozí stav (povinný pro bezpečný retry)
+        required: true
+        type: choice
+        options:
+          - none
+          - agent:ready
+          - agent:running
+          - agent:pr
+          - agent:needs-human
       pr_number:
         description: Číslo PR; povinné pouze pro přechod do agent:pr
         required: false
@@ -44,6 +54,7 @@ jobs:
         env:
           ISSUE_NUMBER: ${{ inputs.issue_number }}
           NEXT_STATE: ${{ inputs.next_state }}
+          PREVIOUS_STATE: ${{ inputs.previous_state }}
           PR_NUMBER: ${{ inputs.pr_number }}
           REASON: ${{ inputs.reason }}
         with:
@@ -52,6 +63,7 @@ jobs:
             const issueNumber = Number(process.env.ISSUE_NUMBER);
             const prNumber = process.env.PR_NUMBER ? Number(process.env.PR_NUMBER) : null;
             const nextState = process.env.NEXT_STATE;
+            const previousState = process.env.PREVIOUS_STATE;
             const reason = process.env.REASON.trim();
             if (!Number.isSafeInteger(issueNumber) || issueNumber < 1 ||
                 (prNumber !== null && (!Number.isSafeInteger(prNumber) || prNumber < 1))) {
@@ -68,14 +80,14 @@ jobs:
             const { data: issue } = await github.rest.issues.get({ ...context.repo, issue_number: issueNumber });
             if (issue.pull_request) return core.setFailed("TARGET_IS_NOT_ISSUE: žádný zápis nebyl proveden");
             const decision = pipeline.validateManualTransition({
-              labels: issue.labels, nextState, targetKind: "issue",
+              labels: issue.labels, previousState, nextState, targetKind: "issue",
             });
             if (!decision.ok) return core.setFailed(`${decision.reason}: žádný zápis nebyl proveden`);
             if (nextState === "agent:needs-human" && !reason) {
               return core.setFailed("ESCALATION_REASON_REQUIRED: žádný zápis nebyl proveden");
             }
             const transitionNeedsPr = nextState === "agent:pr" ||
-              (nextState === "agent:needs-human" && decision.previousState === "agent:pr");
+              (nextState === "agent:needs-human" && previousState === "agent:pr");
             if (transitionNeedsPr && prNumber === null) {
               return core.setFailed("PR_NUMBER_REQUIRED: žádný zápis nebyl proveden");
             }
@@ -90,12 +102,6 @@ jobs:
                   pipeline.parseAgentIssue(pull.body) !== issueNumber) {
                 return core.setFailed("INVALID_PR_LINKAGE: žádný zápis nebyl proveden");
               }
-              const allowedPrState = decision.previousState === "agent:running"
-                ? "none"
-                : decision.previousState === "agent:pr" ? "agent:pr" : "agent:needs-human";
-              if (pipeline.currentState(pull.labels) !== allowedPrState) {
-                return core.setFailed("PR_ALREADY_HAS_AGENT_STATE: žádný zápis nebyl proveden");
-              }
             }
 
             const config = require(`${process.env.GITHUB_WORKSPACE}/.github/agent-pipeline.json`);
@@ -109,15 +115,46 @@ jobs:
               }
             }
 
-            const replaceState = async (number, labels) => {
-              const retained = labels.map((label) => typeof label === "string" ? label : label.name)
-                .filter((label) => !config.stateLabels.includes(label));
-              await github.rest.issues.setLabels({ ...context.repo, issue_number: number, labels: [...retained, nextState] });
+            const mutateState = async (number, plan) => {
+              if (plan.add.length) {
+                await github.rest.issues.addLabels({ ...context.repo, issue_number: number, labels: plan.add });
+              }
+              for (const label of plan.remove) {
+                await github.rest.issues.removeLabel({ ...context.repo, issue_number: number, name: label });
+              }
             };
-            await replaceState(issueNumber, issue.labels);
-            if (pull) await replaceState(prNumber, pull.labels);
+            // Fresh reads + explicit previous/next dovolují bezpečně dokončit pouze stejný partial transition.
+            const { data: freshIssue } = await github.rest.issues.get({ ...context.repo, issue_number: issueNumber });
+            if (!pipeline.isImplementation(freshIssue.labels)) {
+              return core.setFailed("ISSUE_CLASSIFICATION_CHANGED: žádný zápis nebyl proveden");
+            }
+            const issuePlan = pipeline.stateMutationPlan(freshIssue.labels, previousState, nextState);
+            if (!issuePlan.ok) return core.setFailed(`${issuePlan.reason}: žádný zápis nebyl proveden`);
+
+            let prPreviousState = null;
+            let freshPull = null;
+            let prPlan = null;
+            if (pull) {
+              ({ data: freshPull } = await github.rest.pulls.get({ ...context.repo, pull_number: prNumber }));
+              if (freshPull.state !== "open" || freshPull.base.ref !== context.payload.repository.default_branch ||
+                  pipeline.parseAgentIssue(freshPull.body) !== issueNumber) {
+                return core.setFailed("PR_CHANGED_BEFORE_WRITE: žádný zápis nebyl proveden");
+              }
+              prPreviousState = previousState === "agent:running" ? "none" : previousState;
+              prPlan = pipeline.stateMutationPlan(freshPull.labels, prPreviousState, nextState);
+              if (!prPlan.ok) return core.setFailed(`${prPlan.reason}: žádný zápis nebyl proveden`);
+            }
+
+            await mutateState(issueNumber, issuePlan);
+            if (freshPull) {
+              // Po selhání je retry se stejným previous/next idempotentní a doplní jen chybějící stranu.
+              const { data: retryFreshPull } = await github.rest.pulls.get({ ...context.repo, pull_number: prNumber });
+              prPlan = pipeline.stateMutationPlan(retryFreshPull.labels, prPreviousState, nextState);
+              if (!prPlan.ok) return core.setFailed(`${prPlan.reason}: Issue může být v bezpečném partial stavu; opakujte stejný přechod`);
+              await mutateState(prNumber, prPlan);
+            }
             const evidence = [
-              `Agent transition: \`${decision.previousState}\` → \`${nextState}\``,
+              `Agent transition: \`${previousState}\` → \`${nextState}\``,
               `Actor: @${context.actor}`,
               `Workflow run: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
               pull ? `Linked PR: #${prNumber}; head SHA: \`${pull.head.sha}\`` : null,

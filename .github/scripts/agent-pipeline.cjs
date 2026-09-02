@@ -27,20 +27,56 @@ function isImplementation(labels) {
   return names.has("type:implementation") && ![...EPIC_LABELS].some((label) => names.has(label));
 }
 
-function validateManualTransition({ labels, nextState, targetKind, linkedIssueNumber }) {
+function transitionProgress(labels, previousState, nextState) {
+  const states = labelNames(labels).filter((label) => STATES.includes(label));
+  const previousLabels = previousState === "none" ? [] : [previousState];
+  const allowed = new Set([...previousLabels, nextState]);
+  if (states.includes("agent:needs-human") && previousState !== "agent:needs-human" && nextState !== "agent:needs-human") {
+    return { ok: false, reason: "NEEDS_HUMAN_PRESENT" };
+  }
+  if (states.some((state) => !allowed.has(state))) return { ok: false, reason: "CONFLICTING_AGENT_STATE" };
+  if (states.length === 0 && previousState !== "none") return { ok: false, reason: "PREVIOUS_STATE_MISSING" };
+  if (states.length === 0) return { ok: true, complete: false };
+  if (states.every((state) => state === nextState)) return { ok: true, complete: true };
+  return { ok: true, complete: false };
+}
+
+function validateManualTransition({ labels, previousState, nextState, targetKind }) {
   const state = currentState(labels);
-  if (state === "ambiguous") return { ok: false, reason: "MULTIPLE_AGENT_STATES" };
   if (nextState === "agent:verified") return { ok: false, reason: "VERIFIED_IS_AUTOMATED_ONLY" };
   if (targetKind !== "issue") return { ok: false, reason: "MANUAL_TRANSITIONS_REQUIRE_ISSUE" };
   if (!isImplementation(labels)) return { ok: false, reason: "NOT_UNAMBIGUOUS_IMPLEMENTATION" };
-  if (linkedIssueNumber !== undefined) return { ok: false, reason: "UNEXPECTED_LINK" };
-  if (!ALLOWED.has(`${state}->${nextState}`)) return { ok: false, reason: "INVALID_TRANSITION" };
-  return { ok: true, previousState: state };
+  if (!ALLOWED.has(`${previousState}->${nextState}`)) return { ok: false, reason: "INVALID_TRANSITION" };
+  const progress = transitionProgress(labels, previousState, nextState);
+  if (!progress.ok) return progress;
+  return { ok: true, previousState, complete: progress.complete, observedState: state };
 }
 
 function parseAgentIssue(body) {
   const matches = [...(body || "").matchAll(/^\s*-?\s*Agent-Issue:\s*#([1-9][0-9]*)\s*$/gim)];
   return matches.length === 1 ? Number(matches[0][1]) : null;
+}
+
+function hasExactShaReviewAcknowledgement(comments, headSha) {
+  const marker = `<!-- agent-review-ack:v1 sha=${headSha} -->`;
+  return comments.some((comment) => comment.user?.login === "github-actions[bot]" &&
+    comment.body?.split("\n").includes(marker));
+}
+
+function reviewSatisfied({ reviewDecision, acknowledgements, headSha }) {
+  return reviewDecision === "APPROVED" || hasExactShaReviewAcknowledgement(acknowledgements, headSha);
+}
+
+function stateMutationPlan(labels, previousState, nextState) {
+  const progress = transitionProgress(labels, previousState, nextState);
+  if (!progress.ok) return progress;
+  const names = new Set(labelNames(labels));
+  return {
+    ok: true,
+    add: names.has(nextState) ? [] : [nextState],
+    remove: previousState !== "none" && names.has(previousState) ? [previousState] : [],
+    complete: progress.complete,
+  };
 }
 
 function successfulRequiredJobs(jobs, requiredNames, headSha) {
@@ -58,9 +94,9 @@ function verificationDecision(input) {
   if (!input.headSha || input.prHeadSha !== input.headSha) return { ok: false, reason: "HEAD_SHA_MISMATCH" };
   if (!input.open || !input.correctBase) return { ok: false, reason: "PR_NOT_OPEN_AGAINST_DEFAULT" };
   if (input.draft) return { ok: false, reason: "PR_IS_DRAFT" };
-  if (!input.approved) return { ok: false, reason: "APPROVED_REVIEW_MISSING" };
+  if (!input.reviewSatisfied) return { ok: false, reason: "EXACT_SHA_REVIEW_MISSING" };
   if (!input.issueIsImplementation) return { ok: false, reason: "ISSUE_NOT_IMPLEMENTATION" };
-  if (input.issueState !== "agent:pr" || input.prState !== "agent:pr") return { ok: false, reason: "INVALID_PIPELINE_STATE" };
+  if (!input.statesReconciliable) return { ok: false, reason: "INVALID_PIPELINE_STATE" };
   if (input.needsHuman) return { ok: false, reason: "NEEDS_HUMAN_PRESENT" };
   if (!input.requiredJobsSuccessful) return { ok: false, reason: "REQUIRED_CI_JOBS_MISSING" };
   return { ok: true };
@@ -70,8 +106,12 @@ module.exports = {
   STATES,
   currentState,
   isImplementation,
+  hasExactShaReviewAcknowledgement,
   parseAgentIssue,
+  reviewSatisfied,
+  stateMutationPlan,
   successfulRequiredJobs,
+  transitionProgress,
   validateManualTransition,
   verificationDecision,
 };

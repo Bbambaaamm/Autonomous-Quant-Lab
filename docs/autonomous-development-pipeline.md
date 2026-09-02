@@ -57,14 +57,16 @@ The manually dispatched state workflow permits only:
 | `agent:running` | `agent:pr` | Human maintainer; open PR against the default branch with exact linkage. The workflow labels both Issue and PR. |
 | `agent:running`, `agent:pr` | `agent:needs-human` | Human maintainer; non-empty escalation reason. From `agent:pr`, the linked PR number is required and both objects are updated. |
 | `agent:needs-human` | `agent:ready`, `agent:running`, `agent:pr` | Human maintainer after remediation; the dispatch and comment document recovery. `agent:pr` again requires linkage. |
-| `agent:pr` | `agent:verified` | Only **Agent verification gate**, after all conditions below. |
+| `agent:pr` | `agent:verified` | Only **Agent verification gate**, after all conditions below; partial pair writes are safely reconciled on retry. |
 
-The transition workflow verifies the dispatching actor's repository permission,
-replaces the sole old state label, and comments with actor, workflow run, transition,
+The transition workflow requires an explicit expected previous and next state,
+verifies the dispatching actor's repository permission, mutates only those state
+labels, and comments with actor, workflow run, transition,
 PR/SHA where applicable, and escalation reason. Direct label edits are not valid
 pipeline transitions and must be recovered through a maintainer-reviewed state
 reset (remove conflicting state labels, retain the audit history, then dispatch a
-valid transition). Invalid transitions perform no write.
+valid transition). It never replaces the complete label list, so concurrent
+unrelated labels are preserved. Invalid transitions perform no write.
 
 Before first use, a maintainer runs **Agent label setup** once. It idempotently
 creates only the configured classification and state labels and cannot transition
@@ -95,7 +97,8 @@ linked Issue and PR only when all of these are true:
 
 1. the CI run refers to exactly one PR and its conclusion is `success`;
 2. the PR is open, non-draft, and its current head SHA exactly equals the CI run SHA;
-3. GitHub's current review decision is `APPROVED`;
+3. fresh exact-SHA review evidence exists: either GitHub's current review decision
+   is `APPROVED`, or an authorized maintainer recorded the v1 review acknowledgement;
 4. exactly one valid `Agent-Issue` marker points to a non-PR Issue;
 5. that Issue is unambiguously `type:implementation`, not epic/roadmap/capability;
 6. both Issue and PR have exactly the state `agent:pr`;
@@ -103,8 +106,24 @@ linked Issue and PR only when all of these are true:
 8. every configured authoritative CI job succeeded on that exact SHA: `quality`,
    `unit-research`, `api`, `integration-postgres`, `frontend`, `security`,
    `container-build`, and `production-smoke`; and
-9. a final API read immediately before writing still observes the same SHA,
-   non-draft state, and `agent:pr` state.
+9. fresh API reads immediately before each side of the paired write still observe
+   the same linkage, classification, review evidence, SHA, open/default-base/non-draft
+   PR, and a state safely reconcilable from `agent:pr` to `agent:verified`.
+
+### Review acknowledged versus verified versus merge authorization
+
+GitHub does not allow a PR author to approve their own PR. A repository operated by
+one maintainer can therefore use **Agent exact-SHA review acknowledgement** after
+the PR is Ready and in `agent:pr`: the maintainer supplies the full 40-character
+head SHA and confirms `REVIEWED_EXACT_SHA_NOT_MERGE_AUTHORIZATION`. The workflow
+checks permission and current PR metadata, then writes an audit comment containing
+the exact-SHA marker, reviewer, and workflow run. A new commit invalidates it.
+
+`review acknowledged` says only that a human examined that exact revision.
+`agent:verified` additionally says that exact-revision CI, linkage, classification,
+state, and review handoff checks passed. Neither is human merge authorization.
+Required GitHub reviews, rulesets, checks, and branch protection remain higher
+authorities: acknowledgement cannot satisfy or bypass a required GitHub approval.
 
 An unknown/ambiguous event or failed condition produces `NO WRITE`, never inferred
 success. A new commit changes the head SHA; normal GitHub CI and review-dismissal
@@ -117,12 +136,15 @@ check/review authority.
 
 Escalate a blocked or ambiguous run with a reason rather than guessing. Recovery is
 a deliberate maintainer transition out of `agent:needs-human`; comments preserve
-both transitions. If only one of the Issue/PR label writes succeeds because GitHub
-fails between API operations, the mismatch blocks verification. A maintainer must
-inspect the workflow/comments, restore one consistent prior state, record the
-reason, and rerun the intended transition.
+both transitions. Pair transitions use add/remove mutations rather than replacing
+all labels. The caller supplies exact `previous`/`next` states. The combinations
+`previous/previous`, `next/previous`, `previous/next`, `previous+next` (an interrupted
+single-object mutation), and `next/next` are accepted only for that same operation;
+a retry completes missing work idempotently. Any third state fails closed, and
+`agent:needs-human` is never removed except by an explicit human recovery whose
+declared previous state is `agent:needs-human`.
 
-Rollback is disabling the three agent workflows and removing current state labels;
+Rollback is disabling the four agent workflows and removing current state labels;
 comments, commits, reviews, and workflow history remain immutable audit evidence.
 Rollback never changes CI or branch protection. The workflows do not close Issues,
 push branches, merge, or deploy.
