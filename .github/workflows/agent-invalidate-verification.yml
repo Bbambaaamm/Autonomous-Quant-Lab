@@ -15,24 +15,27 @@ jobs:
       issues: write
       pull-requests: write
     steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
       - name: Invaliduj verified stav po změně head SHA
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
         with:
           script: |
-            // Tento privilegovaný workflow pouze čte GitHub metadata; nikdy nenačítá ani nespouští PR kód.
+            // Workflow používá pouze trusted helper z default branch; nikdy nenačítá ani nespouští PR kód.
+            const pipeline = require(`${process.env.GITHUB_WORKSPACE}/.github/scripts/agent-pipeline.cjs`);
             const STATES = ["agent:ready", "agent:running", "agent:pr", "agent:needs-human", "agent:verified"];
             const labels = (item) => item.labels.map((label) => label.name);
             const state = (item) => labels(item).filter((label) => STATES.includes(label));
             const escalate = async (number) => {
               const { data: fresh } = await github.rest.issues.get({ ...context.repo, issue_number: number });
-              const states = state(fresh);
-              const permitted = states.every((value) =>
-                value === "agent:pr" || value === "agent:verified" || value === "agent:needs-human");
-              if (!permitted) throw new Error(`ESCALATION_STATE_CONFLICT na #${number}`);
-              if (!states.includes("agent:needs-human")) {
-                await github.rest.issues.addLabels({ ...context.repo, issue_number: number, labels: ["agent:needs-human"] });
+              const plan = pipeline.escalationMutationPlan(fresh.labels);
+              if (!plan.ok) throw new Error(`${plan.reason} na #${number}`);
+              if (plan.add.length) {
+                await github.rest.issues.addLabels({ ...context.repo, issue_number: number, labels: plan.add });
               }
-              for (const label of states.filter((value) => value !== "agent:needs-human")) {
+              for (const label of plan.remove) {
                 await github.rest.issues.removeLabel({ ...context.repo, issue_number: number, name: label });
               }
             };
