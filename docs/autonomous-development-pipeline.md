@@ -264,3 +264,28 @@ classification/review (v2), exact-merge-SHA staging evidence (v3), or a role-bas
 ready queue (v4) while retaining the same GitHub evidence and fail-closed state
 contract. Those capabilities require their own reviewed implementation; none is
 authorized by this document.
+
+## V2: bounded remediation and independent review
+
+V2 preserves every v1 state and human gate and adds exact-SHA operational evidence. A trusted
+classifier accepts only one known, code-fixable failed authoritative job. Unknown, multiple,
+security, PostgreSQL, image, production, governance, dependency, schema, authentication,
+broker/execution, or live-trading failures fail closed to maintainer intervention. The free-form
+fix budget is two commits per linked PR; an exact `(source SHA, failure evidence)` marker makes
+retries idempotent. Exhaustion is not waived.
+
+The fixer is split into three trust domains: Codex patch generation has `OPENAI_API_KEY`, a
+read-only GitHub permission and no repository command execution; validation has neither model
+secret nor write credential and verifies checksums, paths, patch bounds and prescribed checks;
+publishing has only GitHub write permission, repeats linkage/state/head/base checks, and applies
+only the validated artifact without force-push or pushes to `main`. Configuration and denylist
+are versioned in `.github/agent-pipeline.json`.
+
+After green authoritative CI, a separate read-only Codex invocation reviews AGENTS/governance,
+Issue scope, base-to-exact-head diff, test weakening, security and paper-only/live implications.
+It records structured `PASS` or `BLOCK` evidence bound to the current SHA. Missing
+`OPENAI_API_KEY`, malformed output, stale SHA or TOCTOU always fails closed; the secret value is
+never stored in the repository. `agent:verified` now requires both a fresh v2 Reviewer PASS and
+the existing exact-SHA human/native evidence. Neither substitutes for the other or authorizes
+merge. Reviewer BLOCK may only enter the same eligible two-attempt fixer budget; unsafe,
+ambiguous or exhausted work requires a human.

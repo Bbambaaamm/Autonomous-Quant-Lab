@@ -113,6 +113,46 @@ function reviewSatisfied({ reviewDecision, reviews = [], acknowledgements = [], 
   return nativeExactShaApproval || hasExactShaReviewAcknowledgement(acknowledgements, headSha);
 }
 
+function parseTrustedMarker(comments, kind, headSha) {
+  const prefix = `<!-- ${kind}:v2 sha=${headSha} `;
+  const matches = comments.filter((comment) => comment.user?.login === "github-actions[bot]")
+    .flatMap((comment) => (comment.body || "").split("\n"))
+    .filter((line) => line.startsWith(prefix) && line.endsWith(" -->"));
+  return matches.length === 1 ? matches[0] : null;
+}
+
+function independentReviewSatisfied(comments, headSha) {
+  return parseTrustedMarker(comments, "agent-codex-review", headSha)?.includes(" result=PASS ") === true;
+}
+
+function classifyCiFailure({ jobs, headSha, fixableJobs, prohibitedJobs }) {
+  const failed = jobs.filter((job) => job.head_sha === headSha && ["failure", "timed_out"].includes(job.conclusion));
+  if (failed.length !== 1) return { disposition: "NEEDS_HUMAN", reason: "AMBIGUOUS_FAILURE_SET" };
+  const name = failed[0].name;
+  if (prohibitedJobs.includes(name) || !fixableJobs.includes(name)) {
+    return { disposition: "NEEDS_HUMAN", reason: "UNSUPPORTED_OR_UNSAFE_FAILURE" };
+  }
+  return { disposition: "FIX", job: name, evidence: `${headSha}:${failed[0].id}:${failed[0].run_attempt}` };
+}
+
+function fixAttemptDecision({ comments, sourceSha, evidence, maxAttempts }) {
+  const prefix = `<!-- agent-fix:v2 source=${sourceSha} evidence=${evidence} `;
+  const exact = comments.filter((comment) => comment.user?.login === "github-actions[bot]")
+    .flatMap((comment) => (comment.body || "").split("\n")).filter((line) => line.startsWith(prefix));
+  if (exact.length) return { action: "NO_WRITE", reason: "EXACT_EVIDENCE_ALREADY_PROCESSED" };
+  const attempts = comments.filter((comment) => comment.user?.login === "github-actions[bot]")
+    .flatMap((comment) => (comment.body || "").split("\n")).filter((line) => line.startsWith("<!-- agent-fix:v2 ")).length;
+  return attempts >= maxAttempts ? { action: "NEEDS_HUMAN", reason: "FIX_BUDGET_EXHAUSTED" } : { action: "FIX", attempt: attempts + 1 };
+}
+
+function validatePatchPaths(paths, config) {
+  if (!Array.isArray(paths) || paths.length === 0 || paths.length > config.maxPatchFiles) return false;
+  return paths.every((path) => typeof path === "string" && !path.startsWith("/") && !path.includes("..") &&
+    !config.deniedPathPrefixes.some((prefix) => path.startsWith(prefix)) &&
+    !config.deniedPathBasenames.includes(path.split("/").at(-1)) &&
+    !config.deniedPathFragments.some((fragment) => path.toLowerCase().includes(fragment)));
+}
+
 function stateMutationPlan(labels, previousState, nextState) {
   const progress = transitionProgress(labels, previousState, nextState);
   if (!progress.ok) return progress;
@@ -194,6 +234,9 @@ function verificationTriggerDecision({ workflowRun, workflowCallInputs = {} }) {
     if (workflowRun.name === "Agent review signal" && workflowRun.event === "pull_request_review") {
       return { ok: true, kind: "review-signal", prNumber, headSha: null };
     }
+    if (workflowRun.name === "Agent Codex review" && workflowRun.event === "workflow_run") {
+      return { ok: true, kind: "codex-review", prNumber, headSha: workflowRun.head_sha };
+    }
     return { ok: false, reason: "UNTRUSTED_WORKFLOW_RUN_TRIGGER" };
   }
 
@@ -211,6 +254,7 @@ function verificationDecision(input) {
   if (!input.open || !input.correctBase) return { ok: false, reason: "PR_NOT_OPEN_AGAINST_DEFAULT" };
   if (input.draft) return { ok: false, reason: "PR_IS_DRAFT" };
   if (!input.reviewSatisfied) return { ok: false, reason: "EXACT_SHA_REVIEW_MISSING" };
+  if (!input.independentReviewSatisfied) return { ok: false, reason: "INDEPENDENT_REVIEW_PASS_MISSING" };
   if (!input.issueIsImplementation) return { ok: false, reason: "ISSUE_NOT_IMPLEMENTATION" };
   if (!input.statesReconciliable) return { ok: false, reason: "INVALID_PIPELINE_STATE" };
   if (input.needsHuman) return { ok: false, reason: "NEEDS_HUMAN_PRESENT" };
@@ -232,6 +276,11 @@ module.exports = {
   parseAgentIssue,
   parseDurableLink,
   reviewSatisfied,
+  independentReviewSatisfied,
+  parseTrustedMarker,
+  classifyCiFailure,
+  fixAttemptDecision,
+  validatePatchPaths,
   stateMutationPlan,
   successfulRequiredJobs,
   transitionProgress,

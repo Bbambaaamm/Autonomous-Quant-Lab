@@ -64,7 +64,7 @@ test("PR linkage je právě jeden samostatný Agent-Issue marker", () => {
 });
 
 test("verified vyžaduje přesný SHA, ready PR, review, stav a kompletní CI", () => {
-  const valid = { workflowName: "CI", workflowConclusion: "success", headSha: "abc", prHeadSha: "abc", open: true, correctBase: true, draft: false, reviewSatisfied: true, issueIsImplementation: true, statesReconciliable: true, needsHuman: false, requiredJobsSuccessful: true };
+  const valid = { workflowName: "CI", workflowConclusion: "success", headSha: "abc", prHeadSha: "abc", open: true, correctBase: true, draft: false, reviewSatisfied: true, independentReviewSatisfied: true, issueIsImplementation: true, statesReconciliable: true, needsHuman: false, requiredJobsSuccessful: true };
   assert.deepEqual(pipeline.verificationDecision(valid), { ok: true });
   for (const change of [{ draft: true }, { prHeadSha: "old" }, { reviewSatisfied: false }, { correctBase: false },
     { issueIsImplementation: false }, { statesReconciliable: false }, { needsHuman: true }, { requiredJobsSuccessful: false }]) {
@@ -107,7 +107,7 @@ test("workflow_dispatch caller routuje reusable verifier výhradně podle explic
   assert.equal(pipeline.reviewSatisfied({ acknowledgements, headSha }), true);
   assert.deepEqual(pipeline.verificationDecision({
     workflowName: "CI", workflowConclusion: "success", headSha, prHeadSha: headSha,
-    open: true, correctBase: true, draft: false, reviewSatisfied: true,
+    open: true, correctBase: true, draft: false, reviewSatisfied: true, independentReviewSatisfied: true,
     issueIsImplementation: true, statesReconciliable: true, needsHuman: false,
     requiredJobsSuccessful: true,
   }), { ok: true });
@@ -118,7 +118,7 @@ test("workflow_dispatch caller routuje reusable verifier výhradně podle explic
   }).length, 0);
   assert.equal(pipeline.verificationDecision({
     workflowName: "CI", workflowConclusion: "success", headSha, prHeadSha: stale,
-    open: true, correctBase: true, draft: false, reviewSatisfied: true,
+    open: true, correctBase: true, draft: false, reviewSatisfied: true, independentReviewSatisfied: true,
     issueIsImplementation: true, statesReconciliable: true, needsHuman: false,
     requiredJobsSuccessful: true,
   }).reason, "HEAD_SHA_MISMATCH");
@@ -132,6 +132,9 @@ test("trigger routing rozlišuje CI, review signal a vadné reusable inputs fail
   assert.equal(pipeline.verificationTriggerDecision({
     workflowRun: { ...base, name: "Agent review signal", event: "pull_request_review" },
   }).kind, "review-signal");
+  assert.equal(pipeline.verificationTriggerDecision({
+    workflowRun: { ...base, name: "Agent Codex review", event: "workflow_run", head_sha: "a".repeat(40) },
+  }).kind, "codex-review");
   assert.equal(pipeline.verificationTriggerDecision({
     workflowCallInputs: { prNumber: "202", headSha: "stale" },
   }).reason, "INVALID_WORKFLOW_CALL_INPUTS");
@@ -177,7 +180,7 @@ test("reconciliation zachová cizí label a odmítne konflikt i needs-human", ()
 });
 
 test("stale Issue změněné na needs-human nesmí projít finálním reconciliation", () => {
-  assert.equal(pipeline.verificationDecision({ workflowName: "CI", workflowConclusion: "success", headSha: "abc", prHeadSha: "abc", open: true, correctBase: true, draft: false, reviewSatisfied: true, issueIsImplementation: true, statesReconciliable: true, needsHuman: false, requiredJobsSuccessful: true }).ok, true);
+  assert.equal(pipeline.verificationDecision({ workflowName: "CI", workflowConclusion: "success", headSha: "abc", prHeadSha: "abc", open: true, correctBase: true, draft: false, reviewSatisfied: true, independentReviewSatisfied: true, issueIsImplementation: true, statesReconciliable: true, needsHuman: false, requiredJobsSuccessful: true }).ok, true);
   assert.equal(pipeline.stateMutationPlan(["agent:needs-human"], "agent:pr", "agent:verified").ok, false);
 });
 
@@ -278,7 +281,7 @@ test("review acknowledgement i native approval dávají verifieru trusted re-eva
   const signal = fs.readFileSync(`${__dirname}/../workflows/agent-review-signal.yml`, "utf8");
   assert.match(signal, /pull_request_review:\s*\n\s+types: \[submitted\]/);
   assert.match(signal, /permissions: \{\}/);
-  assert.match(verify, /workflows: \[CI, Agent review signal\]/);
+  assert.match(verify, /workflows: \[CI, Agent review signal, Agent Codex review\]/);
   assert.match(verify, /workflow_call:/);
   assert.match(verify, /listWorkflowRunsForRepo/);
   assert.match(acknowledgement, /uses: \.\/\.github\/workflows\/agent-verify\.yml/);
@@ -290,4 +293,49 @@ test("dokumentace popisuje jediný state label, ne jediný label na objektu", ()
   const docs = fs.readFileSync(`${__dirname}/../../docs/autonomous-development-pipeline.md`, "utf8");
   assert.match(docs, /only `agent:\*` state label/);
   assert.match(docs, /unrelated labels/);
+});
+
+test("v2 classifier je jednoznačný a unsafe failures fail-closed", () => {
+  const config = require("../agent-pipeline.json").v2;
+  const job = (name, id = 1) => ({ name, id, head_sha: "a", run_attempt: 1, conclusion: "failure" });
+  assert.deepEqual(pipeline.classifyCiFailure({ jobs: [job("quality")], headSha: "a", fixableJobs: config.fixableCiJobs, prohibitedJobs: config.prohibitedCiJobs }),
+    { disposition: "FIX", job: "quality", evidence: "a:1:1" });
+  assert.equal(pipeline.classifyCiFailure({ jobs: [job("security")], headSha: "a", fixableJobs: config.fixableCiJobs, prohibitedJobs: config.prohibitedCiJobs }).disposition, "NEEDS_HUMAN");
+  assert.equal(pipeline.classifyCiFailure({ jobs: [job("quality"), job("api", 2)], headSha: "a", fixableJobs: config.fixableCiJobs, prohibitedJobs: config.prohibitedCiJobs }).reason, "AMBIGUOUS_FAILURE_SET");
+});
+
+test("v2 fixer budget, exact evidence a idempotence jsou bounded", () => {
+  const bot = (body) => ({ user: { login: "github-actions[bot]" }, body });
+  assert.deepEqual(pipeline.fixAttemptDecision({ comments: [], sourceSha: "a", evidence: "e", maxAttempts: 2 }), { action: "FIX", attempt: 1 });
+  assert.equal(pipeline.fixAttemptDecision({ comments: [bot("<!-- agent-fix:v2 source=a evidence=e attempt=1 result=b -->")], sourceSha: "a", evidence: "e", maxAttempts: 2 }).reason, "EXACT_EVIDENCE_ALREADY_PROCESSED");
+  const used = [bot("<!-- agent-fix:v2 source=a evidence=1 attempt=1 result=b -->"), bot("<!-- agent-fix:v2 source=b evidence=2 attempt=2 result=c -->")];
+  assert.equal(pipeline.fixAttemptDecision({ comments: used, sourceSha: "c", evidence: "3", maxAttempts: 2 }).reason, "FIX_BUDGET_EXHAUSTED");
+});
+
+test("v2 denylist blokuje governance, dependency a execution cesty", () => {
+  const config = require("../agent-pipeline.json").v2;
+  assert.equal(pipeline.validatePatchPaths(["backend/src/quantlab/safe.py"], config), true);
+  for (const path of [".github/workflows/ci.yml", "AGENTS.md", "frontend/package.json", "backend/uv.lock", "backend/live_broker.py", "../escape"])
+    assert.equal(pipeline.validatePatchPaths([path], config), false, path);
+});
+
+test("v2 independent PASS je exact-SHA a nenahrazuje human review", () => {
+  const comments = [{ user: { login: "github-actions[bot]" }, body: "<!-- agent-codex-review:v2 sha=abc result=PASS -->" }];
+  assert.equal(pipeline.independentReviewSatisfied(comments, "abc"), true);
+  assert.equal(pipeline.independentReviewSatisfied(comments, "new"), false);
+  const base = { workflowName: "CI", workflowConclusion: "success", headSha: "abc", prHeadSha: "abc", open: true, correctBase: true, draft: false, issueIsImplementation: true, statesReconciliable: true, needsHuman: false, requiredJobsSuccessful: true };
+  assert.equal(pipeline.verificationDecision({ ...base, reviewSatisfied: false, independentReviewSatisfied: true }).reason, "EXACT_SHA_REVIEW_MISSING");
+  assert.equal(pipeline.verificationDecision({ ...base, reviewSatisfied: true, independentReviewSatisfied: false }).reason, "INDEPENDENT_REVIEW_PASS_MISSING");
+});
+
+test("v2 workflow wiring odděluje secret, validation a write trust domains", () => {
+  const fixer = fs.readFileSync(".github/workflows/agent-ci-fixer.yml", "utf8");
+  const reviewer = fs.readFileSync(".github/workflows/agent-codex-review.yml", "utf8");
+  assert.match(fixer, /openai\/codex-action@[0-9a-f]{40}/);
+  assert.match(reviewer, /openai\/codex-action@[0-9a-f]{40}/);
+  assert.match(fixer, /maxFixCommits/);
+  assert.match(fixer, /persist-credentials: false/);
+  assert.match(fixer, /concurrency:/);
+  assert.match(reviewer, /sandbox: read-only/);
+  assert.doesNotMatch(fixer.slice(fixer.indexOf("validate-patch:"), fixer.indexOf("trusted-publish:")), /OPENAI_API_KEY|contents: write/);
 });
