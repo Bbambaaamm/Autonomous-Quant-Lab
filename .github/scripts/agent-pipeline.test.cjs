@@ -83,6 +83,63 @@ test("review event po dřívějším green CI znovu vybere pouze exact-head auto
   assert.deepEqual(pipeline.authoritativeCiRunCandidates(runs, { workflowName: "CI", headSha: "stale", prNumber: 85 }), []);
 });
 
+test("workflow_dispatch caller routuje reusable verifier výhradně podle explicitních inputs", () => {
+  const headSha = "a".repeat(40);
+  const trigger = pipeline.verificationTriggerDecision({
+    // Caller event je záměrně irelevantní: reusable workflow jej může zdědit.
+    callerEventName: "workflow_dispatch",
+    workflowRun: undefined,
+    workflowCallInputs: { prNumber: "202", headSha },
+  });
+  assert.deepEqual(trigger, { ok: true, kind: "workflow-call", prNumber: 202, headSha });
+
+  const runs = [{
+    id: 20, name: "CI", event: "pull_request", status: "completed", conclusion: "success",
+    head_sha: headSha, pull_requests: [{ number: 202 }],
+  }];
+  assert.equal(pipeline.authoritativeCiRunCandidates(runs, {
+    workflowName: "CI", headSha: trigger.headSha, prNumber: trigger.prNumber,
+  }).length, 1);
+  const acknowledgements = [{
+    user: { login: "github-actions[bot]" },
+    body: `<!-- agent-review-ack:v1 sha=${headSha} -->`,
+  }];
+  assert.equal(pipeline.reviewSatisfied({ acknowledgements, headSha }), true);
+  assert.deepEqual(pipeline.verificationDecision({
+    workflowName: "CI", workflowConclusion: "success", headSha, prHeadSha: headSha,
+    open: true, correctBase: true, draft: false, reviewSatisfied: true,
+    issueIsImplementation: true, statesReconciliable: true, needsHuman: false,
+    requiredJobsSuccessful: true,
+  }), { ok: true });
+
+  const stale = "b".repeat(40);
+  assert.equal(pipeline.authoritativeCiRunCandidates(runs, {
+    workflowName: "CI", headSha: stale, prNumber: trigger.prNumber,
+  }).length, 0);
+  assert.equal(pipeline.verificationDecision({
+    workflowName: "CI", workflowConclusion: "success", headSha, prHeadSha: stale,
+    open: true, correctBase: true, draft: false, reviewSatisfied: true,
+    issueIsImplementation: true, statesReconciliable: true, needsHuman: false,
+    requiredJobsSuccessful: true,
+  }).reason, "HEAD_SHA_MISMATCH");
+});
+
+test("trigger routing rozlišuje CI, review signal a vadné reusable inputs fail-closed", () => {
+  const base = { status: "completed", conclusion: "success", pull_requests: [{ number: 202 }] };
+  assert.equal(pipeline.verificationTriggerDecision({
+    workflowRun: { ...base, name: "CI", event: "pull_request", head_sha: "a".repeat(40) },
+  }).kind, "ci");
+  assert.equal(pipeline.verificationTriggerDecision({
+    workflowRun: { ...base, name: "Agent review signal", event: "pull_request_review" },
+  }).kind, "review-signal");
+  assert.equal(pipeline.verificationTriggerDecision({
+    workflowCallInputs: { prNumber: "202", headSha: "stale" },
+  }).reason, "INVALID_WORKFLOW_CALL_INPUTS");
+  assert.equal(pipeline.verificationTriggerDecision({
+    workflowRun: { ...base, name: "Other", event: "pull_request" },
+  }).reason, "UNTRUSTED_WORKFLOW_RUN_TRIGGER");
+});
+
 test("exact-SHA review acknowledgement je explicitní a nový commit jej invaliduje", () => {
   const comments = [{ user: { login: "github-actions[bot]" }, body: "Review acknowledged\n<!-- agent-review-ack:v1 sha=abc -->" }];
   assert.equal(pipeline.reviewSatisfied({ reviewDecision: null, acknowledgements: comments, headSha: "abc" }), true);
@@ -176,6 +233,7 @@ test("review acknowledgement i native approval dávají verifieru trusted re-eva
   assert.match(verify, /listWorkflowRunsForRepo/);
   assert.match(acknowledgement, /uses: \.\/\.github\/workflows\/agent-verify\.yml/);
   assert.doesNotMatch(verify, /pull_request_target/);
+  assert.doesNotMatch(verify, /context\.eventName/);
 });
 
 test("dokumentace popisuje jediný state label, ne jediný label na objektu", () => {

@@ -141,6 +141,30 @@ function authoritativeCiRunCandidates(runs, { workflowName, headSha, prNumber })
     .sort((left, right) => right.id - left.id);
 }
 
+function verificationTriggerDecision({ workflowRun, workflowCallInputs = {} }) {
+  if (workflowRun) {
+    if (workflowRun.status !== "completed" || workflowRun.conclusion !== "success" ||
+        workflowRun.pull_requests?.length !== 1) {
+      return { ok: false, reason: "INVALID_WORKFLOW_RUN_TRIGGER" };
+    }
+    const prNumber = workflowRun.pull_requests[0].number;
+    if (workflowRun.name === "CI" && workflowRun.event === "pull_request") {
+      return { ok: true, kind: "ci", prNumber, headSha: workflowRun.head_sha };
+    }
+    if (workflowRun.name === "Agent review signal" && workflowRun.event === "pull_request_review") {
+      return { ok: true, kind: "review-signal", prNumber, headSha: null };
+    }
+    return { ok: false, reason: "UNTRUSTED_WORKFLOW_RUN_TRIGGER" };
+  }
+
+  const prNumber = Number(workflowCallInputs.prNumber);
+  const headSha = workflowCallInputs.headSha || "";
+  if (!Number.isSafeInteger(prNumber) || prNumber < 1 || !/^[0-9a-f]{40}$/.test(headSha)) {
+    return { ok: false, reason: "INVALID_WORKFLOW_CALL_INPUTS" };
+  }
+  return { ok: true, kind: "workflow-call", prNumber, headSha };
+}
+
 function verificationDecision(input) {
   if (input.workflowName !== "CI" || input.workflowConclusion !== "success") return { ok: false, reason: "CI_NOT_SUCCESSFUL" };
   if (!input.headSha || input.prHeadSha !== input.headSha) return { ok: false, reason: "HEAD_SHA_MISMATCH" };
@@ -171,4 +195,5 @@ module.exports = {
   transitionProgress,
   validateManualTransition,
   verificationDecision,
+  verificationTriggerDecision,
 };
