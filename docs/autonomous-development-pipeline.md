@@ -24,34 +24,44 @@ state changes through the named GitHub Actions workflows; never edit state label
 directly.
 
 - [ ] Before the pipeline's first repository use, run **Agent label setup** once.
-- [ ] Confirm the Issue has only `type:implementation` classification and no
-      `agent:*` state, then run **Agent state transition** with the Issue number,
-      `previous_state: none`, and `next_state: agent:ready`.
-- [ ] To authorize takeover, run **Agent state transition** again with
+- [ ] Confirm the Issue has `type:implementation` and no `agent:*` state, then run
+      **Agent state transition** with `previous_state: none` and
+      `next_state: agent:ready`.
+- [ ] Explicitly authorize work by running **Agent state transition** again with
       `previous_state: agent:ready` and `next_state: agent:running`.
 - [ ] Create a branch from the current default branch, implement only the approved
       Issue, validate it, and open a Draft PR against the default branch. Include
-      exactly one standalone `- Agent-Issue: #N` marker in the PR body; do not use
-      an auto-closing reference.
+      exactly one standalone `- Agent-Issue: #N` marker; do not use an auto-closing
+      reference.
+- [ ] Before final handoff, reconcile the branch with the current default branch if
+      that branch moved, and ensure authoritative CI is produced for the final PR
+      head SHA that will be reviewed.
 - [ ] Run **Agent state transition** with `previous_state: agent:running`,
-      `next_state: agent:pr`, and the Issue and PR numbers. Confirm both objects now
-      have only `agent:pr` and the workflow added matching durable linkage comments.
+      `next_state: agent:pr`, and the Issue and PR numbers. Confirm `agent:pr` is the
+      only `agent:*` state on both objects, the Issue still retains
+      `type:implementation`, unrelated labels remain intact, and matching durable
+      linkage comments were written.
 - [ ] Mark the PR ready for review. Have an eligible reviewer approve the current
-      head SHA, or, for the documented single-maintainer case, run **Agent exact-SHA
+      head SHA or, for the documented single-maintainer case, run **Agent exact-SHA
       review acknowledgement** with the PR number, full current head SHA, and
       `REVIEWED_EXACT_SHA_NOT_MERGE_AUTHORIZATION`.
-- [ ] Wait for the authoritative **CI** workflow on that exact SHA. After it passes,
-      **Agent verification gate** validates the linkage, review evidence, states,
-      and configured jobs and moves both objects to `agent:verified`.
-- [ ] Reconfirm repository rules, required checks, and review requirements, then
-      perform the human merge. `agent:verified` is a handoff result, not merge
-      authorization.
+- [ ] Ensure authoritative **CI** is green for that exact current head SHA. CI may
+      finish before review evidence; a later trusted review/acknowledgement
+      re-evaluates the existing exact-head CI. If review evidence exists first, CI
+      completion provides the verification opportunity. No manual CI rerun is
+      required merely to wake the verifier.
+- [ ] Confirm **Agent verification gate** moved both objects to `agent:verified` on
+      that exact SHA.
+- [ ] Reconfirm repository rules, required checks, review requirements, and current
+      base state, then perform the human merge. `agent:verified` is a handoff result,
+      not merge authorization.
 
 If work blocks in `agent:running` or `agent:pr`, use **Agent state transition** to
-move to `agent:needs-human` with a non-empty reason (and the PR number when leaving
-`agent:pr`). After remediation, recover explicitly through
-`agent:needs-human` → `agent:running` → `agent:pr`; there is no direct
-`agent:needs-human` → `agent:pr` transition.
+move to `agent:needs-human` with a non-empty reason and the PR number when leaving
+`agent:pr`. Complete the required remediation while the workflow remains paused.
+Then recover explicitly through `agent:needs-human` → `agent:running` →
+`agent:pr`; for a durable-linked PR, recovery reconciles both Issue and PR. There is
+no direct `agent:needs-human` → `agent:pr` transition.
 
 ## Classification and human opt-in
 
@@ -69,7 +79,10 @@ classified `type:implementation`, and then explicitly opted in by a human.
 
 ## State semantics
 
-Exactly zero or one `agent:*` state label may exist on a participating object.
+Exactly zero or one `agent:*` state label may exist on a participating object;
+`agent:pr` is therefore the only `agent:*` state label on a linked Issue and PR.
+It is not the object's only label: the Issue retains `type:implementation` and all
+transitions preserve unrelated labels on both objects.
 
 | State | Meaning | Explicitly does not mean |
 |---|---|---|
@@ -92,7 +105,7 @@ The manually dispatched state workflow permits only:
 | `agent:ready` | `agent:running` | Human maintainer initiating/assigning a run. |
 | `agent:running` | `agent:pr` | Human maintainer; open PR against the default branch with exact linkage. The workflow labels both Issue and PR. |
 | `agent:running`, `agent:pr` | `agent:needs-human` | Human maintainer; non-empty escalation reason. From `agent:pr`, the linked PR number is required and both objects are updated. |
-| `agent:needs-human` | `agent:ready`, `agent:running` | Human maintainer after remediation; the dispatch and comment document recovery. A PR recovery always continues deterministically through `agent:running` → `agent:pr`. |
+| `agent:needs-human` | `agent:ready`, `agent:running` | Human maintainer after remediation; the dispatch and comment document recovery. If durable linkage exists, recovery resolves its unique open PR, moves both objects to `agent:running`, and then continues through `agent:running` → `agent:pr`. |
 | `agent:pr` | `agent:verified` | Only **Agent verification gate**, after all conditions below; partial pair writes are safely reconciled on retry. |
 
 The transition workflow requires an explicit expected previous and next state,
@@ -129,9 +142,12 @@ body cannot rebind an already authorized PR.
 
 ## Automated verification gate
 
-The write-capable verifier runs only after the authoritative workflow named `CI`
-completes successfully for a pull request. It checks metadata through the GitHub
-API and never checks out or executes PR code. It writes `agent:verified` to the
+The write-capable verifier runs after the authoritative workflow named `CI`
+completes successfully for a pull request and re-evaluates after a submitted native
+review or the exact-SHA acknowledgement workflow. A review-triggered evaluation
+queries existing completed `CI` runs and accepts only complete required-job evidence
+for the same current head SHA and PR. It checks metadata through the GitHub API and
+never checks out or executes PR code. It writes `agent:verified` to the
 linked Issue and PR only when all of these are true:
 
 1. the CI run refers to exactly one PR and its conclusion is `success`;
@@ -170,7 +186,9 @@ Native approvals are read through the GitHub reviews API and count only when an
 active `APPROVED` review has `commit_id` equal to the CI/head SHA. A general
 `reviewDecision` without that exact-commit evidence is insufficient.
 
-An unknown/ambiguous event or failed condition produces `NO WRITE`, never inferred
+Thus CI may finish before review evidence without stranding the PR: the later trusted
+review event reuses CI as evidence instead of rerunning CI. It neither executes PR
+code with a write token nor recursively triggers CI. An unknown/ambiguous event or failed condition produces `NO WRITE`, never inferred
 success. A new commit changes the head SHA; normal GitHub CI and review-dismissal
 policy apply, and the PR must return to `agent:pr` before a later run can verify it.
 The list in `.github/agent-pipeline.json` must be reviewed whenever authoritative
@@ -187,15 +205,28 @@ marker to agree, and idempotently reconciles both Issue and PR from
 approvals and acknowledgements cannot satisfy a later verification because both are
 matched to the new SHA, and the new CI run does not itself promote the state.
 
-`agent:needs-human` always prevents invalidation mutations. Missing or contradictory
-durable linkage is escalated on the PR (and on the deterministically linked Issue
-when available) rather than guessed. Unrelated labels are preserved.
+Before the first durable link exists, repeated `synchronize` events on an unmanaged
+PR are legitimate and produce `NO_WRITE`; they never create an agent state label.
+A uniquely linked `agent:pr` pair without `agent:verified` likewise needs no
+invalidation and produces `NO_WRITE`. Conflicting durable links or a linked marker
+mismatch fail closed, while `agent:needs-human` always has priority and is never
+automatically recovered by invalidation.
+
+`agent:needs-human` always prevents invalidation mutations. Missing durable linkage
+is escalated only when an existing linked lifecycle state makes its absence
+contradictory; a clean pre-link PR remains `NO_WRITE`. Contradictory linkage is
+escalated on the PR (and on the deterministically linked Issue when available)
+rather than guessed. Unrelated labels are preserved.
 
 ## Recovery, rollback, and escalation
 
 Escalate a blocked or ambiguous run with a reason rather than guessing. Recovery is
 a deliberate maintainer transition out of `agent:needs-human`; comments preserve
-both transitions. Pair transitions use add/remove mutations rather than replacing
+both transitions. When the Issue audit comments contain a durable link, recovery
+requires exactly one matching, open, default-base PR whose body marker and own
+durable comment agree. Missing, stale, conflicting, or ambiguous evidence fails
+closed. A pre-PR escalation with no durable link remains an Issue-only recovery.
+Pair transitions use add/remove mutations rather than replacing
 all labels. The caller supplies exact `previous`/`next` states. The combinations
 `previous/previous`, `next/previous`, `previous/next`, `previous+next` (an interrupted
 single-object mutation), and `next/next` are accepted only for that same operation;
