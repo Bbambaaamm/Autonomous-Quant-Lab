@@ -17,6 +17,52 @@ human-approved implementation Issue
 agent:running / agent:pr → agent:needs-human
 ```
 
+## Maintainer quick-start: standard happy path
+
+Use this checklist for one already approved `type:implementation` Issue. Run all
+state changes through the named GitHub Actions workflows; never edit state labels
+directly.
+
+- [ ] Before the pipeline's first repository use, run **Agent label setup** once.
+- [ ] Confirm the Issue has `type:implementation` and no `agent:*` state, then run
+      **Agent state transition** with `previous_state: none` and
+      `next_state: agent:ready`.
+- [ ] Explicitly authorize work by running **Agent state transition** again with
+      `previous_state: agent:ready` and `next_state: agent:running`.
+- [ ] Create a branch from the current default branch, implement only the approved
+      Issue, validate it, and open a Draft PR against the default branch. Include
+      exactly one standalone `- Agent-Issue: #N` marker; do not use an auto-closing
+      reference.
+- [ ] Before final handoff, reconcile the branch with the current default branch if
+      that branch moved, and ensure authoritative CI is produced for the final PR
+      head SHA that will be reviewed.
+- [ ] Run **Agent state transition** with `previous_state: agent:running`,
+      `next_state: agent:pr`, and the Issue and PR numbers. Confirm `agent:pr` is the
+      only `agent:*` state on both objects, the Issue still retains
+      `type:implementation`, unrelated labels remain intact, and matching durable
+      linkage comments were written.
+- [ ] Mark the PR ready for review. Have an eligible reviewer approve the current
+      head SHA or, for the documented single-maintainer case, run **Agent exact-SHA
+      review acknowledgement** with the PR number, full current head SHA, and
+      `REVIEWED_EXACT_SHA_NOT_MERGE_AUTHORIZATION`.
+- [ ] Ensure authoritative **CI** is green for that exact current head SHA. CI may
+      finish before review evidence; a later trusted review/acknowledgement
+      re-evaluates the existing exact-head CI. If review evidence exists first, CI
+      completion provides the verification opportunity. No manual CI rerun is
+      required merely to wake the verifier.
+- [ ] Confirm **Agent verification gate** moved both objects to `agent:verified` on
+      that exact SHA.
+- [ ] Reconfirm repository rules, required checks, review requirements, and current
+      base state, then perform the human merge. `agent:verified` is a handoff result,
+      not merge authorization.
+
+If work blocks in `agent:running` or `agent:pr`, use **Agent state transition** to
+move to `agent:needs-human` with a non-empty reason and the PR number when leaving
+`agent:pr`. Complete the required remediation while the workflow remains paused.
+Then recover explicitly through `agent:needs-human` → `agent:running` →
+`agent:pr`; for a durable-linked PR, recovery reconciles both Issue and PR. There is
+no direct `agent:needs-human` → `agent:pr` transition.
+
 ## Classification and human opt-in
 
 `type:implementation` is mandatory and the mutually exclusive labels
