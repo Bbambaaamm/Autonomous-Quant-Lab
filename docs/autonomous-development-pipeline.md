@@ -17,6 +17,42 @@ human-approved implementation Issue
 agent:running / agent:pr → agent:needs-human
 ```
 
+## Maintainer quick-start: standard happy path
+
+Use this checklist for one already approved `type:implementation` Issue. Run all
+state changes through the named GitHub Actions workflows; never edit state labels
+directly.
+
+- [ ] Before the pipeline's first repository use, run **Agent label setup** once.
+- [ ] Confirm the Issue has only `type:implementation` classification and no
+      `agent:*` state, then run **Agent state transition** with the Issue number,
+      `previous_state: none`, and `next_state: agent:ready`.
+- [ ] To authorize takeover, run **Agent state transition** again with
+      `previous_state: agent:ready` and `next_state: agent:running`.
+- [ ] Create a branch from the current default branch, implement only the approved
+      Issue, validate it, and open a Draft PR against the default branch. Include
+      exactly one standalone `- Agent-Issue: #N` marker in the PR body; do not use
+      an auto-closing reference.
+- [ ] Run **Agent state transition** with `previous_state: agent:running`,
+      `next_state: agent:pr`, and the Issue and PR numbers. Confirm both objects now
+      have only `agent:pr` and the workflow added matching durable linkage comments.
+- [ ] Mark the PR ready for review. Have an eligible reviewer approve the current
+      head SHA, or, for the documented single-maintainer case, run **Agent exact-SHA
+      review acknowledgement** with the PR number, full current head SHA, and
+      `REVIEWED_EXACT_SHA_NOT_MERGE_AUTHORIZATION`.
+- [ ] Wait for the authoritative **CI** workflow on that exact SHA. After it passes,
+      **Agent verification gate** validates the linkage, review evidence, states,
+      and configured jobs and moves both objects to `agent:verified`.
+- [ ] Reconfirm repository rules, required checks, and review requirements, then
+      perform the human merge. `agent:verified` is a handoff result, not merge
+      authorization.
+
+If work blocks in `agent:running` or `agent:pr`, use **Agent state transition** to
+move to `agent:needs-human` with a non-empty reason (and the PR number when leaving
+`agent:pr`). After remediation, recover explicitly through
+`agent:needs-human` → `agent:running` → `agent:pr`; there is no direct
+`agent:needs-human` → `agent:pr` transition.
+
 ## Classification and human opt-in
 
 `type:implementation` is mandatory and the mutually exclusive labels
