@@ -214,6 +214,56 @@ test("invalidation escalation odstraní verified a zachová cizí label", () => 
   });
 });
 
+test("Defect D: pre-link PR zůstává při každém synchronize bez zápisu", () => {
+  const input = {
+    prLabels: ["priority:high"], issueLoaded: false,
+    durableLink: { ok: true, issueNumber: null }, markerIssueNumber: 101,
+  };
+  assert.deepEqual(pipeline.invalidationLifecycleDecision(input), { action: "PRELINK_NO_WRITE" });
+  assert.deepEqual(pipeline.invalidationLifecycleDecision(input), { action: "PRELINK_NO_WRITE" });
+});
+
+test("Defect D: linked agent:pr bez verified nepotřebuje invalidaci", () => {
+  assert.deepEqual(pipeline.invalidationLifecycleDecision({
+    prLabels: ["agent:pr", "priority:high"], issueLabels: ["type:implementation", "agent:pr"],
+    issueLoaded: true, durableLink: { ok: true, issueNumber: 101 }, markerIssueNumber: 101,
+  }), { action: "LINKED_PR_NO_WRITE" });
+});
+
+test("Defect D: linked verified se idempotentně invaliduje na agent:pr a zachová cizí labely", () => {
+  const decision = pipeline.invalidationLifecycleDecision({
+    prLabels: ["agent:verified", "priority:high"],
+    issueLabels: ["type:implementation", "agent:verified", "owner:quant"], issueLoaded: true,
+    durableLink: { ok: true, issueNumber: 101 }, markerIssueNumber: 101,
+  });
+  assert.deepEqual(decision, { action: "INVALIDATE_VERIFIED", issueNumber: 101 });
+  for (const labels of [["agent:verified", "priority:high"], ["type:implementation", "agent:verified", "owner:quant"]]) {
+    const plan = pipeline.stateMutationPlan(labels, "agent:verified", "agent:pr");
+    assert.equal(plan.ok, true);
+    assert.deepEqual(plan.add, ["agent:pr"]);
+    assert.deepEqual(plan.remove, ["agent:verified"]);
+    assert.equal(plan.remove.some((label) => !label.startsWith("agent:")), false);
+  }
+});
+
+test("Defect D: ambiguous link a marker mismatch eskalují fail-closed", () => {
+  assert.deepEqual(pipeline.invalidationLifecycleDecision({
+    prLabels: [], issueLoaded: false, durableLink: { ok: false, reason: "AMBIGUOUS_DURABLE_LINK" },
+    markerIssueNumber: 101,
+  }), { action: "ESCALATE_CONFLICT", reason: "AMBIGUOUS_DURABLE_LINK" });
+  assert.deepEqual(pipeline.invalidationLifecycleDecision({
+    prLabels: ["agent:pr"], issueLabels: ["agent:pr"], issueLoaded: true,
+    durableLink: { ok: true, issueNumber: 101 }, markerIssueNumber: 102,
+  }), { action: "ESCALATE_CONFLICT", reason: "LINKAGE_MISMATCH" });
+});
+
+test("Defect D: agent:needs-human má prioritu a workflow neprovádí recovery", () => {
+  assert.deepEqual(pipeline.invalidationLifecycleDecision({
+    prLabels: ["agent:needs-human", "priority:high"], issueLabels: ["agent:verified"], issueLoaded: true,
+    durableLink: { ok: true, issueNumber: 101 }, markerIssueNumber: 101,
+  }), { action: "NEEDS_HUMAN_NO_WRITE" });
+});
+
 test("konfigurované required joby přesně odpovídají autoritativnímu CI", () => {
   const config = require("../agent-pipeline.json");
   const ci = fs.readFileSync(`${__dirname}/../workflows/ci.yml`, "utf8");

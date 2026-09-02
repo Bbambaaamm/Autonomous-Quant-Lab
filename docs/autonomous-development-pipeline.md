@@ -159,9 +159,18 @@ marker to agree, and idempotently reconciles both Issue and PR from
 approvals and acknowledgements cannot satisfy a later verification because both are
 matched to the new SHA, and the new CI run does not itself promote the state.
 
-`agent:needs-human` always prevents invalidation mutations. Missing or contradictory
-durable linkage is escalated on the PR (and on the deterministically linked Issue
-when available) rather than guessed. Unrelated labels are preserved.
+Before the first durable link exists, repeated `synchronize` events on an unmanaged
+PR are legitimate and produce `NO_WRITE`; they never create an agent state label.
+A uniquely linked `agent:pr` pair without `agent:verified` likewise needs no
+invalidation and produces `NO_WRITE`. Conflicting durable links or a linked marker
+mismatch fail closed, while `agent:needs-human` always has priority and is never
+automatically recovered by invalidation.
+
+`agent:needs-human` always prevents invalidation mutations. Missing durable linkage
+is escalated only when an existing linked lifecycle state makes its absence
+contradictory; a clean pre-link PR remains `NO_WRITE`. Contradictory linkage is
+escalated on the PR (and on the deterministically linked Issue when available)
+rather than guessed. Unrelated labels are preserved.
 
 ## Recovery, rollback, and escalation
 

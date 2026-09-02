@@ -33,6 +33,9 @@ The transition records a durable, trusted GitHub comment binding repository, Iss
 and PR. Verification requires it to match the mutable PR-body marker. A trusted,
 metadata-only synchronization workflow invalidates `agent:verified` back to
 `agent:pr` after a new head SHA without checking out or executing PR code.
+The synchronization workflow treats an unlabeled PR without durable linkage as a
+valid pre-link lifecycle phase and performs no write; only contradictory linked
+evidence is escalated.
 Recovery of an already linked PR resolves that unique durable binding and
 idempotently moves both objects through `agent:running`; it never requires manual
 state-label removal. A later native review or exact-SHA acknowledgement also invokes
