@@ -75,7 +75,7 @@ jobs:
     needs: prepare
     if: needs.prepare.outputs.escalation == 'true'
     runs-on: ubuntu-latest
-    permissions: {contents: read, issues: write, pull-requests: read}
+    permissions: {contents: read, issues: write, pull-requests: write}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with: {ref: '${{ github.event.repository.default_branch }}', persist-credentials: false}
@@ -146,7 +146,7 @@ jobs:
   trusted-record:
     needs: [prepare, independent-review]
     runs-on: ubuntu-latest
-    permissions: {contents: read, issues: write, pull-requests: read}
+    permissions: {contents: read, issues: write, pull-requests: write}
     outputs:
       pass: ${{ steps.record.outputs.pass }}
       blocked: ${{ steps.record.outputs.blocked }}
@@ -188,7 +188,7 @@ jobs:
     needs: [prepare, trusted-record]
     if: needs.trusted-record.outputs.blocked == 'true'
     uses: ./.github/workflows/agent-review-block-escalation.yml
-    permissions: {contents: read, issues: write, pull-requests: read}
+    permissions: {contents: read, issues: write, pull-requests: write}
     with:
       pr_number: ${{ fromJSON(needs.prepare.outputs.pr_number) }}
       head_sha: ${{ needs.prepare.outputs.head_sha }}
@@ -198,7 +198,7 @@ jobs:
     needs: [prepare, independent-review, trusted-record]
     if: always() && needs.prepare.outputs.eligible == 'true' && needs.trusted-record.result != 'success'
     uses: ./.github/workflows/agent-review-block-escalation.yml
-    permissions: {contents: read, issues: write, pull-requests: read}
+    permissions: {contents: read, issues: write, pull-requests: write}
     with:
       pr_number: ${{ fromJSON(needs.prepare.outputs.pr_number) }}
       head_sha: ${{ needs.prepare.outputs.head_sha }}
