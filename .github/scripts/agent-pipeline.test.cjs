@@ -580,3 +580,20 @@ test("v2 reusable caller permissions and governance linkage are fail closed", ()
   const escalation=reviewer.slice(reviewer.indexOf("governance-escalation:"),reviewer.indexOf("independent-review:"));
   assert.match(escalation,/listComments[\s\S]*fullLinkageDecision[\s\S]*STALE_GOVERNANCE_NO_WRITE/);
 });
+
+test("v2 classify job guard admits reusable review-block despite inherited caller events", () => {
+  const fixer=fs.readFileSync(".github/workflows/agent-ci-fixer.yml","utf8");
+  const classify=fixer.slice(fixer.indexOf("  classify:"),fixer.indexOf("    runs-on:",fixer.indexOf("  classify:")));
+  assert.match(classify,/if: inputs\.invocation_mode == 'review-block' \|\|/);
+  assert.match(classify,/github\.event_name == 'workflow_dispatch'[\s\S]*inputs\.invocation_mode == 'failed-ci'/);
+  assert.match(classify,/github\.event_name == 'workflow_run'[\s\S]*inputs\.invocation_mode == ''[\s\S]*conclusion == 'failure'/);
+  assert.doesNotMatch(classify,/github\.event_name == 'workflow_call'/);
+
+  // Exercise the job-level eligibility contract rather than only the inner routing helper.
+  const classifyRuns=({eventName,conclusion,mode}) => mode==="review-block" ||
+    (eventName==="workflow_dispatch" && mode==="failed-ci") ||
+    (eventName==="workflow_run" && !mode && conclusion==="failure");
+  assert.equal(classifyRuns({eventName:"workflow_run",conclusion:"success",mode:"review-block"}),true);
+  assert.equal(classifyRuns({eventName:"workflow_dispatch",conclusion:undefined,mode:"review-block"}),true);
+  assert.equal(classifyRuns({eventName:"workflow_run",conclusion:"success",mode:""}),false);
+});

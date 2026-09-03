@@ -30,7 +30,9 @@ permissions:
 
 jobs:
   classify:
-    if: github.event_name == 'workflow_call' || github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'failure' && github.event.workflow_run.pull_requests[0])
+    # Reusable workflows retain the caller event context. Inspect the explicit mode first so
+    # Reviewer BLOCK routing cannot be suppressed by a successful caller workflow_run.
+    if: inputs.invocation_mode == 'review-block' || (github.event_name == 'workflow_dispatch' && inputs.invocation_mode == 'failed-ci') || (github.event_name == 'workflow_run' && (inputs.invocation_mode == '' || inputs.invocation_mode == null) && github.event.workflow_run.conclusion == 'failure' && github.event.workflow_run.pull_requests[0])
     runs-on: ubuntu-latest
     permissions: {actions: read, contents: read, issues: read, pull-requests: read}
     outputs:
