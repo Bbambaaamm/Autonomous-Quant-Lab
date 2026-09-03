@@ -1,0 +1,66 @@
+name: Agent Reviewer BLOCK escalation
+
+on:
+  workflow_call:
+    inputs:
+      pr_number: {required: true, type: number}
+      head_sha: {required: true, type: string}
+      reason: {required: true, type: string}
+
+permissions: {contents: read}
+
+jobs:
+  escalate:
+    runs-on: ubuntu-latest
+    permissions: {contents: read, issues: write, pull-requests: read}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with: {ref: '${{ github.event.repository.default_branch }}', persist-credentials: false}
+      - name: Revalidate and escalate the exact linked pair
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        env:
+          PR: '${{ inputs.pr_number }}'
+          SHA: '${{ inputs.head_sha }}'
+          BLOCK_REASON: '${{ inputs.reason }}'
+        with:
+          script: |
+            const p=require('./.github/scripts/agent-pipeline.cjs');
+            const prNumber=Number(process.env.PR), expectedSha=process.env.SHA;
+            if(!Number.isSafeInteger(prNumber)||prNumber<1||!/^[0-9a-f]{40}$/.test(expectedSha))
+              return core.notice('REVIEW_BLOCK_NO_WRITE: invalid exact binding');
+            const readValidatedPair=async(expectedIssueNumber=null)=>{
+              const {data:pr}=await github.rest.pulls.get({...context.repo,pull_number:prNumber});
+              const issueNumber=p.parseAgentIssue(pr.body);
+              if(!issueNumber||(expectedIssueNumber!==null&&issueNumber!==expectedIssueNumber)||
+                pr.head.sha!==expectedSha||pr.state!=="open"||
+                pr.base.ref!==context.payload.repository.default_branch)
+                return {ok:false,reason:'stale PR, SHA, base, or Issue marker'};
+              const {data:issue}=await github.rest.issues.get({...context.repo,issue_number:issueNumber});
+              const [prComments,issueComments]=await Promise.all([
+                github.paginate(github.rest.issues.listComments,{...context.repo,issue_number:prNumber,per_page:100}),
+                github.paginate(github.rest.issues.listComments,{...context.repo,issue_number:issueNumber,per_page:100}),
+              ]);
+              const lifecycle=p.reviewerBlockPairPlan(pr.labels,issue.labels);
+              const linkage=p.fullLinkageDecision({prBody:pr.body,prComments,issueComments,...context.repo,issueNumber,prNumber});
+              if(issue.pull_request||issue.state!=="open"||!p.isImplementation(issue.labels)||!lifecycle.ok||!linkage.ok)
+                return {ok:false,reason:lifecycle.reason||linkage.reason||'invalid implementation Issue'};
+              return {ok:true,pr,issue,issueNumber,lifecycle};
+            };
+            const targetLabels=(labels)=>[...new Set([
+              ...p.labelNames(labels).filter(name=>!p.STATES.includes(name)),
+              'agent:needs-human',
+            ])];
+            // Each setLabels call is one atomic object-level write. A retry accepts only the
+            // original pair or either partial target and completes the same paired transition.
+            let pair=await readValidatedPair();
+            if(!pair.ok) return core.notice(`REVIEW_BLOCK_NO_WRITE: ${pair.reason}`);
+            if(pair.lifecycle.pr.add.length||pair.lifecycle.pr.remove.length)
+              await github.rest.issues.setLabels({...context.repo,issue_number:prNumber,labels:targetLabels(pair.pr.labels)});
+            // Re-read all mutable binding, linkage, and lifecycle data after the first write.
+            pair=await readValidatedPair(pair.issueNumber);
+            if(!pair.ok) return core.notice(`REVIEW_BLOCK_NO_WRITE: ${pair.reason}`);
+            if(pair.lifecycle.issue.add.length||pair.lifecycle.issue.remove.length)
+              await github.rest.issues.setLabels({...context.repo,issue_number:pair.issueNumber,labels:targetLabels(pair.issue.labels)});
+            const reason=p.redactDiagnostic(process.env.BLOCK_REASON,1024).replaceAll('<!--','&lt;!--').replaceAll('-->','--&gt;');
+            await github.rest.issues.createComment({...context.repo,issue_number:prNumber,
+              body:`Independent Reviewer BLOCK for exact SHA \`${expectedSha}\`: ${reason}\n\nBoth linked objects were transitioned to \`agent:needs-human\`.`});

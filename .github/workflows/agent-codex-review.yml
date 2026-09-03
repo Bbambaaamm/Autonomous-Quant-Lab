@@ -187,36 +187,19 @@ jobs:
   route-block:
     needs: [prepare, trusted-record]
     if: needs.trusted-record.outputs.blocked == 'true'
-    uses: ./.github/workflows/agent-ci-fixer.yml
-    permissions: {actions: read, contents: read, issues: write, pull-requests: read}
+    uses: ./.github/workflows/agent-review-block-escalation.yml
+    permissions: {contents: read, issues: write, pull-requests: read}
     with:
-      invocation_mode: review-block
       pr_number: ${{ fromJSON(needs.prepare.outputs.pr_number) }}
       head_sha: ${{ needs.prepare.outputs.head_sha }}
-      review_block: ${{ needs.trusted-record.outputs.block_reason }}
-    secrets: inherit
+      reason: ${{ needs.trusted-record.outputs.block_reason }}
 
   fail-closed-finalizer:
     needs: [prepare, independent-review, trusted-record]
     if: always() && needs.prepare.outputs.eligible == 'true' && needs.trusted-record.result != 'success'
-    runs-on: ubuntu-latest
+    uses: ./.github/workflows/agent-review-block-escalation.yml
     permissions: {contents: read, issues: write, pull-requests: read}
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with: {ref: '${{ github.event.repository.default_branch }}', persist-credentials: false}
-      - uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
-        env: {PR: '${{ needs.prepare.outputs.pr_number }}', ISSUE: '${{ needs.prepare.outputs.issue_number }}', SHA: '${{ needs.prepare.outputs.head_sha }}'}
-        with:
-          script: |
-            const p=require('./.github/scripts/agent-pipeline.cjs'),prNumber=Number(process.env.PR),issueNumber=Number(process.env.ISSUE);
-            const {data:pr}=await github.rest.pulls.get({...context.repo,pull_number:prNumber});
-            const {data:issue}=await github.rest.issues.get({...context.repo,issue_number:issueNumber});
-            const prComments=await github.paginate(github.rest.issues.listComments,{...context.repo,issue_number:prNumber,per_page:100});
-            const issueComments=await github.paginate(github.rest.issues.listComments,{...context.repo,issue_number:issueNumber,per_page:100});
-            if(pr.head.sha!==process.env.SHA||!p.lifecycleAtAgentPr(pr.labels,issue.labels).ok||!p.fullLinkageDecision({prBody:pr.body,prComments,issueComments,...context.repo,issueNumber,prNumber}).ok) return core.notice('STALE_REVIEW_FAILURE_NO_WRITE');
-            for(const number of [prNumber,issueNumber]) {
-              const {data:item}=await github.rest.issues.get({...context.repo,issue_number:number}); const plan=p.escalationMutationPlan(item.labels);
-              if(!plan.ok) return core.setFailed(plan.reason); if(plan.add.length) await github.rest.issues.addLabels({...context.repo,issue_number:number,labels:plan.add});
-              for(const name of plan.remove) await github.rest.issues.removeLabel({...context.repo,issue_number:number,name});
-            }
-            await github.rest.issues.createComment({...context.repo,issue_number:prNumber,body:`Independent reviewer failed closed for exact SHA ${process.env.SHA}: missing/invalid OPENAI_API_KEY or reviewer action/output failure; no PASS was synthesized.`});
+    with:
+      pr_number: ${{ fromJSON(needs.prepare.outputs.pr_number) }}
+      head_sha: ${{ needs.prepare.outputs.head_sha }}
+      reason: Reviewer execution or output failed closed; no PASS was synthesized.
