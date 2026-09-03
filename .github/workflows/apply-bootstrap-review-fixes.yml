@@ -25,11 +25,12 @@ jobs:
         run: |
           git diff --check
           ruby -e 'require "yaml"; YAML.load_file(".github/workflows/bootstrap-issue-100-publisher.yml", aliases: true)'
-      - name: Remove one-shot patcher and publish fix commit
+      - name: Export patched workflow as inert blob
         run: |
-          git rm .github/scripts/apply-bootstrap-review-fixes.py .github/workflows/apply-bootstrap-review-fixes.yml
-          git add .github/workflows/bootstrap-issue-100-publisher.yml
+          cp .github/workflows/bootstrap-issue-100-publisher.yml .github/bootstrap-patched-output.txt
+          git checkout -- .github/workflows/bootstrap-issue-100-publisher.yml
+          git add .github/bootstrap-patched-output.txt
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git commit -m 'Harden bootstrap publisher recovery checks'
+          git commit -m 'Export patched bootstrap workflow blob'
           git push origin HEAD:bootstrap/issue-100-autonomous-pipeline
