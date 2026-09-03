@@ -181,14 +181,48 @@ jobs:
         with: {ref: '${{ needs.classify.outputs.source_sha }}', path: candidate, persist-credentials: false}
       - name: Build bounded non-executable source context
         working-directory: candidate
+        env:
+          FIX_SCOPE: '${{ needs.classify.outputs.fix_scope }}'
+          DIAGNOSTIC: '${{ needs.classify.outputs.diagnostic }}'
         run: |
           mkdir "$RUNNER_TEMP/generation-context"
           node - <<'NODE' > "$RUNNER_TEMP/generation-context/source-context.json"
-          const fs=require('fs'),path=require('path'),p=require('../.trusted-policy/.github/scripts/agent-pipeline.cjs'),c=require('../.trusted-policy/.github/agent-pipeline.json');
+          const fs=require('fs'),path=require('path'),{execFileSync}=require('child_process'),p=require('../.trusted-policy/.github/scripts/agent-pipeline.cjs'),c=require('../.trusted-policy/.github/agent-pipeline.json');
+          const SOURCE_CONTEXT_MAX_BYTES=917504;
           const roots=['backend/src','backend/tests','frontend/src','frontend/app','frontend/components'];
-          const files=[]; function walk(dir){if(!fs.existsSync(dir))return;for(const e of fs.readdirSync(dir,{withFileTypes:true})){const n=path.join(dir,e.name);if(e.isDirectory())walk(n);else if(e.isFile()&&p.validatePatchPaths([n],c.v2))files.push({path:n,content:fs.readFileSync(n,'utf8')});}}
-          roots.forEach(walk); const out=JSON.stringify({format:'source-context-v1',files});
-          if(Buffer.byteLength(out)>2097152) throw new Error('SOURCE_CONTEXT_TOO_LARGE'); process.stdout.write(out);
+          const filesByPath=new Map();
+          function addFile(filePath,{required=false}={}) {
+            if (!p.validatePatchPaths([filePath],c.v2)) return false;
+            if (filesByPath.has(filePath)) return true;
+            let entry;
+            try { entry = fs.lstatSync(filePath,{throwIfNoEntry:false}); } catch (error) {
+              if(required) throw new Error(`PRIORITY_SOURCE_CONTEXT_LSTAT_FAILED:${filePath}`);
+              return false;
+            }
+            if(!entry) {
+              if(required) throw new Error(`PRIORITY_SOURCE_CONTEXT_MISSING:${filePath}`);
+              return false;
+            }
+            if(!entry.isFile()) {
+              if(required) throw new Error(`PRIORITY_SOURCE_CONTEXT_NOT_REGULAR_FILE:${filePath}`);
+              return false;
+            }
+            try {
+              filesByPath.set(filePath,{path:filePath,content:fs.readFileSync(filePath,'utf8')});
+            } catch (error) {
+              if(required) throw new Error(`PRIORITY_SOURCE_CONTEXT_READ_FAILED:${filePath}`);
+              return false;
+            }
+            return true;
+          }
+          function walk(dir){if(!fs.existsSync(dir))return;for(const e of fs.readdirSync(dir,{withFileTypes:true})){const n=path.join(dir,e.name);if(e.isDirectory())walk(n);else if(e.isFile())addFile(n);}}
+          roots.forEach(walk);
+          const trackedEntries = p.parseTrackedIndexEntries(execFileSync('git',['ls-files','--stage','-z'],{encoding:'utf8'}));
+          const plan = p.trackedPriorityMaterializationPlan({trackedEntries,fixScopePaths:process.env.FIX_SCOPE,diagnostic:process.env.DIAGNOSTIC,config:c.v2});
+          if(!plan.ok) throw new Error(plan.reason);
+          for(const filePath of plan.priorityPaths) addFile(filePath,{required:true});
+          const out=p.buildBoundedSourceContext({files:[...filesByPath.values()],fixScopePaths:process.env.FIX_SCOPE,diagnostic:process.env.DIAGNOSTIC,sourceBudgetBytes:SOURCE_CONTEXT_MAX_BYTES}).json;
+          process.stdout.write(out);
           NODE
           cp ../.trusted-policy/AGENTS.md "$RUNNER_TEMP/generation-context/trusted-AGENTS.md"
           cp ../.trusted-policy/.github/agent-pipeline.json "$RUNNER_TEMP/generation-context/trusted-policy.json"
@@ -229,7 +263,7 @@ jobs:
           cat .codex-input/trusted-AGENTS.md .codex-input/trusted-policy.json >> .codex-input/prompt.md
           printf '\n--- END TRUSTED GOVERNANCE ---' >> .codex-input/prompt.md
           printf '\nFailure class: %s\nExact SHA: %s\n' "$FAILURE_CLASS" "$SOURCE_SHA" >> .codex-input/prompt.md
-          test "$(stat -c%s .codex-input/prompt.md)" -le 2113536
+          test "$(stat -c%s .codex-input/prompt.md)" -lt 1048576
       - name: Vygeneruj pouze omezený patch; nespouštěj repository kód
         uses: openai/codex-action@86365089eb2b84e0a8fb0717b304f8bdcb13b20e # immutable pin
         with:

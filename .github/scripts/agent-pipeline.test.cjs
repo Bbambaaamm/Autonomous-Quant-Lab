@@ -551,6 +551,160 @@ test("v2 fix scope and durable classification records are deterministic", () => 
   assert.equal(marker,pipeline.classificationMarker(record,agentConfig.v2));
 });
 
+test("Issue #99 source context ordering, truncation, and fail-closed priority are deterministic", () => {
+  const files = [
+    { path: "backend/src/aa_generic.py", content: "g".repeat(256) },
+    { path: "frontend/lib/zz_changed.ts", content: "f".repeat(256) },
+    { path: "frontend/lib/mm_diagnostic.ts", content: "d".repeat(256) },
+    { path: "backend/src/zz_generic.py", content: "z".repeat(256) },
+  ];
+  const fixScope = ["frontend/lib/zz_changed.ts"];
+  const diagnostic = JSON.stringify({ excerpt: "FAILED in frontend/lib/mm_diagnostic.ts line 10" });
+  const wide = pipeline.buildBoundedSourceContext({ files, fixScopePaths: fixScope, diagnostic, sourceBudgetBytes: 50_000 });
+  assert.deepEqual(wide.files.map((file) => file.path), [
+    "frontend/lib/zz_changed.ts",
+    "frontend/lib/mm_diagnostic.ts",
+    "backend/src/aa_generic.py",
+    "backend/src/zz_generic.py",
+  ]);
+  const firstThree = wide.files.slice(0, 3);
+  const truncatedBudget = Buffer.byteLength(JSON.stringify({ format: "source-context-v1", files: firstThree }));
+  const truncated = pipeline.buildBoundedSourceContext({ files, fixScopePaths: fixScope, diagnostic, sourceBudgetBytes: truncatedBudget });
+  assert.deepEqual(truncated.files.map((file) => file.path), [
+    "frontend/lib/zz_changed.ts",
+    "frontend/lib/mm_diagnostic.ts",
+    "backend/src/aa_generic.py",
+  ]);
+  assert.equal(truncated.files.some((file) => file.path === "frontend/lib/zz_changed.ts"), true);
+  assert.equal(truncated.files.some((file) => file.path === "frontend/lib/mm_diagnostic.ts"), true);
+  assert.equal(truncated.files.some((file) => file.path === "backend/src/zz_generic.py"), false);
+  assert.equal(truncated.json, pipeline.buildBoundedSourceContext({ files, fixScopePaths: fixScope, diagnostic, sourceBudgetBytes: truncatedBudget }).json);
+  const fixOnlyBudget = Buffer.byteLength(JSON.stringify({ format: "source-context-v1", files: [wide.files[0]] }));
+  assert.throws(() => pipeline.buildBoundedSourceContext({
+    files, fixScopePaths: fixScope, diagnostic, sourceBudgetBytes: fixOnlyBudget - 1,
+  }), /PRIORITY_SOURCE_CONTEXT_TOO_LARGE/);
+});
+
+test("Issue #99 priority path ordering is locale-independent and bytewise deterministic", () => {
+  const eligible = ["frontend/lib/a.ts", "frontend/lib/A.ts", "frontend/lib/á.ts", "frontend/lib/b.ts"];
+  const fixScope = ["frontend/lib/á.ts", "frontend/lib/A.ts"];
+  const diagnostic = JSON.stringify({ excerpt: "AssertionError at frontend/lib/a.ts" });
+  assert.deepEqual(pipeline.prioritizedEligiblePaths({ eligiblePaths: eligible, fixScopePaths: fixScope, diagnostic }), [
+    "frontend/lib/A.ts",
+    "frontend/lib/á.ts",
+    "frontend/lib/a.ts",
+    "frontend/lib/b.ts",
+  ]);
+  const files = eligible.map((filePath) => ({ path: filePath, content: "x" }));
+  const left = pipeline.buildBoundedSourceContext({ files, fixScopePaths: fixScope, diagnostic, sourceBudgetBytes: 5000 }).json;
+  const right = pipeline.buildBoundedSourceContext({ files, fixScopePaths: fixScope, diagnostic, sourceBudgetBytes: 5000 }).json;
+  assert.equal(left, right);
+});
+
+test("Issue #99 diagnostic relevance supports trusted cwd-relative aliases without fuzzy suffix matches", () => {
+  const files = [
+    { path: "backend/tests/test_example.py", content: "a".repeat(64) },
+    { path: "backend/src/quantlab/example.py", content: "b".repeat(64) },
+    { path: "frontend/src/example.ts", content: "c".repeat(64) },
+    { path: "backend/tests/unrelated.py", content: "d".repeat(64) },
+  ];
+  assert.equal(pipeline.diagnosticMentionsEligiblePath(
+    "backend/tests/test_example.py",
+    JSON.stringify({ job: "unit-research", failureClass: "unit-test", excerpt: "FAILED tests/test_example.py::test_x" })
+  ), true);
+  assert.equal(pipeline.diagnosticMentionsEligiblePath(
+    "backend/src/quantlab/example.py",
+    JSON.stringify({ job: "quality", failureClass: "lint-format", excerpt: "src/quantlab/example.py:1:1: F401" })
+  ), true);
+  assert.equal(pipeline.diagnosticMentionsEligiblePath(
+    "frontend/src/example.ts",
+    JSON.stringify({ job: "frontend", failureClass: "frontend-test-build", excerpt: "src/example.ts:12:3" })
+  ), true);
+  assert.equal(pipeline.diagnosticMentionsEligiblePath(
+    "backend/tests/test_example.py",
+    JSON.stringify({ job: "integration-postgres", failureClass: "integration-postgres", excerpt: "tests/test_example.py" })
+  ), false);
+  assert.equal(pipeline.diagnosticMentionsEligiblePath(
+    "backend/tests/test_example.py",
+    JSON.stringify({ job: "unit-research", failureClass: "unit-test", excerpt: "FAILED test_example.py only" })
+  ), false);
+  assert.equal(pipeline.diagnosticMentionsEligiblePath(
+    "backend/src/quantlab/example.py",
+    JSON.stringify({ job: "quality", failureClass: "lint-format", excerpt: "backend/src/quantlab/example.py:1:1" })
+  ), true);
+
+  const fixScope = ["backend/src/quantlab/priority.py"];
+  const contextFiles = [
+    { path: "backend/src/quantlab/priority.py", content: "p".repeat(64) },
+    ...files,
+    { path: "backend/src/quantlab/zzz_generic.py", content: "z".repeat(64) },
+  ];
+  const wide = pipeline.buildBoundedSourceContext({
+    files: contextFiles,
+    fixScopePaths: fixScope,
+    diagnostic: JSON.stringify({ job: "unit-research", failureClass: "unit-test", excerpt: "FAILED tests/test_example.py::test_x" }),
+    sourceBudgetBytes: 10_000,
+  });
+  const firstTwo = wide.files.slice(0, 2);
+  const tightBudget = Buffer.byteLength(JSON.stringify({ format: "source-context-v1", files: firstTwo }));
+  const tight = pipeline.buildBoundedSourceContext({
+    files: contextFiles,
+    fixScopePaths: fixScope,
+    diagnostic: JSON.stringify({ job: "unit-research", failureClass: "unit-test", excerpt: "FAILED tests/test_example.py::test_x" }),
+    sourceBudgetBytes: tightBudget,
+  });
+  assert.deepEqual(tight.files.map((file) => file.path), [
+    "backend/src/quantlab/priority.py",
+    "backend/tests/test_example.py",
+  ]);
+  const again = pipeline.buildBoundedSourceContext({
+    files: contextFiles,
+    fixScopePaths: fixScope,
+    diagnostic: JSON.stringify({ job: "unit-research", failureClass: "unit-test", excerpt: "FAILED tests/test_example.py::test_x" }),
+    sourceBudgetBytes: tightBudget,
+  });
+  assert.equal(tight.json, again.json);
+  const overflowFile = { path: "backend/tests/test_example.py", content: "x".repeat(200) };
+  const overflowBudget = Buffer.byteLength(JSON.stringify({ format: "source-context-v1", files: [overflowFile] })) - 1;
+  assert.throws(() => pipeline.buildBoundedSourceContext({
+    files: [overflowFile, { path: "backend/src/quantlab/generic.py", content: "g".repeat(8) }],
+    fixScopePaths: [],
+    diagnostic: JSON.stringify({ job: "unit-research", failureClass: "unit-test", excerpt: "FAILED tests/test_example.py::test_x" }),
+    sourceBudgetBytes: overflowBudget,
+  }), /PRIORITY_SOURCE_CONTEXT_TOO_LARGE/);
+});
+
+test("Issue #99 tracked-index plan rejects priority symlinks and excludes generic symlinks", () => {
+  const tracked = pipeline.parseTrackedIndexEntries(
+    "120000 1111111111111111111111111111111111111111 0\tfrontend/lib/zz_changed.ts\0" +
+    "100644 2222222222222222222222222222222222222222 0\tfrontend/lib/mm_diagnostic.ts\0" +
+    "120000 3333333333333333333333333333333333333333 0\tfrontend/src/generic-link.ts\0" +
+    "100644 4444444444444444444444444444444444444444 0\tfrontend/src/regular.ts\0"
+  );
+  assert.deepEqual(pipeline.trackedEligibleRegularPaths({ trackedEntries: tracked, config: agentConfig.v2 }), [
+    "frontend/lib/mm_diagnostic.ts",
+    "frontend/src/regular.ts",
+  ]);
+  const failPlan = pipeline.trackedPriorityMaterializationPlan({
+    trackedEntries: tracked,
+    fixScopePaths: ["frontend/lib/zz_changed.ts"],
+    diagnostic: JSON.stringify({ excerpt: "FAILED frontend/lib/mm_diagnostic.ts" }),
+    config: agentConfig.v2,
+  });
+  assert.equal(failPlan.ok, false);
+  assert.match(failPlan.reason, /^PRIORITY_SOURCE_CONTEXT_UNSAFE_TRACKED_ENTRY:frontend\/lib\/zz_changed\.ts$/);
+
+  const okPlan = pipeline.trackedPriorityMaterializationPlan({
+    trackedEntries: tracked,
+    fixScopePaths: ["frontend/lib/mm_diagnostic.ts"],
+    diagnostic: JSON.stringify({ excerpt: "FAILED frontend/src/regular.ts" }),
+    config: agentConfig.v2,
+  });
+  assert.equal(okPlan.ok, true);
+  assert.deepEqual(okPlan.priorityPaths, ["frontend/lib/mm_diagnostic.ts", "frontend/src/regular.ts"]);
+  assert.equal(okPlan.eligibleRegularPaths.includes("frontend/src/generic-link.ts"), false);
+});
+
 test("v2 write job executes only trusted policy and treats candidate checkout as data", () => {
   const fixer=fs.readFileSync(".github/workflows/agent-ci-fixer.yml","utf8");
   const publish=fixer.slice(fixer.indexOf("trusted-publish:"),fixer.indexOf("fail-closed-finalizer:"));
@@ -723,4 +877,13 @@ test("v2 classify job guard admits reusable review-block despite inherited calle
   assert.equal(classifyRuns({eventName:"workflow_run",conclusion:"success",mode:"review-block"}),true);
   assert.equal(classifyRuns({eventName:"workflow_dispatch",conclusion:undefined,mode:"review-block"}),true);
   assert.equal(classifyRuns({eventName:"workflow_run",conclusion:"success",mode:""}),false);
+  assert.match(fixer,/prepare-generation-context:[\s\S]*FIX_SCOPE: '\$\{\{ needs\.classify\.outputs\.fix_scope \}\}'[\s\S]*DIAGNOSTIC: '\$\{\{ needs\.classify\.outputs\.diagnostic \}\}'/);
+  assert.match(fixer,/git',\['ls-files','--stage','-z'\]/);
+  assert.match(fixer,/parseTrackedIndexEntries\(/);
+  assert.match(fixer,/trackedPriorityMaterializationPlan\(\{trackedEntries,fixScopePaths:process\.env\.FIX_SCOPE,diagnostic:process\.env\.DIAGNOSTIC,config:c\.v2\}\)/);
+  assert.match(fixer,/fs\.lstatSync/);
+  assert.doesNotMatch(fixer,/fs\.statSync/);
+  assert.match(fixer,/buildBoundedSourceContext\(\{files:\[\.\.\.filesByPath\.values\(\)\],fixScopePaths:process\.env\.FIX_SCOPE,diagnostic:process\.env\.DIAGNOSTIC,sourceBudgetBytes:SOURCE_CONTEXT_MAX_BYTES\}\)/);
+  assert.match(fixer,/SOURCE_CONTEXT_MAX_BYTES=917504/);
+  assert.match(fixer,/test "\$\(stat -c%s \.codex-input\/prompt\.md\)" -lt 1048576/);
 });
