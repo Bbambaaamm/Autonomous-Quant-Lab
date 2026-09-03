@@ -185,10 +185,13 @@ jobs:
           mkdir "$RUNNER_TEMP/generation-context"
           node - <<'NODE' > "$RUNNER_TEMP/generation-context/source-context.json"
           const fs=require('fs'),path=require('path'),p=require('../.trusted-policy/.github/scripts/agent-pipeline.cjs'),c=require('../.trusted-policy/.github/agent-pipeline.json');
+          const SOURCE_CONTEXT_MAX_BYTES=983040;
           const roots=['backend/src','backend/tests','frontend/src','frontend/app','frontend/components'];
           const files=[]; function walk(dir){if(!fs.existsSync(dir))return;for(const e of fs.readdirSync(dir,{withFileTypes:true})){const n=path.join(dir,e.name);if(e.isDirectory())walk(n);else if(e.isFile()&&p.validatePatchPaths([n],c.v2))files.push({path:n,content:fs.readFileSync(n,'utf8')});}}
-          roots.forEach(walk); const out=JSON.stringify({format:'source-context-v1',files});
-          if(Buffer.byteLength(out)>2097152) throw new Error('SOURCE_CONTEXT_TOO_LARGE'); process.stdout.write(out);
+          roots.forEach(walk); files.sort((a,b)=>a.path.localeCompare(b.path));
+          let bounded=files.slice(); let out=JSON.stringify({format:'source-context-v1',files:bounded});
+          while(Buffer.byteLength(out)>SOURCE_CONTEXT_MAX_BYTES&&bounded.length>1){bounded.pop();out=JSON.stringify({format:'source-context-v1',files:bounded});}
+          if(Buffer.byteLength(out)>SOURCE_CONTEXT_MAX_BYTES) throw new Error('SOURCE_CONTEXT_TOO_LARGE'); process.stdout.write(out);
           NODE
           cp ../.trusted-policy/AGENTS.md "$RUNNER_TEMP/generation-context/trusted-AGENTS.md"
           cp ../.trusted-policy/.github/agent-pipeline.json "$RUNNER_TEMP/generation-context/trusted-policy.json"
@@ -229,7 +232,7 @@ jobs:
           cat .codex-input/trusted-AGENTS.md .codex-input/trusted-policy.json >> .codex-input/prompt.md
           printf '\n--- END TRUSTED GOVERNANCE ---' >> .codex-input/prompt.md
           printf '\nFailure class: %s\nExact SHA: %s\n' "$FAILURE_CLASS" "$SOURCE_SHA" >> .codex-input/prompt.md
-          test "$(stat -c%s .codex-input/prompt.md)" -le 2113536
+          test "$(stat -c%s .codex-input/prompt.md)" -le 1048576
       - name: Vygeneruj pouze omezený patch; nespouštěj repository kód
         uses: openai/codex-action@86365089eb2b84e0a8fb0717b304f8bdcb13b20e # immutable pin
         with:
