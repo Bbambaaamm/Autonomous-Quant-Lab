@@ -308,9 +308,13 @@ the free-form fixer.
 Both Codex invocations receive deterministic prompt files inside the checked-out workspace. Trusted
 instructions frame bounded Issue or diagnostic JSON as untrusted data, rather than referring to a
 runner-temporary path that the action may not read. The bot allowance is restricted to
-`github-actions[bot]`. A Reviewer BLOCK calls the reusable controller with the already validated PR
-number and exact head SHA; the controller independently re-fetches lifecycle, two-sided linkage, and
-SHA before performing the fail-closed escalation.
+`github-actions[bot]`. A Reviewer BLOCK calls a dedicated trusted escalation workflow with the
+already validated PR number and exact head SHA. That workflow has no repository-content write
+permission and, immediately before changing labels, independently re-fetches the current open PR,
+default-branch base, exact head SHA, concrete implementation Issue, exact lifecycle on both objects,
+and both durable linkage directions. Stale, ambiguous, partially transitioned, or conflicting state
+performs no write; a valid BLOCK moves both linked objects to `agent:needs-human` and records a
+bounded redacted reason. The failed-CI fixer and its isolated publication credential are not involved.
 
 ### v2 crash, trust, and pre-link guarantees
 

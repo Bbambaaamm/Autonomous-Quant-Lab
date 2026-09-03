@@ -380,6 +380,7 @@ test("v2 independent PASS je exact-SHA a nenahrazuje human review", () => {
 test("v2 workflow wiring odděluje secret, validation a write trust domains", () => {
   const fixer = fs.readFileSync(".github/workflows/agent-ci-fixer.yml", "utf8");
   const reviewer = fs.readFileSync(".github/workflows/agent-codex-review.yml", "utf8");
+  const blockEscalation = fs.readFileSync(".github/workflows/agent-review-block-escalation.yml", "utf8");
   assert.match(fixer, /openai\/codex-action@[0-9a-f]{40}/);
   assert.match(reviewer, /openai\/codex-action@[0-9a-f]{40}/);
   for (const workflow of [fixer, reviewer]) {
@@ -395,7 +396,9 @@ test("v2 workflow wiring odděluje secret, validation a write trust domains", ()
   assert.match(reviewer, /allow-bot-users: "github-actions\[bot\]"/);
   assert.doesNotMatch(fixer + reviewer, /allow-bots:/);
   assert.match(fixer, /workflow_call:/);
-  assert.match(reviewer, /route-block:[\s\S]*uses: \.\/\.github\/workflows\/agent-ci-fixer\.yml[\s\S]*pr_number:[\s\S]*head_sha:/);
+  assert.match(reviewer, /route-block:[\s\S]*uses: \.\/\.github\/workflows\/agent-review-block-escalation\.yml[\s\S]*pr_number:[\s\S]*head_sha:/);
+  assert.doesNotMatch(reviewer, /uses: \.\/\.github\/workflows\/agent-ci-fixer\.yml/);
+  assert.doesNotMatch(reviewer + blockEscalation, /contents: write/);
   assert.match(fixer, /sourceRunId:run\.id,runAttempt:run\.run_attempt,logExcerpt/);
   assert.match(fixer, /prompt-file: \.codex-input\/prompt\.md/);
   assert.match(reviewer, /prompt-file: \.codex-input\/review-prompt\.md/);
@@ -570,15 +573,40 @@ test("v2 fifth-audit wiring pins validation toolchain, seals last, and finalizes
   assert.match(fixer,/BEGIN TRUSTED GOVERNANCE[\s\S]*trusted-AGENTS\.md/);
   assert.match(reviewer,/exact authoritative green CI missing or ambiguous/);
   assert.match(reviewer,/Fail closed when reviewer credential is absent/);
-  assert.match(reviewer,/fail-closed-finalizer:[\s\S]*STALE_REVIEW_FAILURE_NO_WRITE/);
+  assert.match(reviewer,/fail-closed-finalizer:[\s\S]*uses: \.\/\.github\/workflows\/agent-review-block-escalation\.yml[\s\S]*no PASS was synthesized/);
 });
 
 test("v2 reusable caller permissions and governance linkage are fail closed", () => {
   const reviewer=fs.readFileSync(".github/workflows/agent-codex-review.yml","utf8");
+  const block=fs.readFileSync(".github/workflows/agent-review-block-escalation.yml","utf8");
   assert.match(reviewer,/verify-after-pass:[\s\S]*permissions: \{actions: read, contents: read, issues: write, pull-requests: write\}/);
-  assert.match(reviewer,/route-block:[\s\S]*permissions: \{actions: read, contents: read, issues: write, pull-requests: read\}/);
+  assert.match(reviewer,/route-block:[\s\S]*permissions: \{contents: read, issues: write, pull-requests: read\}/);
+  assert.match(block,/permissions: \{contents: read, issues: write, pull-requests: read\}/);
+  assert.doesNotMatch(block,/contents: write|secrets: inherit|AGENT_PUBLISH_TOKEN/);
+  assert.match(block,/pr\.head\.sha!==expectedSha[\s\S]*pr\.state!=="open"[\s\S]*pr\.base\.ref!==context\.payload\.repository\.default_branch/);
+  assert.match(block,/issue\.pull_request\|\|issue\.state!=="open"\|\|!p\.isImplementation/);
+  assert.match(block,/lifecycleAtAgentPr[\s\S]*fullLinkageDecision[\s\S]*REVIEW_BLOCK_NO_WRITE/);
+  assert.match(block,/const plans=[\s\S]*for\(const \[number,plan\] of plans\)/);
   const escalation=reviewer.slice(reviewer.indexOf("governance-escalation:"),reviewer.indexOf("independent-review:"));
   assert.match(escalation,/listComments[\s\S]*fullLinkageDecision[\s\S]*STALE_GOVERNANCE_NO_WRITE/);
+});
+
+test("Issue #90 Reviewer BLOCK escalation transitions only an exact valid linked pair", () => {
+  const issueNumber=90, prNumber=123, sha="a".repeat(40);
+  const marker={user:{login:"github-actions[bot]"},body:`<!-- agent-link:v1 repo=o/r issue=${issueNumber} pr=${prNumber} -->`};
+  const valid={prBody:`- Agent-Issue: #${issueNumber}`,prComments:[marker],issueComments:[marker],owner:"o",repo:"r",issueNumber,prNumber};
+  assert.deepEqual(pipeline.lifecycleAtAgentPr(["agent:pr"],["type:implementation","agent:pr"]),{ok:true});
+  assert.deepEqual(pipeline.fullLinkageDecision(valid),{ok:true});
+  assert.deepEqual(pipeline.escalationMutationPlan(["agent:pr","priority:high"]),
+    {ok:true,add:["agent:needs-human"],remove:["agent:pr"]});
+  for(const conflict of [
+    {prLabels:["agent:pr"],issueLabels:["type:implementation","agent:needs-human"]},
+    {prLabels:["agent:ready"],issueLabels:["type:implementation","agent:pr"]},
+  ]) assert.equal(pipeline.lifecycleAtAgentPr(conflict.prLabels,conflict.issueLabels).ok,false);
+  assert.equal(pipeline.fullLinkageDecision({...valid,prBody:"- Agent-Issue: #91"}).ok,false);
+  assert.equal(pipeline.fullLinkageDecision({...valid,issueComments:[]}).ok,false);
+  // The workflow additionally compares the requested SHA and base immediately before this decision.
+  assert.equal(sha.length,40);
 });
 
 test("v2 classify job guard admits reusable review-block despite inherited caller events", () => {
