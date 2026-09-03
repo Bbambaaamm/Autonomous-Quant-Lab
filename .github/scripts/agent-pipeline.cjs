@@ -268,6 +268,10 @@ function parseJsonStringArray(value) {
   return parsed.filter((item) => typeof item === "string");
 }
 
+function stableByteCompare(left, right) {
+  return Buffer.compare(Buffer.from(left, "utf8"), Buffer.from(right, "utf8"));
+}
+
 function diagnosticExcerpt(value) {
   if (!value) return "";
   if (typeof value === "string") {
@@ -287,18 +291,41 @@ function diagnosticMentionsPath(text, filePath) {
   return new RegExp(`(^|[^A-Za-z0-9_./-])${escaped}(?=$|[^A-Za-z0-9_./-])`).test(text);
 }
 
+function prioritizedEligiblePaths({ eligiblePaths = [], fixScopePaths = [], diagnostic = "" }) {
+  const eligible = [...new Set(parseJsonStringArray(eligiblePaths))];
+  const eligibleSet = new Set(eligible);
+  const fixScope = new Set(parseJsonStringArray(fixScopePaths).filter((filePath) => eligibleSet.has(filePath)));
+  const excerpt = diagnosticExcerpt(diagnostic);
+  const diagnosticPaths = new Set(eligible
+    .filter((filePath) => !fixScope.has(filePath) && excerpt && diagnosticMentionsPath(excerpt, filePath)));
+  const toSorted = (items) => [...items].sort(stableByteCompare);
+  return [
+    ...toSorted(fixScope),
+    ...toSorted(diagnosticPaths),
+    ...toSorted(eligible.filter((filePath) => !fixScope.has(filePath) && !diagnosticPaths.has(filePath))),
+  ];
+}
+
 function buildBoundedSourceContext({ files, fixScopePaths = [], diagnostic = "", sourceBudgetBytes }) {
   if (!Number.isSafeInteger(sourceBudgetBytes) || sourceBudgetBytes < 256) throw new Error("INVALID_SOURCE_CONTEXT_BUDGET");
   const normalized = [...new Map((files || [])
     .filter((file) => typeof file?.path === "string" && typeof file?.content === "string")
     .map((file) => [file.path, { path: file.path, content: file.content }])).values()];
-  const fixScope = new Set(parseJsonStringArray(fixScopePaths));
+  const eligible = normalized.map((file) => file.path);
+  const fixScope = new Set(parseJsonStringArray(fixScopePaths).filter((filePath) => eligible.includes(filePath)));
   const excerpt = diagnosticExcerpt(diagnostic);
-  const prioritized = normalized.map((file) => ({
-    ...file,
-    tier: fixScope.has(file.path) ? 0 : (excerpt && diagnosticMentionsPath(excerpt, file.path) ? 1 : 2),
-  })).sort((left, right) => left.tier - right.tier || left.path.localeCompare(right.path));
-  const prioritySet = new Set(prioritized.filter((file) => file.tier < 2).map((file) => file.path));
+  const diagnosticPaths = new Set(eligible
+    .filter((filePath) => !fixScope.has(filePath) && excerpt && diagnosticMentionsPath(excerpt, filePath)));
+  const pathOrder = prioritizedEligiblePaths({
+    eligiblePaths: eligible,
+    fixScopePaths,
+    diagnostic,
+  });
+  const rank = new Map(pathOrder.map((filePath, index) => [filePath, index]));
+  const prioritized = normalized
+    .map((file) => ({ ...file, rank: rank.get(file.path) ?? Number.MAX_SAFE_INTEGER }))
+    .sort((left, right) => left.rank - right.rank);
+  const prioritySet = new Set([...fixScope, ...diagnosticPaths]);
   const selected = [];
   let out = JSON.stringify({ format: "source-context-v1", files: selected });
   if (Buffer.byteLength(out) > sourceBudgetBytes) throw new Error("SOURCE_CONTEXT_TOO_LARGE");
@@ -530,6 +557,7 @@ module.exports = {
   lifecycleAtAgentPr,
   fullLinkageDecision,
   trustedArtifactDecision,
+  prioritizedEligiblePaths,
   buildBoundedSourceContext,
   fixScopeDecision,
   classificationMarker,
