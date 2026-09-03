@@ -76,8 +76,8 @@ def test_provider_identity_and_quality_events() -> None:
 
 
 def test_us_exchange_calendar_rejects_saturday() -> None:
-    calendar=USExchangeCalendar(frozenset())
-    assert calendar.is_session(date(2025,1,4)) is False
+    calendar = USExchangeCalendar(frozenset())
+    assert calendar.is_session(date(2025, 1, 4)) is False
 
 
 def test_split_and_walk_forward_boundaries() -> None:
