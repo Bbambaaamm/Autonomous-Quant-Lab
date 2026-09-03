@@ -260,6 +260,177 @@ function fixScopeDecision(paths, baselinePaths, config) {
     ? { ok: true, paths: [...paths].sort() } : { ok: false, reason: "OUTSIDE_AUTHORIZED_FIX_SCOPE" };
 }
 
+function parseJsonStringArray(value) {
+  if (Array.isArray(value)) return value.filter((item) => typeof item === "string");
+  if (typeof value !== "string" || !value.trim()) return [];
+  const parsed = JSON.parse(value);
+  if (!Array.isArray(parsed)) throw new Error("INVALID_JSON_STRING_ARRAY");
+  return parsed.filter((item) => typeof item === "string");
+}
+
+function stableByteCompare(left, right) {
+  return Buffer.compare(Buffer.from(left, "utf8"), Buffer.from(right, "utf8"));
+}
+
+function parseTrackedIndexEntries(rawTrackedIndex) {
+  return String(rawTrackedIndex || "")
+    .split("\0")
+    .filter(Boolean)
+    .map((entry) => {
+      const match = /^([0-9]{6}) [0-9a-f]{40} ([0-3])\t(.+)$/.exec(entry);
+      if (!match) throw new Error("INVALID_TRACKED_INDEX_ENTRY");
+      return { mode: match[1], stage: Number(match[2]), path: match[3] };
+    });
+}
+
+function diagnosticExcerpt(value) {
+  if (!value) return "";
+  if (typeof value === "string") {
+    try {
+      const parsed = JSON.parse(value);
+      return typeof parsed?.excerpt === "string" ? parsed.excerpt : value;
+    } catch {
+      return value;
+    }
+  }
+  if (typeof value === "object" && value !== null && typeof value.excerpt === "string") return value.excerpt;
+  return String(value);
+}
+
+function parseDiagnosticMetadata(value) {
+  if (typeof value === "object" && value !== null) return value;
+  if (typeof value !== "string" || !value.trim()) return {};
+  try {
+    const parsed = JSON.parse(value);
+    return typeof parsed === "object" && parsed !== null ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function diagnosticWorkingDirectoryPrefixes(metadata = {}) {
+  const backendJobs = new Set(["quality", "unit-research", "api"]);
+  if (backendJobs.has(metadata.job)) return ["backend"];
+  if (metadata.job === "frontend" || metadata.failureClass === "frontend-test-build") return ["frontend"];
+  return [];
+}
+
+function diagnosticMentionsPath(text, filePath) {
+  const escaped = filePath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`(^|[^A-Za-z0-9_./-])${escaped}(?=$|[^A-Za-z0-9_./-])`).test(text);
+}
+
+function diagnosticPathAliases(canonicalPath, metadata = {}) {
+  const aliases = [canonicalPath];
+  for (const prefix of diagnosticWorkingDirectoryPrefixes(metadata)) {
+    const root = `${prefix}/`;
+    if (canonicalPath.startsWith(root)) aliases.push(canonicalPath.slice(root.length));
+  }
+  return [...new Set(aliases)];
+}
+
+function diagnosticMentionsEligiblePath(canonicalPath, diagnostic = "") {
+  const metadata = parseDiagnosticMetadata(diagnostic);
+  const excerpt = diagnosticExcerpt(diagnostic);
+  if (!excerpt) return false;
+  return diagnosticPathAliases(canonicalPath, metadata)
+    .some((alias) => diagnosticMentionsPath(excerpt, alias));
+}
+
+function prioritizedEligiblePaths({ eligiblePaths = [], fixScopePaths = [], diagnostic = "" }) {
+  const eligible = [...new Set(parseJsonStringArray(eligiblePaths))];
+  const eligibleSet = new Set(eligible);
+  const fixScope = new Set(parseJsonStringArray(fixScopePaths).filter((filePath) => eligibleSet.has(filePath)));
+  const diagnosticPaths = new Set(eligible
+    .filter((filePath) => !fixScope.has(filePath) && diagnosticMentionsEligiblePath(filePath, diagnostic)));
+  const toSorted = (items) => [...items].sort(stableByteCompare);
+  return [
+    ...toSorted(fixScope),
+    ...toSorted(diagnosticPaths),
+    ...toSorted(eligible.filter((filePath) => !fixScope.has(filePath) && !diagnosticPaths.has(filePath))),
+  ];
+}
+
+function prioritizedEligiblePathGroups({ eligiblePaths = [], fixScopePaths = [], diagnostic = "" }) {
+  const ordered = prioritizedEligiblePaths({ eligiblePaths, fixScopePaths, diagnostic });
+  const eligible = new Set(parseJsonStringArray(eligiblePaths));
+  const fixScope = new Set(parseJsonStringArray(fixScopePaths).filter((filePath) => eligible.has(filePath)));
+  const diagnosticSet = new Set(
+    [...eligible].filter((filePath) => !fixScope.has(filePath) && diagnosticMentionsEligiblePath(filePath, diagnostic))
+  );
+  const generic = ordered.filter((filePath) => !fixScope.has(filePath) && !diagnosticSet.has(filePath));
+  return {
+    fixScope: ordered.filter((filePath) => fixScope.has(filePath)),
+    diagnostic: ordered.filter((filePath) => diagnosticSet.has(filePath)),
+    generic,
+    ordered,
+  };
+}
+
+function trackedEligibleRegularPaths({ trackedEntries = [], config }) {
+  const allowedModes = new Set(["100644", "100755"]);
+  return [...new Set((trackedEntries || [])
+    .filter((entry) => entry?.stage === 0 && typeof entry.path === "string" && allowedModes.has(entry.mode))
+    .map((entry) => entry.path)
+    .filter((filePath) => validatePatchPaths([filePath], config)))]
+    .sort(stableByteCompare);
+}
+
+function trackedPriorityMaterializationPlan({ trackedEntries = [], fixScopePaths = [], diagnostic = "", config }) {
+  const policyPaths = [...new Set((trackedEntries || [])
+    .filter((entry) => entry?.stage === 0 && typeof entry.path === "string")
+    .map((entry) => entry.path)
+    .filter((filePath) => validatePatchPaths([filePath], config)))];
+  const regularPaths = trackedEligibleRegularPaths({ trackedEntries, config });
+  const allGroups = prioritizedEligiblePathGroups({ eligiblePaths: policyPaths, fixScopePaths, diagnostic });
+  const regularGroups = prioritizedEligiblePathGroups({ eligiblePaths: regularPaths, fixScopePaths, diagnostic });
+  const requiredPriority = [...allGroups.fixScope, ...allGroups.diagnostic];
+  const safePriority = new Set([...regularGroups.fixScope, ...regularGroups.diagnostic]);
+  const rejected = requiredPriority.filter((filePath) => !safePriority.has(filePath));
+  if (rejected.length) return { ok: false, reason: `PRIORITY_SOURCE_CONTEXT_UNSAFE_TRACKED_ENTRY:${rejected[0]}` };
+  return {
+    ok: true,
+    priorityPaths: [...regularGroups.fixScope, ...regularGroups.diagnostic],
+    eligibleRegularPaths: regularPaths,
+  };
+}
+
+function buildBoundedSourceContext({ files, fixScopePaths = [], diagnostic = "", sourceBudgetBytes }) {
+  if (!Number.isSafeInteger(sourceBudgetBytes) || sourceBudgetBytes < 256) throw new Error("INVALID_SOURCE_CONTEXT_BUDGET");
+  const normalized = [...new Map((files || [])
+    .filter((file) => typeof file?.path === "string" && typeof file?.content === "string")
+    .map((file) => [file.path, { path: file.path, content: file.content }])).values()];
+  const eligible = normalized.map((file) => file.path);
+  const fixScope = new Set(parseJsonStringArray(fixScopePaths).filter((filePath) => eligible.includes(filePath)));
+  const diagnosticPaths = new Set(eligible
+    .filter((filePath) => !fixScope.has(filePath) && diagnosticMentionsEligiblePath(filePath, diagnostic)));
+  const pathOrder = prioritizedEligiblePaths({
+    eligiblePaths: eligible,
+    fixScopePaths,
+    diagnostic,
+  });
+  const rank = new Map(pathOrder.map((filePath, index) => [filePath, index]));
+  const prioritized = normalized
+    .map((file) => ({ ...file, rank: rank.get(file.path) ?? Number.MAX_SAFE_INTEGER }))
+    .sort((left, right) => left.rank - right.rank);
+  const prioritySet = new Set([...fixScope, ...diagnosticPaths]);
+  const selected = [];
+  let out = JSON.stringify({ format: "source-context-v1", files: selected });
+  if (Buffer.byteLength(out) > sourceBudgetBytes) throw new Error("SOURCE_CONTEXT_TOO_LARGE");
+  for (const file of prioritized) {
+    const candidate = [...selected, { path: file.path, content: file.content }];
+    const encoded = JSON.stringify({ format: "source-context-v1", files: candidate });
+    if (Buffer.byteLength(encoded) <= sourceBudgetBytes) {
+      selected.push({ path: file.path, content: file.content });
+      out = encoded;
+      continue;
+    }
+    if (prioritySet.has(file.path)) throw new Error("PRIORITY_SOURCE_CONTEXT_TOO_LARGE");
+    break;
+  }
+  return { json: out, files: selected };
+}
+
 function classificationMarker(record, config) {
   const keys = config.classificationSchema || [];
   if (keys.some((key) => record[key] === undefined)) throw new Error("INCOMPLETE_CLASSIFICATION_RECORD");
@@ -471,9 +642,18 @@ module.exports = {
   redactDiagnostic,
   extractFailureDiagnostic,
   validationCommands,
+  parseTrackedIndexEntries,
+  trackedEligibleRegularPaths,
+  trackedPriorityMaterializationPlan,
+  diagnosticWorkingDirectoryPrefixes,
+  diagnosticPathAliases,
+  diagnosticMentionsEligiblePath,
   lifecycleAtAgentPr,
   fullLinkageDecision,
   trustedArtifactDecision,
+  prioritizedEligiblePathGroups,
+  prioritizedEligiblePaths,
+  buildBoundedSourceContext,
   fixScopeDecision,
   classificationMarker,
   fixAttemptDecision,

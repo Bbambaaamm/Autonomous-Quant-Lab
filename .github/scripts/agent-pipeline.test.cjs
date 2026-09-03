@@ -454,8 +454,35 @@ test("v2 third-audit workflow wiring is fail-closed and injection safe", () => {
   assert.match(reviewer,/trusted-governance\.json/);
   assert.match(reviewer,/base_sha:pr\.base\.sha/);
   assert.match(reviewer,/git diff --quiet "\$BASE_SHA" "\$HEAD_SHA" -- AGENTS\.md/);
-  assert.doesNotMatch(fixer,/pull-requests: write/);
-  assert.equal((reviewer.match(/pull-requests: write/g)||[]).length,1);
+  assert.equal((fixer.match(/pull-requests: write/g)||[]).length,4);
+  assert.equal((reviewer.match(/pull-requests: write/g)||[]).length,5);
+});
+
+test("Issue #94 grants PR metadata writes only to trusted fixer writers", () => {
+  const fixer=fs.readFileSync(".github/workflows/agent-ci-fixer.yml","utf8");
+  const jobNames=[...fixer.matchAll(/^  ([a-z][a-z0-9-]+):\n(?=    )/gm)].map(match=>({name:match[1],index:match.index}));
+  const jobs=Object.fromEntries(jobNames.map((job,index)=>[
+    job.name,
+    fixer.slice(job.index,jobNames[index+1]?.index ?? fixer.length),
+  ]));
+  const metadataCalls=/github\.rest\.issues\.(?:createComment|addLabels|removeLabel)\(/;
+  const metadataWriters=Object.entries(jobs).filter(([,body])=>metadataCalls.test(body)).map(([name])=>name).sort();
+  assert.deepEqual(metadataWriters,["escalate","fail-closed-finalizer","record-classification","trusted-publish"]);
+  for(const name of metadataWriters) assert.match(jobs[name],/permissions: \{[^\n]*pull-requests: write[^\n]*\}/,`${name} must be able to mutate PR metadata`);
+
+  assert.equal(fixer.match(/^permissions:\n  contents: read$/gm)?.length,1,"workflow permissions remain read-only");
+  assert.match(jobs["record-classification"],/classificationMarker[\s\S]*record\.sha[\s\S]*record\.ciRunId[\s\S]*record\.ciRunAttempt[\s\S]*issues\.createComment/);
+  for(const name of ["escalate","fail-closed-finalizer"]) {
+    assert.match(jobs[name],/for\(const number of \[prNumber,issueNumber\]\)/);
+    assert.match(jobs[name],/escalationMutationPlan\(item\.labels\)[\s\S]*plan\.add[\s\S]*plan\.remove/);
+    assert.doesNotMatch(jobs[name],/contents: write/);
+  }
+  assert.match(jobs["trusted-publish"],/agent-fix:v2[\s\S]*issues\.createComment|issues\.createComment[\s\S]*agent-fix:v2/);
+  for(const name of ["classify","prepare-generation-context","generate-patch","validate-patch","seal-patch"]) {
+    assert.doesNotMatch(jobs[name],/issues: write|pull-requests: write|contents: write/,`${name} trust boundary broadened`);
+  }
+  assert.doesNotMatch(jobs["generate-patch"],/permissions:[^\n]*(?:issues|pull-requests): write/);
+  assert.doesNotMatch(jobs["validate-patch"],/permissions:[^\n]*(?:issues|pull-requests): write/);
 });
 
 test("v2 index mode policy rejects symlinks, gitlinks, and mode transitions", () => {
@@ -524,6 +551,160 @@ test("v2 fix scope and durable classification records are deterministic", () => 
   assert.equal(marker,pipeline.classificationMarker(record,agentConfig.v2));
 });
 
+test("Issue #99 source context ordering, truncation, and fail-closed priority are deterministic", () => {
+  const files = [
+    { path: "backend/src/aa_generic.py", content: "g".repeat(256) },
+    { path: "frontend/lib/zz_changed.ts", content: "f".repeat(256) },
+    { path: "frontend/lib/mm_diagnostic.ts", content: "d".repeat(256) },
+    { path: "backend/src/zz_generic.py", content: "z".repeat(256) },
+  ];
+  const fixScope = ["frontend/lib/zz_changed.ts"];
+  const diagnostic = JSON.stringify({ excerpt: "FAILED in frontend/lib/mm_diagnostic.ts line 10" });
+  const wide = pipeline.buildBoundedSourceContext({ files, fixScopePaths: fixScope, diagnostic, sourceBudgetBytes: 50_000 });
+  assert.deepEqual(wide.files.map((file) => file.path), [
+    "frontend/lib/zz_changed.ts",
+    "frontend/lib/mm_diagnostic.ts",
+    "backend/src/aa_generic.py",
+    "backend/src/zz_generic.py",
+  ]);
+  const firstThree = wide.files.slice(0, 3);
+  const truncatedBudget = Buffer.byteLength(JSON.stringify({ format: "source-context-v1", files: firstThree }));
+  const truncated = pipeline.buildBoundedSourceContext({ files, fixScopePaths: fixScope, diagnostic, sourceBudgetBytes: truncatedBudget });
+  assert.deepEqual(truncated.files.map((file) => file.path), [
+    "frontend/lib/zz_changed.ts",
+    "frontend/lib/mm_diagnostic.ts",
+    "backend/src/aa_generic.py",
+  ]);
+  assert.equal(truncated.files.some((file) => file.path === "frontend/lib/zz_changed.ts"), true);
+  assert.equal(truncated.files.some((file) => file.path === "frontend/lib/mm_diagnostic.ts"), true);
+  assert.equal(truncated.files.some((file) => file.path === "backend/src/zz_generic.py"), false);
+  assert.equal(truncated.json, pipeline.buildBoundedSourceContext({ files, fixScopePaths: fixScope, diagnostic, sourceBudgetBytes: truncatedBudget }).json);
+  const fixOnlyBudget = Buffer.byteLength(JSON.stringify({ format: "source-context-v1", files: [wide.files[0]] }));
+  assert.throws(() => pipeline.buildBoundedSourceContext({
+    files, fixScopePaths: fixScope, diagnostic, sourceBudgetBytes: fixOnlyBudget - 1,
+  }), /PRIORITY_SOURCE_CONTEXT_TOO_LARGE/);
+});
+
+test("Issue #99 priority path ordering is locale-independent and bytewise deterministic", () => {
+  const eligible = ["frontend/lib/a.ts", "frontend/lib/A.ts", "frontend/lib/á.ts", "frontend/lib/b.ts"];
+  const fixScope = ["frontend/lib/á.ts", "frontend/lib/A.ts"];
+  const diagnostic = JSON.stringify({ excerpt: "AssertionError at frontend/lib/a.ts" });
+  assert.deepEqual(pipeline.prioritizedEligiblePaths({ eligiblePaths: eligible, fixScopePaths: fixScope, diagnostic }), [
+    "frontend/lib/A.ts",
+    "frontend/lib/á.ts",
+    "frontend/lib/a.ts",
+    "frontend/lib/b.ts",
+  ]);
+  const files = eligible.map((filePath) => ({ path: filePath, content: "x" }));
+  const left = pipeline.buildBoundedSourceContext({ files, fixScopePaths: fixScope, diagnostic, sourceBudgetBytes: 5000 }).json;
+  const right = pipeline.buildBoundedSourceContext({ files, fixScopePaths: fixScope, diagnostic, sourceBudgetBytes: 5000 }).json;
+  assert.equal(left, right);
+});
+
+test("Issue #99 diagnostic relevance supports trusted cwd-relative aliases without fuzzy suffix matches", () => {
+  const files = [
+    { path: "backend/tests/test_example.py", content: "a".repeat(64) },
+    { path: "backend/src/quantlab/example.py", content: "b".repeat(64) },
+    { path: "frontend/src/example.ts", content: "c".repeat(64) },
+    { path: "backend/tests/unrelated.py", content: "d".repeat(64) },
+  ];
+  assert.equal(pipeline.diagnosticMentionsEligiblePath(
+    "backend/tests/test_example.py",
+    JSON.stringify({ job: "unit-research", failureClass: "unit-test", excerpt: "FAILED tests/test_example.py::test_x" })
+  ), true);
+  assert.equal(pipeline.diagnosticMentionsEligiblePath(
+    "backend/src/quantlab/example.py",
+    JSON.stringify({ job: "quality", failureClass: "lint-format", excerpt: "src/quantlab/example.py:1:1: F401" })
+  ), true);
+  assert.equal(pipeline.diagnosticMentionsEligiblePath(
+    "frontend/src/example.ts",
+    JSON.stringify({ job: "frontend", failureClass: "frontend-test-build", excerpt: "src/example.ts:12:3" })
+  ), true);
+  assert.equal(pipeline.diagnosticMentionsEligiblePath(
+    "backend/tests/test_example.py",
+    JSON.stringify({ job: "integration-postgres", failureClass: "integration-postgres", excerpt: "tests/test_example.py" })
+  ), false);
+  assert.equal(pipeline.diagnosticMentionsEligiblePath(
+    "backend/tests/test_example.py",
+    JSON.stringify({ job: "unit-research", failureClass: "unit-test", excerpt: "FAILED test_example.py only" })
+  ), false);
+  assert.equal(pipeline.diagnosticMentionsEligiblePath(
+    "backend/src/quantlab/example.py",
+    JSON.stringify({ job: "quality", failureClass: "lint-format", excerpt: "backend/src/quantlab/example.py:1:1" })
+  ), true);
+
+  const fixScope = ["backend/src/quantlab/priority.py"];
+  const contextFiles = [
+    { path: "backend/src/quantlab/priority.py", content: "p".repeat(64) },
+    ...files,
+    { path: "backend/src/quantlab/zzz_generic.py", content: "z".repeat(64) },
+  ];
+  const wide = pipeline.buildBoundedSourceContext({
+    files: contextFiles,
+    fixScopePaths: fixScope,
+    diagnostic: JSON.stringify({ job: "unit-research", failureClass: "unit-test", excerpt: "FAILED tests/test_example.py::test_x" }),
+    sourceBudgetBytes: 10_000,
+  });
+  const firstTwo = wide.files.slice(0, 2);
+  const tightBudget = Buffer.byteLength(JSON.stringify({ format: "source-context-v1", files: firstTwo }));
+  const tight = pipeline.buildBoundedSourceContext({
+    files: contextFiles,
+    fixScopePaths: fixScope,
+    diagnostic: JSON.stringify({ job: "unit-research", failureClass: "unit-test", excerpt: "FAILED tests/test_example.py::test_x" }),
+    sourceBudgetBytes: tightBudget,
+  });
+  assert.deepEqual(tight.files.map((file) => file.path), [
+    "backend/src/quantlab/priority.py",
+    "backend/tests/test_example.py",
+  ]);
+  const again = pipeline.buildBoundedSourceContext({
+    files: contextFiles,
+    fixScopePaths: fixScope,
+    diagnostic: JSON.stringify({ job: "unit-research", failureClass: "unit-test", excerpt: "FAILED tests/test_example.py::test_x" }),
+    sourceBudgetBytes: tightBudget,
+  });
+  assert.equal(tight.json, again.json);
+  const overflowFile = { path: "backend/tests/test_example.py", content: "x".repeat(200) };
+  const overflowBudget = Buffer.byteLength(JSON.stringify({ format: "source-context-v1", files: [overflowFile] })) - 1;
+  assert.throws(() => pipeline.buildBoundedSourceContext({
+    files: [overflowFile, { path: "backend/src/quantlab/generic.py", content: "g".repeat(8) }],
+    fixScopePaths: [],
+    diagnostic: JSON.stringify({ job: "unit-research", failureClass: "unit-test", excerpt: "FAILED tests/test_example.py::test_x" }),
+    sourceBudgetBytes: overflowBudget,
+  }), /PRIORITY_SOURCE_CONTEXT_TOO_LARGE/);
+});
+
+test("Issue #99 tracked-index plan rejects priority symlinks and excludes generic symlinks", () => {
+  const tracked = pipeline.parseTrackedIndexEntries(
+    "120000 1111111111111111111111111111111111111111 0\tfrontend/lib/zz_changed.ts\0" +
+    "100644 2222222222222222222222222222222222222222 0\tfrontend/lib/mm_diagnostic.ts\0" +
+    "120000 3333333333333333333333333333333333333333 0\tfrontend/src/generic-link.ts\0" +
+    "100644 4444444444444444444444444444444444444444 0\tfrontend/src/regular.ts\0"
+  );
+  assert.deepEqual(pipeline.trackedEligibleRegularPaths({ trackedEntries: tracked, config: agentConfig.v2 }), [
+    "frontend/lib/mm_diagnostic.ts",
+    "frontend/src/regular.ts",
+  ]);
+  const failPlan = pipeline.trackedPriorityMaterializationPlan({
+    trackedEntries: tracked,
+    fixScopePaths: ["frontend/lib/zz_changed.ts"],
+    diagnostic: JSON.stringify({ excerpt: "FAILED frontend/lib/mm_diagnostic.ts" }),
+    config: agentConfig.v2,
+  });
+  assert.equal(failPlan.ok, false);
+  assert.match(failPlan.reason, /^PRIORITY_SOURCE_CONTEXT_UNSAFE_TRACKED_ENTRY:frontend\/lib\/zz_changed\.ts$/);
+
+  const okPlan = pipeline.trackedPriorityMaterializationPlan({
+    trackedEntries: tracked,
+    fixScopePaths: ["frontend/lib/mm_diagnostic.ts"],
+    diagnostic: JSON.stringify({ excerpt: "FAILED frontend/src/regular.ts" }),
+    config: agentConfig.v2,
+  });
+  assert.equal(okPlan.ok, true);
+  assert.deepEqual(okPlan.priorityPaths, ["frontend/lib/mm_diagnostic.ts", "frontend/src/regular.ts"]);
+  assert.equal(okPlan.eligibleRegularPaths.includes("frontend/src/generic-link.ts"), false);
+});
+
 test("v2 write job executes only trusted policy and treats candidate checkout as data", () => {
   const fixer=fs.readFileSync(".github/workflows/agent-ci-fixer.yml","utf8");
   const publish=fixer.slice(fixer.indexOf("trusted-publish:"),fixer.indexOf("fail-closed-finalizer:"));
@@ -580,8 +761,8 @@ test("v2 reusable caller permissions and governance linkage are fail closed", ()
   const reviewer=fs.readFileSync(".github/workflows/agent-codex-review.yml","utf8");
   const block=fs.readFileSync(".github/workflows/agent-review-block-escalation.yml","utf8");
   assert.match(reviewer,/verify-after-pass:[\s\S]*permissions: \{actions: read, contents: read, issues: write, pull-requests: write\}/);
-  assert.match(reviewer,/route-block:[\s\S]*permissions: \{contents: read, issues: write, pull-requests: read\}/);
-  assert.match(block,/permissions: \{contents: read, issues: write, pull-requests: read\}/);
+  assert.match(reviewer,/route-block:[\s\S]*permissions: \{contents: read, issues: write, pull-requests: write\}/);
+  assert.match(block,/permissions: \{contents: read, issues: write, pull-requests: write\}/);
   assert.doesNotMatch(block,/contents: write|secrets: inherit|AGENT_PUBLISH_TOKEN/);
   assert.match(block,/pr\.head\.sha!==expectedSha[\s\S]*pr\.state!=="open"[\s\S]*pr\.base\.ref!==context\.payload\.repository\.default_branch/);
   assert.match(block,/issue\.pull_request\|\|issue\.state!=="open"\|\|!p\.isImplementation/);
@@ -589,6 +770,56 @@ test("v2 reusable caller permissions and governance linkage are fail closed", ()
   assert.match(block,/setLabels[\s\S]*readValidatedPair\(pair\.issueNumber\)[\s\S]*setLabels/);
   const escalation=reviewer.slice(reviewer.indexOf("governance-escalation:"),reviewer.indexOf("independent-review:"));
   assert.match(escalation,/listComments[\s\S]*fullLinkageDecision[\s\S]*STALE_GOVERNANCE_NO_WRITE/);
+});
+
+test("Issue #94 Fixer metadata writers have compatible least-privilege grants", () => {
+  const fixer=fs.readFileSync(".github/workflows/agent-ci-fixer.yml","utf8");
+  const job=(workflow,name)=>{
+    const match=workflow.match(new RegExp(`^  ${name}:\\n([\\s\\S]*?)(?=^  [a-zA-Z0-9_-]+:\\n|(?![\\s\\S]))`,"m"));
+    assert.ok(match,`missing job ${name}`);
+    return match[0];
+  };
+  for(const name of ["record-classification","escalate","fail-closed-finalizer"]){
+    const section=job(fixer,name);
+    assert.match(section,/permissions: \{contents: read, issues: write, pull-requests: write\}/,name);
+    assert.doesNotMatch(section,/contents: write|OPENAI_API_KEY/,name);
+  }
+  const publish=job(fixer,"trusted-publish");
+  assert.match(publish,/permissions: \{contents: write, issues: write, pull-requests: write\}/);
+  assert.doesNotMatch(publish,/OPENAI_API_KEY/);
+  for(const name of ["prepare-generation-context","generate-patch","validate-patch","seal-patch"]){
+    const section=job(fixer,name);
+    assert.match(section,/permissions: \{contents: read\}/,name);
+    assert.doesNotMatch(section,/issues: write|pull-requests: write|contents: write/,name);
+  }
+  assert.match(job(fixer,"generate-patch"),/OPENAI_API_KEY/);
+});
+
+test("Issue #96 Reviewer metadata writers have compatible least-privilege grants", () => {
+  const reviewer=fs.readFileSync(".github/workflows/agent-codex-review.yml","utf8");
+  const block=fs.readFileSync(".github/workflows/agent-review-block-escalation.yml","utf8");
+  const job=(workflow,name)=>{
+    const match=workflow.match(new RegExp(`^  ${name}:\\n([\\s\\S]*?)(?=^  [a-zA-Z0-9_-]+:\\n|(?![\\s\\S]))`,"m"));
+    assert.ok(match,`missing job ${name}`);
+    return match[0];
+  };
+  for(const name of ["governance-escalation","trusted-record","route-block","fail-closed-finalizer"]){
+    const section=job(reviewer,name);
+    assert.match(section,/permissions: \{contents: read, issues: write, pull-requests: write\}/,name);
+    assert.doesNotMatch(section,/contents: write|OPENAI_API_KEY/,name);
+  }
+  const model=job(reviewer,"independent-review");
+  assert.match(model,/permissions: \{contents: read\}/);
+  assert.doesNotMatch(model,/issues: write|pull-requests: write|contents: write/);
+  assert.match(model,/OPENAI_API_KEY/);
+  assert.match(job(reviewer,"trusted-record"),/result\.reviewed_sha!==process\.env\.SHA[\s\S]*createComment[\s\S]*agent-codex-review:v2 sha=\$\{process\.env\.SHA\}/);
+  assert.match(job(reviewer,"governance-escalation"),/fullLinkageDecision[\s\S]*lifecycleAtAgentPr[\s\S]*(?:addLabels|removeLabel)[\s\S]*createComment/);
+  for(const name of ["route-block","fail-closed-finalizer"])
+    assert.match(job(reviewer,name),/uses: \.\/\.github\/workflows\/agent-review-block-escalation\.yml/);
+  const escalate=job(block,"escalate");
+  assert.match(escalate,/permissions: \{contents: read, issues: write, pull-requests: write\}/);
+  assert.doesNotMatch(block,/contents: write|OPENAI_API_KEY|secrets:/);
+  assert.match(escalate,/reviewerBlockPairPlan[\s\S]*fullLinkageDecision[\s\S]*setLabels[\s\S]*readValidatedPair\(pair\.issueNumber\)[\s\S]*setLabels[\s\S]*createComment/);
 });
 
 test("Issue #90 Reviewer BLOCK escalation transitions only an exact valid linked pair", () => {
@@ -646,4 +877,13 @@ test("v2 classify job guard admits reusable review-block despite inherited calle
   assert.equal(classifyRuns({eventName:"workflow_run",conclusion:"success",mode:"review-block"}),true);
   assert.equal(classifyRuns({eventName:"workflow_dispatch",conclusion:undefined,mode:"review-block"}),true);
   assert.equal(classifyRuns({eventName:"workflow_run",conclusion:"success",mode:""}),false);
+  assert.match(fixer,/prepare-generation-context:[\s\S]*FIX_SCOPE: '\$\{\{ needs\.classify\.outputs\.fix_scope \}\}'[\s\S]*DIAGNOSTIC: '\$\{\{ needs\.classify\.outputs\.diagnostic \}\}'/);
+  assert.match(fixer,/git',\['ls-files','--stage','-z'\]/);
+  assert.match(fixer,/parseTrackedIndexEntries\(/);
+  assert.match(fixer,/trackedPriorityMaterializationPlan\(\{trackedEntries,fixScopePaths:process\.env\.FIX_SCOPE,diagnostic:process\.env\.DIAGNOSTIC,config:c\.v2\}\)/);
+  assert.match(fixer,/fs\.lstatSync/);
+  assert.doesNotMatch(fixer,/fs\.statSync/);
+  assert.match(fixer,/buildBoundedSourceContext\(\{files:\[\.\.\.filesByPath\.values\(\)\],fixScopePaths:process\.env\.FIX_SCOPE,diagnostic:process\.env\.DIAGNOSTIC,sourceBudgetBytes:SOURCE_CONTEXT_MAX_BYTES\}\)/);
+  assert.match(fixer,/SOURCE_CONTEXT_MAX_BYTES=917504/);
+  assert.match(fixer,/test "\$\(stat -c%s \.codex-input\/prompt\.md\)" -lt 1048576/);
 });
