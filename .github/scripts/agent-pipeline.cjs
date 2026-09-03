@@ -157,6 +157,8 @@ function normalizedFailureClass(job) {
   const name = job.name.toLowerCase();
   const steps = failedStepNames(job).join(" ");
   const metadata = `${name} ${steps}`;
+  // Infrastructure evidence takes precedence: a timeout is not a source defect.
+  if (job.conclusion === "timed_out" || /runner|network|download|service unavailable/.test(metadata)) return "infra-transient";
   if (/dependenc|lock|npm ci|uv lock|uv sync/.test(metadata)) return "dependency-lock";
   if (/security|audit|bandit|pip-audit/.test(metadata)) return "security";
   if (/integration-postgres|postgres/.test(metadata)) return "integration-postgres";
@@ -167,8 +169,25 @@ function normalizedFailureClass(job) {
   if (/ruff|lint|format/.test(metadata)) return "lint-format";
   if (/\bapi\b/.test(metadata)) return "api-test";
   if (/unit|pytest/.test(metadata)) return "unit-test";
-  if (job.conclusion === "timed_out" || /runner|network|download|service unavailable/.test(metadata)) return "infra-transient";
   return "unknown";
+}
+
+function fixerInvocationDecision({ eventName, mode, prNumber, headSha, reviewBlock, ciRunId }) {
+  if (eventName === "workflow_run") return { ok: mode === "ci-workflow-run", kind: "ci-workflow-run" };
+  const validBinding = Number.isSafeInteger(Number(prNumber)) && Number(prNumber) > 0 &&
+    /^[0-9a-f]{40}$/.test(headSha || "");
+  if (!validBinding) return { ok: false, reason: "INVALID_EXPLICIT_BINDING" };
+  if (eventName === "workflow_call" && mode === "review-block" && String(reviewBlock || "").trim())
+    return { ok: true, kind: "review-block" };
+  if (eventName === "workflow_dispatch" && mode === "failed-ci" && Number(ciRunId) > 0)
+    return { ok: true, kind: "failed-ci" };
+  return { ok: false, reason: "INVALID_INVOCATION_MODE" };
+}
+
+function authoritativeCiIdentity(run, { prNumber, headSha, conclusion }) {
+  return !!run && run.name === "CI" && run.event === "pull_request" && run.status === "completed" &&
+    run.conclusion === conclusion && run.head_sha === headSha && run.pull_requests?.length === 1 &&
+    run.pull_requests[0].number === Number(prNumber);
 }
 
 function redactDiagnostic(value, maxBytes = 8192) {
@@ -429,6 +448,8 @@ module.exports = {
   parseTrustedMarker,
   classifyCiFailure,
   normalizedFailureClass,
+  fixerInvocationDecision,
+  authoritativeCiIdentity,
   redactDiagnostic,
   extractFailureDiagnostic,
   validationCommands,

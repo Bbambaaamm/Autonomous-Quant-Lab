@@ -483,7 +483,7 @@ test("v2 fourth-audit wiring validates before checks and closes dispatch and pus
   const validation=fixer.slice(fixer.indexOf("validate-patch:"),fixer.indexOf("trusted-publish:"));
   assert.ok(validation.indexOf("cmp \"$RUNNER_TEMP/declared-paths\"") < validation.indexOf("case \"$(jq -r .failure_class"));
   assert.ok(validation.indexOf("validatePatchPaths(x,c.v2)") < validation.indexOf("case \"$(jq -r .failure_class"));
-  assert.match(fixer,/run\.name!=="CI"[\s\S]*run\.event!=="pull_request"[\s\S]*run\.status!=="completed"[\s\S]*run\.conclusion!=="failure"/);
+  assert.match(fixer,/authoritativeCiIdentity\(run,\{prNumber,headSha:requestedSha,conclusion:"failure"\}\)/);
   assert.match(fixer,/cmp "\$RUNNER_TEMP\/validated\.patch" "\$RUNNER_TEMP\/publisher\.patch"/);
   assert.match(fixer,/ls-remote --refs origin "refs\/heads\/\$HEAD_REF"[\s\S]*= "\$SHA"[\s\S]*push origin[\s\S]*ls-remote --refs origin/);
   assert.match(fixer,/prepare-generation-context:[\s\S]*source-context\.json/);
@@ -529,4 +529,41 @@ test("v2 write job executes only trusted policy and treats candidate checkout as
   assert.match(publish,/\.trusted-policy\/\.github\/scripts\/agent-pipeline\.cjs/);
   assert.match(fixer,/record-classification:[\s\S]*agent-ci-classification:v2|record-classification:[\s\S]*classificationMarker/);
   assert.match(fixer,/authorized_scope/);
+});
+
+test("v2 fixer uses explicit trusted invocation modes", () => {
+  const sha="a".repeat(40);
+  assert.deepEqual(pipeline.fixerInvocationDecision({eventName:"workflow_run",mode:"ci-workflow-run"}),{ok:true,kind:"ci-workflow-run"});
+  assert.equal(pipeline.fixerInvocationDecision({eventName:"workflow_call",mode:"review-block",prNumber:7,headSha:sha,reviewBlock:"unsafe"}).ok,true);
+  assert.equal(pipeline.fixerInvocationDecision({eventName:"workflow_call",mode:"ci-workflow-run",prNumber:7,headSha:sha,reviewBlock:"unsafe"}).ok,false);
+  assert.equal(pipeline.fixerInvocationDecision({eventName:"workflow_dispatch",mode:"failed-ci",prNumber:7,headSha:sha,ciRunId:9}).ok,true);
+});
+
+test("v2 authoritative CI identity is exact for automatic and dispatched routing", () => {
+  const sha="b".repeat(40), base={name:"CI",event:"pull_request",status:"completed",conclusion:"success",head_sha:sha,pull_requests:[{number:8}]};
+  assert.equal(pipeline.authoritativeCiIdentity(base,{prNumber:8,headSha:sha,conclusion:"success"}),true);
+  for (const bad of [{name:"Other"},{event:"workflow_dispatch"},{status:"in_progress"},{conclusion:"failure"},{head_sha:"c".repeat(40)},{pull_requests:[]},{pull_requests:[{number:9}]}])
+    assert.equal(pipeline.authoritativeCiIdentity({...base,...bad},{prNumber:8,headSha:sha,conclusion:"success"}),false);
+});
+
+test("v2 timeout evidence takes precedence over source-looking job names", () => {
+  for (const name of ["unit-research","api","frontend"]) assert.equal(pipeline.normalizedFailureClass({name,conclusion:"timed_out",steps:[{name:"pytest failure",conclusion:"failure"}]}),"infra-transient");
+});
+
+test("v2 fifth-audit wiring pins validation toolchain, seals last, and finalizes reviewer", () => {
+  const fixer=fs.readFileSync(".github/workflows/agent-ci-fixer.yml","utf8"), reviewer=fs.readFileSync(".github/workflows/agent-codex-review.yml","utf8");
+  assert.doesNotMatch(fixer,/context\.eventName===['"]workflow_call/);
+  assert.match(fixer,/invocation_mode:[\s\S]*review-block/);
+  assert.match(fixer,/actions\/setup-python@[0-9a-f]{40}[\s\S]*python-version: '3\.12'/);
+  assert.match(fixer,/setup-uv@[0-9a-f]{40}[\s\S]*version: '0\.12\.3'/);
+  assert.match(fixer,/setup-node@[0-9a-f]{40}[\s\S]*node-version: '24'/);
+  assert.match(fixer,/npm install --global npm@11\.17\.0/);
+  const validate=fixer.slice(fixer.indexOf("validate-patch:"),fixer.indexOf("trusted-publish:"));
+  assert.ok(validate.indexOf("node --test") < validate.indexOf("Seal post-test artifact"));
+  assert.ok(validate.indexOf("Seal post-test artifact") < validate.indexOf("validated-checksum"));
+  assert.match(validate,/cmp "\$RUNNER_TEMP\/pretest\.patch" "\$RUNNER_TEMP\/validated\.patch"/);
+  assert.match(fixer,/BEGIN TRUSTED GOVERNANCE[\s\S]*trusted-AGENTS\.md/);
+  assert.match(reviewer,/exact authoritative green CI missing or ambiguous/);
+  assert.match(reviewer,/Fail closed when reviewer credential is absent/);
+  assert.match(reviewer,/fail-closed-finalizer:[\s\S]*STALE_REVIEW_FAILURE_NO_WRITE/);
 });

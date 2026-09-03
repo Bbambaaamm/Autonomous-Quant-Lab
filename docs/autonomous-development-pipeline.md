@@ -347,3 +347,9 @@ jobs, normalized class, eligibility, budget state, and producing workflow/run. U
 recorded before escalation. Repair scope comes from trusted GitHub metadata: existing files must be
 in the PR baseline file set and additions are limited to configured test paths. Validation binds
 that scope into the artifact and publication checks it again.
+
+### Fifth independent audit hardening
+
+Reusable fixer calls now carry an explicit trusted invocation mode rather than inferring reusable-call identity from the inherited GitHub event context. Both automatic reviewer entry points and dispatched review require one completed, successful, pull-request-triggered authoritative `CI` run for the exact PR and head; failed-CI fixer entry likewise requires the complete failed identity contract. Timeout and runner evidence takes precedence over source-failure classification.
+
+Credential-free patch validation installs the same pinned Python 3.12, uv 0.12.3, Node 24, and npm 11.17.0 toolchain as authoritative CI and synchronizes locked dependencies before the relevant checks. Repository checks run before a final non-repository sealing step, which rejects index/worktree drift and then re-derives paths, modes, scope, patch bytes, checksum, and metadata. Generation receives bounded trusted default-branch governance separately from untrusted diagnostics and source. Structured fixer `BLOCK` reasons and reviewer credential/action failures use exact-SHA, lifecycle, and two-sided-linkage rechecks before fail-closed human escalation; neither path can synthesize review PASS.

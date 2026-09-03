@@ -43,6 +43,15 @@ jobs:
             const {data:pr}=await github.rest.pulls.get({...context.repo,pull_number:prNumber});
             const issueNumber=p.parseAgentIssue(pr.body);
             if(!issueNumber||pr.head.sha!==sha||pr.state!=="open"||pr.base.ref!==context.payload.repository.default_branch) return core.notice('NO_WRITE: stale PR');
+            let ciRun;
+            if(context.eventName==="workflow_run") ciRun=context.payload.workflow_run;
+            else {
+              const runs=await github.paginate(github.rest.actions.listWorkflowRuns,{...context.repo,workflow_id:"ci.yml",event:"pull_request",status:"completed",per_page:100});
+              const matches=runs.filter(run=>p.authoritativeCiIdentity(run,{prNumber,headSha:sha,conclusion:"success"}));
+              if(matches.length!==1) return core.notice('NO_WRITE: exact authoritative green CI missing or ambiguous');
+              ciRun=matches[0];
+            }
+            if(!p.authoritativeCiIdentity(ciRun,{prNumber,headSha:sha,conclusion:"success"})) return core.notice('NO_WRITE: non-authoritative CI identity');
             const {data:issue}=await github.rest.issues.get({...context.repo,issue_number:issueNumber});
             const prComments=await github.paginate(github.rest.issues.listComments,{...context.repo,issue_number:prNumber,per_page:100});
             const issueComments=await github.paginate(github.rest.issues.listComments,{...context.repo,issue_number:issueNumber,per_page:100});
@@ -110,6 +119,9 @@ jobs:
           test "$(stat -c%s .codex-input/review-prompt.md)" -le 131072
       - run: test "$(git rev-parse HEAD)" = "$HEAD_SHA" && git cat-file -e "$BASE_SHA^{commit}" && git diff --quiet "$BASE_SHA" "$HEAD_SHA" -- AGENTS.md .github/agent-pipeline.json docs/autonomous-development-pipeline.md docs/adr/0003-autonomous-development-pipeline-v2.md
         env: {HEAD_SHA: '${{ needs.prepare.outputs.head_sha }}', BASE_SHA: '${{ needs.prepare.outputs.base_sha }}'}
+      - name: Fail closed when reviewer credential is absent
+        env: {OPENAI_API_KEY: '${{ secrets.OPENAI_API_KEY }}'}
+        run: test -n "$OPENAI_API_KEY"
       - name: Independent bounded review
         uses: openai/codex-action@86365089eb2b84e0a8fb0717b304f8bdcb13b20e # immutable official commit
         with:
@@ -173,7 +185,33 @@ jobs:
     if: needs.trusted-record.outputs.blocked == 'true'
     uses: ./.github/workflows/agent-ci-fixer.yml
     with:
+      invocation_mode: review-block
       pr_number: ${{ fromJSON(needs.prepare.outputs.pr_number) }}
       head_sha: ${{ needs.prepare.outputs.head_sha }}
       review_block: ${{ needs.trusted-record.outputs.block_reason }}
     secrets: inherit
+
+  fail-closed-finalizer:
+    needs: [prepare, independent-review, trusted-record]
+    if: always() && needs.prepare.outputs.eligible == 'true' && needs.trusted-record.result != 'success'
+    runs-on: ubuntu-latest
+    permissions: {contents: read, issues: write, pull-requests: read}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with: {ref: '${{ github.event.repository.default_branch }}', persist-credentials: false}
+      - uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        env: {PR: '${{ needs.prepare.outputs.pr_number }}', ISSUE: '${{ needs.prepare.outputs.issue_number }}', SHA: '${{ needs.prepare.outputs.head_sha }}'}
+        with:
+          script: |
+            const p=require('./.github/scripts/agent-pipeline.cjs'),prNumber=Number(process.env.PR),issueNumber=Number(process.env.ISSUE);
+            const {data:pr}=await github.rest.pulls.get({...context.repo,pull_number:prNumber});
+            const {data:issue}=await github.rest.issues.get({...context.repo,issue_number:issueNumber});
+            const prComments=await github.paginate(github.rest.issues.listComments,{...context.repo,issue_number:prNumber,per_page:100});
+            const issueComments=await github.paginate(github.rest.issues.listComments,{...context.repo,issue_number:issueNumber,per_page:100});
+            if(pr.head.sha!==process.env.SHA||!p.lifecycleAtAgentPr(pr.labels,issue.labels).ok||!p.fullLinkageDecision({prBody:pr.body,prComments,issueComments,...context.repo,issueNumber,prNumber}).ok) return core.notice('STALE_REVIEW_FAILURE_NO_WRITE');
+            for(const number of [prNumber,issueNumber]) {
+              const {data:item}=await github.rest.issues.get({...context.repo,issue_number:number}); const plan=p.escalationMutationPlan(item.labels);
+              if(!plan.ok) return core.setFailed(plan.reason); if(plan.add.length) await github.rest.issues.addLabels({...context.repo,issue_number:number,labels:plan.add});
+              for(const name of plan.remove) await github.rest.issues.removeLabel({...context.repo,issue_number:number,name});
+            }
+            await github.rest.issues.createComment({...context.repo,issue_number:prNumber,body:`Independent reviewer failed closed for exact SHA ${process.env.SHA}: missing/invalid OPENAI_API_KEY or reviewer action/output failure; no PASS was synthesized.`});

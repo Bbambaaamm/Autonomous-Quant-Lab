@@ -206,6 +206,6 @@ jobs:
               const ci=exact[0];
               if(ci.status!=="completed") return core.notice("POST_LINK_CI_IN_PROGRESS_NO_WRITE");
               const workflow_id=ci.conclusion==="success" ? "agent-codex-review.yml" : "agent-ci-fixer.yml";
-              const inputs=ci.conclusion==="success" ? {pr_number:String(effectivePrNumber),head_sha:pull.head.sha} : {pr_number:String(effectivePrNumber),head_sha:pull.head.sha,ci_run_id:String(ci.id)};
+              const inputs=ci.conclusion==="success" ? {pr_number:String(effectivePrNumber),head_sha:pull.head.sha} : {invocation_mode:"failed-ci",pr_number:String(effectivePrNumber),head_sha:pull.head.sha,ci_run_id:String(ci.id)};
               await github.rest.actions.createWorkflowDispatch({...context.repo,workflow_id,ref:context.payload.repository.default_branch,inputs});
             }
