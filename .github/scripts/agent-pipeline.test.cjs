@@ -454,7 +454,7 @@ test("v2 third-audit workflow wiring is fail-closed and injection safe", () => {
   assert.match(reviewer,/trusted-governance\.json/);
   assert.match(reviewer,/base_sha:pr\.base\.sha/);
   assert.match(reviewer,/git diff --quiet "\$BASE_SHA" "\$HEAD_SHA" -- AGENTS\.md/);
-  assert.doesNotMatch(fixer,/pull-requests: write/);
+  assert.equal((fixer.match(/pull-requests: write/g)||[]).length,4);
   assert.equal((reviewer.match(/pull-requests: write/g)||[]).length,5);
 });
 
@@ -589,6 +589,29 @@ test("v2 reusable caller permissions and governance linkage are fail closed", ()
   assert.match(block,/setLabels[\s\S]*readValidatedPair\(pair\.issueNumber\)[\s\S]*setLabels/);
   const escalation=reviewer.slice(reviewer.indexOf("governance-escalation:"),reviewer.indexOf("independent-review:"));
   assert.match(escalation,/listComments[\s\S]*fullLinkageDecision[\s\S]*STALE_GOVERNANCE_NO_WRITE/);
+});
+
+test("Issue #94 Fixer metadata writers have compatible least-privilege grants", () => {
+  const fixer=fs.readFileSync(".github/workflows/agent-ci-fixer.yml","utf8");
+  const job=(workflow,name)=>{
+    const match=workflow.match(new RegExp(`^  ${name}:\\n([\\s\\S]*?)(?=^  [a-zA-Z0-9_-]+:\\n|(?![\\s\\S]))`,"m"));
+    assert.ok(match,`missing job ${name}`);
+    return match[0];
+  };
+  for(const name of ["record-classification","escalate","fail-closed-finalizer"]){
+    const section=job(fixer,name);
+    assert.match(section,/permissions: \{contents: read, issues: write, pull-requests: write\}/,name);
+    assert.doesNotMatch(section,/contents: write|OPENAI_API_KEY/,name);
+  }
+  const publish=job(fixer,"trusted-publish");
+  assert.match(publish,/permissions: \{contents: write, issues: write, pull-requests: write\}/);
+  assert.doesNotMatch(publish,/OPENAI_API_KEY/);
+  for(const name of ["prepare-generation-context","generate-patch","validate-patch","seal-patch"]){
+    const section=job(fixer,name);
+    assert.match(section,/permissions: \{contents: read\}/,name);
+    assert.doesNotMatch(section,/issues: write|pull-requests: write|contents: write/,name);
+  }
+  assert.match(job(fixer,"generate-patch"),/OPENAI_API_KEY/);
 });
 
 test("Issue #96 Reviewer metadata writers have compatible least-privilege grants", () => {
