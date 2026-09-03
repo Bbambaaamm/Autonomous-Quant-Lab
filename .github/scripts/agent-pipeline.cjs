@@ -173,14 +173,15 @@ function normalizedFailureClass(job) {
 }
 
 function fixerInvocationDecision({ eventName, mode, prNumber, headSha, reviewBlock, ciRunId }) {
-  if (eventName === "workflow_run") return { ok: mode === "ci-workflow-run", kind: "ci-workflow-run" };
+  // Explicitly bound reusable modes are authoritative.  A called workflow retains
+  // the caller's event name, so eventName cannot identify workflow_call here.
   const validBinding = Number.isSafeInteger(Number(prNumber)) && Number(prNumber) > 0 &&
     /^[0-9a-f]{40}$/.test(headSha || "");
-  if (!validBinding) return { ok: false, reason: "INVALID_EXPLICIT_BINDING" };
-  if (eventName === "workflow_call" && mode === "review-block" && String(reviewBlock || "").trim())
-    return { ok: true, kind: "review-block" };
-  if (eventName === "workflow_dispatch" && mode === "failed-ci" && Number(ciRunId) > 0)
-    return { ok: true, kind: "failed-ci" };
+  if (mode === "review-block") return validBinding && String(reviewBlock || "").trim()
+    ? { ok: true, kind: "review-block" } : { ok: false, reason: "INVALID_EXPLICIT_BINDING" };
+  if (mode === "failed-ci") return validBinding && Number(ciRunId) > 0
+    ? { ok: true, kind: "failed-ci" } : { ok: false, reason: "INVALID_EXPLICIT_BINDING" };
+  if (eventName === "workflow_run") return { ok: mode === "ci-workflow-run", kind: "ci-workflow-run" };
   return { ok: false, reason: "INVALID_INVOCATION_MODE" };
 }
 

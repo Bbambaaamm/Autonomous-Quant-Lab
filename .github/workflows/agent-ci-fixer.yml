@@ -314,23 +314,41 @@ jobs:
             *) echo 'Untrusted validation class' >&2; exit 1 ;;
           esac
           node --test .github/scripts/agent-pipeline.test.cjs
-      - name: Seal post-test artifact without repository execution
-        env: {SOURCE_SHA: '${{ needs.classify.outputs.source_sha }}', FIX_SCOPE: '${{ needs.classify.outputs.fix_scope }}'}
+
+  seal-patch:
+    needs: [classify, generate-patch, validate-patch]
+    runs-on: ubuntu-latest
+    permissions: {contents: read}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with: {ref: '${{ github.event.repository.default_branch }}', path: .trusted-policy, persist-credentials: false}
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with: {ref: '${{ needs.classify.outputs.source_sha }}', path: candidate, persist-credentials: false}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with: {name: 'generated-patch-${{ github.run_id }}', path: '${{ runner.temp }}/generated'}
+      - name: Independently seal generated patch on fresh runner
         working-directory: candidate
+        env: {SOURCE_SHA: '${{ needs.classify.outputs.source_sha }}', FAILURE_CLASS: '${{ needs.classify.outputs.failure_class }}', FIX_SCOPE: '${{ needs.classify.outputs.fix_scope }}'}
         run: |
-          git diff --quiet
-          test -z "$(git ls-files --others --exclude-standard)"
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          test "$(jq -r .source_sha "$RUNNER_TEMP/generated/metadata.json")" = "$SOURCE_SHA"
+          test "$(jq -r .failure_class "$RUNNER_TEMP/generated/metadata.json")" = "$FAILURE_CLASS"
+          test "$(sha256sum "$RUNNER_TEMP/generated/output.json"|cut -d' ' -f1)" = "$(cat "$RUNNER_TEMP/generated/checksum")"
+          test "$(jq -r .result "$RUNNER_TEMP/generated/output.json")" = PATCH
+          jq -r .patch "$RUNNER_TEMP/generated/output.json" > "$RUNNER_TEMP/change.patch"
+          git apply --check "$RUNNER_TEMP/change.patch" && git apply "$RUNNER_TEMP/change.patch"
+          git add -A && git diff --cached --check
+          git diff --cached --name-only | sort > "$RUNNER_TEMP/sealed-paths"
+          jq -r '.paths[]' "$RUNNER_TEMP/generated/output.json" | sort > "$RUNNER_TEMP/declared-paths"
+          cmp "$RUNNER_TEMP/declared-paths" "$RUNNER_TEMP/sealed-paths"
+          node -e 'const p=require(process.env.GITHUB_WORKSPACE+"/.trusted-policy/.github/scripts/agent-pipeline.cjs"),c=require(process.env.GITHUB_WORKSPACE+"/.trusted-policy/.github/agent-pipeline.json"),fs=require("fs");const x=fs.readFileSync(process.argv[1],"utf8").trim().split("\n");if(!p.validatePatchPaths(x,c.v2)||!p.fixScopeDecision(x,JSON.parse(process.env.FIX_SCOPE),c.v2).ok)process.exit(1)' "$RUNNER_TEMP/sealed-paths"
+          git diff --cached --raw > "$RUNNER_TEMP/sealed-modes"
+          node -e 'const p=require(process.env.GITHUB_WORKSPACE+"/.trusted-policy/.github/scripts/agent-pipeline.cjs"),fs=require("fs");if(!p.validatePatchModes(fs.readFileSync(process.argv[1],"utf8")))process.exit(1)' "$RUNNER_TEMP/sealed-modes"
           git diff --cached --binary > "$RUNNER_TEMP/validated.patch"
-          cmp "$RUNNER_TEMP/pretest.patch" "$RUNNER_TEMP/validated.patch"
-          git diff --cached --name-only | sort > "$RUNNER_TEMP/posttest-paths"
-          cmp "$RUNNER_TEMP/actual-paths" "$RUNNER_TEMP/posttest-paths"
-          node -e 'const p=require(process.env.GITHUB_WORKSPACE+"/.trusted-policy/.github/scripts/agent-pipeline.cjs"),c=require(process.env.GITHUB_WORKSPACE+"/.trusted-policy/.github/agent-pipeline.json"),fs=require("fs");const x=fs.readFileSync(process.argv[1],"utf8").trim().split("\n");if(!p.validatePatchPaths(x,c.v2)||!p.fixScopeDecision(x,JSON.parse(process.env.FIX_SCOPE),c.v2).ok)process.exit(1)' "$RUNNER_TEMP/posttest-paths"
-          git diff --cached --raw > "$RUNNER_TEMP/posttest-modes"
-          node -e 'const p=require(process.env.GITHUB_WORKSPACE+"/.trusted-policy/.github/scripts/agent-pipeline.cjs"),fs=require("fs");if(!p.validatePatchModes(fs.readFileSync(process.argv[1],"utf8")))process.exit(1)' "$RUNNER_TEMP/posttest-modes"
-          git diff --cached --check
           test "$(stat -c%s "$RUNNER_TEMP/validated.patch")" -le 131072
           sha256sum "$RUNNER_TEMP/validated.patch" | cut -d' ' -f1 > "$RUNNER_TEMP/validated-checksum"
-          jq -n --arg sha "$SOURCE_SHA" --arg class "$(jq -r .failure_class "$RUNNER_TEMP/generated/metadata.json")" --arg checksum "$(cat "$RUNNER_TEMP/validated-checksum")" --argjson scope "$FIX_SCOPE" --slurpfile paths "$RUNNER_TEMP/validated-paths.json" '{source_sha:$sha,failure_class:$class,checksum:$checksum,paths:$paths[0],authorized_scope:$scope}' > "$RUNNER_TEMP/validated-metadata.json"
+          jq -Rsc 'split("\n")[:-1]' < "$RUNNER_TEMP/sealed-paths" > "$RUNNER_TEMP/validated-paths.json"
+          jq -n --arg sha "$SOURCE_SHA" --arg class "$FAILURE_CLASS" --arg checksum "$(cat "$RUNNER_TEMP/validated-checksum")" --argjson scope "$FIX_SCOPE" --slurpfile paths "$RUNNER_TEMP/validated-paths.json" '{source_sha:$sha,failure_class:$class,checksum:$checksum,paths:$paths[0],authorized_scope:$scope}' > "$RUNNER_TEMP/validated-metadata.json"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: validated-patch-${{ github.run_id }}
@@ -343,7 +361,7 @@ jobs:
           retention-days: 1
 
   trusted-publish:
-    needs: [classify, validate-patch]
+    needs: [classify, seal-patch]
     runs-on: ubuntu-latest
     permissions: {contents: write, issues: write, pull-requests: read}
     steps:
@@ -383,6 +401,8 @@ jobs:
           test "$(sha256sum "$RUNNER_TEMP/validated.patch"|cut -d' ' -f1)" = "$(cat "$RUNNER_TEMP/validated-checksum")"
           test "$(jq -r .checksum "$RUNNER_TEMP/validated-metadata.json")" = "$(cat "$RUNNER_TEMP/validated-checksum")"
           test "$(jq -r .source_sha "$RUNNER_TEMP/validated-metadata.json")" = "$SHA"
+          test "$(jq -r .failure_class "$RUNNER_TEMP/validated-metadata.json")" = "${{ needs.classify.outputs.failure_class }}"
+          test "$(jq -cS .authorized_scope "$RUNNER_TEMP/validated-metadata.json")" = "$(printf '%s' '${{ needs.classify.outputs.fix_scope }}' | jq -cS .)"
           test "$(stat -c%s "$RUNNER_TEMP/validated.patch")" -le 131072
           git apply --check "$RUNNER_TEMP/validated.patch" && git apply "$RUNNER_TEMP/validated.patch"
           git add -A
@@ -422,7 +442,7 @@ jobs:
 
 
   fail-closed-finalizer:
-    needs: [classify, generate-patch, validate-patch, trusted-publish]
+    needs: [classify, generate-patch, validate-patch, seal-patch, trusted-publish]
     if: always() && needs.classify.outputs.eligible == 'true' && needs.trusted-publish.result != 'success'
     runs-on: ubuntu-latest
     permissions: {contents: read, issues: write, pull-requests: read}

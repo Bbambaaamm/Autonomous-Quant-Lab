@@ -86,7 +86,10 @@ jobs:
             const p=require('./.github/scripts/agent-pipeline.cjs'),prNumber=Number(process.env.PR),issueNumber=Number(process.env.ISSUE);
             const {data:pr}=await github.rest.pulls.get({...context.repo,pull_number:prNumber});
             const {data:issue}=await github.rest.issues.get({...context.repo,issue_number:issueNumber});
-            if(pr.head.sha!==process.env.SHA||!p.lifecycleAtAgentPr(pr.labels,issue.labels).ok) return core.notice('STALE_GOVERNANCE_NO_WRITE');
+            const prComments=await github.paginate(github.rest.issues.listComments,{...context.repo,issue_number:prNumber,per_page:100});
+            const issueComments=await github.paginate(github.rest.issues.listComments,{...context.repo,issue_number:issueNumber,per_page:100});
+            const linkage=p.fullLinkageDecision({prBody:pr.body,prComments,issueComments,...context.repo,issueNumber,prNumber});
+            if(pr.head.sha!==process.env.SHA||!p.lifecycleAtAgentPr(pr.labels,issue.labels).ok||!linkage.ok) return core.notice('STALE_GOVERNANCE_NO_WRITE');
             for(const number of [prNumber,issueNumber]) {
               const {data:item}=await github.rest.issues.get({...context.repo,issue_number:number}); const plan=p.escalationMutationPlan(item.labels);
               if(!plan.ok) return core.setFailed(plan.reason); if(plan.add.length) await github.rest.issues.addLabels({...context.repo,issue_number:number,labels:plan.add});
@@ -175,6 +178,7 @@ jobs:
     needs: [prepare, trusted-record]
     if: needs.trusted-record.outputs.pass == 'true'
     uses: ./.github/workflows/agent-verify.yml
+    permissions: {actions: read, contents: read, issues: write, pull-requests: write}
     with:
       pr_number: ${{ fromJSON(needs.prepare.outputs.pr_number) }}
       head_sha: ${{ needs.prepare.outputs.head_sha }}
@@ -184,6 +188,7 @@ jobs:
     needs: [prepare, trusted-record]
     if: needs.trusted-record.outputs.blocked == 'true'
     uses: ./.github/workflows/agent-ci-fixer.yml
+    permissions: {actions: read, contents: read, issues: write, pull-requests: read}
     with:
       invocation_mode: review-block
       pr_number: ${{ fromJSON(needs.prepare.outputs.pr_number) }}

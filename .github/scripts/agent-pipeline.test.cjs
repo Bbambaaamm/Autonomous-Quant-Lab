@@ -451,7 +451,8 @@ test("v2 third-audit workflow wiring is fail-closed and injection safe", () => {
   assert.match(reviewer,/trusted-governance\.json/);
   assert.match(reviewer,/base_sha:pr\.base\.sha/);
   assert.match(reviewer,/git diff --quiet "\$BASE_SHA" "\$HEAD_SHA" -- AGENTS\.md/);
-  assert.doesNotMatch(fixer+reviewer,/pull-requests: write/);
+  assert.doesNotMatch(fixer,/pull-requests: write/);
+  assert.equal((reviewer.match(/pull-requests: write/g)||[]).length,1);
 });
 
 test("v2 index mode policy rejects symlinks, gitlinks, and mode transitions", () => {
@@ -535,6 +536,8 @@ test("v2 fixer uses explicit trusted invocation modes", () => {
   const sha="a".repeat(40);
   assert.deepEqual(pipeline.fixerInvocationDecision({eventName:"workflow_run",mode:"ci-workflow-run"}),{ok:true,kind:"ci-workflow-run"});
   assert.equal(pipeline.fixerInvocationDecision({eventName:"workflow_call",mode:"review-block",prNumber:7,headSha:sha,reviewBlock:"unsafe"}).ok,true);
+  assert.equal(pipeline.fixerInvocationDecision({eventName:"workflow_run",mode:"review-block",prNumber:7,headSha:sha,reviewBlock:"unsafe"}).kind,"review-block");
+  assert.equal(pipeline.fixerInvocationDecision({eventName:"workflow_dispatch",mode:"review-block",prNumber:7,headSha:sha,reviewBlock:"unsafe"}).kind,"review-block");
   assert.equal(pipeline.fixerInvocationDecision({eventName:"workflow_call",mode:"ci-workflow-run",prNumber:7,headSha:sha,reviewBlock:"unsafe"}).ok,false);
   assert.equal(pipeline.fixerInvocationDecision({eventName:"workflow_dispatch",mode:"failed-ci",prNumber:7,headSha:sha,ciRunId:9}).ok,true);
 });
@@ -558,12 +561,22 @@ test("v2 fifth-audit wiring pins validation toolchain, seals last, and finalizes
   assert.match(fixer,/setup-uv@[0-9a-f]{40}[\s\S]*version: '0\.12\.3'/);
   assert.match(fixer,/setup-node@[0-9a-f]{40}[\s\S]*node-version: '24'/);
   assert.match(fixer,/npm install --global npm@11\.17\.0/);
-  const validate=fixer.slice(fixer.indexOf("validate-patch:"),fixer.indexOf("trusted-publish:"));
-  assert.ok(validate.indexOf("node --test") < validate.indexOf("Seal post-test artifact"));
-  assert.ok(validate.indexOf("Seal post-test artifact") < validate.indexOf("validated-checksum"));
-  assert.match(validate,/cmp "\$RUNNER_TEMP\/pretest\.patch" "\$RUNNER_TEMP\/validated\.patch"/);
+  const validate=fixer.slice(fixer.indexOf("validate-patch:"),fixer.indexOf("seal-patch:"));
+  const seal=fixer.slice(fixer.indexOf("seal-patch:"),fixer.indexOf("trusted-publish:"));
+  assert.match(validate,/node --test/);
+  assert.doesNotMatch(validate,/validated-checksum|upload-artifact/);
+  assert.match(seal,/runs-on: ubuntu-latest[\s\S]*generated-patch-[\s\S]*Independently seal generated patch on fresh runner/);
+  assert.match(seal,/validatePatchPaths[\s\S]*fixScopeDecision[\s\S]*validatePatchModes[\s\S]*validated-checksum/);
   assert.match(fixer,/BEGIN TRUSTED GOVERNANCE[\s\S]*trusted-AGENTS\.md/);
   assert.match(reviewer,/exact authoritative green CI missing or ambiguous/);
   assert.match(reviewer,/Fail closed when reviewer credential is absent/);
   assert.match(reviewer,/fail-closed-finalizer:[\s\S]*STALE_REVIEW_FAILURE_NO_WRITE/);
+});
+
+test("v2 reusable caller permissions and governance linkage are fail closed", () => {
+  const reviewer=fs.readFileSync(".github/workflows/agent-codex-review.yml","utf8");
+  assert.match(reviewer,/verify-after-pass:[\s\S]*permissions: \{actions: read, contents: read, issues: write, pull-requests: write\}/);
+  assert.match(reviewer,/route-block:[\s\S]*permissions: \{actions: read, contents: read, issues: write, pull-requests: read\}/);
+  const escalation=reviewer.slice(reviewer.indexOf("governance-escalation:"),reviewer.indexOf("independent-review:"));
+  assert.match(escalation,/listComments[\s\S]*fullLinkageDecision[\s\S]*STALE_GOVERNANCE_NO_WRITE/);
 });
