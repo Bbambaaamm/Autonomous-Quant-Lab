@@ -551,6 +551,39 @@ test("v2 fix scope and durable classification records are deterministic", () => 
   assert.equal(marker,pipeline.classificationMarker(record,agentConfig.v2));
 });
 
+test("Issue #99 source context ordering, truncation, and fail-closed priority are deterministic", () => {
+  const files = [
+    { path: "backend/src/aa_generic.py", content: "g".repeat(256) },
+    { path: "backend/src/zz_fix_scope.py", content: "f".repeat(256) },
+    { path: "backend/src/mm_diagnostic.py", content: "d".repeat(256) },
+    { path: "backend/src/zz_generic.py", content: "z".repeat(256) },
+  ];
+  const fixScope = ["backend/src/zz_fix_scope.py"];
+  const diagnostic = JSON.stringify({ excerpt: "FAILED in backend/src/mm_diagnostic.py line 10" });
+  const wide = pipeline.buildBoundedSourceContext({ files, fixScopePaths: fixScope, diagnostic, sourceBudgetBytes: 50_000 });
+  assert.deepEqual(wide.files.map((file) => file.path), [
+    "backend/src/zz_fix_scope.py",
+    "backend/src/mm_diagnostic.py",
+    "backend/src/aa_generic.py",
+    "backend/src/zz_generic.py",
+  ]);
+  const firstThree = wide.files.slice(0, 3);
+  const truncatedBudget = Buffer.byteLength(JSON.stringify({ format: "source-context-v1", files: firstThree }));
+  const truncated = pipeline.buildBoundedSourceContext({ files, fixScopePaths: fixScope, diagnostic, sourceBudgetBytes: truncatedBudget });
+  assert.deepEqual(truncated.files.map((file) => file.path), [
+    "backend/src/zz_fix_scope.py",
+    "backend/src/mm_diagnostic.py",
+    "backend/src/aa_generic.py",
+  ]);
+  assert.equal(truncated.files.some((file) => file.path === "backend/src/zz_fix_scope.py"), true);
+  assert.equal(truncated.files.some((file) => file.path === "backend/src/mm_diagnostic.py"), true);
+  assert.equal(truncated.json, pipeline.buildBoundedSourceContext({ files, fixScopePaths: fixScope, diagnostic, sourceBudgetBytes: truncatedBudget }).json);
+  const fixOnlyBudget = Buffer.byteLength(JSON.stringify({ format: "source-context-v1", files: [wide.files[0]] }));
+  assert.throws(() => pipeline.buildBoundedSourceContext({
+    files, fixScopePaths: fixScope, diagnostic, sourceBudgetBytes: fixOnlyBudget - 1,
+  }), /PRIORITY_SOURCE_CONTEXT_TOO_LARGE/);
+});
+
 test("v2 write job executes only trusted policy and treats candidate checkout as data", () => {
   const fixer=fs.readFileSync(".github/workflows/agent-ci-fixer.yml","utf8");
   const publish=fixer.slice(fixer.indexOf("trusted-publish:"),fixer.indexOf("fail-closed-finalizer:"));
@@ -723,4 +756,8 @@ test("v2 classify job guard admits reusable review-block despite inherited calle
   assert.equal(classifyRuns({eventName:"workflow_run",conclusion:"success",mode:"review-block"}),true);
   assert.equal(classifyRuns({eventName:"workflow_dispatch",conclusion:undefined,mode:"review-block"}),true);
   assert.equal(classifyRuns({eventName:"workflow_run",conclusion:"success",mode:""}),false);
+  assert.match(fixer,/prepare-generation-context:[\s\S]*FIX_SCOPE: '\$\{\{ needs\.classify\.outputs\.fix_scope \}\}'[\s\S]*DIAGNOSTIC: '\$\{\{ needs\.classify\.outputs\.diagnostic \}\}'/);
+  assert.match(fixer,/buildBoundedSourceContext\(\{files,fixScopePaths:process\.env\.FIX_SCOPE,diagnostic:process\.env\.DIAGNOSTIC,sourceBudgetBytes:SOURCE_CONTEXT_MAX_BYTES\}\)/);
+  assert.match(fixer,/SOURCE_CONTEXT_MAX_BYTES=917504/);
+  assert.match(fixer,/test "\$\(stat -c%s \.codex-input\/prompt\.md\)" -le 1048576/);
 });
