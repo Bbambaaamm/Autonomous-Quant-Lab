@@ -264,3 +264,97 @@ classification/review (v2), exact-merge-SHA staging evidence (v3), or a role-bas
 ready queue (v4) while retaining the same GitHub evidence and fail-closed state
 contract. Those capabilities require their own reviewed implementation; none is
 authorized by this document.
+
+## V2: bounded remediation and independent review
+
+V2 preserves every v1 state and human gate and adds exact-SHA operational evidence. A trusted
+classifier binds the job list to its containing exact-SHA workflow run and normalizes failed-step
+metadata into a fixed taxonomy. Unknown, multiple, infrastructure-transient, security, PostgreSQL,
+image, production, governance, schema, authentication,
+broker/execution, or live-trading failures fail closed to maintainer intervention. The free-form
+fix budget is two commits per linked PR; an exact `(source SHA, failure evidence)` marker makes
+retries idempotent. Exhaustion is not waived.
+
+The fixer is split into three trust domains: Codex patch generation has `OPENAI_API_KEY`, a
+read-only GitHub permission and no repository command execution; validation has neither model
+secret nor write credential and verifies checksums, paths, patch bounds and prescribed checks;
+publishing has only GitHub write permission, repeats linkage/state/head/base checks, and applies
+only the checksum- and exact-path-bound validated artifact without force-push or pushes to `main`.
+Validation commands come from a hard-coded failure-class map, never from model output. Both linked
+objects must have exactly `agent:pr`, and two-sided durable comments must agree with the PR marker.
+Configuration and denylist
+are versioned in `.github/agent-pipeline.json`.
+
+After green authoritative CI, a separate read-only Codex invocation reviews AGENTS/governance,
+the trusted resolver's bounded linked-Issue scope, base-to-exact-head diff, test weakening,
+security and paper-only/live implications. Its strict schema records the reviewed SHA, findings,
+scope consistency and safety assessments.
+It records structured `PASS` or `BLOCK` evidence bound to the current SHA. Missing
+`OPENAI_API_KEY`, malformed output, stale SHA or TOCTOU always fails closed; the secret value is
+never stored in the repository. `agent:verified` now requires both a fresh v2 Reviewer PASS and
+the existing exact-SHA human/native evidence. Neither substitutes for the other or authorizes
+merge. Reviewer BLOCK and unsafe, ambiguous or exhausted work require a human. The `agent:pr`
+transition dispatches a trusted re-evaluation, so green CI that finished before linkage is reused
+without a manual CI rerun; a PASS explicitly invokes the reusable verifier with PR number and SHA.
+
+### V2 trusted diagnostics and Reviewer BLOCK routing
+
+The CI controller downloads only the single failed authoritative job log, aggressively redacts and
+truncates it, and binds the excerpt checksum, source workflow run ID, job ID, and run attempt to the
+exact head SHA. If that bounded diagnostic cannot be produced, or when the failure is
+`dependency-lock`, the controller fails closed to `agent:needs-human`; dependency files never enter
+the free-form fixer.
+
+Both Codex invocations receive deterministic prompt files inside the checked-out workspace. Trusted
+instructions frame bounded Issue or diagnostic JSON as untrusted data, rather than referring to a
+runner-temporary path that the action may not read. The bot allowance is restricted to
+`github-actions[bot]`. A Reviewer BLOCK calls the reusable controller with the already validated PR
+number and exact head SHA; the controller independently re-fetches lifecycle, two-sided linkage, and
+SHA before performing the fail-closed escalation.
+
+### v2 crash, trust, and pre-link guarantees
+
+The post-link controller re-queries a unique authoritative CI run for the exact PR head. A completed success routes to independent review, a completed failure routes to the classifier with its exact run ID, an active run is left to its normal completion event, and missing or ambiguous evidence performs no write. Fixer publication is limited to same-repository PR heads, validates the ref as data, and uses the narrowly scoped `AGENT_PUBLISH_TOKEN` so the resulting push deterministically emits the next pull-request CI cycle.
+
+Validated patches are exported from the staged index, including new files. Concrete trading, risk, execution, security, paper-only, authentication, and RBAC surfaces are protected by machine-readable path and diagnostic patterns. Fix commits carry a durable `Agent-Fix-Attempt` trailer, allowing budget reconciliation even if post-push audit recording crashes. All model, validation, and publication failures use an exact-head fail-closed finalizer; stale failures never mutate a newer head. Reviewer governance and the base SHA come from the trusted default-branch preparation checkout.
+
+### v2 fourth-audit artifact and secret boundary
+
+Before any repository check runs, credential-free validation stages the applied patch, compares the
+actual cached path set with the model declaration, applies the deny policy to that actual set, and
+rejects symlinks, gitlinks, executable additions, and mode transitions. Trusted publication repeats
+the cached path and index-mode policy, stages additions before comparison, verifies the remote head
+is still the classified source SHA immediately before push, and verifies the resulting remote SHA.
+Manual dispatch accepts a CI run only when its completed failed `CI`/`pull_request` identity, exact
+SHA, single attached PR, and PR number all agree.
+
+Patch generation has an explicit secret preflight and no repository checkout. A preceding
+credential-free job serializes bounded repairable source files as non-executable JSON; the
+secret-bearing job contains only that source context and diagnostic artifact, so repository scripts
+and tests are mechanically absent while `OPENAI_API_KEY` is present. The immutable Codex action pin
+and read-only profile are wiring-tested. Publication exposes and requires `AGENT_PUBLISH_TOKEN` only in the final push step and never falls back to `GITHUB_TOKEN`.
+
+### Trusted policy, classification, and fix scope
+
+All v2 security decisions are loaded from a separate default-branch checkout. The pull-request
+checkout is candidate data only: it never supplies classifier, path/mode rules, or publisher code.
+Candidate checkout credentials are not persisted, and `AGENT_PUBLISH_TOKEN` is exposed only to the
+final checked push operation after trusted linkage, artifact, path, mode, and scope checks.
+
+Every exact failed authoritative CI run produces one idempotent `agent-ci-classification:v2`
+record. Its encoded payload binds repository, Issue, PR, exact SHA, CI run and attempt, failed
+jobs, normalized class, eligibility, budget state, and producing workflow/run. Unsafe outcomes are
+recorded before escalation. Repair scope comes from trusted GitHub metadata: existing files must be
+in the PR baseline file set and additions are limited to configured test paths. Validation binds
+that scope into the artifact and publication checks it again.
+
+### Fifth independent audit hardening
+
+Reusable fixer calls now carry an explicit trusted invocation mode rather than inferring reusable-call identity from the inherited GitHub event context. Both automatic reviewer entry points and dispatched review require one completed, successful, pull-request-triggered authoritative `CI` run for the exact PR and head; failed-CI fixer entry likewise requires the complete failed identity contract. Timeout and runner evidence takes precedence over source-failure classification.
+
+Credential-free patch validation installs the same pinned Python 3.12, uv 0.12.3, Node 24, and npm 11.17.0 toolchain as authoritative CI and synchronizes locked dependencies before the relevant checks. After those untrusted checks succeed, a separate fresh-runner `seal-patch` job downloads the original server-side generated artifact, freshly checks out trusted default-branch policy and the exact candidate SHA, and independently re-derives paths, modes, scope, patch bytes, checksum, and metadata without executing repository code. Publication binds source SHA, failure class, and authorized scope back to classifier outputs rather than trusting artifact metadata alone. Generation receives bounded trusted default-branch governance separately from untrusted diagnostics and source. Structured fixer `BLOCK` reasons and reviewer credential/action failures use exact-SHA, lifecycle, and two-sided-linkage rechecks before fail-closed human escalation; neither path can synthesize review PASS. Reusable verification and BLOCK-routing jobs explicitly receive minimal caller-side permissions, and governance escalation freshly revalidates both durable linkage directions immediately before label changes.
+
+The fixer job-level guard treats an explicit reusable `review-block` invocation as authoritative
+regardless of the caller's inherited event context. Direct `workflow_run` entry remains limited to
+failed authoritative CI, while `workflow_dispatch` is limited to an explicit failed-CI replay; the
+inner trusted invocation decision and exact linkage, lifecycle, SHA, and CI checks remain mandatory.

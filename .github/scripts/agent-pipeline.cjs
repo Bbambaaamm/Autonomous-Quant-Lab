@@ -113,6 +113,216 @@ function reviewSatisfied({ reviewDecision, reviews = [], acknowledgements = [], 
   return nativeExactShaApproval || hasExactShaReviewAcknowledgement(acknowledgements, headSha);
 }
 
+function parseTrustedMarker(comments, kind, headSha) {
+  const prefix = `<!-- ${kind}:v2 sha=${headSha} `;
+  const matches = comments.filter((comment) => comment.user?.login === "github-actions[bot]")
+    .flatMap((comment) => (comment.body || "").split("\n"))
+    .filter((line) => line.startsWith(prefix) && line.endsWith(" -->"));
+  return matches.length === 1 ? matches[0] : null;
+}
+
+function independentReviewSatisfied(comments, headSha) {
+  return parseTrustedMarker(comments, "agent-codex-review", headSha)?.includes(" result=PASS ") === true;
+}
+
+const FAILURE_CLASSES = ["lint-format", "typecheck", "unit-test", "api-test", "integration-postgres",
+  "frontend-test-build", "security", "container-build", "production-smoke", "dependency-lock",
+  "infra-transient", "multiple-failures", "unknown"];
+
+function lifecycleAtAgentPr(prLabels, issueLabels) {
+  const states = (labels) => labelNames(labels).filter((label) => STATES.includes(label));
+  const pr = states(prLabels), issue = states(issueLabels);
+  if (pr.includes("agent:needs-human") || issue.includes("agent:needs-human")) {
+    return { ok: false, reason: "NEEDS_HUMAN_PRESENT" };
+  }
+  return pr.length === 1 && pr[0] === "agent:pr" && issue.length === 1 && issue[0] === "agent:pr"
+    ? { ok: true } : { ok: false, reason: "NOT_EXACT_AGENT_PR" };
+}
+
+function fullLinkageDecision({ prBody, prComments, issueComments, owner, repo, issueNumber, prNumber }) {
+  if (parseAgentIssue(prBody) !== issueNumber) return { ok: false, reason: "BODY_MARKER_MISMATCH" };
+  const prSide = durableIssueLinkDecision(prComments, { owner, repo, prNumber });
+  const issueSide = durablePrLinkDecision(issueComments, { owner, repo, issueNumber });
+  if (!prSide.ok || !issueSide.ok) return { ok: false, reason: "AMBIGUOUS_DURABLE_LINK" };
+  return prSide.issueNumber === issueNumber && issueSide.prNumber === prNumber
+    ? { ok: true } : { ok: false, reason: "DURABLE_LINK_MISMATCH" };
+}
+
+function failedStepNames(job) {
+  return (job.steps || []).filter((step) => ["failure", "timed_out"].includes(step.conclusion))
+    .map((step) => step.name.toLowerCase());
+}
+
+function normalizedFailureClass(job) {
+  const name = job.name.toLowerCase();
+  const steps = failedStepNames(job).join(" ");
+  const metadata = `${name} ${steps}`;
+  // Infrastructure evidence takes precedence: a timeout is not a source defect.
+  if (job.conclusion === "timed_out" || /runner|network|download|service unavailable/.test(metadata)) return "infra-transient";
+  if (/dependenc|lock|npm ci|uv lock|uv sync/.test(metadata)) return "dependency-lock";
+  if (/security|audit|bandit|pip-audit/.test(metadata)) return "security";
+  if (/integration-postgres|postgres/.test(metadata)) return "integration-postgres";
+  if (/container-build|docker/.test(metadata)) return "container-build";
+  if (/production-smoke|smoke/.test(metadata)) return "production-smoke";
+  if (/frontend|npm test|next build/.test(metadata)) return "frontend-test-build";
+  if (/mypy|typecheck|type check/.test(metadata)) return "typecheck";
+  if (/ruff|lint|format/.test(metadata)) return "lint-format";
+  if (/\bapi\b/.test(metadata)) return "api-test";
+  if (/unit|pytest/.test(metadata)) return "unit-test";
+  return "unknown";
+}
+
+function fixerInvocationDecision({ eventName, mode, prNumber, headSha, reviewBlock, ciRunId }) {
+  // Explicitly bound reusable modes are authoritative.  A called workflow retains
+  // the caller's event name, so eventName cannot identify workflow_call here.
+  const validBinding = Number.isSafeInteger(Number(prNumber)) && Number(prNumber) > 0 &&
+    /^[0-9a-f]{40}$/.test(headSha || "");
+  if (mode === "review-block") return validBinding && String(reviewBlock || "").trim()
+    ? { ok: true, kind: "review-block" } : { ok: false, reason: "INVALID_EXPLICIT_BINDING" };
+  if (mode === "failed-ci") return validBinding && Number(ciRunId) > 0
+    ? { ok: true, kind: "failed-ci" } : { ok: false, reason: "INVALID_EXPLICIT_BINDING" };
+  if (eventName === "workflow_run") return { ok: mode === "ci-workflow-run", kind: "ci-workflow-run" };
+  return { ok: false, reason: "INVALID_INVOCATION_MODE" };
+}
+
+function authoritativeCiIdentity(run, { prNumber, headSha, conclusion }) {
+  return !!run && run.name === "CI" && run.event === "pull_request" && run.status === "completed" &&
+    run.conclusion === conclusion && run.head_sha === headSha && run.pull_requests?.length === 1 &&
+    run.pull_requests[0].number === Number(prNumber);
+}
+
+function redactDiagnostic(value, maxBytes = 8192) {
+  return String(value || "")
+    .replace(/(authorization|token|secret|password|api[_-]?key)\s*[:=]\s*\S+/gi, "$1=[REDACTED]")
+    .replace(/\b(bearer|basic)\s+[A-Za-z0-9+/._=-]+/gi, "$1 [REDACTED]")
+    .replace(/\b[A-Z][A-Z0-9_]*(?:TOKEN|SECRET|PASSWORD|KEY)=[^\s]+/g, "[REDACTED_ENV]")
+    .replace(/gh[pousr]_[A-Za-z0-9_]+|sk-[A-Za-z0-9_-]+/g, "[REDACTED]")
+    .replace(/AKIA[0-9A-Z]{16}/g, "[REDACTED]")
+    .replace(/([?&](?:token|key|secret|signature)=)[^&\s]+/gi, "$1[REDACTED]")
+    .slice(-maxBytes);
+}
+
+function extractFailureDiagnostic(value, maxBytes = 4096) {
+  const input = String(value || "");
+  const meaningful = input.split(/\r?\n/).filter((line) =>
+    /error|fail|assert|exception|traceback|fatal|denied|mismatch|expected|actual|timed out/i.test(line));
+  return redactDiagnostic(meaningful.length ? meaningful.slice(-80).join("\n") : input.slice(-maxBytes), maxBytes);
+}
+
+function classifyCiFailure({ jobs, runHeadSha, expectedHeadSha, sourceRunId, runAttempt, logExcerpt, config = {} }) {
+  if (!/^[0-9a-f]{40}$/.test(runHeadSha || "") || runHeadSha !== expectedHeadSha) {
+    return { disposition: "NO_WRITE", failureClass: "unknown", reason: "WORKFLOW_RUN_SHA_MISMATCH" };
+  }
+  const authoritative = new Set(config.requiredCiJobs || []);
+  const failedAll = jobs.filter((job) => ["failure", "timed_out"].includes(job.conclusion));
+  if (failedAll.some((job) => !authoritative.has(job.name))) {
+    return { disposition: "NEEDS_HUMAN", failureClass: "unknown", reason: "NON_AUTHORITATIVE_FAILED_JOB" };
+  }
+  const failed = failedAll.filter((job) => authoritative.has(job.name));
+  if (failed.length !== 1) return { disposition: "NEEDS_HUMAN", failureClass: failed.length > 1 ? "multiple-failures" : "unknown", reason: "FAILURE_SET_NOT_SINGLE" };
+  const job = failed[0], failureClass = normalizedFailureClass(job);
+  const eligible = new Set(config.failureClassPolicy?.eligible || []);
+  const denied = new Set(config.failureClassPolicy?.denied || []);
+  if (!eligible.has(failureClass) && !denied.has(failureClass)) return { disposition: "NEEDS_HUMAN", failureClass: "unknown", reason: "UNCONFIGURED_FAILURE_CLASS" };
+  const excerpt = extractFailureDiagnostic(logExcerpt, 4096);
+  const protectedPatterns = config.protectedDiagnosticPatterns || [];
+  if (protectedPatterns.some((pattern) => new RegExp(pattern, "i").test(excerpt))) {
+    return { disposition: "NEEDS_HUMAN", failureClass, reason: "PROTECTED_TEST_OR_INVARIANT" };
+  }
+  if (eligible.has(failureClass) && (!Number.isSafeInteger(sourceRunId) || sourceRunId < 1 ||
+      !Number.isSafeInteger(runAttempt) || runAttempt < 1 || !excerpt.trim())) {
+    return { disposition: "NEEDS_HUMAN", failureClass, reason: "SAFE_DIAGNOSTIC_UNAVAILABLE" };
+  }
+  const crypto = require("crypto");
+  const diagnosticObject = { failureClass, job: job.name, conclusion: job.conclusion,
+    failedSteps: failedStepNames(job), jobId: job.id, sourceRunId, runAttempt,
+    excerpt };
+  const diagnosticWithoutChecksum = JSON.stringify(diagnosticObject);
+  diagnosticObject.checksum = crypto.createHash("sha256").update(diagnosticWithoutChecksum).digest("hex");
+  return {
+    disposition: denied.has(failureClass) ? "NEEDS_HUMAN" : "FIX",
+    failureClass,
+    job: job.name,
+    jobId: job.id,
+    evidence: `${runHeadSha}:${sourceRunId}:${job.id}:${runAttempt}:${diagnosticObject.checksum}`,
+    diagnostic: JSON.stringify(diagnosticObject),
+    reason: denied.has(failureClass) ? "PROHIBITED_OR_UNKNOWN_FAILURE_CLASS" : undefined,
+  };
+}
+
+function fixScopeDecision(paths, baselinePaths, config) {
+  const baseline = new Set(baselinePaths || []);
+  const additions = config.fixScope?.testAdditionPrefixes || [];
+  const additionPatterns = (config.fixScope?.testAdditionPatterns || []).map((pattern) => new RegExp(pattern));
+  if (!Array.isArray(paths) || !paths.length) return { ok: false, reason: "EMPTY_FIX_SCOPE" };
+  return paths.every((path) => baseline.has(path) || additions.some((prefix) => path.startsWith(prefix)) ||
+      additionPatterns.some((pattern) => pattern.test(path)))
+    ? { ok: true, paths: [...paths].sort() } : { ok: false, reason: "OUTSIDE_AUTHORIZED_FIX_SCOPE" };
+}
+
+function classificationMarker(record, config) {
+  const keys = config.classificationSchema || [];
+  if (keys.some((key) => record[key] === undefined)) throw new Error("INCOMPLETE_CLASSIFICATION_RECORD");
+  const encoded = Buffer.from(JSON.stringify(record)).toString("base64url");
+  return `<!-- ${config.classificationMarker} evidence=${record.sha}:${record.ciRunId}:${record.ciRunAttempt} record=${encoded} -->`;
+}
+
+function validationCommands(failureClass) {
+  const commands = {
+    "lint-format": ["cd backend && uv run ruff check .", "cd backend && uv run ruff format --check ."],
+    typecheck: ["cd backend && uv run mypy src/quantlab"],
+    "unit-test": ["cd backend && uv run pytest -q tests/test_research.py tests/test_research_engine.py tests/test_phase6.py tests/test_alpaca_corporate_actions.py tests/test_xnys_calendar.py tests/test_paper_only_architecture.py tests/test_phase6_runtime.py tests/test_phase6_audit_fixes.py tests/test_phase6_experiment_audit.py tests/test_phase7.py tests/test_pre_pilot_review_remediation.py"],
+    "api-test": ["cd backend && uv run pytest -q tests/test_vertical_slice.py tests/test_phase7_api.py tests/test_phase8_api.py tests/test_phase9_security.py"],
+    "frontend-test-build": ["cd frontend && npm ci", "cd frontend && npm run lint", "cd frontend && npm run typecheck", "cd frontend && npm test", "cd frontend && npm run build"],
+  };
+  return commands[failureClass] ? [...commands[failureClass]] : null;
+}
+
+function trustedArtifactDecision({ patchBytes, actualChecksum, metadataChecksum, actualPaths, metadataPaths, config }) {
+  if (patchBytes < 1 || patchBytes > config.maxPatchBytes || actualChecksum !== metadataChecksum) return { ok: false, reason: "ARTIFACT_MISMATCH" };
+  if (JSON.stringify([...actualPaths].sort()) !== JSON.stringify([...metadataPaths].sort()) || !validatePatchPaths(actualPaths, config)) {
+    return { ok: false, reason: "PATH_SET_MISMATCH" };
+  }
+  return { ok: true };
+}
+
+function fixAttemptDecision({ comments, commits = [], sourceSha, evidence, maxAttempts }) {
+  const prefix = `<!-- agent-fix:v2 source=${sourceSha} evidence=${evidence} `;
+  const exact = comments.filter((comment) => comment.user?.login === "github-actions[bot]")
+    .flatMap((comment) => (comment.body || "").split("\n")).filter((line) => line.startsWith(prefix));
+  if (exact.length) return { action: "NO_WRITE", reason: "EXACT_EVIDENCE_ALREADY_PROCESSED" };
+  const commentAttempts = comments.filter((comment) => comment.user?.login === "github-actions[bot]")
+    .flatMap((comment) => (comment.body || "").split("\n")).filter((line) => line.startsWith("<!-- agent-fix:v2 ")).length;
+  const commitAttempts = commits.filter((commit) => commit.author?.login === "github-actions[bot]" &&
+    /(^|\n)Agent-Fix-Attempt: [1-9][0-9]*($|\n)/.test(commit.commit?.message || "")).length;
+  const attempts = Math.max(commentAttempts, commitAttempts);
+  return attempts >= maxAttempts ? { action: "NEEDS_HUMAN", reason: "FIX_BUDGET_EXHAUSTED" } : { action: "FIX", attempt: attempts + 1 };
+}
+
+function validatePatchPaths(paths, config) {
+  if (!Array.isArray(paths) || paths.length === 0 || paths.length > config.maxPatchFiles) return false;
+  return paths.every((path) => typeof path === "string" && !path.startsWith("/") && !path.includes("..") &&
+    !(config.protectedPaths || []).includes(path) &&
+    !config.deniedPathPrefixes.some((prefix) => path.startsWith(prefix)) &&
+    !config.deniedPathBasenames.includes(path.split("/").at(-1)) &&
+    !config.deniedPathFragments.some((fragment) => path.toLowerCase().includes(fragment)));
+}
+
+function validatePatchModes(rawDiff) {
+  const allowedModes = new Set(["100644", "100755"]);
+  const lines = String(rawDiff || "").split("\n").filter(Boolean);
+  if (!lines.length) return false;
+  return lines.every((line) => {
+    const match = /^:(\d{6}) (\d{6}) [0-9a-f]+ [0-9a-f]+ [A-Z][0-9]*\t/.exec(line);
+    if (!match) return false;
+    const [, oldMode, newMode] = match;
+    if (oldMode === newMode) return allowedModes.has(oldMode);
+    // New/deleted generated entries are narrow regular, non-executable files only.
+    return (oldMode === "000000" && newMode === "100644") ||
+      (oldMode === "100644" && newMode === "000000");
+  });
+}
+
 function stateMutationPlan(labels, previousState, nextState) {
   const progress = transitionProgress(labels, previousState, nextState);
   if (!progress.ok) return progress;
@@ -166,7 +376,8 @@ function invalidationLifecycleDecision({ prLabels, issueLabels = [], issueLoaded
 function successfulRequiredJobs(jobs, requiredNames, headSha) {
   const latest = new Map();
   for (const job of jobs) {
-    if (job.head_sha !== headSha) continue;
+    // listJobsForWorkflowRun jobs have no head_sha; callers bind the containing run to headSha.
+    if (job.head_sha !== undefined && job.head_sha !== headSha) continue;
     const old = latest.get(job.name);
     if (!old || job.run_attempt >= old.run_attempt) latest.set(job.name, job);
   }
@@ -211,6 +422,7 @@ function verificationDecision(input) {
   if (!input.open || !input.correctBase) return { ok: false, reason: "PR_NOT_OPEN_AGAINST_DEFAULT" };
   if (input.draft) return { ok: false, reason: "PR_IS_DRAFT" };
   if (!input.reviewSatisfied) return { ok: false, reason: "EXACT_SHA_REVIEW_MISSING" };
+  if (!input.independentReviewSatisfied) return { ok: false, reason: "INDEPENDENT_REVIEW_PASS_MISSING" };
   if (!input.issueIsImplementation) return { ok: false, reason: "ISSUE_NOT_IMPLEMENTATION" };
   if (!input.statesReconciliable) return { ok: false, reason: "INVALID_PIPELINE_STATE" };
   if (input.needsHuman) return { ok: false, reason: "NEEDS_HUMAN_PRESENT" };
@@ -220,6 +432,7 @@ function verificationDecision(input) {
 
 module.exports = {
   STATES,
+  FAILURE_CLASSES,
   currentState,
   authoritativeCiRunCandidates,
   durablePrLinkDecision,
@@ -232,6 +445,23 @@ module.exports = {
   parseAgentIssue,
   parseDurableLink,
   reviewSatisfied,
+  independentReviewSatisfied,
+  parseTrustedMarker,
+  classifyCiFailure,
+  normalizedFailureClass,
+  fixerInvocationDecision,
+  authoritativeCiIdentity,
+  redactDiagnostic,
+  extractFailureDiagnostic,
+  validationCommands,
+  lifecycleAtAgentPr,
+  fullLinkageDecision,
+  trustedArtifactDecision,
+  fixScopeDecision,
+  classificationMarker,
+  fixAttemptDecision,
+  validatePatchPaths,
+  validatePatchModes,
   stateMutationPlan,
   successfulRequiredJobs,
   transitionProgress,

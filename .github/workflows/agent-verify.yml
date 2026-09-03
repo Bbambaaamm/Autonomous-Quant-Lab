@@ -111,6 +111,7 @@ jobs:
               correctBase: pull.base.ref === context.payload.repository.default_branch,
               draft: pull.draft,
               reviewSatisfied: pipeline.reviewSatisfied({ ...review, headSha: run.head_sha }),
+              independentReviewSatisfied: pipeline.independentReviewSatisfied(review.acknowledgements, run.head_sha),
               issueIsImplementation: pipeline.isImplementation(issue.labels),
               statesReconciliable: issuePlan.ok && prPlan.ok,
               needsHuman,
@@ -140,6 +141,7 @@ jobs:
               correctBase: freshPull.base.ref === context.payload.repository.default_branch,
               draft: freshPull.draft,
               reviewSatisfied: pipeline.reviewSatisfied({ ...freshReview, headSha: run.head_sha }),
+              independentReviewSatisfied: pipeline.independentReviewSatisfied(freshReview.acknowledgements, run.head_sha),
               issueIsImplementation: !freshIssue.pull_request && pipeline.isImplementation(freshIssue.labels),
               statesReconciliable: freshIssuePlan.ok && freshPrPlan.ok,
               needsHuman: freshNeedsHuman,
@@ -167,7 +169,8 @@ jobs:
                 writeFreshPull.base.ref !== context.payload.repository.default_branch ||
                 pipeline.parseAgentIssue(writeFreshPull.body) !== issueNumber || writeNeedsHuman ||
                 !pipeline.hasDurableLink(writeFreshReview.acknowledgements, { ...context.repo, issueNumber, prNumber }) ||
-                !pipeline.reviewSatisfied({ ...writeFreshReview, headSha: run.head_sha })) {
+                !pipeline.reviewSatisfied({ ...writeFreshReview, headSha: run.head_sha }) ||
+                !pipeline.independentReviewSatisfied(writeFreshReview.acknowledgements, run.head_sha)) {
               return core.setFailed("ISSUE_CHANGED_DURING_WRITE: PR může být v bezpečném partial stavu; opakovaný CI run provede reconciliation");
             }
             await mutateState(issueNumber, writeIssuePlan);
