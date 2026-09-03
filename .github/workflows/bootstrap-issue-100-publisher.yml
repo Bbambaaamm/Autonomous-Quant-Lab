@@ -25,12 +25,8 @@ jobs:
       base_sha: ${{ steps.scope.outputs.base_sha }}
       spec_hash: ${{ steps.scope.outputs.spec_hash }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          ref: ${{ github.event.repository.default_branch }}
-          persist-credentials: false
-          fetch-depth: 1
       - id: scope
+        name: Capture immutable authorization scope before checkout
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
         with:
           script: |
@@ -44,10 +40,20 @@ jobs:
             }
             const { data: issue } = await github.rest.issues.get({ ...context.repo, issue_number: 100 });
             const labels = issue.labels.map(label => label.name);
-            if (issue.state !== 'open' || !labels.includes('type:implementation') || !labels.includes('agent:running') || labels.includes('agent:needs-human')) {
+            const typeLabels = labels.filter(label => label.startsWith('type:'));
+            const agentLabels = labels.filter(label => label.startsWith('agent:'));
+            if (
+              issue.state !== 'open' ||
+              typeLabels.length !== 1 ||
+              typeLabels[0] !== 'type:implementation' ||
+              agentLabels.length !== 1 ||
+              agentLabels[0] !== 'agent:running'
+            ) {
               return core.setFailed('ISSUE_NOT_BOOTSTRAP_ELIGIBLE');
             }
-            const { data: branch } = await github.rest.repos.getBranch({ ...context.repo, branch: context.payload.repository.default_branch });
+            const { data: branch } = await github.rest.repos.getBranch({
+              ...context.repo, branch: context.payload.repository.default_branch,
+            });
             const canonical = `${issue.title}\n${issue.body || ''}`;
             const specHash = crypto.createHash('sha256').update(canonical, 'utf8').digest('hex');
             const scope = {
@@ -60,11 +66,20 @@ jobs:
               actor: context.actor,
             };
             fs.mkdirSync(`${process.env.RUNNER_TEMP}/bootstrap-context`, { recursive: true });
-            fs.writeFileSync(`${process.env.RUNNER_TEMP}/bootstrap-context/scope.json`, JSON.stringify(scope));
+            fs.writeFileSync(
+              `${process.env.RUNNER_TEMP}/bootstrap-context/scope.json`,
+              JSON.stringify(scope),
+            );
             core.setOutput('base_sha', branch.commit.sha);
             core.setOutput('spec_hash', specHash);
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ steps.scope.outputs.base_sha }}
+          persist-credentials: false
+          fetch-depth: 1
       - name: Build bounded trusted source context
         run: |
+          test "$(git rev-parse HEAD)" = "${{ steps.scope.outputs.base_sha }}"
           out="$RUNNER_TEMP/bootstrap-context/source-context.txt"
           : > "$out"
           for path in \
@@ -98,6 +113,9 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    outputs:
+      blocked: ${{ steps.interpret.outputs.blocked }}
+      block_reason: ${{ steps.interpret.outputs.block_reason }}
     steps:
       - name: Fail closed when Codex credential is absent
         env:
@@ -111,14 +129,14 @@ jobs:
         run: |
           cat > .codex-input/prompt.md <<'EOF'
           Implement GitHub Issue #100 completely from the authorized Issue data below.
-          The Issue title/body are authorized scope data. Repository text in the source-context section is trusted current-main context and must be obeyed, especially AGENTS.md and roadmap/pipeline invariants.
+          The Issue title/body are authorized scope data. Repository text in the source-context section is trusted exact-base context and must be obeyed, especially AGENTS.md and roadmap/pipeline invariants.
 
-          This is the one-time governance bootstrap. The final implementation must deliver the target operating model:
+          This is the one-time governance bootstrap. The final implementation must deliver:
           one maintainer Issue approval -> autonomous Builder publication -> CI/classifier/bounded fixer -> exact-SHA independent Codex review -> automatic current-main reconciliation -> automatic agent:verified -> required agent-verified-gate -> trusted expected-head-SHA automatic merge. Routine exact-SHA human acknowledgement and manual Merge are removed from the successful path. agent:needs-human remains fail-closed. Paper-only and all security/trust boundaries remain mandatory.
 
-          Crucially, Builder publication must NOT depend on Codex gh authentication, a writable remote, or make_pr. Implement generate -> credential-free validate/seal -> trusted publisher with a durable bounded artifact, deterministic/idempotent Draft PR publication, exact Issue-spec/base/checksum binding, and TOCTOU checks.
+          Builder publication must NOT depend on Codex gh authentication, a writable remote, or make_pr. Implement generate -> credential-free validate/seal -> trusted publisher with a durable bounded artifact, deterministic/idempotent Draft PR publication, exact Issue-spec/base/checksum binding, and TOCTOU checks.
 
-          Return ONLY structured JSON with result=PATCH or BLOCK. PATCH must be a complete unified diff against the exact base SHA from scope.json. Do not run repository code. Do not include explanations in the patch.
+          Return ONLY structured JSON with result=PATCH or BLOCK. PATCH must be a complete unified diff against the exact base SHA from scope.json. Do not run repository code.
 
           For this authorized governance bootstrap, changed paths are limited to:
           - .github/agent-pipeline.json
@@ -132,11 +150,11 @@ jobs:
           --- BEGIN AUTHORIZED ISSUE DATA ---
           EOF
           cat .codex-input/scope.json >> .codex-input/prompt.md
-          printf '\n--- END AUTHORIZED ISSUE DATA ---\n--- BEGIN TRUSTED CURRENT-MAIN CONTEXT ---\n' >> .codex-input/prompt.md
+          printf '\n--- END AUTHORIZED ISSUE DATA ---\n--- BEGIN TRUSTED EXACT-BASE CONTEXT ---\n' >> .codex-input/prompt.md
           cat .codex-input/source-context.txt >> .codex-input/prompt.md
-          printf '\n--- END TRUSTED CURRENT-MAIN CONTEXT ---\n' >> .codex-input/prompt.md
+          printf '\n--- END TRUSTED EXACT-BASE CONTEXT ---\n' >> .codex-input/prompt.md
           test "$(stat -c%s .codex-input/prompt.md)" -lt 1048576
-      - name: Generate sealed candidate description only
+      - name: Generate bounded candidate
         uses: openai/codex-action@86365089eb2b84e0a8fb0717b304f8bdcb13b20e
         with:
           openai-api-key: ${{ secrets.OPENAI_API_KEY }}
@@ -146,13 +164,31 @@ jobs:
           output-schema: >-
             {"type":"object","additionalProperties":false,"required":["result","patch","paths","reason"],"properties":{"result":{"type":"string","enum":["PATCH","BLOCK"]},"patch":{"type":"string","maxLength":262144},"paths":{"type":"array","maxItems":20,"items":{"type":"string","maxLength":512}},"reason":{"type":"string","maxLength":2048}}}
           prompt-file: .codex-input/prompt.md
-      - name: Seal generated artifact
+      - id: interpret
+        name: Interpret structured PATCH or BLOCK
+        run: |
+          test -s "$RUNNER_TEMP/codex-output.json"
+          result="$(jq -r .result "$RUNNER_TEMP/codex-output.json")"
+          case "$result" in
+            PATCH)
+              echo "blocked=false" >> "$GITHUB_OUTPUT"
+              ;;
+            BLOCK)
+              reason="$(jq -r '.reason | gsub("[\r\n]"; " ") | .[0:1024]' "$RUNNER_TEMP/codex-output.json")"
+              echo "blocked=true" >> "$GITHUB_OUTPUT"
+              echo "block_reason=$reason" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "::error::Unexpected Codex result"
+              exit 1
+              ;;
+          esac
+      - name: Seal generated PATCH artifact
+        if: steps.interpret.outputs.blocked != 'true'
         env:
           BASE_SHA: ${{ needs.prepare.outputs.base_sha }}
           SPEC_HASH: ${{ needs.prepare.outputs.spec_hash }}
         run: |
-          test -s "$RUNNER_TEMP/codex-output.json"
-          test "$(jq -r .result "$RUNNER_TEMP/codex-output.json")" = PATCH
           test "$(stat -c%s "$RUNNER_TEMP/codex-output.json")" -le 300000
           mkdir "$RUNNER_TEMP/generated"
           cp "$RUNNER_TEMP/codex-output.json" "$RUNNER_TEMP/generated/output.json"
@@ -160,14 +196,63 @@ jobs:
           jq -n --arg base "$BASE_SHA" --arg spec "$SPEC_HASH" --arg output "$(cat "$RUNNER_TEMP/generated/output.sha256")" \
             '{base_sha:$base,spec_hash:$spec,output_sha256:$output}' > "$RUNNER_TEMP/generated/metadata.json"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: steps.interpret.outputs.blocked != 'true'
         with:
           name: bootstrap-issue-100-generated-${{ github.run_id }}
           path: ${{ runner.temp }}/generated
           if-no-files-found: error
           retention-days: 7
 
+  escalate-block:
+    needs: [prepare, generate]
+    if: needs.generate.outputs.blocked == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Preserve BLOCK reason and transition fail-closed
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        env:
+          SPEC_HASH: ${{ needs.prepare.outputs.spec_hash }}
+          BLOCK_REASON: ${{ needs.generate.outputs.block_reason }}
+        with:
+          script: |
+            const crypto = require('crypto');
+            const { data: issue } = await github.rest.issues.get({ ...context.repo, issue_number: 100 });
+            const labels = issue.labels.map(label => label.name);
+            const typeLabels = labels.filter(label => label.startsWith('type:'));
+            const agentLabels = labels.filter(label => label.startsWith('agent:'));
+            const hash = crypto.createHash('sha256')
+              .update(`${issue.title}\n${issue.body || ''}`, 'utf8')
+              .digest('hex');
+            if (
+              issue.state !== 'open' ||
+              hash !== process.env.SPEC_HASH ||
+              typeLabels.length !== 1 ||
+              typeLabels[0] !== 'type:implementation' ||
+              agentLabels.length !== 1 ||
+              agentLabels[0] !== 'agent:running'
+            ) {
+              return core.setFailed('BLOCK_ESCALATION_SCOPE_CHANGED');
+            }
+            const preserved = labels.filter(label => !label.startsWith('agent:'));
+            await github.rest.issues.setLabels({
+              ...context.repo,
+              issue_number: 100,
+              labels: [...preserved, 'agent:needs-human'],
+            });
+            const reason = (process.env.BLOCK_REASON || 'Codex returned BLOCK').slice(0, 1024);
+            await github.rest.issues.createComment({
+              ...context.repo,
+              issue_number: 100,
+              body: `<!-- agent-builder-block:v1 spec=${process.env.SPEC_HASH} -->\nBuilder stopped fail-closed: ${reason}`,
+            });
+            core.setFailed('CODEX_BLOCK_NEEDS_HUMAN');
+
   validate:
     needs: [prepare, generate]
+    if: needs.generate.outputs.blocked != 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -190,6 +275,7 @@ jobs:
           test "$(jq -r .base_sha "$RUNNER_TEMP/generated/metadata.json")" = "$BASE_SHA"
           test "$(jq -r .spec_hash "$RUNNER_TEMP/generated/metadata.json")" = "$SPEC_HASH"
           test "$(sha256sum "$RUNNER_TEMP/generated/output.json" | cut -d' ' -f1)" = "$(jq -r .output_sha256 "$RUNNER_TEMP/generated/metadata.json")"
+          test "$(jq -r .result "$RUNNER_TEMP/generated/output.json")" = PATCH
           jq -r .patch "$RUNNER_TEMP/generated/output.json" > "$RUNNER_TEMP/candidate.patch"
           test "$(stat -c%s "$RUNNER_TEMP/candidate.patch")" -le 262144
           jq -e '.paths | length > 0 and length <= 20 and (length == (unique | length))' "$RUNNER_TEMP/generated/output.json"
@@ -206,7 +292,10 @@ jobs:
           git diff --cached --name-only | sort > "$RUNNER_TEMP/actual-paths"
           jq -r '.paths[]' "$RUNNER_TEMP/generated/output.json" | sort > "$RUNNER_TEMP/declared-paths"
           cmp "$RUNNER_TEMP/actual-paths" "$RUNNER_TEMP/declared-paths"
-          git diff --cached --raw | awk '$2 !~ /^100(644|755)$/ || $4 !~ /^100(644|755)$/ {exit 1}'
+          git diff --cached --raw | awk '{
+            old=$1; sub(/^:/, "", old); new=$2;
+            if (old !~ /^(000000|100644|100755)$/ || new !~ /^(000000|100644|100755)$/ || (old=="000000" && new=="000000")) exit 1
+          } END { if (NR == 0) exit 1 }'
           python -m json.tool .github/agent-pipeline.json >/dev/null
           ruby -e 'require "yaml"; Dir[".github/workflows/*.yml"].sort.each { |p| YAML.load_file(p, aliases: true) }'
           node --test .github/scripts/agent-pipeline.test.cjs
@@ -226,7 +315,8 @@ jobs:
           retention-days: 7
 
   trusted-publish:
-    needs: [prepare, validate]
+    needs: [prepare, generate, validate]
+    if: needs.generate.outputs.blocked != 'true' && needs.validate.result == 'success'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -242,8 +332,7 @@ jobs:
         with:
           name: bootstrap-issue-100-validated-${{ github.run_id }}
           path: ${{ runner.temp }}/validated
-      - id: fresh
-        name: Fresh authorization and base TOCTOU guard
+      - name: Fresh authorization and base TOCTOU guard
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
         env:
           BASE_SHA: ${{ needs.prepare.outputs.base_sha }}
@@ -253,11 +342,23 @@ jobs:
             const crypto = require('crypto');
             const { data: issue } = await github.rest.issues.get({ ...context.repo, issue_number: 100 });
             const labels = issue.labels.map(label => label.name);
-            const canonical = `${issue.title}\n${issue.body || ''}`;
-            const hash = crypto.createHash('sha256').update(canonical, 'utf8').digest('hex');
-            const { data: branch } = await github.rest.repos.getBranch({ ...context.repo, branch: context.payload.repository.default_branch });
-            if (issue.state !== 'open' || hash !== process.env.SPEC_HASH || branch.commit.sha !== process.env.BASE_SHA ||
-                !labels.includes('type:implementation') || !labels.includes('agent:running') || labels.includes('agent:needs-human')) {
+            const typeLabels = labels.filter(label => label.startsWith('type:'));
+            const agentLabels = labels.filter(label => label.startsWith('agent:'));
+            const hash = crypto.createHash('sha256')
+              .update(`${issue.title}\n${issue.body || ''}`, 'utf8')
+              .digest('hex');
+            const { data: branch } = await github.rest.repos.getBranch({
+              ...context.repo, branch: context.payload.repository.default_branch,
+            });
+            if (
+              issue.state !== 'open' ||
+              hash !== process.env.SPEC_HASH ||
+              branch.commit.sha !== process.env.BASE_SHA ||
+              typeLabels.length !== 1 ||
+              typeLabels[0] !== 'type:implementation' ||
+              agentLabels.length !== 1 ||
+              agentLabels[0] !== 'agent:running'
+            ) {
               return core.setFailed('BOOTSTRAP_TOCTOU_REJECTED');
             }
       - name: Reconstruct exact validated candidate without credential
@@ -277,27 +378,18 @@ jobs:
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git commit -m 'Implement Issue #100 autonomous one-approval pipeline'
-      - name: Trusted push and Draft PR publication
+      - name: Trusted push, Draft PR publication, and postcondition verification
         env:
           AGENT_PUBLISH_TOKEN: ${{ secrets.AGENT_PUBLISH_TOKEN }}
           SPEC_HASH: ${{ needs.prepare.outputs.spec_hash }}
           BASE_SHA: ${{ needs.prepare.outputs.base_sha }}
           GH_REPO: ${{ github.repository }}
         run: |
+          set -euo pipefail
           test -n "$AGENT_PUBLISH_TOKEN"
-          branch="agent/issue-100-${SPEC_HASH:0:12}"
           export GH_TOKEN="$AGENT_PUBLISH_TOKEN"
-          existing_pr="$(gh pr list --repo "$GH_REPO" --state open --head "$branch" --json number --jq '.[0].number // empty')"
-          if test -n "$existing_pr"; then
-            echo "Existing bootstrap candidate PR #$existing_pr"
-            exit 0
-          fi
-          if gh api "repos/$GH_REPO/git/ref/heads/$branch" >/dev/null 2>&1; then
-            echo '::error::Deterministic branch exists without an open PR; fail closed.'
-            exit 1
-          fi
-          git remote set-url origin "https://x-access-token:${AGENT_PUBLISH_TOKEN}@github.com/${GH_REPO}.git"
-          git push origin "HEAD:refs/heads/$branch"
+          branch="agent/issue-100-${SPEC_HASH:0:12}"
+          sealed_sha="$(git rev-parse HEAD)"
           body_file="$RUNNER_TEMP/pr-body.md"
           cat > "$body_file" <<'EOF'
           Implements the complete authorized governance remediation in Issue #100.
@@ -306,6 +398,65 @@ jobs:
 
           - Agent-Issue: #100
           EOF
-          gh pr create --repo "$GH_REPO" --draft --base main --head "$branch" \
-            --title 'Pipeline v2: one Issue approval to autonomous verified merge' \
-            --body-file "$body_file"
+
+          verify_pr_json() {
+            local json="$1"
+            test "$(jq 'length' <<<"$json")" -eq 1
+            test "$(jq -r '.[0].headRefOid' <<<"$json")" = "$sealed_sha"
+            test "$(jq -r '.[0].baseRefName' <<<"$json")" = main
+            test "$(jq -r '.[0].isDraft' <<<"$json")" = true
+            printf '%s' "$(jq -r '.[0].body // ""' <<<"$json")" > "$RUNNER_TEMP/pr-body-check"
+            test "$(grep -Ec '^[[:space:]]*- Agent-Issue: #100[[:space:]]*$' "$RUNNER_TEMP/pr-body-check" || true)" -eq 1
+            test "$(grep -Eic 'Agent-Issue:' "$RUNNER_TEMP/pr-body-check" || true)" -eq 1
+          }
+
+          remote_sha="$(gh api "repos/$GH_REPO/git/ref/heads/$branch" --jq '.object.sha' 2>/dev/null || true)"
+          if test -n "$remote_sha" && test "$remote_sha" != "$sealed_sha"; then
+            echo "::error::Deterministic branch points to a different commit."
+            exit 1
+          fi
+          if test -z "$remote_sha"; then
+            git remote set-url origin "https://github.com/${GH_REPO}.git"
+            gh auth setup-git
+            git push origin "HEAD:refs/heads/$branch"
+          fi
+
+          prs="$(gh pr list --repo "$GH_REPO" --state open --head "$branch" --limit 2 \
+            --json number,headRefOid,baseRefName,isDraft,body)"
+          count="$(jq 'length' <<<"$prs")"
+          if test "$count" -gt 1; then
+            echo "::error::Multiple open PRs exist for deterministic branch."
+            exit 1
+          fi
+          if test "$count" -eq 1; then
+            verify_pr_json "$prs"
+          else
+            gh pr create --repo "$GH_REPO" --draft --base main --head "$branch" \
+              --title 'Pipeline v2: one Issue approval to autonomous verified merge' \
+              --body-file "$body_file"
+          fi
+
+          remote_sha="$(gh api "repos/$GH_REPO/git/ref/heads/$branch" --jq '.object.sha')"
+          test "$remote_sha" = "$sealed_sha"
+          prs="$(gh pr list --repo "$GH_REPO" --state open --head "$branch" --limit 2 \
+            --json number,headRefOid,baseRefName,isDraft,body)"
+          verify_pr_json "$prs"
+
+          fresh_base="$(gh api "repos/$GH_REPO/branches/main" --jq '.commit.sha')"
+          test "$fresh_base" = "$BASE_SHA"
+          issue_json="$(gh api "repos/$GH_REPO/issues/100")"
+          test "$(jq -r .state <<<"$issue_json")" = open
+          test "$(jq '[.labels[].name | select(startswith("type:"))] | length' <<<"$issue_json")" -eq 1
+          test "$(jq -r '[.labels[].name | select(startswith("type:"))][0]' <<<"$issue_json")" = type:implementation
+          test "$(jq '[.labels[].name | select(startswith("agent:"))] | length' <<<"$issue_json")" -eq 1
+          test "$(jq -r '[.labels[].name | select(startswith("agent:"))][0]' <<<"$issue_json")" = agent:running
+          fresh_hash="$(
+            printf '%s' "$issue_json" | node -e '
+              const crypto=require("crypto"),fs=require("fs");
+              const issue=JSON.parse(fs.readFileSync(0,"utf8"));
+              process.stdout.write(
+                crypto.createHash("sha256").update(`${issue.title}\n${issue.body || ""}`,"utf8").digest("hex")
+              );
+            '
+          )"
+          test "$fresh_hash" = "$SPEC_HASH"
