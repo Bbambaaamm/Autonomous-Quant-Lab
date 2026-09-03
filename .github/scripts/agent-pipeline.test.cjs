@@ -454,8 +454,35 @@ test("v2 third-audit workflow wiring is fail-closed and injection safe", () => {
   assert.match(reviewer,/trusted-governance\.json/);
   assert.match(reviewer,/base_sha:pr\.base\.sha/);
   assert.match(reviewer,/git diff --quiet "\$BASE_SHA" "\$HEAD_SHA" -- AGENTS\.md/);
-  assert.doesNotMatch(fixer,/pull-requests: write/);
+  assert.equal((fixer.match(/pull-requests: write/g)||[]).length,4);
   assert.equal((reviewer.match(/pull-requests: write/g)||[]).length,1);
+});
+
+test("Issue #94 grants PR metadata writes only to trusted fixer writers", () => {
+  const fixer=fs.readFileSync(".github/workflows/agent-ci-fixer.yml","utf8");
+  const jobNames=[...fixer.matchAll(/^  ([a-z][a-z0-9-]+):\n(?=    )/gm)].map(match=>({name:match[1],index:match.index}));
+  const jobs=Object.fromEntries(jobNames.map((job,index)=>[
+    job.name,
+    fixer.slice(job.index,jobNames[index+1]?.index ?? fixer.length),
+  ]));
+  const metadataCalls=/github\.rest\.issues\.(?:createComment|addLabels|removeLabel)\(/;
+  const metadataWriters=Object.entries(jobs).filter(([,body])=>metadataCalls.test(body)).map(([name])=>name).sort();
+  assert.deepEqual(metadataWriters,["escalate","fail-closed-finalizer","record-classification","trusted-publish"]);
+  for(const name of metadataWriters) assert.match(jobs[name],/permissions: \{[^\n]*pull-requests: write[^\n]*\}/,`${name} must be able to mutate PR metadata`);
+
+  assert.equal(fixer.match(/^permissions:\n  contents: read$/gm)?.length,1,"workflow permissions remain read-only");
+  assert.match(jobs["record-classification"],/classificationMarker[\s\S]*record\.sha[\s\S]*record\.ciRunId[\s\S]*record\.ciRunAttempt[\s\S]*issues\.createComment/);
+  for(const name of ["escalate","fail-closed-finalizer"]) {
+    assert.match(jobs[name],/for\(const number of \[prNumber,issueNumber\]\)/);
+    assert.match(jobs[name],/escalationMutationPlan\(item\.labels\)[\s\S]*plan\.add[\s\S]*plan\.remove/);
+    assert.doesNotMatch(jobs[name],/contents: write/);
+  }
+  assert.match(jobs["trusted-publish"],/agent-fix:v2[\s\S]*issues\.createComment|issues\.createComment[\s\S]*agent-fix:v2/);
+  for(const name of ["classify","prepare-generation-context","generate-patch","validate-patch","seal-patch"]) {
+    assert.doesNotMatch(jobs[name],/issues: write|pull-requests: write|contents: write/,`${name} trust boundary broadened`);
+  }
+  assert.doesNotMatch(jobs["generate-patch"],/permissions:[^\n]*(?:issues|pull-requests): write/);
+  assert.doesNotMatch(jobs["validate-patch"],/permissions:[^\n]*(?:issues|pull-requests): write/);
 });
 
 test("v2 index mode policy rejects symlinks, gitlinks, and mode transitions", () => {
