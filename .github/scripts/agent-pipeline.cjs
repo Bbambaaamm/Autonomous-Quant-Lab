@@ -297,18 +297,52 @@ function diagnosticExcerpt(value) {
   return String(value);
 }
 
+function parseDiagnosticMetadata(value) {
+  if (typeof value === "object" && value !== null) return value;
+  if (typeof value !== "string" || !value.trim()) return {};
+  try {
+    const parsed = JSON.parse(value);
+    return typeof parsed === "object" && parsed !== null ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function diagnosticWorkingDirectoryPrefixes(metadata = {}) {
+  const backendJobs = new Set(["quality", "unit-research", "api"]);
+  if (backendJobs.has(metadata.job)) return ["backend"];
+  if (metadata.job === "frontend" || metadata.failureClass === "frontend-test-build") return ["frontend"];
+  return [];
+}
+
 function diagnosticMentionsPath(text, filePath) {
   const escaped = filePath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   return new RegExp(`(^|[^A-Za-z0-9_./-])${escaped}(?=$|[^A-Za-z0-9_./-])`).test(text);
+}
+
+function diagnosticPathAliases(canonicalPath, metadata = {}) {
+  const aliases = [canonicalPath];
+  for (const prefix of diagnosticWorkingDirectoryPrefixes(metadata)) {
+    const root = `${prefix}/`;
+    if (canonicalPath.startsWith(root)) aliases.push(canonicalPath.slice(root.length));
+  }
+  return [...new Set(aliases)];
+}
+
+function diagnosticMentionsEligiblePath(canonicalPath, diagnostic = "") {
+  const metadata = parseDiagnosticMetadata(diagnostic);
+  const excerpt = diagnosticExcerpt(diagnostic);
+  if (!excerpt) return false;
+  return diagnosticPathAliases(canonicalPath, metadata)
+    .some((alias) => diagnosticMentionsPath(excerpt, alias));
 }
 
 function prioritizedEligiblePaths({ eligiblePaths = [], fixScopePaths = [], diagnostic = "" }) {
   const eligible = [...new Set(parseJsonStringArray(eligiblePaths))];
   const eligibleSet = new Set(eligible);
   const fixScope = new Set(parseJsonStringArray(fixScopePaths).filter((filePath) => eligibleSet.has(filePath)));
-  const excerpt = diagnosticExcerpt(diagnostic);
   const diagnosticPaths = new Set(eligible
-    .filter((filePath) => !fixScope.has(filePath) && excerpt && diagnosticMentionsPath(excerpt, filePath)));
+    .filter((filePath) => !fixScope.has(filePath) && diagnosticMentionsEligiblePath(filePath, diagnostic)));
   const toSorted = (items) => [...items].sort(stableByteCompare);
   return [
     ...toSorted(fixScope),
@@ -321,9 +355,8 @@ function prioritizedEligiblePathGroups({ eligiblePaths = [], fixScopePaths = [],
   const ordered = prioritizedEligiblePaths({ eligiblePaths, fixScopePaths, diagnostic });
   const eligible = new Set(parseJsonStringArray(eligiblePaths));
   const fixScope = new Set(parseJsonStringArray(fixScopePaths).filter((filePath) => eligible.has(filePath)));
-  const excerpt = diagnosticExcerpt(diagnostic);
   const diagnosticSet = new Set(
-    [...eligible].filter((filePath) => !fixScope.has(filePath) && excerpt && diagnosticMentionsPath(excerpt, filePath))
+    [...eligible].filter((filePath) => !fixScope.has(filePath) && diagnosticMentionsEligiblePath(filePath, diagnostic))
   );
   const generic = ordered.filter((filePath) => !fixScope.has(filePath) && !diagnosticSet.has(filePath));
   return {
@@ -613,6 +646,9 @@ module.exports = {
   parseTrackedIndexEntries,
   trackedEligibleRegularPaths,
   trackedPriorityMaterializationPlan,
+  diagnosticWorkingDirectoryPrefixes,
+  diagnosticPathAliases,
+  diagnosticMentionsEligiblePath,
   lifecycleAtAgentPr,
   fullLinkageDecision,
   trustedArtifactDecision,

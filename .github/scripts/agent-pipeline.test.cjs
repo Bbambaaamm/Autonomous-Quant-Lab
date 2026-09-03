@@ -601,6 +601,71 @@ test("Issue #99 priority path ordering is locale-independent and bytewise determ
   assert.equal(left, right);
 });
 
+test("Issue #99 diagnostic relevance supports trusted cwd-relative aliases without fuzzy suffix matches", () => {
+  const files = [
+    { path: "backend/tests/test_example.py", content: "a".repeat(64) },
+    { path: "backend/src/quantlab/example.py", content: "b".repeat(64) },
+    { path: "frontend/src/example.ts", content: "c".repeat(64) },
+    { path: "backend/tests/unrelated.py", content: "d".repeat(64) },
+  ];
+  assert.equal(pipeline.diagnosticMentionsEligiblePath(
+    "backend/tests/test_example.py",
+    JSON.stringify({ job: "unit-research", failureClass: "unit-test", excerpt: "FAILED tests/test_example.py::test_x" })
+  ), true);
+  assert.equal(pipeline.diagnosticMentionsEligiblePath(
+    "backend/src/quantlab/example.py",
+    JSON.stringify({ job: "quality", failureClass: "lint-format", excerpt: "src/quantlab/example.py:1:1: F401" })
+  ), true);
+  assert.equal(pipeline.diagnosticMentionsEligiblePath(
+    "frontend/src/example.ts",
+    JSON.stringify({ job: "frontend", failureClass: "frontend-test-build", excerpt: "src/example.ts:12:3" })
+  ), true);
+  assert.equal(pipeline.diagnosticMentionsEligiblePath(
+    "backend/tests/test_example.py",
+    JSON.stringify({ job: "integration-postgres", failureClass: "integration-postgres", excerpt: "tests/test_example.py" })
+  ), false);
+  assert.equal(pipeline.diagnosticMentionsEligiblePath(
+    "backend/tests/test_example.py",
+    JSON.stringify({ job: "unit-research", failureClass: "unit-test", excerpt: "FAILED test_example.py only" })
+  ), false);
+  assert.equal(pipeline.diagnosticMentionsEligiblePath(
+    "backend/src/quantlab/example.py",
+    JSON.stringify({ job: "quality", failureClass: "lint-format", excerpt: "backend/src/quantlab/example.py:1:1" })
+  ), true);
+
+  const fixScope = ["backend/src/quantlab/priority.py"];
+  const contextFiles = [
+    { path: "backend/src/quantlab/priority.py", content: "p".repeat(64) },
+    ...files,
+    { path: "backend/src/quantlab/zzz_generic.py", content: "z".repeat(64) },
+  ];
+  const wide = pipeline.buildBoundedSourceContext({
+    files: contextFiles,
+    fixScopePaths: fixScope,
+    diagnostic: JSON.stringify({ job: "unit-research", failureClass: "unit-test", excerpt: "FAILED tests/test_example.py::test_x" }),
+    sourceBudgetBytes: 10_000,
+  });
+  const firstTwo = wide.files.slice(0, 2);
+  const tightBudget = Buffer.byteLength(JSON.stringify({ format: "source-context-v1", files: firstTwo }));
+  const tight = pipeline.buildBoundedSourceContext({
+    files: contextFiles,
+    fixScopePaths: fixScope,
+    diagnostic: JSON.stringify({ job: "unit-research", failureClass: "unit-test", excerpt: "FAILED tests/test_example.py::test_x" }),
+    sourceBudgetBytes: tightBudget,
+  });
+  assert.deepEqual(tight.files.map((file) => file.path), [
+    "backend/src/quantlab/priority.py",
+    "backend/tests/test_example.py",
+  ]);
+  const again = pipeline.buildBoundedSourceContext({
+    files: contextFiles,
+    fixScopePaths: fixScope,
+    diagnostic: JSON.stringify({ job: "unit-research", failureClass: "unit-test", excerpt: "FAILED tests/test_example.py::test_x" }),
+    sourceBudgetBytes: tightBudget,
+  });
+  assert.equal(tight.json, again.json);
+});
+
 test("Issue #99 tracked-index plan rejects priority symlinks and excludes generic symlinks", () => {
   const tracked = pipeline.parseTrackedIndexEntries(
     "120000 1111111111111111111111111111111111111111 0\tfrontend/lib/zz_changed.ts\0" +
