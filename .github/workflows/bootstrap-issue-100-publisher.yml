@@ -28,6 +28,8 @@ jobs:
       - id: scope
         name: Capture immutable authorization scope before checkout
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        env:
+          EVENT_SHA: ${{ github.sha }}
         with:
           script: |
             const crypto = require('crypto');
@@ -54,6 +56,9 @@ jobs:
             const { data: branch } = await github.rest.repos.getBranch({
               ...context.repo, branch: context.payload.repository.default_branch,
             });
+            if (branch.commit.sha !== process.env.EVENT_SHA) {
+              return core.setFailed('WORKFLOW_REVISION_STALE_REISSUE_COMMAND');
+            }
             const canonical = `${issue.title}\n${issue.body || ''}`;
             const specHash = crypto.createHash('sha256').update(canonical, 'utf8').digest('hex');
             const scope = {
@@ -63,6 +68,7 @@ jobs:
               body: issue.body || '',
               spec_hash: specHash,
               base_sha: branch.commit.sha,
+              workflow_sha: process.env.EVENT_SHA,
               actor: context.actor,
             };
             fs.mkdirSync(`${process.env.RUNNER_TEMP}/bootstrap-context`, { recursive: true });
@@ -134,7 +140,7 @@ jobs:
           This is the one-time governance bootstrap. The final implementation must deliver:
           one maintainer Issue approval -> autonomous Builder publication -> CI/classifier/bounded fixer -> exact-SHA independent Codex review -> automatic current-main reconciliation -> automatic agent:verified -> required agent-verified-gate -> trusted expected-head-SHA automatic merge. Routine exact-SHA human acknowledgement and manual Merge are removed from the successful path. agent:needs-human remains fail-closed. Paper-only and all security/trust boundaries remain mandatory.
 
-          Builder publication must NOT depend on Codex gh authentication, a writable remote, or make_pr. Implement generate -> credential-free validate/seal -> trusted publisher with a durable bounded artifact, deterministic/idempotent Draft PR publication, exact Issue-spec/base/checksum binding, and TOCTOU checks.
+          Builder publication must NOT depend on Codex gh authentication, a writable remote, or make_pr. Implement generate -> credential-free validate/test/seal -> trusted publisher with a durable bounded artifact, deterministic/idempotent Draft PR publication, exact Issue-spec/base/checksum binding, and TOCTOU checks.
 
           Return ONLY structured JSON with result=PATCH or BLOCK. PATCH must be a complete unified diff against the exact base SHA from scope.json. Do not run repository code.
 
@@ -183,7 +189,7 @@ jobs:
               exit 1
               ;;
           esac
-      - name: Seal generated PATCH artifact
+      - name: Seal generated PATCH envelope
         if: steps.interpret.outputs.blocked != 'true'
         env:
           BASE_SHA: ${{ needs.prepare.outputs.base_sha }}
@@ -211,7 +217,7 @@ jobs:
       contents: read
       issues: write
     steps:
-      - name: Preserve BLOCK reason and transition fail-closed
+      - name: Preserve BLOCK reason before changing lifecycle state
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
         env:
           SPEC_HASH: ${{ needs.prepare.outputs.spec_hash }}
@@ -232,25 +238,40 @@ jobs:
               typeLabels.length !== 1 ||
               typeLabels[0] !== 'type:implementation' ||
               agentLabels.length !== 1 ||
-              agentLabels[0] !== 'agent:running'
+              !['agent:running', 'agent:needs-human'].includes(agentLabels[0])
             ) {
               return core.setFailed('BLOCK_ESCALATION_SCOPE_CHANGED');
             }
-            const preserved = labels.filter(label => !label.startsWith('agent:'));
-            await github.rest.issues.setLabels({
-              ...context.repo,
-              issue_number: 100,
-              labels: [...preserved, 'agent:needs-human'],
+            const marker = `<!-- agent-builder-block:v2 spec=${process.env.SPEC_HASH} -->`;
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              ...context.repo, issue_number: 100, per_page: 100,
             });
+            const existing = comments.filter(comment =>
+              comment.user?.login === 'github-actions[bot]' &&
+              (comment.body || '').split('\n').includes(marker)
+            );
+            if (existing.length > 1) {
+              return core.setFailed('AMBIGUOUS_BLOCK_AUDIT');
+            }
             const reason = (process.env.BLOCK_REASON || 'Codex returned BLOCK').slice(0, 1024);
-            await github.rest.issues.createComment({
-              ...context.repo,
-              issue_number: 100,
-              body: `<!-- agent-builder-block:v1 spec=${process.env.SPEC_HASH} -->\nBuilder stopped fail-closed: ${reason}`,
-            });
+            if (existing.length === 0) {
+              await github.rest.issues.createComment({
+                ...context.repo,
+                issue_number: 100,
+                body: `${marker}\nBuilder stopped fail-closed: ${reason}`,
+              });
+            }
+            if (agentLabels[0] === 'agent:running') {
+              const preserved = labels.filter(label => !label.startsWith('agent:'));
+              await github.rest.issues.setLabels({
+                ...context.repo,
+                issue_number: 100,
+                labels: [...preserved, 'agent:needs-human'],
+              });
+            }
             core.setFailed('CODEX_BLOCK_NEEDS_HUMAN');
 
-  validate:
+  validate-structure:
     needs: [prepare, generate]
     if: needs.generate.outputs.blocked != 'true'
     runs-on: ubuntu-latest
@@ -266,11 +287,12 @@ jobs:
         with:
           name: bootstrap-issue-100-generated-${{ github.run_id }}
           path: ${{ runner.temp }}/generated
-      - name: Verify and apply candidate without model or GitHub write credential
+      - name: Validate exact candidate structure without executing candidate code
         env:
           BASE_SHA: ${{ needs.prepare.outputs.base_sha }}
           SPEC_HASH: ${{ needs.prepare.outputs.spec_hash }}
         run: |
+          set -euo pipefail
           test "$(git rev-parse HEAD)" = "$BASE_SHA"
           test "$(jq -r .base_sha "$RUNNER_TEMP/generated/metadata.json")" = "$BASE_SHA"
           test "$(jq -r .spec_hash "$RUNNER_TEMP/generated/metadata.json")" = "$SPEC_HASH"
@@ -294,16 +316,100 @@ jobs:
           cmp "$RUNNER_TEMP/actual-paths" "$RUNNER_TEMP/declared-paths"
           git diff --cached --raw | awk '{
             old=$1; sub(/^:/, "", old); new=$2;
-            if (old !~ /^(000000|100644|100755)$/ || new !~ /^(000000|100644|100755)$/ || (old=="000000" && new=="000000")) exit 1
+            pair=old "->" new;
+            if (pair !~ /^(000000->100644|100644->100644|100755->100755|100644->000000|100755->000000)$/) exit 1
           } END { if (NR == 0) exit 1 }'
           python -m json.tool .github/agent-pipeline.json >/dev/null
           ruby -e 'require "yaml"; Dir[".github/workflows/*.yml"].sort.each { |p| YAML.load_file(p, aliases: true) }'
+
+  test-candidate:
+    needs: [prepare, generate, validate-structure]
+    if: needs.generate.outputs.blocked != 'true' && needs.validate-structure.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.prepare.outputs.base_sha }}
+          persist-credentials: false
+          fetch-depth: 1
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: bootstrap-issue-100-generated-${{ github.run_id }}
+          path: ${{ runner.temp }}/generated
+      - name: Execute focused candidate tests with no model or write credential
+        run: |
+          set -euo pipefail
+          jq -r .patch "$RUNNER_TEMP/generated/output.json" > "$RUNNER_TEMP/candidate.patch"
+          git apply --check "$RUNNER_TEMP/candidate.patch"
+          git apply "$RUNNER_TEMP/candidate.patch"
           node --test .github/scripts/agent-pipeline.test.cjs
+
+  seal:
+    needs: [prepare, generate, validate-structure, test-candidate]
+    if: >-
+      needs.generate.outputs.blocked != 'true' &&
+      needs.validate-structure.result == 'success' &&
+      needs.test-candidate.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.prepare.outputs.base_sha }}
+          persist-credentials: false
+          fetch-depth: 1
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: bootstrap-issue-100-generated-${{ github.run_id }}
+          path: ${{ runner.temp }}/generated
+      - name: Reseal original candidate on fresh runner without executing candidate code
+        env:
+          BASE_SHA: ${{ needs.prepare.outputs.base_sha }}
+          SPEC_HASH: ${{ needs.prepare.outputs.spec_hash }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$BASE_SHA"
+          test "$(jq -r .base_sha "$RUNNER_TEMP/generated/metadata.json")" = "$BASE_SHA"
+          test "$(jq -r .spec_hash "$RUNNER_TEMP/generated/metadata.json")" = "$SPEC_HASH"
+          output_sha="$(sha256sum "$RUNNER_TEMP/generated/output.json" | cut -d' ' -f1)"
+          test "$output_sha" = "$(jq -r .output_sha256 "$RUNNER_TEMP/generated/metadata.json")"
+          test "$(jq -r .result "$RUNNER_TEMP/generated/output.json")" = PATCH
+          jq -r .patch "$RUNNER_TEMP/generated/output.json" > "$RUNNER_TEMP/candidate.patch"
+          test "$(stat -c%s "$RUNNER_TEMP/candidate.patch")" -le 262144
+          git apply --check "$RUNNER_TEMP/candidate.patch"
+          git apply "$RUNNER_TEMP/candidate.patch"
+          git add -A
+          git diff --cached --check
+          git diff --cached --name-only | sort > "$RUNNER_TEMP/actual-paths"
+          jq -r '.paths[]' "$RUNNER_TEMP/generated/output.json" | sort > "$RUNNER_TEMP/declared-paths"
+          cmp "$RUNNER_TEMP/actual-paths" "$RUNNER_TEMP/declared-paths"
+          while IFS= read -r path; do
+            case "$path" in
+              .github/agent-pipeline.json|.github/scripts/agent-pipeline.cjs|.github/scripts/agent-pipeline.test.cjs|.github/workflows/agent-*.yml|docs/autonomous-development-pipeline.md|docs/adr/0004-*.md) ;;
+              *) echo "::error::Unauthorized sealed path: $path"; exit 1 ;;
+            esac
+          done < "$RUNNER_TEMP/actual-paths"
+          git diff --cached --raw | awk '{
+            old=$1; sub(/^:/, "", old); new=$2;
+            pair=old "->" new;
+            if (pair !~ /^(000000->100644|100644->100644|100755->100755|100644->000000|100755->000000)$/) exit 1
+          } END { if (NR == 0) exit 1 }'
           git diff --cached --binary > "$RUNNER_TEMP/validated.patch"
+          test "$(stat -c%s "$RUNNER_TEMP/validated.patch")" -le 262144
           sha256sum "$RUNNER_TEMP/validated.patch" | cut -d' ' -f1 > "$RUNNER_TEMP/validated.sha256"
-          jq -n --arg base "$BASE_SHA" --arg spec "$SPEC_HASH" --arg checksum "$(cat "$RUNNER_TEMP/validated.sha256")" \
+          tree_sha="$(git write-tree)"
+          jq -n \
+            --arg base "$BASE_SHA" \
+            --arg spec "$SPEC_HASH" \
+            --arg patch "$(cat "$RUNNER_TEMP/validated.sha256")" \
+            --arg output "$output_sha" \
+            --arg tree "$tree_sha" \
             --slurpfile paths <(jq '.paths' "$RUNNER_TEMP/generated/output.json") \
-            '{base_sha:$base,spec_hash:$spec,patch_sha256:$checksum,paths:$paths[0]}' > "$RUNNER_TEMP/validated-metadata.json"
+            '{base_sha:$base,spec_hash:$spec,patch_sha256:$patch,output_sha256:$output,tree_sha:$tree,paths:$paths[0]}' \
+            > "$RUNNER_TEMP/validated-metadata.json"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: bootstrap-issue-100-validated-${{ github.run_id }}
@@ -315,8 +421,8 @@ jobs:
           retention-days: 7
 
   trusted-publish:
-    needs: [prepare, generate, validate]
-    if: needs.generate.outputs.blocked != 'true' && needs.validate.result == 'success'
+    needs: [prepare, generate, seal]
+    if: needs.generate.outputs.blocked != 'true' && needs.seal.result == 'success'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -366,6 +472,7 @@ jobs:
           BASE_SHA: ${{ needs.prepare.outputs.base_sha }}
           SPEC_HASH: ${{ needs.prepare.outputs.spec_hash }}
         run: |
+          set -euo pipefail
           test "$(git rev-parse HEAD)" = "$BASE_SHA"
           test "$(jq -r .base_sha "$RUNNER_TEMP/validated/validated-metadata.json")" = "$BASE_SHA"
           test "$(jq -r .spec_hash "$RUNNER_TEMP/validated/validated-metadata.json")" = "$SPEC_HASH"
@@ -375,10 +482,13 @@ jobs:
           git apply "$RUNNER_TEMP/validated/validated.patch"
           git add -A
           git diff --cached --check
+          test "$(git write-tree)" = "$(jq -r .tree_sha "$RUNNER_TEMP/validated/validated-metadata.json")"
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git commit -m 'Implement Issue #100 autonomous one-approval pipeline'
-      - name: Trusted push, Draft PR publication, and postcondition verification
+          fixed_date="$(git show -s --format=%cI "$BASE_SHA")"
+          GIT_AUTHOR_DATE="$fixed_date" GIT_COMMITTER_DATE="$fixed_date" \
+            git commit -m 'Implement Issue #100 autonomous one-approval pipeline'
+      - name: Trusted publication with recovery and postcondition cleanup
         env:
           AGENT_PUBLISH_TOKEN: ${{ secrets.AGENT_PUBLISH_TOKEN }}
           SPEC_HASH: ${{ needs.prepare.outputs.spec_hash }}
@@ -388,75 +498,148 @@ jobs:
           set -euo pipefail
           test -n "$AGENT_PUBLISH_TOKEN"
           export GH_TOKEN="$AGENT_PUBLISH_TOKEN"
+          owner="${GH_REPO%%/*}"
           branch="agent/issue-100-${SPEC_HASH:0:12}"
           sealed_sha="$(git rev-parse HEAD)"
-          body_file="$RUNNER_TEMP/pr-body.md"
-          cat > "$body_file" <<'EOF'
+          sealed_tree="$(git show -s --format=%T HEAD)"
+          patch_sha="$(cat "$RUNNER_TEMP/validated/validated.sha256")"
+          created_branch=0
+          created_pr=""
+
+          same_repo_open_prs() {
+            gh api "repos/$GH_REPO/pulls?state=open&per_page=100" |
+              jq --arg branch "$branch" --arg repo "$GH_REPO" \
+                '[.[] | select(.head.ref == $branch and .head.repo.full_name == $repo)]'
+          }
+
+          verify_pr() {
+            local json="$1"
+            local expected_head="$2"
+            test "$(jq 'length' <<<"$json")" -eq 1
+            test "$(jq -r '.[0].head.repo.full_name' <<<"$json")" = "$GH_REPO"
+            test "$(jq -r '.[0].head.sha' <<<"$json")" = "$expected_head"
+            test "$(jq -r '.[0].base.ref' <<<"$json")" = main
+            test "$(jq -r '.[0].draft' <<<"$json")" = true
+            local body
+            body="$(jq -r '.[0].body // ""' <<<"$json")"
+            test "$(grep -Ec '^[[:space:]]*- Agent-Issue: #100[[:space:]]*$' <<<"$body" || true)" -eq 1
+            test "$(grep -Eic 'Agent-Issue:' <<<"$body" || true)" -eq 1
+            test "$(grep -Ec "^<!-- agent-bootstrap-publish:v2 spec=$SPEC_HASH base=$BASE_SHA tree=[0-9a-f]{40} -->$" <<<"$body" || true)" -eq 1
+            local parent tree
+            parent="$(gh api "repos/$GH_REPO/commits/$expected_head" --jq '.parents[0].sha')"
+            tree="$(gh api "repos/$GH_REPO/git/commits/$expected_head" --jq '.tree.sha')"
+            test "$parent" = "$BASE_SHA"
+            grep -Eq "^<!-- agent-bootstrap-publish:v2 spec=$SPEC_HASH base=$BASE_SHA tree=$tree -->$" <<<"$body"
+          }
+
+          cleanup_current() {
+            set +e
+            if test -n "$created_pr"; then
+              gh api -X PATCH "repos/$GH_REPO/pulls/$created_pr" -f state=closed >/dev/null 2>&1 || true
+            fi
+            if test "$created_branch" -eq 1; then
+              current="$(gh api "repos/$GH_REPO/git/ref/heads/$branch" --jq '.object.sha' 2>/dev/null || true)"
+              if test "$current" = "$sealed_sha"; then
+                gh api -X DELETE "repos/$GH_REPO/git/refs/heads/$branch" >/dev/null 2>&1 || true
+              fi
+            fi
+            set -e
+          }
+
+          prs="$(same_repo_open_prs)"
+          if test "$(jq 'length' <<<"$prs")" -gt 1; then
+            echo "::error::Multiple same-repository open PRs exist for deterministic branch."
+            exit 1
+          fi
+
+          if test "$(jq 'length' <<<"$prs")" -eq 1; then
+            existing_head="$(jq -r '.[0].head.sha' <<<"$prs")"
+            if verify_pr "$prs" "$existing_head"; then
+              canonical_sha="$existing_head"
+            else
+              existing_body="$(jq -r '.[0].body // ""' <<<"$prs")"
+              existing_pr="$(jq -r '.[0].number' <<<"$prs")"
+              if (
+                test "$(jq -r '.[0].head.repo.full_name' <<<"$prs")" = "$GH_REPO"
+                test "$(jq -r '.[0].head.ref' <<<"$prs")" = "$branch"
+                test "$(jq -r '.[0].base.ref' <<<"$prs")" = main
+                test "$(jq -r '.[0].draft' <<<"$prs")" = true
+                test "$(grep -Ec '^[[:space:]]*- Agent-Issue: #100[[:space:]]*$' <<<"$existing_body" || true)" -eq 1
+                test "$(grep -Eic 'Agent-Issue:' <<<"$existing_body" || true)" -eq 1
+                test "$(grep -Ec "^<!-- agent-bootstrap-publish:v2 spec=$SPEC_HASH base=[0-9a-f]{40} tree=[0-9a-f]{40} -->$" <<<"$existing_body" || true)" -eq 1
+              ); then
+                gh api -X PATCH "repos/$GH_REPO/pulls/$existing_pr" -f state=closed >/dev/null
+                remote_sha="$(gh api "repos/$GH_REPO/git/ref/heads/$branch" --jq '.object.sha' 2>/dev/null || true)"
+                if test "$remote_sha" = "$existing_head"; then
+                  gh api -X DELETE "repos/$GH_REPO/git/refs/heads/$branch"
+                else
+                  echo "::error::Stale bootstrap branch moved while cleaning up."
+                  exit 1
+                fi
+                prs='[]'
+              else
+                echo "::error::Existing deterministic PR cannot be proven to be a stale bootstrap publication."
+                exit 1
+              fi
+            fi
+          fi
+
+          if test "$(jq 'length' <<<"$prs")" -eq 0; then
+            remote_sha="$(gh api "repos/$GH_REPO/git/ref/heads/$branch" --jq '.object.sha' 2>/dev/null || true)"
+            if test -n "$remote_sha"; then
+              gh api -X DELETE "repos/$GH_REPO/git/refs/heads/$branch"
+            fi
+
+            git remote set-url origin "https://github.com/${GH_REPO}.git"
+            gh auth setup-git
+            git push origin "HEAD:refs/heads/$branch"
+            created_branch=1
+            canonical_sha="$sealed_sha"
+
+            body_file="$RUNNER_TEMP/pr-body.md"
+            cat > "$body_file" <<EOF
           Implements the complete authorized governance remediation in Issue #100.
 
           This PR is the one-time bootstrap candidate generated without giving Codex GitHub write credentials. The candidate was generated read-only, validated and sealed without model/write credentials, then published only by this trusted step.
 
           - Agent-Issue: #100
+          <!-- agent-bootstrap-publish:v2 spec=$SPEC_HASH base=$BASE_SHA tree=$sealed_tree -->
           EOF
-
-          verify_pr_json() {
-            local json="$1"
-            test "$(jq 'length' <<<"$json")" -eq 1
-            test "$(jq -r '.[0].headRefOid' <<<"$json")" = "$sealed_sha"
-            test "$(jq -r '.[0].baseRefName' <<<"$json")" = main
-            test "$(jq -r '.[0].isDraft' <<<"$json")" = true
-            printf '%s' "$(jq -r '.[0].body // ""' <<<"$json")" > "$RUNNER_TEMP/pr-body-check"
-            test "$(grep -Ec '^[[:space:]]*- Agent-Issue: #100[[:space:]]*$' "$RUNNER_TEMP/pr-body-check" || true)" -eq 1
-            test "$(grep -Eic 'Agent-Issue:' "$RUNNER_TEMP/pr-body-check" || true)" -eq 1
-          }
-
-          remote_sha="$(gh api "repos/$GH_REPO/git/ref/heads/$branch" --jq '.object.sha' 2>/dev/null || true)"
-          if test -n "$remote_sha" && test "$remote_sha" != "$sealed_sha"; then
-            echo "::error::Deterministic branch points to a different commit."
-            exit 1
-          fi
-          if test -z "$remote_sha"; then
-            git remote set-url origin "https://github.com/${GH_REPO}.git"
-            gh auth setup-git
-            git push origin "HEAD:refs/heads/$branch"
-          fi
-
-          prs="$(gh pr list --repo "$GH_REPO" --state open --head "$branch" --limit 2 \
-            --json number,headRefOid,baseRefName,isDraft,body)"
-          count="$(jq 'length' <<<"$prs")"
-          if test "$count" -gt 1; then
-            echo "::error::Multiple open PRs exist for deterministic branch."
-            exit 1
-          fi
-          if test "$count" -eq 1; then
-            verify_pr_json "$prs"
-          else
             gh pr create --repo "$GH_REPO" --draft --base main --head "$branch" \
               --title 'Pipeline v2: one Issue approval to autonomous verified merge' \
               --body-file "$body_file"
+
+            prs="$(same_repo_open_prs)"
+            test "$(jq 'length' <<<"$prs")" -eq 1
+            created_pr="$(jq -r '.[0].number' <<<"$prs")"
+            verify_pr "$prs" "$canonical_sha"
           fi
 
-          remote_sha="$(gh api "repos/$GH_REPO/git/ref/heads/$branch" --jq '.object.sha')"
-          test "$remote_sha" = "$sealed_sha"
-          prs="$(gh pr list --repo "$GH_REPO" --state open --head "$branch" --limit 2 \
-            --json number,headRefOid,baseRefName,isDraft,body)"
-          verify_pr_json "$prs"
-
-          fresh_base="$(gh api "repos/$GH_REPO/branches/main" --jq '.commit.sha')"
-          test "$fresh_base" = "$BASE_SHA"
-          issue_json="$(gh api "repos/$GH_REPO/issues/100")"
-          test "$(jq -r .state <<<"$issue_json")" = open
-          test "$(jq '[.labels[].name | select(startswith("type:"))] | length' <<<"$issue_json")" -eq 1
-          test "$(jq -r '[.labels[].name | select(startswith("type:"))][0]' <<<"$issue_json")" = type:implementation
-          test "$(jq '[.labels[].name | select(startswith("agent:"))] | length' <<<"$issue_json")" -eq 1
-          test "$(jq -r '[.labels[].name | select(startswith("agent:"))][0]' <<<"$issue_json")" = agent:running
-          fresh_hash="$(
-            printf '%s' "$issue_json" | node -e '
-              const crypto=require("crypto"),fs=require("fs");
-              const issue=JSON.parse(fs.readFileSync(0,"utf8"));
-              process.stdout.write(
-                crypto.createHash("sha256").update(`${issue.title}\n${issue.body || ""}`,"utf8").digest("hex")
-              );
-            '
-          )"
-          test "$fresh_hash" = "$SPEC_HASH"
+          if ! (
+            remote_sha="$(gh api "repos/$GH_REPO/git/ref/heads/$branch" --jq '.object.sha')"
+            test "$remote_sha" = "$canonical_sha"
+            prs="$(same_repo_open_prs)"
+            verify_pr "$prs" "$canonical_sha"
+            fresh_base="$(gh api "repos/$GH_REPO/branches/main" --jq '.commit.sha')"
+            test "$fresh_base" = "$BASE_SHA"
+            issue_json="$(gh api "repos/$GH_REPO/issues/100")"
+            test "$(jq -r .state <<<"$issue_json")" = open
+            test "$(jq '[.labels[].name | select(startswith("type:"))] | length' <<<"$issue_json")" -eq 1
+            test "$(jq -r '[.labels[].name | select(startswith("type:"))][0]' <<<"$issue_json")" = type:implementation
+            test "$(jq '[.labels[].name | select(startswith("agent:"))] | length' <<<"$issue_json")" -eq 1
+            test "$(jq -r '[.labels[].name | select(startswith("agent:"))][0]' <<<"$issue_json")" = agent:running
+            fresh_hash="$(
+              printf '%s' "$issue_json" | node -e '
+                const crypto=require("crypto"),fs=require("fs");
+                const issue=JSON.parse(fs.readFileSync(0,"utf8"));
+                process.stdout.write(
+                  crypto.createHash("sha256").update(`${issue.title}\n${issue.body || ""}`,"utf8").digest("hex")
+                );
+              '
+            )"
+            test "$fresh_hash" = "$SPEC_HASH"
+          ); then
+            echo "::error::Publication postcondition changed; cleaning objects created by this run."
+            cleanup_current
+            exit 1
+          fi
