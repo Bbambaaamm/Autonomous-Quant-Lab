@@ -664,6 +664,14 @@ test("Issue #99 diagnostic relevance supports trusted cwd-relative aliases witho
     sourceBudgetBytes: tightBudget,
   });
   assert.equal(tight.json, again.json);
+  const overflowFile = { path: "backend/tests/test_example.py", content: "x".repeat(200) };
+  const overflowBudget = Buffer.byteLength(JSON.stringify({ format: "source-context-v1", files: [overflowFile] })) - 1;
+  assert.throws(() => pipeline.buildBoundedSourceContext({
+    files: [overflowFile, { path: "backend/src/quantlab/generic.py", content: "g".repeat(8) }],
+    fixScopePaths: [],
+    diagnostic: JSON.stringify({ job: "unit-research", failureClass: "unit-test", excerpt: "FAILED tests/test_example.py::test_x" }),
+    sourceBudgetBytes: overflowBudget,
+  }), /PRIORITY_SOURCE_CONTEXT_TOO_LARGE/);
 });
 
 test("Issue #99 tracked-index plan rejects priority symlinks and excludes generic symlinks", () => {

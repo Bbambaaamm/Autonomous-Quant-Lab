@@ -402,9 +402,8 @@ function buildBoundedSourceContext({ files, fixScopePaths = [], diagnostic = "",
     .map((file) => [file.path, { path: file.path, content: file.content }])).values()];
   const eligible = normalized.map((file) => file.path);
   const fixScope = new Set(parseJsonStringArray(fixScopePaths).filter((filePath) => eligible.includes(filePath)));
-  const excerpt = diagnosticExcerpt(diagnostic);
   const diagnosticPaths = new Set(eligible
-    .filter((filePath) => !fixScope.has(filePath) && excerpt && diagnosticMentionsPath(excerpt, filePath)));
+    .filter((filePath) => !fixScope.has(filePath) && diagnosticMentionsEligiblePath(filePath, diagnostic)));
   const pathOrder = prioritizedEligiblePaths({
     eligiblePaths: eligible,
     fixScopePaths,
