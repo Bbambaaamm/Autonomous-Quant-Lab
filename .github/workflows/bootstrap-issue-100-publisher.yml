@@ -499,9 +499,9 @@ jobs:
           test -n "$AGENT_PUBLISH_TOKEN"
           export GH_TOKEN="$AGENT_PUBLISH_TOKEN"
           owner="${GH_REPO%%/*}"
-          branch="agent/issue-100-${SPEC_HASH:0:12}-${BASE_SHA:0:8}-${sealed_tree:0:12}"
           sealed_sha="$(git rev-parse HEAD)"
           sealed_tree="$(git show -s --format=%T HEAD)"
+          branch="agent/issue-100-${SPEC_HASH:0:12}-${BASE_SHA:0:8}-${sealed_tree:0:12}"
           patch_sha="$(cat "$RUNNER_TEMP/validated/validated.sha256")"
           created_branch=0
           created_pr=""
@@ -560,15 +560,13 @@ jobs:
             else
               existing_body="$(jq -r '.[0].body // ""' <<<"$prs")"
               existing_pr="$(jq -r '.[0].number' <<<"$prs")"
-              if (
-                test "$(jq -r '.[0].head.repo.full_name' <<<"$prs")" = "$GH_REPO"
-                test "$(jq -r '.[0].head.ref' <<<"$prs")" = "$branch"
-                test "$(jq -r '.[0].base.ref' <<<"$prs")" = main
-                test "$(jq -r '.[0].draft' <<<"$prs")" = true
-                test "$(grep -Ec '^[[:space:]]*- Agent-Issue: #100[[:space:]]*$' <<<"$existing_body" || true)" -eq 1
-                test "$(grep -Eic 'Agent-Issue:' <<<"$existing_body" || true)" -eq 1
-                test "$(grep -Ec "^<!-- agent-bootstrap-publish:v2 spec=$SPEC_HASH base=[0-9a-f]{40} tree=[0-9a-f]{40} -->$" <<<"$existing_body" || true)" -eq 1
-              ); then
+              if test "$(jq -r '.[0].head.repo.full_name' <<<"$prs")" = "$GH_REPO" &&
+                 test "$(jq -r '.[0].head.ref' <<<"$prs")" = "$branch" &&
+                 test "$(jq -r '.[0].base.ref' <<<"$prs")" = main &&
+                 test "$(jq -r '.[0].draft' <<<"$prs")" = true &&
+                 test "$(grep -Ec '^[[:space:]]*- Agent-Issue: #100[[:space:]]*$' <<<"$existing_body" || true)" -eq 1 &&
+                 test "$(grep -Eic 'Agent-Issue:' <<<"$existing_body" || true)" -eq 1 &&
+                 test "$(grep -Ec "^<!-- agent-bootstrap-publish:v2 spec=$SPEC_HASH base=[0-9a-f]{40} tree=[0-9a-f]{40} -->$" <<<"$existing_body" || true)" -eq 1; then
                 gh api -X PATCH "repos/$GH_REPO/pulls/$existing_pr" -f state=closed >/dev/null
                 remote_sha="$(gh api "repos/$GH_REPO/git/ref/heads/$branch" --jq '.object.sha' 2>/dev/null || true)"
                 if test "$remote_sha" = "$existing_head"; then
