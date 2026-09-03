@@ -334,17 +334,25 @@ jobs:
           ref: ${{ needs.prepare.outputs.base_sha }}
           persist-credentials: false
           fetch-depth: 1
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: bootstrap-issue-100-generated-${{ github.run_id }}
           path: ${{ runner.temp }}/generated
-      - name: Execute focused candidate tests with no model or write credential
+      - name: Execute candidate and immutable base acceptance tests with no model or write credential
         run: |
           set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/trusted-suite/.github/scripts"
+          cp .github/scripts/agent-pipeline.test.cjs "$RUNNER_TEMP/trusted-suite/.github/scripts/agent-pipeline.test.cjs"
           jq -r .patch "$RUNNER_TEMP/generated/output.json" > "$RUNNER_TEMP/candidate.patch"
           git apply --check "$RUNNER_TEMP/candidate.patch"
           git apply "$RUNNER_TEMP/candidate.patch"
           node --test .github/scripts/agent-pipeline.test.cjs
+          cp .github/scripts/agent-pipeline.cjs "$RUNNER_TEMP/trusted-suite/.github/scripts/agent-pipeline.cjs"
+          cp .github/agent-pipeline.json "$RUNNER_TEMP/trusted-suite/.github/agent-pipeline.json"
+          node --test "$RUNNER_TEMP/trusted-suite/.github/scripts/agent-pipeline.test.cjs"
 
   seal:
     needs: [prepare, generate, validate-structure, test-candidate]
