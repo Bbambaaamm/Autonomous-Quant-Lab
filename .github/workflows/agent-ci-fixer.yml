@@ -194,13 +194,16 @@ jobs:
           function addFile(filePath,{required=false}={}) {
             if (!p.validatePatchPaths([filePath],c.v2)) return false;
             if (filesByPath.has(filePath)) return true;
-            let stat;
-            try { stat = fs.statSync(filePath,{throwIfNoEntry:false}); } catch (error) {
-              if(required) throw new Error(`PRIORITY_SOURCE_CONTEXT_STAT_FAILED:${filePath}`);
+            let entry;
+            try { entry = fs.lstatSync(filePath,{throwIfNoEntry:false}); } catch (error) {
+              if(required) throw new Error(`PRIORITY_SOURCE_CONTEXT_LSTAT_FAILED:${filePath}`);
               return false;
             }
-            if(!stat) return false;
-            if(!stat.isFile()) {
+            if(!entry) {
+              if(required) throw new Error(`PRIORITY_SOURCE_CONTEXT_MISSING:${filePath}`);
+              return false;
+            }
+            if(!entry.isFile()) {
               if(required) throw new Error(`PRIORITY_SOURCE_CONTEXT_NOT_REGULAR_FILE:${filePath}`);
               return false;
             }
@@ -214,9 +217,10 @@ jobs:
           }
           function walk(dir){if(!fs.existsSync(dir))return;for(const e of fs.readdirSync(dir,{withFileTypes:true})){const n=path.join(dir,e.name);if(e.isDirectory())walk(n);else if(e.isFile())addFile(n);}}
           roots.forEach(walk);
-          const tracked = execFileSync('git',['ls-files','-z'],{encoding:'utf8'}).split('\0').filter(Boolean);
-          const priority = p.prioritizedEligiblePaths({eligiblePaths:tracked,fixScopePaths:process.env.FIX_SCOPE,diagnostic:process.env.DIAGNOSTIC});
-          for(const filePath of priority) addFile(filePath,{required:true});
+          const trackedEntries = p.parseTrackedIndexEntries(execFileSync('git',['ls-files','--stage','-z'],{encoding:'utf8'}));
+          const plan = p.trackedPriorityMaterializationPlan({trackedEntries,fixScopePaths:process.env.FIX_SCOPE,diagnostic:process.env.DIAGNOSTIC,config:c.v2});
+          if(!plan.ok) throw new Error(plan.reason);
+          for(const filePath of plan.priorityPaths) addFile(filePath,{required:true});
           const out=p.buildBoundedSourceContext({files:[...filesByPath.values()],fixScopePaths:process.env.FIX_SCOPE,diagnostic:process.env.DIAGNOSTIC,sourceBudgetBytes:SOURCE_CONTEXT_MAX_BYTES}).json;
           process.stdout.write(out);
           NODE

@@ -272,6 +272,17 @@ function stableByteCompare(left, right) {
   return Buffer.compare(Buffer.from(left, "utf8"), Buffer.from(right, "utf8"));
 }
 
+function parseTrackedIndexEntries(rawTrackedIndex) {
+  return String(rawTrackedIndex || "")
+    .split("\0")
+    .filter(Boolean)
+    .map((entry) => {
+      const match = /^([0-9]{6}) [0-9a-f]{40} ([0-3])\t(.+)$/.exec(entry);
+      if (!match) throw new Error("INVALID_TRACKED_INDEX_ENTRY");
+      return { mode: match[1], stage: Number(match[2]), path: match[3] };
+    });
+}
+
 function diagnosticExcerpt(value) {
   if (!value) return "";
   if (typeof value === "string") {
@@ -304,6 +315,51 @@ function prioritizedEligiblePaths({ eligiblePaths = [], fixScopePaths = [], diag
     ...toSorted(diagnosticPaths),
     ...toSorted(eligible.filter((filePath) => !fixScope.has(filePath) && !diagnosticPaths.has(filePath))),
   ];
+}
+
+function prioritizedEligiblePathGroups({ eligiblePaths = [], fixScopePaths = [], diagnostic = "" }) {
+  const ordered = prioritizedEligiblePaths({ eligiblePaths, fixScopePaths, diagnostic });
+  const eligible = new Set(parseJsonStringArray(eligiblePaths));
+  const fixScope = new Set(parseJsonStringArray(fixScopePaths).filter((filePath) => eligible.has(filePath)));
+  const excerpt = diagnosticExcerpt(diagnostic);
+  const diagnosticSet = new Set(
+    [...eligible].filter((filePath) => !fixScope.has(filePath) && excerpt && diagnosticMentionsPath(excerpt, filePath))
+  );
+  const generic = ordered.filter((filePath) => !fixScope.has(filePath) && !diagnosticSet.has(filePath));
+  return {
+    fixScope: ordered.filter((filePath) => fixScope.has(filePath)),
+    diagnostic: ordered.filter((filePath) => diagnosticSet.has(filePath)),
+    generic,
+    ordered,
+  };
+}
+
+function trackedEligibleRegularPaths({ trackedEntries = [], config }) {
+  const allowedModes = new Set(["100644", "100755"]);
+  return [...new Set((trackedEntries || [])
+    .filter((entry) => entry?.stage === 0 && typeof entry.path === "string" && allowedModes.has(entry.mode))
+    .map((entry) => entry.path)
+    .filter((filePath) => validatePatchPaths([filePath], config)))]
+    .sort(stableByteCompare);
+}
+
+function trackedPriorityMaterializationPlan({ trackedEntries = [], fixScopePaths = [], diagnostic = "", config }) {
+  const policyPaths = [...new Set((trackedEntries || [])
+    .filter((entry) => entry?.stage === 0 && typeof entry.path === "string")
+    .map((entry) => entry.path)
+    .filter((filePath) => validatePatchPaths([filePath], config)))];
+  const regularPaths = trackedEligibleRegularPaths({ trackedEntries, config });
+  const allGroups = prioritizedEligiblePathGroups({ eligiblePaths: policyPaths, fixScopePaths, diagnostic });
+  const regularGroups = prioritizedEligiblePathGroups({ eligiblePaths: regularPaths, fixScopePaths, diagnostic });
+  const requiredPriority = [...allGroups.fixScope, ...allGroups.diagnostic];
+  const safePriority = new Set([...regularGroups.fixScope, ...regularGroups.diagnostic]);
+  const rejected = requiredPriority.filter((filePath) => !safePriority.has(filePath));
+  if (rejected.length) return { ok: false, reason: `PRIORITY_SOURCE_CONTEXT_UNSAFE_TRACKED_ENTRY:${rejected[0]}` };
+  return {
+    ok: true,
+    priorityPaths: [...regularGroups.fixScope, ...regularGroups.diagnostic],
+    eligibleRegularPaths: regularPaths,
+  };
 }
 
 function buildBoundedSourceContext({ files, fixScopePaths = [], diagnostic = "", sourceBudgetBytes }) {
@@ -554,9 +610,13 @@ module.exports = {
   redactDiagnostic,
   extractFailureDiagnostic,
   validationCommands,
+  parseTrackedIndexEntries,
+  trackedEligibleRegularPaths,
+  trackedPriorityMaterializationPlan,
   lifecycleAtAgentPr,
   fullLinkageDecision,
   trustedArtifactDecision,
+  prioritizedEligiblePathGroups,
   prioritizedEligiblePaths,
   buildBoundedSourceContext,
   fixScopeDecision,

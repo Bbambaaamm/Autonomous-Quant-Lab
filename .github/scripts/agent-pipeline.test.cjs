@@ -601,6 +601,37 @@ test("Issue #99 priority path ordering is locale-independent and bytewise determ
   assert.equal(left, right);
 });
 
+test("Issue #99 tracked-index plan rejects priority symlinks and excludes generic symlinks", () => {
+  const tracked = pipeline.parseTrackedIndexEntries(
+    "120000 1111111111111111111111111111111111111111 0\tfrontend/lib/zz_changed.ts\0" +
+    "100644 2222222222222222222222222222222222222222 0\tfrontend/lib/mm_diagnostic.ts\0" +
+    "120000 3333333333333333333333333333333333333333 0\tfrontend/src/generic-link.ts\0" +
+    "100644 4444444444444444444444444444444444444444 0\tfrontend/src/regular.ts\0"
+  );
+  assert.deepEqual(pipeline.trackedEligibleRegularPaths({ trackedEntries: tracked, config: agentConfig.v2 }), [
+    "frontend/lib/mm_diagnostic.ts",
+    "frontend/src/regular.ts",
+  ]);
+  const failPlan = pipeline.trackedPriorityMaterializationPlan({
+    trackedEntries: tracked,
+    fixScopePaths: ["frontend/lib/zz_changed.ts"],
+    diagnostic: JSON.stringify({ excerpt: "FAILED frontend/lib/mm_diagnostic.ts" }),
+    config: agentConfig.v2,
+  });
+  assert.equal(failPlan.ok, false);
+  assert.match(failPlan.reason, /^PRIORITY_SOURCE_CONTEXT_UNSAFE_TRACKED_ENTRY:frontend\/lib\/zz_changed\.ts$/);
+
+  const okPlan = pipeline.trackedPriorityMaterializationPlan({
+    trackedEntries: tracked,
+    fixScopePaths: ["frontend/lib/mm_diagnostic.ts"],
+    diagnostic: JSON.stringify({ excerpt: "FAILED frontend/src/regular.ts" }),
+    config: agentConfig.v2,
+  });
+  assert.equal(okPlan.ok, true);
+  assert.deepEqual(okPlan.priorityPaths, ["frontend/lib/mm_diagnostic.ts", "frontend/src/regular.ts"]);
+  assert.equal(okPlan.eligibleRegularPaths.includes("frontend/src/generic-link.ts"), false);
+});
+
 test("v2 write job executes only trusted policy and treats candidate checkout as data", () => {
   const fixer=fs.readFileSync(".github/workflows/agent-ci-fixer.yml","utf8");
   const publish=fixer.slice(fixer.indexOf("trusted-publish:"),fixer.indexOf("fail-closed-finalizer:"));
@@ -774,7 +805,11 @@ test("v2 classify job guard admits reusable review-block despite inherited calle
   assert.equal(classifyRuns({eventName:"workflow_dispatch",conclusion:undefined,mode:"review-block"}),true);
   assert.equal(classifyRuns({eventName:"workflow_run",conclusion:"success",mode:""}),false);
   assert.match(fixer,/prepare-generation-context:[\s\S]*FIX_SCOPE: '\$\{\{ needs\.classify\.outputs\.fix_scope \}\}'[\s\S]*DIAGNOSTIC: '\$\{\{ needs\.classify\.outputs\.diagnostic \}\}'/);
-  assert.match(fixer,/prioritizedEligiblePaths\(\{eligiblePaths:tracked,fixScopePaths:process\.env\.FIX_SCOPE,diagnostic:process\.env\.DIAGNOSTIC\}\)/);
+  assert.match(fixer,/git',\['ls-files','--stage','-z'\]/);
+  assert.match(fixer,/parseTrackedIndexEntries\(/);
+  assert.match(fixer,/trackedPriorityMaterializationPlan\(\{trackedEntries,fixScopePaths:process\.env\.FIX_SCOPE,diagnostic:process\.env\.DIAGNOSTIC,config:c\.v2\}\)/);
+  assert.match(fixer,/fs\.lstatSync/);
+  assert.doesNotMatch(fixer,/fs\.statSync/);
   assert.match(fixer,/buildBoundedSourceContext\(\{files:\[\.\.\.filesByPath\.values\(\)\],fixScopePaths:process\.env\.FIX_SCOPE,diagnostic:process\.env\.DIAGNOSTIC,sourceBudgetBytes:SOURCE_CONTEXT_MAX_BYTES\}\)/);
   assert.match(fixer,/SOURCE_CONTEXT_MAX_BYTES=917504/);
   assert.match(fixer,/test "\$\(stat -c%s \.codex-input\/prompt\.md\)" -lt 1048576/);
