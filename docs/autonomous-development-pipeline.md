@@ -311,10 +311,13 @@ runner-temporary path that the action may not read. The bot allowance is restric
 `github-actions[bot]`. A Reviewer BLOCK calls a dedicated trusted escalation workflow with the
 already validated PR number and exact head SHA. That workflow has no repository-content write
 permission and, immediately before changing labels, independently re-fetches the current open PR,
-default-branch base, exact head SHA, concrete implementation Issue, exact lifecycle on both objects,
-and both durable linkage directions. Stale, ambiguous, partially transitioned, or conflicting state
-performs no write; a valid BLOCK moves both linked objects to `agent:needs-human` and records a
-bounded redacted reason. The failed-CI fixer and its isolated publication credential are not involved.
+default-branch base, exact head SHA, concrete implementation Issue, escalation lifecycle on both
+objects, and both durable linkage directions. The paired transition uses atomic per-object label
+replacement and revalidates the complete binding, lifecycle, and two-sided linkage after the first
+write. A retry accepts either partial ordering (`agent:pr`/`agent:needs-human`) and completes the
+same transition while preserving foreign labels; stale, ambiguous, or conflicting state performs no
+write. A valid BLOCK moves both linked objects to `agent:needs-human` and records a bounded redacted
+reason. The failed-CI fixer and its isolated publication credential are not involved.
 
 ### v2 crash, trust, and pre-link guarantees
 

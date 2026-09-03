@@ -585,8 +585,8 @@ test("v2 reusable caller permissions and governance linkage are fail closed", ()
   assert.doesNotMatch(block,/contents: write|secrets: inherit|AGENT_PUBLISH_TOKEN/);
   assert.match(block,/pr\.head\.sha!==expectedSha[\s\S]*pr\.state!=="open"[\s\S]*pr\.base\.ref!==context\.payload\.repository\.default_branch/);
   assert.match(block,/issue\.pull_request\|\|issue\.state!=="open"\|\|!p\.isImplementation/);
-  assert.match(block,/lifecycleAtAgentPr[\s\S]*fullLinkageDecision[\s\S]*REVIEW_BLOCK_NO_WRITE/);
-  assert.match(block,/const plans=[\s\S]*for\(const \[number,plan\] of plans\)/);
+  assert.match(block,/reviewerBlockPairPlan[\s\S]*fullLinkageDecision[\s\S]*REVIEW_BLOCK_NO_WRITE/);
+  assert.match(block,/setLabels[\s\S]*readValidatedPair\(pair\.issueNumber\)[\s\S]*setLabels/);
   const escalation=reviewer.slice(reviewer.indexOf("governance-escalation:"),reviewer.indexOf("independent-review:"));
   assert.match(escalation,/listComments[\s\S]*fullLinkageDecision[\s\S]*STALE_GOVERNANCE_NO_WRITE/);
 });
@@ -607,6 +607,28 @@ test("Issue #90 Reviewer BLOCK escalation transitions only an exact valid linked
   assert.equal(pipeline.fullLinkageDecision({...valid,issueComments:[]}).ok,false);
   // The workflow additionally compares the requested SHA and base immediately before this decision.
   assert.equal(sha.length,40);
+});
+
+test("Issue #90 Reviewer BLOCK retry reconciles either partial write and preserves foreign labels", () => {
+  for (const [prLabels, issueLabels] of [
+    [["agent:needs-human", "priority:high"], ["type:implementation", "agent:pr", "team:quant"]],
+    [["agent:pr", "priority:high"], ["type:implementation", "agent:needs-human", "team:quant"]],
+  ]) {
+    const plan = pipeline.reviewerBlockPairPlan(prLabels, issueLabels);
+    assert.equal(plan.ok, true);
+    const apply = (labels) => [
+      ...pipeline.labelNames(labels).filter((name) => !pipeline.STATES.includes(name)),
+      "agent:needs-human",
+    ];
+    assert.deepEqual(apply(prLabels), ["priority:high", "agent:needs-human"]);
+    assert.deepEqual(apply(issueLabels), ["type:implementation", "team:quant", "agent:needs-human"]);
+  }
+  for (const conflict of [
+    [["agent:ready"], ["type:implementation", "agent:pr"]],
+    [["agent:pr", "agent:needs-human"], ["type:implementation", "agent:pr"]],
+    [["agent:pr"], ["type:implementation", "agent:verified"]],
+  ]) assert.deepEqual(pipeline.reviewerBlockPairPlan(...conflict),
+    {ok:false,reason:"INVALID_REVIEW_BLOCK_PAIR"});
 });
 
 test("v2 classify job guard admits reusable review-block despite inherited caller events", () => {

@@ -347,6 +347,21 @@ function escalationMutationPlan(labels) {
   };
 }
 
+function reviewerBlockPairPlan(prLabels, issueLabels) {
+  const exactEscalationState = (labels) => {
+    const states = labelNames(labels).filter((label) => STATES.includes(label));
+    return states.length === 1 && (states[0] === "agent:pr" || states[0] === "agent:needs-human");
+  };
+  if (!exactEscalationState(prLabels) || !exactEscalationState(issueLabels)) {
+    return { ok: false, reason: "INVALID_REVIEW_BLOCK_PAIR" };
+  }
+  return {
+    ok: true,
+    pr: escalationMutationPlan(prLabels),
+    issue: escalationMutationPlan(issueLabels),
+  };
+}
+
 function invalidationLifecycleDecision({ prLabels, issueLabels = [], issueLoaded, durableLink, markerIssueNumber }) {
   const prStates = labelNames(prLabels).filter((label) => STATES.includes(label));
   const issueStates = labelNames(issueLabels).filter((label) => STATES.includes(label));
@@ -433,11 +448,13 @@ function verificationDecision(input) {
 module.exports = {
   STATES,
   FAILURE_CLASSES,
+  labelNames,
   currentState,
   authoritativeCiRunCandidates,
   durablePrLinkDecision,
   durableIssueLinkDecision,
   escalationMutationPlan,
+  reviewerBlockPairPlan,
   hasDurableLink,
   isImplementation,
   invalidationLifecycleDecision,
