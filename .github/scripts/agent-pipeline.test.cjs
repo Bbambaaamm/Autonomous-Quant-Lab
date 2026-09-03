@@ -455,7 +455,7 @@ test("v2 third-audit workflow wiring is fail-closed and injection safe", () => {
   assert.match(reviewer,/base_sha:pr\.base\.sha/);
   assert.match(reviewer,/git diff --quiet "\$BASE_SHA" "\$HEAD_SHA" -- AGENTS\.md/);
   assert.doesNotMatch(fixer,/pull-requests: write/);
-  assert.equal((reviewer.match(/pull-requests: write/g)||[]).length,1);
+  assert.equal((reviewer.match(/pull-requests: write/g)||[]).length,5);
 });
 
 test("v2 index mode policy rejects symlinks, gitlinks, and mode transitions", () => {
@@ -580,8 +580,8 @@ test("v2 reusable caller permissions and governance linkage are fail closed", ()
   const reviewer=fs.readFileSync(".github/workflows/agent-codex-review.yml","utf8");
   const block=fs.readFileSync(".github/workflows/agent-review-block-escalation.yml","utf8");
   assert.match(reviewer,/verify-after-pass:[\s\S]*permissions: \{actions: read, contents: read, issues: write, pull-requests: write\}/);
-  assert.match(reviewer,/route-block:[\s\S]*permissions: \{contents: read, issues: write, pull-requests: read\}/);
-  assert.match(block,/permissions: \{contents: read, issues: write, pull-requests: read\}/);
+  assert.match(reviewer,/route-block:[\s\S]*permissions: \{contents: read, issues: write, pull-requests: write\}/);
+  assert.match(block,/permissions: \{contents: read, issues: write, pull-requests: write\}/);
   assert.doesNotMatch(block,/contents: write|secrets: inherit|AGENT_PUBLISH_TOKEN/);
   assert.match(block,/pr\.head\.sha!==expectedSha[\s\S]*pr\.state!=="open"[\s\S]*pr\.base\.ref!==context\.payload\.repository\.default_branch/);
   assert.match(block,/issue\.pull_request\|\|issue\.state!=="open"\|\|!p\.isImplementation/);
@@ -589,6 +589,33 @@ test("v2 reusable caller permissions and governance linkage are fail closed", ()
   assert.match(block,/setLabels[\s\S]*readValidatedPair\(pair\.issueNumber\)[\s\S]*setLabels/);
   const escalation=reviewer.slice(reviewer.indexOf("governance-escalation:"),reviewer.indexOf("independent-review:"));
   assert.match(escalation,/listComments[\s\S]*fullLinkageDecision[\s\S]*STALE_GOVERNANCE_NO_WRITE/);
+});
+
+test("Issue #96 Reviewer metadata writers have compatible least-privilege grants", () => {
+  const reviewer=fs.readFileSync(".github/workflows/agent-codex-review.yml","utf8");
+  const block=fs.readFileSync(".github/workflows/agent-review-block-escalation.yml","utf8");
+  const job=(workflow,name)=>{
+    const match=workflow.match(new RegExp(`^  ${name}:\\n([\\s\\S]*?)(?=^  [a-zA-Z0-9_-]+:\\n|(?![\\s\\S]))`,"m"));
+    assert.ok(match,`missing job ${name}`);
+    return match[0];
+  };
+  for(const name of ["governance-escalation","trusted-record","route-block","fail-closed-finalizer"]){
+    const section=job(reviewer,name);
+    assert.match(section,/permissions: \{contents: read, issues: write, pull-requests: write\}/,name);
+    assert.doesNotMatch(section,/contents: write|OPENAI_API_KEY/,name);
+  }
+  const model=job(reviewer,"independent-review");
+  assert.match(model,/permissions: \{contents: read\}/);
+  assert.doesNotMatch(model,/issues: write|pull-requests: write|contents: write/);
+  assert.match(model,/OPENAI_API_KEY/);
+  assert.match(job(reviewer,"trusted-record"),/result\.reviewed_sha!==process\.env\.SHA[\s\S]*createComment[\s\S]*agent-codex-review:v2 sha=\$\{process\.env\.SHA\}/);
+  assert.match(job(reviewer,"governance-escalation"),/fullLinkageDecision[\s\S]*lifecycleAtAgentPr[\s\S]*(?:addLabels|removeLabel)[\s\S]*createComment/);
+  for(const name of ["route-block","fail-closed-finalizer"])
+    assert.match(job(reviewer,name),/uses: \.\/\.github\/workflows\/agent-review-block-escalation\.yml/);
+  const escalate=job(block,"escalate");
+  assert.match(escalate,/permissions: \{contents: read, issues: write, pull-requests: write\}/);
+  assert.doesNotMatch(block,/contents: write|OPENAI_API_KEY|secrets:/);
+  assert.match(escalate,/reviewerBlockPairPlan[\s\S]*fullLinkageDecision[\s\S]*setLabels[\s\S]*readValidatedPair\(pair\.issueNumber\)[\s\S]*setLabels[\s\S]*createComment/);
 });
 
 test("Issue #90 Reviewer BLOCK escalation transitions only an exact valid linked pair", () => {
