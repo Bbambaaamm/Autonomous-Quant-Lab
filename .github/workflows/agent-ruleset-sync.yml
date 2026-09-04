@@ -1,0 +1,60 @@
+name: Agent Protect main ruleset sync
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Verify trusted default-branch revision
+        env:
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          test "${GITHUB_REF}" = "refs/heads/${{ github.event.repository.default_branch }}"
+          test "$(git rev-parse HEAD)" = "${GITHUB_SHA}"
+      - name: Require agent-verified-gate in Protect main
+        env:
+          GH_TOKEN: ${{ secrets.AGENT_PUBLISH_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          test -n "$GH_TOKEN"
+          rulesets="$(gh api "repos/$GH_REPO/rulesets")"
+          id="$(jq -r '[.[]|select(.name=="Protect main" and .target=="branch" and .enforcement=="active")]|if length==1 then .[0].id else empty end' <<<"$rulesets")"
+          test -n "$id"
+          current="$(gh api "repos/$GH_REPO/rulesets/$id")"
+          test "$(jq -r '.bypass_actors|length' <<<"$current")" = 0
+          test "$(jq -r '.conditions.ref_name.include==["refs/heads/main"] and (.conditions.ref_name.exclude|length==0)' <<<"$current")" = true
+          test "$(jq -r '[.rules[].type]|index("deletion")!=null and index("non_fast_forward")!=null and index("pull_request")!=null and index("required_status_checks")!=null' <<<"$current")" = true
+          jq '
+            .rules |= map(
+              if .type=="required_status_checks" then
+                .parameters.strict_required_status_checks_policy=true |
+                .parameters.required_status_checks |= (
+                  . + [{"context":"agent-verified-gate","integration_id":15368}] |
+                  unique_by(.context) |
+                  sort_by(.context)
+                )
+              else . end
+            ) |
+            {name,target,enforcement,conditions,rules,bypass_actors}
+          ' <<<"$current" > "$RUNNER_TEMP/ruleset.json"
+          gh api --method PUT "repos/$GH_REPO/rulesets/$id" --input "$RUNNER_TEMP/ruleset.json" >/dev/null
+          fresh="$(gh api "repos/$GH_REPO/rulesets/$id")"
+          jq -e '
+            .name=="Protect main" and .enforcement=="active" and (.bypass_actors|length==0) and
+            ([.rules[]|select(.type=="required_status_checks")][0].parameters.strict_required_status_checks_policy==true) and
+            ([.rules[]|select(.type=="required_status_checks")][0].parameters.required_status_checks|map(.context)|index("agent-verified-gate")!=null)
+          ' <<<"$fresh" >/dev/null
