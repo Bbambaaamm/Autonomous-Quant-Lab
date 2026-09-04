@@ -341,25 +341,78 @@ jobs:
         with:
           name: bootstrap-issue-100-generated-${{ github.run_id }}
           path: ${{ runner.temp }}/generated
-      - name: Execute candidate and immutable base acceptance tests with no model or write credential
+      - name: Execute candidate-authored regression tests with no model or write credential
         run: |
           set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/trusted-suite/.github/scripts"
-          cp .github/scripts/agent-pipeline.test.cjs "$RUNNER_TEMP/trusted-suite/.github/scripts/agent-pipeline.test.cjs"
           jq -r .patch "$RUNNER_TEMP/generated/output.json" > "$RUNNER_TEMP/candidate.patch"
           git apply --check "$RUNNER_TEMP/candidate.patch"
           git apply "$RUNNER_TEMP/candidate.patch"
           node --test .github/scripts/agent-pipeline.test.cjs
-          cp .github/scripts/agent-pipeline.cjs "$RUNNER_TEMP/trusted-suite/.github/scripts/agent-pipeline.cjs"
-          cp .github/agent-pipeline.json "$RUNNER_TEMP/trusted-suite/.github/agent-pipeline.json"
-          node --test "$RUNNER_TEMP/trusted-suite/.github/scripts/agent-pipeline.test.cjs"
+
+  trusted-acceptance:
+    needs: [prepare, generate, validate-structure]
+    if: needs.generate.outputs.blocked != 'true' && needs.validate-structure.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.prepare.outputs.base_sha }}
+          persist-credentials: false
+          fetch-depth: 1
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: bootstrap-issue-100-generated-${{ github.run_id }}
+          path: ${{ runner.temp }}/generated
+      - name: Run immutable bootstrap acceptance harness without executing candidate code
+        run: |
+          set -euo pipefail
+          jq -r .patch "$RUNNER_TEMP/generated/output.json" > "$RUNNER_TEMP/candidate.patch"
+          git apply --check "$RUNNER_TEMP/candidate.patch"
+          git apply "$RUNNER_TEMP/candidate.patch"
+          python -m json.tool .github/agent-pipeline.json >/dev/null
+          ruby -e 'require "yaml"; Dir[".github/workflows/*.yml"].sort.each { |p| YAML.load_file(p, aliases: true) }'
+          node <<'NODE'
+          const assert = require('node:assert/strict');
+          const fs = require('node:fs');
+          const path = require('node:path');
+          const read = (p) => fs.readFileSync(p, 'utf8');
+          const config = JSON.parse(read('.github/agent-pipeline.json'));
+          const expectedJobs = [
+            'agent-pipeline', 'quality', 'unit-research', 'api', 'integration-postgres',
+            'frontend', 'security', 'container-build', 'production-smoke',
+          ].sort();
+          assert.deepEqual([...config.requiredCiJobs].sort(), expectedJobs);
+          assert.equal(config.v2.maxFixCommits, 2);
+          assert.equal(config.v2.reviewerRequired, true);
+          const workflowDir = '.github/workflows';
+          const workflows = fs.readdirSync(workflowDir)
+            .filter((name) => name.startsWith('agent-') && name.endsWith('.yml'))
+            .sort()
+            .map((name) => read(path.join(workflowDir, name)))
+            .join('\n');
+          const policyText = [
+            read('.github/scripts/agent-pipeline.cjs'),
+            read('.github/scripts/agent-pipeline.test.cjs'),
+            workflows,
+          ].join('\n');
+          assert.match(policyText, /agent-verified-gate/);
+          assert.match(policyText, /agent:needs-human/);
+          assert.doesNotMatch(policyText, /danger-full-access/);
+          assert.doesNotMatch(policyText, /pull_request_target/);
+          NODE
 
   seal:
-    needs: [prepare, generate, validate-structure, test-candidate]
+    needs: [prepare, generate, validate-structure, test-candidate, trusted-acceptance]
     if: >-
       needs.generate.outputs.blocked != 'true' &&
       needs.validate-structure.result == 'success' &&
-      needs.test-candidate.result == 'success'
+      needs.test-candidate.result == 'success' &&
+      needs.trusted-acceptance.result == 'success'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -510,7 +563,6 @@ jobs:
           sealed_sha="$(git rev-parse HEAD)"
           sealed_tree="$(git show -s --format=%T HEAD)"
           branch="agent/issue-100-${SPEC_HASH:0:12}-${BASE_SHA:0:8}-${sealed_tree:0:12}"
-          patch_sha="$(cat "$RUNNER_TEMP/validated/validated.sha256")"
           created_branch=0
           created_pr=""
 
