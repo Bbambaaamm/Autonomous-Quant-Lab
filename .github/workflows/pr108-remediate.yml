@@ -52,6 +52,24 @@ jobs:
           PY
       - name: Apply all current Codex findings
         run: python .github/scripts/pr108-remediate.py
+      - name: Normalize remediated publisher shell indentation
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('.github/workflows/agent-builder-publish.yml')
+          lines=p.read_text().splitlines()
+          start=next((i for i,line in enumerate(lines) if line.strip()=='owned(){'),None)
+          if start is None: raise SystemExit('owned function missing after remediation')
+          end=None
+          for i in range(start+1,len(lines)-1):
+              if lines[i].strip()=='}' and lines[i+1].strip().startswith('prs(){'):
+                  end=i
+                  break
+          if end is None: raise SystemExit('owned function end missing after remediation')
+          for i in range(start,end+1):
+              lines[i]='          '+lines[i].lstrip()
+          p.write_text('\n'.join(lines)+'\n')
+          PY
       - name: Update legacy trust-boundary regression assertions for Issue 100
         run: |
           python - <<'PY'
