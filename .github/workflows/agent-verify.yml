@@ -8,6 +8,8 @@ on:
     inputs:
       pr_number: {required: true, type: number}
       head_sha: {required: true, type: string}
+    secrets:
+      AGENT_PUBLISH_TOKEN: {required: false}
 
 permissions:
   contents: read
@@ -32,6 +34,7 @@ jobs:
         name: Verify authorization, current-main, exact CI and independent review
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
         with:
+          github-token: ${{ secrets.AGENT_PUBLISH_TOKEN }}
           script: |
             const p=require('./.github/scripts/agent-pipeline.cjs'),a=require('./.github/scripts/agent-autonomy.cjs'),c=require('./.github/agent-pipeline.json');
             const trigger=p.verificationTriggerDecision({workflowRun:context.payload.workflow_run,workflowCallInputs:{prNumber:'${{ inputs.pr_number || '' }}',headSha:'${{ inputs.head_sha || '' }}'}});
@@ -139,3 +142,5 @@ jobs:
       pr_number: ${{ fromJSON(needs.verify.outputs.pr_number) }}
       head_sha: ${{ needs.verify.outputs.head_sha }}
       spec_hash: ${{ needs.verify.outputs.spec_hash }}
+    secrets:
+      AGENT_PUBLISH_TOKEN: '${{ secrets.AGENT_PUBLISH_TOKEN }}'

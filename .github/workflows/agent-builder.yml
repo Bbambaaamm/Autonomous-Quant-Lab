@@ -144,7 +144,7 @@ jobs:
     needs: [prepare, generate, seal]
     if: needs.generate.outputs.blocked != 'true' && needs.seal.result == 'success'
     uses: ./.github/workflows/agent-builder-publish.yml
-    permissions: {actions: read, contents: read, issues: write, pull-requests: write}
+    permissions: {actions: write, contents: read, issues: write, pull-requests: write}
     with: {issue_number: '${{ needs.prepare.outputs.issue }}', spec_hash: '${{ needs.prepare.outputs.spec }}', base_sha: '${{ needs.prepare.outputs.base }}'}
     secrets: {AGENT_PUBLISH_TOKEN: '${{ secrets.AGENT_PUBLISH_TOKEN }}'}
 

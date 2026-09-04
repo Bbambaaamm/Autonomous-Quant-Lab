@@ -18,8 +18,49 @@ jobs:
       - name: Require exact gate binding and one-Issue approval model
         env: {GH_TOKEN: '${{ secrets.AGENT_PUBLISH_TOKEN }}', GH_REPO: '${{ github.repository }}'}
         run: |
-          set -euo pipefail; test -n "$GH_TOKEN"; test "${GITHUB_REF}" = "refs/heads/${{ github.event.repository.default_branch }}"; test "$(git rev-parse HEAD)" = "${GITHUB_SHA}"
-          rulesets="$(gh api "repos/$GH_REPO/rulesets")"; id="$(jq -r '[.[]|select(.name=="Protect main" and .target=="branch" and .enforcement=="active")]|if length==1 then .[0].id else empty end'<<<"$rulesets")"; test -n "$id"; current="$(gh api "repos/$GH_REPO/rulesets/$id")"; test "$(jq -r '.bypass_actors|length'<<<"$current")" = 0
-          jq '.rules|=map(if .type=="required_status_checks" then .parameters.strict_required_status_checks_policy=true|.parameters.required_status_checks=([.parameters.required_status_checks[]|select(.context!="agent-verified-gate")]+[{"context":"agent-verified-gate","integration_id":15368}]|sort_by(.context)) elif .type=="pull_request" then .parameters.required_approving_review_count=0|.parameters.required_reviewers=[]|.parameters.require_code_owner_review=false|.parameters.require_last_push_approval=false|.parameters.require_extra_approval_for_unattributed_changes=false else . end)|{name,target,enforcement,conditions,rules,bypass_actors}'<<<"$current">"$RUNNER_TEMP/ruleset.json"
-          gh api --method PUT "repos/$GH_REPO/rulesets/$id" --input "$RUNNER_TEMP/ruleset.json" >/dev/null; fresh="$(gh api "repos/$GH_REPO/rulesets/$id")"
-          jq -e '(.bypass_actors|length==0) and ([.rules[]|select(.type=="required_status_checks")][0].parameters.strict_required_status_checks_policy==true) and ([.rules[]|select(.type=="required_status_checks")][0].parameters.required_status_checks|[.[]|select(.context=="agent-verified-gate" and .integration_id==15368)]|length==1) and ([.rules[]|select(.type=="pull_request")][0].parameters.required_approving_review_count==0)'<<<"$fresh">/dev/null
+          set -euo pipefail
+          test -n "$GH_TOKEN"
+          test "${GITHUB_REF}" = "refs/heads/${{ github.event.repository.default_branch }}"
+          test "$(git rev-parse HEAD)" = "${GITHUB_SHA}"
+          rulesets="$(gh api "repos/$GH_REPO/rulesets")"
+          id="$(jq -r '[.[]|select(.name=="Protect main" and .target=="branch" and .enforcement=="active")]|if length==1 then .[0].id else empty end'<<<"$rulesets")"
+          test -n "$id"
+          current="$(gh api "repos/$GH_REPO/rulesets/$id")"
+          jq -e '
+            (.bypass_actors|length==0) and
+            (.conditions.ref_name.include==["refs/heads/main"]) and
+            ((.conditions.ref_name.exclude//[])==[]) and
+            ([.rules[]|select(.type=="deletion")]|length==1) and
+            ([.rules[]|select(.type=="non_fast_forward")]|length==1) and
+            ([.rules[]|select(.type=="pull_request")]|length==1) and
+            ([.rules[]|select(.type=="required_status_checks")]|length==1)
+          ' <<<"$current" >/dev/null
+          jq '
+            .rules|=map(
+              if .type=="required_status_checks" then
+                .parameters.strict_required_status_checks_policy=true |
+                .parameters.required_status_checks=([.parameters.required_status_checks[]|select(.context!="agent-verified-gate")]+[{"context":"agent-verified-gate","integration_id":15368}]|sort_by(.context))
+              elif .type=="pull_request" then
+                .parameters.required_approving_review_count=0 |
+                .parameters.required_reviewers=[] |
+                .parameters.require_code_owner_review=false |
+                .parameters.require_last_push_approval=false |
+                .parameters.require_extra_approval_for_unattributed_changes=false
+              else . end
+            ) |
+            {name,target,enforcement,conditions,rules,bypass_actors}
+          ' <<<"$current" >"$RUNNER_TEMP/ruleset.json"
+          gh api --method PUT "repos/$GH_REPO/rulesets/$id" --input "$RUNNER_TEMP/ruleset.json" >/dev/null
+          fresh="$(gh api "repos/$GH_REPO/rulesets/$id")"
+          jq -e '
+            (.bypass_actors|length==0) and
+            (.conditions.ref_name.include==["refs/heads/main"]) and
+            ((.conditions.ref_name.exclude//[])==[]) and
+            ([.rules[]|select(.type=="deletion")]|length==1) and
+            ([.rules[]|select(.type=="non_fast_forward")]|length==1) and
+            ([.rules[]|select(.type=="pull_request")]|length==1) and
+            ([.rules[]|select(.type=="required_status_checks")]|length==1) and
+            ([.rules[]|select(.type=="required_status_checks")][0].parameters.strict_required_status_checks_policy==true) and
+            ([.rules[]|select(.type=="required_status_checks")][0].parameters.required_status_checks|[.[]|select(.context=="agent-verified-gate" and .integration_id==15368)]|length==1) and
+            ([.rules[]|select(.type=="pull_request")][0].parameters.required_approving_review_count==0)
+          ' <<<"$fresh" >/dev/null

@@ -172,9 +172,10 @@ function failedStepNames(job) {
 function normalizedFailureClass(job, logExcerpt = "") {
   const name = job.name.toLowerCase();
   const steps = failedStepNames(job).join(" ");
-  const metadata = `${name} ${steps} ${String(logExcerpt || "").toLowerCase()}`;
-  // Infrastructure evidence takes precedence: a timeout is not a source defect.
-  if (job.conclusion === "timed_out" || /runner|network|download|service unavailable/.test(metadata)) return "infra-transient";
+  const diagnostic = String(logExcerpt || "").toLowerCase();
+  const metadata = `${name} ${steps} ${diagnostic}`;
+  const transientEvidence = /network timeout|audit endpoint returned an error|eai_again|econnreset|etimedout|socket hang up|temporary failure|connection reset|502 bad gateway|503 service unavailable|504 gateway timeout/;
+  if (job.conclusion === "timed_out" || transientEvidence.test(diagnostic)) return "infra-transient";
   if (/dependenc|lock|npm ci|uv lock|uv sync/.test(metadata)) return "dependency-lock";
   if (/security|audit|bandit|pip-audit/.test(metadata)) return "security";
   if (/integration-postgres|postgres/.test(metadata)) return "integration-postgres";
@@ -183,7 +184,7 @@ function normalizedFailureClass(job, logExcerpt = "") {
   if (/frontend|npm test|next build/.test(metadata)) return "frontend-test-build";
   if (/mypy|typecheck|type check/.test(metadata)) return "typecheck";
   if (/ruff|lint|format/.test(metadata)) return "lint-format";
-  if (/\bapi\b/.test(metadata)) return "api-test";
+  if (/api/.test(metadata)) return "api-test";
   if (/unit|pytest/.test(metadata)) return "unit-test";
   return "unknown";
 }

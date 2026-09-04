@@ -182,6 +182,8 @@ jobs:
     with:
       pr_number: ${{ fromJSON(needs.prepare.outputs.pr_number) }}
       head_sha: ${{ needs.prepare.outputs.head_sha }}
+    secrets:
+      AGENT_PUBLISH_TOKEN: '${{ secrets.AGENT_PUBLISH_TOKEN }}'
 
 
   route-block:

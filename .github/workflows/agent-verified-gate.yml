@@ -6,6 +6,8 @@ on:
       pr_number: {required: true, type: number}
       head_sha: {required: true, type: string}
       spec_hash: {required: true, type: string}
+    secrets:
+      AGENT_PUBLISH_TOKEN: {required: true}
 
 permissions:
   contents: read
@@ -95,3 +97,5 @@ jobs:
       pr_number: ${{ inputs.pr_number }}
       head_sha: ${{ inputs.head_sha }}
       spec_hash: ${{ inputs.spec_hash }}
+    secrets:
+      AGENT_PUBLISH_TOKEN: '${{ secrets.AGENT_PUBLISH_TOKEN }}'

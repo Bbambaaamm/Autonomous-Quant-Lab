@@ -176,6 +176,11 @@ const BUILDER_DENIED_BASENAMES = new Set([
   "pyproject.toml",
   "uv.lock",
 ]);
+const BUILDER_DENIED_EXACT_PATHS = new Set([
+  "backend/src/quantlab/trading.py",
+  "backend/src/quantlab/phase4.py",
+  "backend/src/quantlab/security.py",
+]);
 const BUILDER_DENIED_SEGMENTS = new Set([
   "auth",
   "authentication",
@@ -200,6 +205,7 @@ function safeRelativePath(path) {
 function builderPathAllowed(path) {
   if (!safeRelativePath(path)) return false;
   if (BUILDER_DENIED_PREFIXES.some((prefix) => path.startsWith(prefix))) return false;
+  if (BUILDER_DENIED_EXACT_PATHS.has(path)) return false;
   const basename = path.split("/").at(-1);
   if (BUILDER_DENIED_BASENAMES.has(basename)) return false;
   const tokens = path.toLowerCase().split(/[\/_\-.]+/).filter(Boolean);

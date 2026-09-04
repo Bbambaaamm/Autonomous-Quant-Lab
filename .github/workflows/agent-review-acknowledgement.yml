@@ -72,6 +72,9 @@ jobs:
       head_sha: ${{ inputs.expected_head_sha }}
     permissions:
       actions: read
-      contents: read
+      contents: write
       issues: write
       pull-requests: write
+      statuses: write
+    secrets:
+      AGENT_PUBLISH_TOKEN: '${{ secrets.AGENT_PUBLISH_TOKEN }}'
