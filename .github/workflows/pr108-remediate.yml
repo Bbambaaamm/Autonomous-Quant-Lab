@@ -31,16 +31,8 @@ jobs:
           text,n=re.subn(pattern,replacement_owned,text,count=1)
           if n!=1: raise SystemExit(f'publisher owned replacement failed {n}')
           '''
-          new='''old_owned = \'''          owned(){
-            local sha="$1" m p t
-            m="$(gh api "repos/$GH_REPO/git/commits/$sha" --jq .message)" || return 1
-            p="$(gh api "repos/$GH_REPO/commits/$sha" --jq '.parents[0].sha')" || return 1
-            t="$(gh api "repos/$GH_REPO/git/commits/$sha" --jq '.tree.sha')" || return 1
-            test "$p" = "$BASE" || return 1
-            grep -Fxq "Agent-Builder-Seal: v1 issue=$ISSUE spec=$SPEC base=$BASE tree=$t" <<<"$m" || return 1
-          }
-          \'''
-          new_owned = \'''          owned(){
+          new='''pattern = r'          owned\\(\\)\\{\\n.*?\\n          \\}\\n(?=          prs\\(\\))'
+          replacement_owned = \'''          owned(){
             local sha="$1" m p t
             test "$sha" = "$sealed" || return 1
             m="$(gh api "repos/$GH_REPO/git/commits/$sha" --jq .message)" || return 1
@@ -52,8 +44,8 @@ jobs:
             return 0
           }
           \'''
-          if old_owned not in text: raise SystemExit('publisher owned multiline block missing')
-          text=text.replace(old_owned,new_owned,1)
+          text,n=re.subn(pattern,replacement_owned,text,count=1,flags=re.S)
+          if n!=1: raise SystemExit(f'publisher owned multiline replacement failed {n}')
           '''
           if old not in s: raise SystemExit('remediation script legacy matcher block missing')
           p.write_text(s.replace(old,new,1))
