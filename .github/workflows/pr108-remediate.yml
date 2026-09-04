@@ -70,6 +70,23 @@ jobs:
               lines[i]='          '+lines[i].lstrip()
           p.write_text('\n'.join(lines)+'\n')
           PY
+      - name: Normalize remediated ruleset workflow YAML
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('.github/workflows/agent-ruleset-sync.yml')
+          s=p.read_text()
+          expr='${' + '{ github.event.repository.default_branch }}'
+          old=f'        with: {{ref: {expr}, persist-credentials: false, fetch-depth: 1}}'
+          new='\n'.join([
+              '        with:',
+              f'          ref: {expr}',
+              '          persist-credentials: false',
+              '          fetch-depth: 1',
+          ])
+          if s.count(old)!=1: raise SystemExit(f'ruleset checkout flow mapping missing: {s.count(old)}')
+          p.write_text(s.replace(old,new,1))
+          PY
       - name: Update legacy trust-boundary regression assertions for Issue 100
         run: |
           python - <<'PY'
