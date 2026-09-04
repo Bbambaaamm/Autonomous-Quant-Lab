@@ -374,6 +374,7 @@ jobs:
           python -m json.tool .github/agent-pipeline.json >/dev/null
           ruby <<'RUBY'
           require 'yaml'
+          require 'json'
           expected_jobs = %w[agent-pipeline quality unit-research api integration-postgres frontend security container-build production-smoke].sort
           config = JSON.parse(File.read('.github/agent-pipeline.json')) rescue nil
           raise 'invalid config' unless config
