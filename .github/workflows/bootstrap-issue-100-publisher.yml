@@ -96,11 +96,9 @@ jobs:
             .github/agent-pipeline.json \
             .github/scripts/agent-pipeline.cjs \
             .github/scripts/agent-pipeline.test.cjs \
-            .github/workflows/agent-state-transition.yml \
-            .github/workflows/agent-verify.yml \
-            .github/workflows/agent-invalidate-verification.yml \
-            .github/workflows/agent-codex-review.yml \
-            .github/workflows/agent-ci-fixer.yml; do
+            .github/workflows/agent-*.yml \
+            .github/workflows/bootstrap-issue-100-publisher.yml \
+            .github/workflows/ci.yml; do
             test -f "$path"
             printf '\n===== BEGIN %s =====\n' "$path" >> "$out"
             cat "$path" >> "$out"
@@ -148,6 +146,8 @@ jobs:
           one maintainer Issue approval -> autonomous Builder publication -> CI/classifier/bounded fixer -> exact-SHA independent Codex review -> automatic current-main reconciliation -> automatic agent:verified -> required agent-verified-gate -> trusted expected-head-SHA automatic merge. Routine exact-SHA human acknowledgement and manual Merge are removed from the successful path. agent:needs-human remains fail-closed. Paper-only and all security/trust boundaries remain mandatory.
 
           Builder publication must NOT depend on Codex gh authentication, a writable remote, or make_pr. Implement generate -> credential-free validate/test/seal -> trusted publisher with a durable bounded artifact, deterministic/idempotent Draft PR publication, exact Issue-spec/base/checksum binding, and TOCTOU checks.
+
+          The read-only generation job is NOT responsible for mutating the live GitHub ruleset or executing the live dogfood rehearsal. Lack of GitHub mutation credentials, inability to change the active ruleset, and inability to run live post-publication acceptance are expected properties of this job and MUST NOT be reasons to return BLOCK. Encode the required repository-side controller, verification, reconciliation, ruleset-management support, regression tests, and documentation in the patch; the trusted control plane performs live ruleset mutation and dogfood after publication/merge.
 
           Return ONLY structured JSON with result=PATCH or BLOCK. PATCH must be a complete unified diff against the exact base SHA from scope.json. Do not run repository code.
 
