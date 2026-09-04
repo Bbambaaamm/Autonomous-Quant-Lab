@@ -1,4 +1,5 @@
 name: Agent control-plane remediation request
+run-name: "Agent control-plane remediation request PR #${{ inputs.pr_number }} @ ${{ inputs.head_sha }}"
 
 on:
   workflow_dispatch:
