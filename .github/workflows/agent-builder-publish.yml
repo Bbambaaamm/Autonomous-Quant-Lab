@@ -43,7 +43,7 @@ jobs:
           test -n "$GH_TOKEN"
           test -n "$JOB_TOKEN"
           owner="${GH_REPO%%/*}"
-          branch="agent/issue-${ISSUE}-${SPEC:0:12}"
+          branch="agent/issue-${ISSUE}-${SPEC:0:12}-${BASE:0:12}"
           sealed="$(git rev-parse HEAD)"; expected_tree="$(jq -r .tree_sha "$RUNNER_TEMP/s/validated.json")"; test "$(jq -r .base_sha "$RUNNER_TEMP/s/validated.json")" = "$BASE"; test "$(jq -r .spec_hash "$RUNNER_TEMP/s/validated.json")" = "$SPEC"
           git remote set-url origin "https://github.com/${GH_REPO}.git"
           AUTH_HEADER="AUTHORIZATION: basic $(printf x-access-token:%s "$GH_TOKEN" | base64 -w0)"
