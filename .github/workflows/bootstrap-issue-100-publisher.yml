@@ -149,6 +149,8 @@ jobs:
 
           The read-only generation job is NOT responsible for mutating the live GitHub ruleset or executing the live dogfood rehearsal. Lack of GitHub mutation credentials, inability to change the active ruleset, and inability to run live post-publication acceptance are expected properties of this job and MUST NOT be reasons to return BLOCK. Encode the required repository-side controller, verification, reconciliation, ruleset-management support, regression tests, and documentation in the patch; the trusted control plane performs live ruleset mutation and dogfood after publication/merge.
 
+          The existing `.github/workflows/bootstrap-issue-100-publisher.yml` is intentionally one-time trusted migration infrastructure and is reference context only. It is OUTSIDE the candidate changed-path allowlist and MUST NOT be modified, replaced, generalized, or treated as a reason to return BLOCK. Implement the permanent generalized Builder/orchestration only through authorized `.github/workflows/agent-*.yml` paths. After the permanent Pipeline v2 implementation is merged and proven by live dogfood, the trusted control plane will remove this temporary bootstrap workflow in a separate cleanup step. The temporary bootstrap workflow is not part of the final steady-state authorization/publication path.
+
           Return ONLY structured JSON with result=PATCH or BLOCK. PATCH must be a complete unified diff against the exact base SHA from scope.json. Do not run repository code.
 
           For this authorized governance bootstrap, changed paths are limited to:
