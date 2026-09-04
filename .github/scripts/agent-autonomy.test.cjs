@@ -159,3 +159,30 @@ test("Issue #110 Builder publisher uses isolated one-command Git auth and exact 
   }
   assert.match(section("publish", "fail-closed-finalizer"), /secrets: \{AGENT_PUBLISH_TOKEN:/);
 });
+
+test("Issue #112 verifier keeps metadata on GITHUB_TOKEN and reconciliation on publish token", () => {
+  const workflow = fs.readFileSync(".github/workflows/agent-verify.yml", "utf8");
+  const verifyJob = workflow.slice(workflow.indexOf("  verify:"), workflow.indexOf("\n  gate:"));
+  const gateJob = workflow.slice(workflow.indexOf("\n  gate:"));
+  const reconciliationStart = verifyJob.indexOf("if(state.comparison.data.behind_by>0)");
+  const metadataStart = verifyJob.indexOf("const runs=", reconciliationStart);
+  const reconciliation = verifyJob.slice(reconciliationStart, metadataStart);
+  const metadata = verifyJob.slice(metadataStart);
+
+  assert.match(verifyJob, /permissions:\n\s+actions: read\n\s+contents: read\n\s+issues: write\n\s+pull-requests: write/);
+  assert.doesNotMatch(verifyJob, /github-token:\s*\$\{\{\s*secrets\.AGENT_PUBLISH_TOKEN/);
+  assert.match(verifyJob, /AGENT_PUBLISH_TOKEN:\s*'\$\{\{ secrets\.AGENT_PUBLISH_TOKEN \}\}'/);
+  assert.match(reconciliation, /RECONCILIATION_TOKEN_MISSING/);
+  assert.match(reconciliation, /authorization:`Bearer \$\{process\.env\.AGENT_PUBLISH_TOKEN\}`/);
+  assert.match(reconciliation, /pulls\/\$\{prNumber\}\/update-branch/);
+  assert.doesNotMatch(metadata, /process\.env\.AGENT_PUBLISH_TOKEN/);
+  assert.match(metadata, /github\.rest\.issues\.setLabels/);
+  assert.match(metadata, /github\.rest\.issues\.createComment/);
+  assert.match(gateJob, /secrets:\n\s+AGENT_PUBLISH_TOKEN:/);
+
+  const headSha = "a".repeat(40);
+  const marker = a.verificationMarker({ repo, issueNumber: 112, prNumber: 114, headSha, specHash: spec, ciRunId: 1234 });
+  const args = { repo, issueNumber: 112, prNumber: 114, headSha, specHash: spec };
+  assert.equal(a.exactVerificationEvidence([{ user: { login: "github-actions[bot]" }, body: marker }], args), true);
+  assert.equal(a.exactVerificationEvidence([{ user: { login: "Bbambaaamm" }, body: marker }], args), false);
+});
