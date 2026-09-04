@@ -1,0 +1,54 @@
+name: Agent Builder trusted publish
+
+on:
+  workflow_call:
+    inputs:
+      issue_number: {required: true, type: string}
+      spec_hash: {required: true, type: string}
+      base_sha: {required: true, type: string}
+    secrets:
+      AGENT_PUBLISH_TOKEN: {required: true}
+
+permissions: {contents: read}
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions: {actions: read, contents: read, issues: write, pull-requests: write}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with: {ref: '${{ inputs.base_sha }}', persist-credentials: false}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with: {name: 'builder-sealed-${{ github.run_id }}', path: '${{ runner.temp }}/s'}
+      - name: Reconstruct sealed commit without credential
+        run: |
+          set -euo pipefail; test "$(sha256sum "$RUNNER_TEMP/s/validated.patch"|cut -d' ' -f1)" = "$(cat "$RUNNER_TEMP/s/validated.sha256")"; git apply --check "$RUNNER_TEMP/s/validated.patch"; git apply "$RUNNER_TEMP/s/validated.patch"; git add -A; test "$(git write-tree)" = "$(jq -r .tree_sha "$RUNNER_TEMP/s/validated.json")"
+          git config user.name 'github-actions[bot]'; git config user.email '41898282+github-actions[bot]@users.noreply.github.com'; d="$(git show -s --format=%cI '${{ inputs.base_sha }}')"; tree="$(git write-tree)"; GIT_AUTHOR_DATE="$d" GIT_COMMITTER_DATE="$d" git commit -m 'Autonomous Builder candidate for Issue #${{ inputs.issue_number }}' -m "Agent-Builder-Seal: v1 issue=${{ inputs.issue_number }} spec=${{ inputs.spec_hash }} base=${{ inputs.base_sha }} tree=$tree"
+      - id: p
+        name: Publish with isolated credential
+        env: {GH_TOKEN: '${{ secrets.AGENT_PUBLISH_TOKEN }}', GH_REPO: '${{ github.repository }}', ISSUE: '${{ inputs.issue_number }}', SPEC: '${{ inputs.spec_hash }}', BASE: '${{ inputs.base_sha }}'}
+        run: |
+          set -euo pipefail; test -n "$GH_TOKEN"; owner="${GH_REPO%%/*}"; branch="agent/issue-${ISSUE}-${SPEC:0:12}"; sealed="$(git rev-parse HEAD)"
+          owned(){ local sha="$1" m p t; m="$(gh api "repos/$GH_REPO/git/commits/$sha" --jq .message)"||return 1; p="$(gh api "repos/$GH_REPO/commits/$sha" --jq '.parents[0].sha')"||return 1; t="$(gh api "repos/$GH_REPO/git/commits/$sha" --jq '.tree.sha')"||return 1; grep -Fxq "Agent-Builder-Seal: v1 issue=$ISSUE spec=$SPEC base=$p tree=$t" <<<"$m"; }
+          prs(){ gh api --paginate --slurp -X GET "repos/$GH_REPO/pulls" -f state=open -f per_page=100 -f head="$owner:$branch"|jq --arg r "$GH_REPO" --arg b "$branch" '[.[][]|select(.head.repo.full_name==$r and .head.ref==$b)]'; }
+          q="$(prs)"; test "$(jq length<<<"$q")" -le 1
+          if test "$(jq length<<<"$q")" -eq 1; then sha="$(jq -r '.[0].head.sha'<<<"$q")"; owned "$sha"; else remote="$(gh api "repos/$GH_REPO/git/ref/heads/$branch" --jq .object.sha 2>/dev/null||true)"; if test -n "$remote"; then owned "$remote"; sha="$remote"; else git remote set-url origin "https://github.com/${GH_REPO}.git"; gh auth setup-git; git push origin "HEAD:refs/heads/$branch"; sha="$sealed"; fi; parent="$(gh api "repos/$GH_REPO/commits/$sha" --jq '.parents[0].sha')"; tree="$(gh api "repos/$GH_REPO/git/commits/$sha" --jq '.tree.sha')"; cat > "$RUNNER_TEMP/body" <<BODY
+          Implements the exact authorized Issue #$ISSUE through the trusted autonomous Builder.
+
+          - Agent-Issue: #$ISSUE
+          <!-- agent-builder-publish:v1 issue=$ISSUE spec=$SPEC base=$parent tree=$tree -->
+          BODY
+          gh pr create --repo "$GH_REPO" --draft --base main --head "$branch" --title "Agent: Issue #$ISSUE" --body-file "$RUNNER_TEMP/body"; q="$(prs)"; test "$(jq length<<<"$q")" -eq 1; fi
+          echo "pr=$(jq -r '.[0].number'<<<"$q")" >> "$GITHUB_OUTPUT"; echo "sha=$sha" >> "$GITHUB_OUTPUT"
+      - name: Link, transition and release Draft
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        env: {ISSUE: '${{ inputs.issue_number }}', SPEC: '${{ inputs.spec_hash }}', PR: '${{ steps.p.outputs.pr }}', HEAD: '${{ steps.p.outputs.sha }}'}
+        with:
+          script: |
+            const p=require('./.github/scripts/agent-pipeline.cjs'),a=require('./.github/scripts/agent-autonomy.cjs'),n=Number(process.env.ISSUE),prn=Number(process.env.PR),repo=`${context.repo.owner}/${context.repo.repo}`;
+            let {data:pr}=await github.rest.pulls.get({...context.repo,pull_number:prn}); let {data:i}=await github.rest.issues.get({...context.repo,issue_number:n}); let ic=await github.paginate(github.rest.issues.listComments,{...context.repo,issue_number:n,per_page:100}); const auth=a.authorizationDecision({comments:ic,repo,issueNumber:n,title:i.title,body:i.body||'',labels:i.labels});
+            if(!auth.ok||auth.specHash!==process.env.SPEC||pr.state!=='open'||pr.head.sha!==process.env.HEAD||pr.base.ref!==context.payload.repository.default_branch||p.parseAgentIssue(pr.body)!==n||!a.exactAgentState(i.labels,'agent:running')) return core.setFailed('PUBLISH_SCOPE_REJECTED');
+            let pc=await github.paginate(github.rest.issues.listComments,{...context.repo,issue_number:prn,per_page:100}),il=p.durablePrLinkDecision(ic,{...context.repo,issueNumber:n}),pl=p.durableIssueLinkDecision(pc,{...context.repo,prNumber:prn}); if(!il.ok||!pl.ok||(il.prNumber!==null&&il.prNumber!==prn)||(pl.issueNumber!==null&&pl.issueNumber!==n)) return core.setFailed('LINK_CONFLICT');
+            const marker=`<!-- agent-link:v1 repo=${repo} issue=${n} pr=${prn} -->`; if(il.prNumber===null) await github.rest.issues.createComment({...context.repo,issue_number:n,body:`Linked autonomous PR #${prn}.\n\n${marker}`}); if(pl.issueNumber===null) await github.rest.issues.createComment({...context.repo,issue_number:prn,body:`Linked authorized Issue #${n}.\n\n${marker}`});
+            const state=async(num,labels)=>github.rest.issues.setLabels({...context.repo,issue_number:num,labels:[...a.labelNames(labels).filter(x=>!x.startsWith('agent:')),'agent:pr']}); await state(n,i.labels); ({data:pr}=await github.rest.pulls.get({...context.repo,pull_number:prn})); await state(prn,pr.labels); if(pr.draft) await github.graphql('mutation($id:ID!){markPullRequestReadyForReview(input:{pullRequestId:$id}){pullRequest{id}}}',{id:pr.node_id});
+            ({data:pr}=await github.rest.pulls.get({...context.repo,pull_number:prn})); ({data:i}=await github.rest.issues.get({...context.repo,issue_number:n})); pc=await github.paginate(github.rest.issues.listComments,{...context.repo,issue_number:prn,per_page:100}); ic=await github.paginate(github.rest.issues.listComments,{...context.repo,issue_number:n,per_page:100}); if(!a.lifecyclePairDecision(pr.labels,i.labels,'agent:pr').ok||!p.fullLinkageDecision({prBody:pr.body,prComments:pc,issueComments:ic,...context.repo,issueNumber:n,prNumber:prn}).ok||pr.head.sha!==process.env.HEAD||pr.draft) return core.setFailed('PUBLISH_POSTCONDITION_FAILED');
