@@ -22,6 +22,10 @@ on:
 
 permissions: {contents: read}
 
+concurrency:
+  group: agent-control-plane-remediation-request-${{ inputs.pr_number }}-${{ inputs.head_sha }}
+  cancel-in-progress: false
+
 jobs:
   request:
     if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
@@ -58,13 +62,15 @@ jobs:
             if(!auth.ok) return core.setFailed(`AUTHORIZATION_REJECTED:${auth.reason}`);
             const issueLink=p.durablePrLinkDecision(issueComments,{...context.repo,issueNumber}),prLink=p.durableIssueLinkDecision(prComments,{...context.repo,prNumber});
             if(!issueLink.ok||!prLink.ok||(issueLink.prNumber!==null&&issueLink.prNumber!==prNumber)||(prLink.issueNumber!==null&&prLink.issueNumber!==issueNumber)) return core.setFailed('MAINTENANCE_LINK_CONFLICT');
-            const exactState=(labels,state)=>a.exactAgentState(labels,state);
-            const entryState=exactState(issue.labels,'agent:needs-human')&&exactState(pr.labels,'agent:needs-human')?'agent:needs-human':p.lifecycleAtAgentPr(pr.labels,issue.labels).ok?'agent:pr':null;
+            const issueRecovery=p.stateMutationPlan(issue.labels,'agent:needs-human','agent:pr');
+            const prRecovery=p.stateMutationPlan(pr.labels,'agent:needs-human','agent:pr');
+            const entryState=p.lifecycleAtAgentPr(pr.labels,issue.labels).ok?'agent:pr':(issueRecovery.ok&&prRecovery.ok?'agent:needs-human':null);
             if(!entryState) return core.setFailed('MAINTENANCE_LIFECYCLE_REJECTED');
             const allowed=path=>/^\.github\/workflows\/agent-[^/]+\.yml$/.test(path)||/^\.github\/scripts\/agent-[^/]+\.cjs$/.test(path)||path==='.github/agent-pipeline.json'||path==='docs/autonomous-development-pipeline.md'||path==='docs/adr/0003-autonomous-development-pipeline-v2.md'||path==='docs/adr/0006-conditional-autonomous-merge.md'||path==='docs/adr/0007-control-plane-remediation.md';
             const changed=await github.paginate(github.rest.pulls.listFiles,{...context.repo,pull_number:prNumber,per_page:100});
             const fileAllowed=file=>allowed(file.filename)&&(file.status!=='renamed'||allowed(file.previous_filename));
-            if(changed.length===0||changed.some(file=>!fileAllowed(file))) return core.setFailed('CONTROL_PLANE_SCOPE_VIOLATION');
+            const completeFileList=Number.isSafeInteger(pr.changed_files)&&pr.changed_files>0&&pr.changed_files<=3000&&changed.length===pr.changed_files;
+            if(!completeFileList||changed.some(file=>!fileAllowed(file))) return core.setFailed('CONTROL_PLANE_SCOPE_VIOLATION');
             const {data:main}=await github.rest.repos.getBranch({...context.repo,branch:context.payload.repository.default_branch});
             const comparison=await github.rest.repos.compareCommits({...context.repo,base:main.commit.sha,head:headSha});
             if(comparison.data.behind_by!==0) return core.setFailed('PR_BEHIND_MAIN');
