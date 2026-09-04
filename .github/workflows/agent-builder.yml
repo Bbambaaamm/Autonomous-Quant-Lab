@@ -1,0 +1,149 @@
+name: Agent autonomous Builder
+
+on:
+  workflow_dispatch:
+    inputs:
+      issue_number: {required: true, type: string}
+      spec_hash: {required: true, type: string}
+
+permissions: {contents: read}
+concurrency: {group: 'agent-builder-${{ inputs.issue_number }}', cancel-in-progress: false}
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    permissions: {contents: read, issues: read}
+    outputs:
+      issue: ${{ steps.s.outputs.issue }}
+      spec: ${{ steps.s.outputs.spec }}
+      base: ${{ steps.s.outputs.base }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with: {ref: '${{ github.event.repository.default_branch }}', persist-credentials: false}
+      - id: s
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        env: {ISSUE: '${{ inputs.issue_number }}', SPEC: '${{ inputs.spec_hash }}'}
+        with:
+          script: |
+            const fs=require('fs'),p=require('./.github/scripts/agent-pipeline.cjs'),a=require('./.github/scripts/agent-autonomy.cjs');
+            const n=Number(process.env.ISSUE),repo=`${context.repo.owner}/${context.repo.repo}`;
+            if(!Number.isSafeInteger(n)||n<1||!/^[0-9a-f]{64}$/.test(process.env.SPEC)) return core.setFailed('INVALID_BINDING');
+            const {data:i}=await github.rest.issues.get({...context.repo,issue_number:n});
+            const cs=await github.paginate(github.rest.issues.listComments,{...context.repo,issue_number:n,per_page:100});
+            const auth=a.authorizationDecision({comments:cs,repo,issueNumber:n,title:i.title,body:i.body||'',labels:i.labels});
+            if(!auth.ok||auth.specHash!==process.env.SPEC||i.state!=='open'||!p.isImplementation(i.labels)||!a.exactAgentState(i.labels,'agent:running')) return core.setFailed(`AUTH_REJECTED:${auth.reason||'STATE'}`);
+            const {data:b}=await github.rest.repos.getBranch({...context.repo,branch:context.payload.repository.default_branch});
+            if(b.commit.sha!==context.sha) return core.setFailed('STALE_WORKFLOW_REVISION');
+            fs.writeFileSync(`${process.env.RUNNER_TEMP}/scope.json`,JSON.stringify({repository:repo,issue_number:n,title:i.title,body:i.body||'',spec_hash:auth.specHash,base_sha:b.commit.sha}));
+            core.setOutput('issue',String(n)); core.setOutput('spec',auth.specHash); core.setOutput('base',b.commit.sha);
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with: {name: 'builder-scope-${{ github.run_id }}', path: '${{ runner.temp }}/scope.json', if-no-files-found: error, retention-days: 2}
+
+  generate:
+    needs: prepare
+    runs-on: ubuntu-latest
+    permissions: {contents: read}
+    outputs: {blocked: '${{ steps.out.outputs.blocked }}', reason: '${{ steps.out.outputs.reason }}'}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with: {ref: '${{ needs.prepare.outputs.base }}', persist-credentials: false}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with: {name: 'builder-scope-${{ github.run_id }}', path: '.codex-input'}
+      - run: |
+          test "$(git rev-parse HEAD)" = '${{ needs.prepare.outputs.base }}'
+          cat > .codex-input/prompt.md <<'PROMPT'
+          Implement only the exact authorized Issue in scope.json against this exact checkout. Read and obey AGENTS.md and repository policy. Preserve paper-only and all security/runtime invariants. Do not publish or merge. Do not modify .github, AGENTS.md, docs/ROADMAP.md, dependency/lock files, migrations, deploy/infra, authentication/authorization/security, credentials/secrets, broker/execution/risk/trading/live-trading surfaces. If required scope touches any forbidden surface, return BLOCK. Return only structured JSON; PATCH is a complete unified diff and paths exactly list changed paths. Do not execute repository code.
+          PROMPT
+          cat .codex-input/scope.json >> .codex-input/prompt.md
+          test "$(stat -c%s .codex-input/prompt.md)" -lt 262144
+      - env: {OPENAI_API_KEY: '${{ secrets.OPENAI_API_KEY }}'}
+        run: test -n "$OPENAI_API_KEY"
+      - uses: openai/codex-action@86365089eb2b84e0a8fb0717b304f8bdcb13b20e
+        with:
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          permission-profile: ':read-only'
+          allow-bot-users: 'github-actions[bot]'
+          output-file: ${{ runner.temp }}/output.json
+          output-schema: >-
+            {"type":"object","additionalProperties":false,"required":["result","patch","paths","reason"],"properties":{"result":{"type":"string","enum":["PATCH","BLOCK"]},"patch":{"type":"string","maxLength":262144},"paths":{"type":"array","maxItems":20,"items":{"type":"string","maxLength":512}},"reason":{"type":"string","maxLength":2048}}}
+          prompt-file: .codex-input/prompt.md
+      - id: out
+        run: |
+          r="$(jq -r .result "$RUNNER_TEMP/output.json")"
+          if test "$r" = BLOCK; then echo blocked=true >> "$GITHUB_OUTPUT"; echo "reason=$(jq -r '.reason|gsub("[\r\n]";" ")|.[0:1024]' "$RUNNER_TEMP/output.json")" >> "$GITHUB_OUTPUT"; else test "$r" = PATCH; echo blocked=false >> "$GITHUB_OUTPUT"; fi
+      - if: steps.out.outputs.blocked != 'true'
+        run: |
+          mkdir "$RUNNER_TEMP/generated"; cp "$RUNNER_TEMP/output.json" "$RUNNER_TEMP/generated/output.json"; sha256sum "$RUNNER_TEMP/generated/output.json"|cut -d' ' -f1 > "$RUNNER_TEMP/generated/output.sha256"
+          jq -n --arg base '${{ needs.prepare.outputs.base }}' --arg spec '${{ needs.prepare.outputs.spec }}' --arg sum "$(cat "$RUNNER_TEMP/generated/output.sha256")" '{base_sha:$base,spec_hash:$spec,output_sha256:$sum}' > "$RUNNER_TEMP/generated/metadata.json"
+      - if: steps.out.outputs.blocked != 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with: {name: 'builder-generated-${{ github.run_id }}', path: '${{ runner.temp }}/generated', if-no-files-found: error, retention-days: 2}
+
+  block:
+    needs: [prepare, generate]
+    if: needs.generate.outputs.blocked == 'true'
+    runs-on: ubuntu-latest
+    permissions: {contents: read, issues: write}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with: {ref: '${{ github.event.repository.default_branch }}', persist-credentials: false}
+      - uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        env: {ISSUE: '${{ needs.prepare.outputs.issue }}', SPEC: '${{ needs.prepare.outputs.spec }}', REASON: '${{ needs.generate.outputs.reason }}'}
+        with:
+          script: |
+            const p=require('./.github/scripts/agent-pipeline.cjs'),a=require('./.github/scripts/agent-autonomy.cjs'),n=Number(process.env.ISSUE),repo=`${context.repo.owner}/${context.repo.repo}`;
+            const {data:i}=await github.rest.issues.get({...context.repo,issue_number:n}); const cs=await github.paginate(github.rest.issues.listComments,{...context.repo,issue_number:n,per_page:100});
+            const auth=a.authorizationDecision({comments:cs,repo,issueNumber:n,title:i.title,body:i.body||'',labels:i.labels}); if(!auth.ok||auth.specHash!==process.env.SPEC||!p.isImplementation(i.labels)||!a.exactAgentState(i.labels,'agent:running')) return core.setFailed('BLOCK_SCOPE_CHANGED');
+            await github.rest.issues.setLabels({...context.repo,issue_number:n,labels:[...a.labelNames(i.labels).filter(x=>!x.startsWith('agent:')),'agent:needs-human']});
+            await github.rest.issues.createComment({...context.repo,issue_number:n,body:`Builder stopped fail-closed: ${String(process.env.REASON||'BLOCK').slice(0,1024)}`});
+
+  validate:
+    needs: [prepare, generate]
+    if: needs.generate.outputs.blocked != 'true'
+    runs-on: ubuntu-latest
+    permissions: {contents: read}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with: {ref: '${{ needs.prepare.outputs.base }}', persist-credentials: false}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with: {name: 'builder-generated-${{ github.run_id }}', path: '${{ runner.temp }}/g'}
+      - run: |
+          set -euo pipefail
+          test "$(sha256sum "$RUNNER_TEMP/g/output.json"|cut -d' ' -f1)" = "$(jq -r .output_sha256 "$RUNNER_TEMP/g/metadata.json")"; test "$(jq -r .base_sha "$RUNNER_TEMP/g/metadata.json")" = '${{ needs.prepare.outputs.base }}'; test "$(jq -r .spec_hash "$RUNNER_TEMP/g/metadata.json")" = '${{ needs.prepare.outputs.spec }}'
+          jq -r .patch "$RUNNER_TEMP/g/output.json" > "$RUNNER_TEMP/p.patch"; test "$(stat -c%s "$RUNNER_TEMP/p.patch")" -le 262144
+          node -e 'const a=require("./.github/scripts/agent-autonomy.cjs");if(!a.validateBuilderPaths(JSON.parse(process.argv[1]),20))process.exit(1)' "$(jq -c .paths "$RUNNER_TEMP/g/output.json")"
+          git apply --check "$RUNNER_TEMP/p.patch"; git apply "$RUNNER_TEMP/p.patch"; git add -A; git diff --cached --check
+          git diff --cached --name-only|sort > "$RUNNER_TEMP/a"; jq -r '.paths[]' "$RUNNER_TEMP/g/output.json"|sort > "$RUNNER_TEMP/d"; cmp "$RUNNER_TEMP/a" "$RUNNER_TEMP/d"; git diff --cached --raw > "$RUNNER_TEMP/raw"
+          node -e 'const fs=require("fs"),a=require("./.github/scripts/agent-autonomy.cjs");if(!a.validateBuilderModes(fs.readFileSync(process.argv[1],"utf8")))process.exit(1)' "$RUNNER_TEMP/raw"
+
+  seal:
+    needs: [prepare, generate, validate]
+    if: needs.generate.outputs.blocked != 'true' && needs.validate.result == 'success'
+    runs-on: ubuntu-latest
+    permissions: {contents: read}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with: {ref: '${{ needs.prepare.outputs.base }}', persist-credentials: false}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with: {name: 'builder-generated-${{ github.run_id }}', path: '${{ runner.temp }}/g'}
+      - run: |
+          set -euo pipefail; test "$(sha256sum "$RUNNER_TEMP/g/output.json"|cut -d' ' -f1)" = "$(jq -r .output_sha256 "$RUNNER_TEMP/g/metadata.json")"; jq -r .patch "$RUNNER_TEMP/g/output.json" > "$RUNNER_TEMP/p.patch"; git apply --check "$RUNNER_TEMP/p.patch"; git apply "$RUNNER_TEMP/p.patch"; git add -A; git diff --cached --check
+          paths="$(git diff --cached --name-only|jq -R -s 'split("\n")|map(select(length>0))')"; node -e 'const a=require("./.github/scripts/agent-autonomy.cjs");if(!a.validateBuilderPaths(JSON.parse(process.argv[1]),20))process.exit(1)' "$paths"; git diff --cached --raw > "$RUNNER_TEMP/raw"; node -e 'const fs=require("fs"),a=require("./.github/scripts/agent-autonomy.cjs");if(!a.validateBuilderModes(fs.readFileSync(process.argv[1],"utf8")))process.exit(1)' "$RUNNER_TEMP/raw"
+          git diff --cached --binary > "$RUNNER_TEMP/validated.patch"; sha256sum "$RUNNER_TEMP/validated.patch"|cut -d' ' -f1 > "$RUNNER_TEMP/validated.sha256"; jq -n --arg base '${{ needs.prepare.outputs.base }}' --arg spec '${{ needs.prepare.outputs.spec }}' --arg sum "$(cat "$RUNNER_TEMP/validated.sha256")" --arg tree "$(git write-tree)" --argjson paths "$paths" '{base_sha:$base,spec_hash:$spec,patch_sha256:$sum,tree_sha:$tree,paths:$paths}' > "$RUNNER_TEMP/validated.json"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: builder-sealed-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/validated.patch
+            ${{ runner.temp }}/validated.sha256
+            ${{ runner.temp }}/validated.json
+          if-no-files-found: error
+          retention-days: 2
+
+  publish:
+    needs: [prepare, generate, seal]
+    if: needs.generate.outputs.blocked != 'true' && needs.seal.result == 'success'
+    uses: ./.github/workflows/agent-builder-publish.yml
+    permissions: {actions: read, contents: read, issues: write, pull-requests: write}
+    with: {issue_number: '${{ needs.prepare.outputs.issue }}', spec_hash: '${{ needs.prepare.outputs.spec }}', base_sha: '${{ needs.prepare.outputs.base }}'}
+    secrets: {AGENT_PUBLISH_TOKEN: '${{ secrets.AGENT_PUBLISH_TOKEN }}'}
