@@ -1,0 +1,147 @@
+name: Issue 100 bootstrap recovery
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - docs/adr/0003-autonomous-development-pipeline-v2.md
+      - .github/workflows/agent-issue-100-bootstrap-recovery.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: issue-100-bootstrap-recovery
+  cancel-in-progress: false
+
+jobs:
+  recover:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Recover one previously authorized bootstrap attempt
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        env:
+          EXPECTED_BLOCK_FRAGMENT: read-only and network access is restricted
+        with:
+          github-token: ${{ secrets.AGENT_PUBLISH_TOKEN }}
+          script: |
+            const crypto = require('crypto');
+            const issueNumber = 100;
+            const { data: issue } = await github.rest.issues.get({
+              ...context.repo,
+              issue_number: issueNumber,
+            });
+            const labels = issue.labels.map(label => label.name);
+            const typeLabels = labels.filter(label => label.startsWith('type:'));
+            const agentLabels = labels.filter(label => label.startsWith('agent:'));
+
+            if (
+              issue.state !== 'open' ||
+              typeLabels.length !== 1 ||
+              typeLabels[0] !== 'type:implementation'
+            ) {
+              core.notice('NO_WRITE: Issue #100 is not the expected open implementation Issue.');
+              return;
+            }
+            if (agentLabels.length !== 1 || agentLabels[0] !== 'agent:needs-human') {
+              core.notice('NO_WRITE: Issue #100 is no longer in the recoverable needs-human state.');
+              return;
+            }
+
+            const specHash = crypto.createHash('sha256')
+              .update(`${issue.title}\n${issue.body || ''}`, 'utf8')
+              .digest('hex');
+            const blockMarker = `<!-- agent-builder-block:v2 spec=${specHash} -->`;
+            const recoveryMarker = `<!-- agent-bootstrap-recovery:v1 spec=${specHash} -->`;
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              ...context.repo,
+              issue_number: issueNumber,
+              per_page: 100,
+            });
+
+            if (comments.some(comment => (comment.body || '').split('\n').includes(recoveryMarker))) {
+              core.notice('NO_WRITE: this exact Issue specification already consumed its bounded recovery attempt.');
+              return;
+            }
+
+            const blockComments = comments.filter(comment =>
+              comment.user?.login === 'github-actions[bot]' &&
+              (comment.body || '').split('\n').includes(blockMarker) &&
+              (comment.body || '').includes(process.env.EXPECTED_BLOCK_FRAGMENT)
+            );
+            if (blockComments.length !== 1) {
+              return core.setFailed('RECOVERY_BLOCK_EVIDENCE_MISSING_OR_AMBIGUOUS');
+            }
+
+            const commandComments = comments.filter(comment =>
+              (comment.body || '').trim() === '/bootstrap issue-100 publish' &&
+              comment.user?.login &&
+              !comment.user.login.endsWith('[bot]')
+            );
+            let authorizedCommand = false;
+            for (const comment of commandComments) {
+              try {
+                const { data: permission } = await github.rest.repos.getCollaboratorPermissionLevel({
+                  ...context.repo,
+                  username: comment.user.login,
+                });
+                if (['admin', 'maintain', 'write'].includes(permission.permission)) {
+                  authorizedCommand = true;
+                  break;
+                }
+              } catch {
+                // Unknown/non-collaborator authors are not authorization evidence.
+              }
+            }
+            if (!authorizedCommand) {
+              return core.setFailed('RECOVERY_MAINTAINER_COMMAND_MISSING');
+            }
+
+            const pulls = await github.paginate(github.rest.pulls.list, {
+              ...context.repo,
+              state: 'open',
+              base: context.payload.repository.default_branch,
+              per_page: 100,
+            });
+            const linked = pulls.filter(pull => {
+              const body = pull.body || '';
+              return body.split('\n').filter(line => /^\s*- Agent-Issue: #100\s*$/.test(line)).length === 1;
+            });
+            if (linked.length !== 0) {
+              core.notice('NO_WRITE: an open Issue #100 implementation PR already exists.');
+              return;
+            }
+
+            const preserved = labels.filter(label => !label.startsWith('agent:'));
+            await github.rest.issues.setLabels({
+              ...context.repo,
+              issue_number: issueNumber,
+              labels: [...preserved, 'agent:running'],
+            });
+
+            try {
+              const { data: command } = await github.rest.issues.createComment({
+                ...context.repo,
+                issue_number: issueNumber,
+                body: '/bootstrap issue-100 publish',
+              });
+              await github.rest.issues.createComment({
+                ...context.repo,
+                issue_number: issueNumber,
+                body: [
+                  recoveryMarker,
+                  `Bounded trusted recovery re-issued the already-authorized bootstrap command after the read-only generation-contract remediation.`,
+                  `Command comment: ${command.html_url}`,
+                  `Recovery workflow run: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+                ].join('\n\n'),
+              });
+            } catch (error) {
+              await github.rest.issues.setLabels({
+                ...context.repo,
+                issue_number: issueNumber,
+                labels: [...preserved, 'agent:needs-human'],
+              });
+              throw error;
+            }
