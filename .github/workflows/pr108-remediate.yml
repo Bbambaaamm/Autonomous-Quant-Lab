@@ -1,0 +1,89 @@
+name: PR 108 exact remediation helper
+
+on:
+  push:
+    branches: [agent/issue-100-final-implementation]
+    paths:
+      - .github/scripts/pr108-remediate.py
+      - .github/workflows/pr108-remediate.yml
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    permissions: {contents: read}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Apply all current Codex findings
+        run: python .github/scripts/pr108-remediate.py
+      - name: Validate remediated candidate without write credential
+        run: |
+          set -euo pipefail
+          node --test .github/scripts/agent-pipeline.test.cjs .github/scripts/agent-autonomy.test.cjs
+          python -m json.tool .github/agent-pipeline.json >/dev/null
+          ruby -e 'require "yaml"; Dir[".github/workflows/*.yml"].sort.each { |p| YAML.load_file(p, aliases: true) }'
+          git diff --check
+          git add -A
+          git diff --cached --check
+          test ! -e .github/scripts/pr108-remediate.py
+          test ! -e .github/workflows/pr108-remediate.yml
+          mapfile -t files < <(git diff --cached --name-only)
+          printf '%s\n' "${files[@]}" | grep -Ev '^(\.github/(agent-pipeline\.json|scripts/(agent-pipeline\.cjs|agent-autonomy\.cjs|agent-autonomy\.test\.cjs|pr108-remediate\.py)|workflows/(agent-authorization-invalidation\.yml|agent-authorize\.yml|agent-auto-merge\.yml|agent-builder-publish\.yml|agent-builder\.yml|agent-ci-fixer\.yml|agent-codex-review\.yml|agent-review-acknowledgement\.yml|agent-ruleset-sync\.yml|agent-verified-gate\.yml|agent-verify\.yml|ci\.yml|pr108-remediate\.yml))|docs/(autonomous-development-pipeline\.md|adr/0003-autonomous-development-pipeline-v2\.md))$' && exit 1 || true
+          git diff --cached --binary > "$RUNNER_TEMP/remediation.patch"
+          sha256sum "$RUNNER_TEMP/remediation.patch" > "$RUNNER_TEMP/remediation.patch.sha256"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: pr108-remediation-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/remediation.patch
+            ${{ runner.temp }}/remediation.patch.sha256
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    needs: prepare
+    runs-on: ubuntu-latest
+    permissions: {contents: read}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 2
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: pr108-remediation-${{ github.run_id }}
+          path: ${{ runner.temp }}/remediation
+      - name: Reconstruct exact validated patch without executing candidate code
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/remediation"
+          sha256sum -c remediation.patch.sha256
+          cd "$GITHUB_WORKSPACE"
+          git apply --check "$RUNNER_TEMP/remediation/remediation.patch"
+          git apply "$RUNNER_TEMP/remediation/remediation.patch"
+          git diff --check
+          test ! -e .github/scripts/pr108-remediate.py
+          test ! -e .github/workflows/pr108-remediate.yml
+      - name: Publish exact validated tree with isolated credential
+        env:
+          GH_TOKEN: ${{ secrets.AGENT_PUBLISH_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          test -n "$GH_TOKEN"
+          git add -A
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'Address PR 108 exact-SHA governance findings'
+          remote="$(gh api "repos/$GH_REPO/git/ref/heads/agent/issue-100-final-implementation" --jq .object.sha)"
+          test "$remote" = "${GITHUB_SHA}"
+          git remote set-url origin "https://github.com/${GH_REPO}.git"
+          gh auth setup-git
+          git push origin HEAD:refs/heads/agent/issue-100-final-implementation
