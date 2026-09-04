@@ -89,3 +89,16 @@ For this bootstrap path, `BLOCK` is appropriate only when the authorized require
 safely represented as a repository patch within the explicitly allowed governance paths, or when the
 provided trusted context is insufficient or contradictory. Environment limitations that are part of
 the designed trust separation must never be treated as implementation blockers.
+
+The Codex sandbox is also **not required to expose the checked-out repository tree itself**. The
+bootstrap workflow deliberately serializes trusted exact-base files into `.codex-input/source-context.txt`
+before the model boundary. That bounded source-context is the authoritative representation of those
+existing base files for patch synthesis. Seeing only `.codex-input` inside the model workspace is an
+expected trust-separation property, not evidence that the exact base is unavailable. The generator
+must construct its unified diff against the exact `base_sha` in `scope.json` using the complete file
+contents supplied in `source-context.txt`; it must not require `git`, a working tree, a writable remote,
+or authenticated GitHub access to do so. Applicability, path authorization, exact-base binding and
+patch verification are responsibilities of the downstream credential-free validation jobs. A model
+`BLOCK` is therefore justified by source-context insufficiency only when a specific existing file that
+must be modified is not present in the supplied trusted context and the change cannot instead be
+represented safely as a new-file patch.
