@@ -2,6 +2,7 @@
 
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
 const a = require("./agent-autonomy.cjs");
 
 const repo = "Bbambaaamm/Autonomous-Quant-Lab";
@@ -128,3 +129,33 @@ test("newest CI failure defeats older success",()=>{const p=require("./agent-pip
 test("npm registry 503 is infra transient",()=>{const p=require("./agent-pipeline.cjs"),sha="e".repeat(40),r=p.classifyCiFailure({jobs:[{id:7,name:"security",conclusion:"failure",steps:[{name:"npm audit",conclusion:"failure"}]}],runHeadSha:sha,expectedHeadSha:sha,sourceRunId:77,runAttempt:1,logExcerpt:"503 Service Unavailable",config:{requiredCiJobs:["security"],failureClassPolicy:{eligible:[],denied:["infra-transient","security"]},protectedDiagnosticPatterns:[]}});assert.equal(r.failureClass,"infra-transient");});
 
 test("ordinary security failure log boilerplate is not transient",()=>{const p=require("./agent-pipeline.cjs"),sha="f".repeat(40),r=p.classifyCiFailure({jobs:[{id:8,name:"security",conclusion:"failure",steps:[{name:"npm audit",conclusion:"failure"}]}],runHeadSha:sha,expectedHeadSha:sha,sourceRunId:78,runAttempt:1,logExcerpt:"Current runner version 2.337.0\nDownloading action\nnpm audit found a critical vulnerability",config:{requiredCiJobs:["security"],failureClassPolicy:{eligible:[],denied:["infra-transient","security"]},protectedDiagnosticPatterns:[]}});assert.equal(r.failureClass,"security");});
+
+test("Issue #110 Builder publisher uses isolated one-command Git auth and exact sealed SHA checks", () => {
+  const publish = fs.readFileSync(".github/workflows/agent-builder-publish.yml", "utf8");
+  const builder = fs.readFileSync(".github/workflows/agent-builder.yml", "utf8");
+
+  assert.doesNotMatch(publish, /gh auth setup-git/);
+  assert.match(publish, /AUTH_HEADER="AUTHORIZATION: basic \$\(printf x-access-token:%s "\$GH_TOKEN" \| base64 -w0\)"/);
+  assert.match(publish, /remote="\$\(git -c http\.extraheader="\$AUTH_HEADER" ls-remote --refs origin "refs\/heads\/\$branch" \| awk '\{print \$1\}'\)"/);
+
+  const absence = publish.indexOf('test -z "$remote"');
+  const push = publish.indexOf('git -c http.extraheader="$AUTH_HEADER" push origin "HEAD:refs/heads/$branch"');
+  const postCheck = publish.indexOf('sha="$(git -c http.extraheader="$AUTH_HEADER" ls-remote --refs origin "refs/heads/$branch"');
+  const exactSha = publish.indexOf('test "$sha" = "$sealed"', postCheck);
+  assert.ok(absence >= 0 && absence < push && push < postCheck && postCheck < exactSha);
+  assert.doesNotMatch(publish, /git[^\n]*push[^\n]*(?:--force-with-lease|--force|\s-f(?:\s|$))/);
+
+  const owned = publish.slice(publish.indexOf("owned(){"), publish.indexOf("prs(){"));
+  assert.match(owned, /test "\$sha" = "\$sealed"/);
+  assert.match(owned, /test "\$p" = "\$BASE"/);
+  assert.match(owned, /test "\$t" = "\$expected_tree"/);
+  assert.match(owned, /Agent-Builder-Seal: v1 issue=\$ISSUE spec=\$SPEC base=\$BASE tree=\$expected_tree/);
+
+  const section = (name, next) => builder.slice(builder.indexOf(`  ${name}:`), next ? builder.indexOf(`  ${next}:`) : builder.length);
+  for (const [name, next] of [["generate", "block"], ["validate", "seal"], ["seal", "publish"]]) {
+    const job = section(name, next);
+    assert.match(job, /permissions: \{contents: read\}/, name);
+    assert.doesNotMatch(job, /AGENT_PUBLISH_TOKEN|GH_TOKEN|contents: write|issues: write|pull-requests: write/, name);
+  }
+  assert.match(section("publish", "fail-closed-finalizer"), /secrets: \{AGENT_PUBLISH_TOKEN:/);
+});
