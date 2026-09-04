@@ -44,20 +44,17 @@ jobs:
               const {data:issue}=await github.rest.issues.get({...context.repo,issue_number:issueNumber});
               const prComments=await github.paginate(github.rest.issues.listComments,{...context.repo,issue_number:prNumber,per_page:100});
               const issueComments=await github.paginate(github.rest.issues.listComments,{...context.repo,issue_number:issueNumber,per_page:100});
-              const auth=a.authorizationDecision({comments:issueComments,repo,issueNumber,title:issue.title,body:issue.body||'',labels:issue.labels});
+              const auth=a.authorizationDecision({comments:issueComments,repo,issueNumber,title:issue.title,body:issue.body||'',labels:issue.labels,state:issue.state});
               const linkage=p.fullLinkageDecision({prBody:pr.body,prComments,issueComments,...context.repo,issueNumber,prNumber});
               const {data:main}=await github.rest.repos.getBranch({...context.repo,branch:context.payload.repository.default_branch});
               const comparison=await github.rest.repos.compareCommits({...context.repo,base:main.commit.sha,head:headSha});
               const runs=await github.paginate(github.rest.actions.listWorkflowRunsForRepo,{...context.repo,event:'pull_request',head_sha:headSha,status:'completed',per_page:100});
-              const candidates=p.authoritativeCiRunCandidates(runs,{workflowName:'CI',headSha,prNumber});
-              let ciRun=null,jobs=null;
-              for(const candidate of candidates){
-                const candidateJobs=await github.paginate(github.rest.actions.listJobsForWorkflowRun,{...context.repo,run_id:candidate.id,filter:'all',per_page:100});
-                if(p.successfulRequiredJobs(candidateJobs,c.requiredCiJobs,headSha)){ciRun=candidate;jobs=candidateJobs;break;}
-              }
+              const ciRun=p.newestAuthoritativeCiRun(runs,{workflowName:'CI',headSha,prNumber});
+              const jobs=ciRun?await github.paginate(github.rest.actions.listJobsForWorkflowRun,{...context.repo,run_id:ciRun.id,filter:'all',per_page:100}):null;
               const verifiedLifecycle=a.lifecyclePairDecision(pr.labels,issue.labels,'agent:verified').ok;
               const decision=a.gateDecision({
                 authorizationCurrent:auth.ok&&auth.specHash===spec,
+                issueOpen:issue.state==='open',
                 issueIsImplementation:p.isImplementation(issue.labels),
                 linkageValid:linkage.ok,
                 open:pr.state==='open',
@@ -67,7 +64,7 @@ jobs:
                 verifiedLifecycle,
                 needsHuman:[...a.labelNames(pr.labels),...a.labelNames(issue.labels)].includes('agent:needs-human'),
                 currentMain:comparison.data.behind_by===0,
-                requiredCiSuccessful:!!ciRun&&p.successfulRequiredJobs(jobs,c.requiredCiJobs,headSha),
+                requiredCiSuccessful:!!ciRun&&ciRun.conclusion==='success'&&p.successfulRequiredJobs(jobs,c.requiredCiJobs,headSha),
                 independentReviewPass:p.independentReviewSatisfied(prComments,headSha),
                 verificationEvidence:a.exactVerificationEvidence(prComments,{repo,issueNumber,prNumber,headSha,specHash:spec}),
               });

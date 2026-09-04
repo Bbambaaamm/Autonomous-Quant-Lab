@@ -398,7 +398,9 @@ test("v2 workflow wiring odděluje secret, validation a write trust domains", ()
   assert.match(fixer, /workflow_call:/);
   assert.match(reviewer, /route-block:[\s\S]*uses: \.\/\.github\/workflows\/agent-review-block-escalation\.yml[\s\S]*pr_number:[\s\S]*head_sha:/);
   assert.doesNotMatch(reviewer, /uses: \.\/\.github\/workflows\/agent-ci-fixer\.yml/);
-  assert.doesNotMatch(reviewer + blockEscalation, /contents: write/);
+  const independentReviewer = reviewer.slice(reviewer.indexOf("independent-review:"), reviewer.indexOf("trusted-record:"));
+assert.doesNotMatch(independentReviewer + blockEscalation, /contents: write|AGENT_PUBLISH_TOKEN/);
+assert.match(reviewer, /verify-after-pass:[\s\S]*permissions: \{actions: read, contents: write, issues: write, pull-requests: write, statuses: write\}/);
   assert.match(fixer, /sourceRunId:run\.id,runAttempt:run\.run_attempt,logExcerpt/);
   assert.match(fixer, /prompt-file: \.codex-input\/prompt\.md/);
   assert.match(reviewer, /prompt-file: \.codex-input\/review-prompt\.md/);
@@ -760,7 +762,7 @@ test("v2 fifth-audit wiring pins validation toolchain, seals last, and finalizes
 test("v2 reusable caller permissions and governance linkage are fail closed", () => {
   const reviewer=fs.readFileSync(".github/workflows/agent-codex-review.yml","utf8");
   const block=fs.readFileSync(".github/workflows/agent-review-block-escalation.yml","utf8");
-  assert.match(reviewer,/verify-after-pass:[\s\S]*permissions: \{actions: read, contents: read, issues: write, pull-requests: write\}/);
+  assert.match(reviewer,/verify-after-pass:[\s\S]*permissions: \{actions: read, contents: write, issues: write, pull-requests: write, statuses: write\}/);
   assert.match(reviewer,/route-block:[\s\S]*permissions: \{contents: read, issues: write, pull-requests: write\}/);
   assert.match(block,/permissions: \{contents: read, issues: write, pull-requests: write\}/);
   assert.doesNotMatch(block,/contents: write|secrets: inherit|AGENT_PUBLISH_TOKEN/);

@@ -178,7 +178,7 @@ jobs:
     needs: [prepare, trusted-record]
     if: needs.trusted-record.outputs.pass == 'true'
     uses: ./.github/workflows/agent-verify.yml
-    permissions: {actions: read, contents: read, issues: write, pull-requests: write}
+    permissions: {actions: read, contents: write, issues: write, pull-requests: write, statuses: write}
     with:
       pr_number: ${{ fromJSON(needs.prepare.outputs.pr_number) }}
       head_sha: ${{ needs.prepare.outputs.head_sha }}

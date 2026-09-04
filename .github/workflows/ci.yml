@@ -19,7 +19,7 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with: {node-version: "24"}
       - name: Validate agent pipeline state machine
-        run: node --test .github/scripts/agent-pipeline.test.cjs
+        run: node --test .github/scripts/agent-pipeline.test.cjs .github/scripts/agent-autonomy.test.cjs
       - name: Validate agent pipeline JSON
         run: python -m json.tool .github/agent-pipeline.json >/dev/null
       - name: Validate GitHub Actions YAML syntax

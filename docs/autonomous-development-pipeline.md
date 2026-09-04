@@ -142,58 +142,15 @@ body cannot rebind an already authorized PR.
 
 ## Automated verification gate
 
-The write-capable verifier runs after the authoritative workflow named `CI`
-completes successfully for a pull request and re-evaluates after a submitted native
-review or the exact-SHA acknowledgement workflow. A review-triggered evaluation
-queries existing completed `CI` runs and accepts only complete required-job evidence
-for the same current head SHA and PR. It checks metadata through the GitHub API and
-never checks out or executes PR code. It writes `agent:verified` to the
-linked Issue and PR only when all of these are true:
+Issue #100 changes the normal operating contract to **one explicit human authorization at the concrete Issue level**. The trusted authorization marker is bound to the canonical Issue title, body and single `type:implementation` classification. Closing, reopening, or changing approval-relevant Issue data invalidates autonomous progress and requires fresh human authorization.
 
-1. the CI run refers to exactly one PR and its conclusion is `success`;
-2. the PR is open, non-draft, and its current head SHA exactly equals the CI run SHA;
-3. fresh exact-SHA review evidence exists: either GitHub's current review decision
-   is `APPROVED` and an active approval explicitly records the current commit SHA,
-   or an authorized maintainer recorded the v1 review acknowledgement for that SHA;
-4. exactly one valid `Agent-Issue` marker points to a non-PR Issue and exactly
-   matches the trusted durable `agent-link:v1` evidence for this repository and PR;
-5. that Issue is unambiguously `type:implementation`, not epic/roadmap/capability;
-6. both Issue and PR have exactly the state `agent:pr`;
-7. neither object has `agent:needs-human`;
-8. every configured authoritative CI job succeeded on that exact SHA:
-   `agent-pipeline`, `quality`, `unit-research`, `api`, `integration-postgres`,
-   `frontend`, `security`, `container-build`, and `production-smoke`; and
-9. fresh API reads immediately before each side of the paired write still observe
-   the same linkage, classification, review evidence, SHA, open/default-base/non-draft
-   PR, and a state safely reconcilable from `agent:pr` to `agent:verified`.
+Verification is automatic for the exact current PR head. It requires the Issue to be open with current authorization, one active durable Issue ↔ PR link, an open non-draft default-base PR that is not behind `main`, a coherent non-escalated lifecycle, the **newest** authoritative completed CI run for that PR/SHA with all nine required jobs green, and an independent Codex `PASS` for the same SHA. A successful verifier records exact `agent-verified:v2` evidence and invokes `agent-verified-gate`, which revalidates these facts before publishing the trusted required status. The merge controller then performs another full TOCTOU re-evaluation and merges with the expected exact head SHA. If `main` moves, the branch is reconciled without force-push and all SHA-bound evidence is regenerated.
 
-### Review acknowledged versus verified versus merge authorization
+### Human acknowledgement and native PR approval
 
-GitHub does not allow a PR author to approve their own PR. A repository operated by
-one maintainer can therefore use **Agent exact-SHA review acknowledgement** after
-the PR is Ready and in `agent:pr`: the maintainer supplies the full 40-character
-head SHA and confirms `REVIEWED_EXACT_SHA_NOT_MERGE_AUTHORIZATION`. The workflow
-checks permission and current PR metadata, then writes an audit comment containing
-the exact-SHA marker, reviewer, and workflow run. A new commit invalidates it.
+The old exact-SHA human acknowledgement/native-approval handoff is not part of the normal successful path. The sole normal human decision is Issue authorization. Historical acknowledgement tooling is compatibility/recovery only and cannot replace current Issue authorization, newest exact-SHA CI, independent Codex PASS, current-main reconciliation, or `agent-verified-gate`.
 
-`review acknowledged` says only that a human examined that exact revision.
-`agent:verified` additionally says that exact-revision CI, linkage, classification,
-state, and review handoff checks passed. Neither is human merge authorization.
-Required GitHub reviews, rulesets, checks, and branch protection remain higher
-authorities: acknowledgement cannot satisfy or bypass a required GitHub approval.
-
-Native approvals are read through the GitHub reviews API and count only when an
-active `APPROVED` review has `commit_id` equal to the CI/head SHA. A general
-`reviewDecision` without that exact-commit evidence is insufficient.
-
-Thus CI may finish before review evidence without stranding the PR: the later trusted
-review event reuses CI as evidence instead of rerunning CI. It neither executes PR
-code with a write token nor recursively triggers CI. An unknown/ambiguous event or failed condition produces `NO WRITE`, never inferred
-success. A new commit changes the head SHA; normal GitHub CI and review-dismissal
-policy apply, and the PR must return to `agent:pr` before a later run can verify it.
-The list in `.github/agent-pipeline.json` must be reviewed whenever authoritative
-CI job names change. Repository branch protection remains the ultimate required
-check/review authority.
+`Protect main` remains the independent backstop. Under the Issue #100 model it requires no separate native PR approval, retains strict existing CI checks, adds `agent-verified-gate` bound to GitHub Actions, and has no bypass actors.
 
 ## Verification invalidation after a push
 

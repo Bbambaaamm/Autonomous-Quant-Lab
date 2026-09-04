@@ -51,6 +51,7 @@ jobs:
       failed_jobs: ${{ steps.classify.outputs.failed_jobs }}
       budget_state: ${{ steps.classify.outputs.budget_state }}
       fix_scope: ${{ steps.classify.outputs.fix_scope }}
+      transient_retry: ${{ steps.classify.outputs.transient_retry }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with: {ref: '${{ github.event.repository.default_branch }}', path: .trusted-policy, persist-credentials: false}
@@ -64,7 +65,7 @@ jobs:
           REQUEST_SHA: '${{ inputs.head_sha }}'
         with:
           script: |
-            const p=require(`${process.env.GITHUB_WORKSPACE}/.trusted-policy/.github/scripts/agent-pipeline.cjs`), c=require(`${process.env.GITHUB_WORKSPACE}/.trusted-policy/.github/agent-pipeline.json`);
+            const p=require(`${process.env.GITHUB_WORKSPACE}/.trusted-policy/.github/scripts/agent-pipeline.cjs`), a=require(`${process.env.GITHUB_WORKSPACE}/.trusted-policy/.github/scripts/agent-autonomy.cjs`), c=require(`${process.env.GITHUB_WORKSPACE}/.trusted-policy/.github/agent-pipeline.json`);
             const invocation=p.fixerInvocationDecision({eventName:context.eventName,mode:process.env.INVOCATION_MODE,prNumber:process.env.REQUEST_PR,headSha:process.env.REQUEST_SHA,reviewBlock:process.env.REVIEW_BLOCK,ciRunId:process.env.CI_RUN_ID});
             if(!invocation.ok) return core.notice(`NO_WRITE: ${invocation.reason}`);
             const called=invocation.kind==="review-block";
@@ -104,6 +105,7 @@ jobs:
             }
             const classification=p.classifyCiFailure({jobs,runHeadSha:run.head_sha,expectedHeadSha:pr.head.sha,sourceRunId:run.id,runAttempt:run.run_attempt,logExcerpt,config:{...c.v2,requiredCiJobs:c.requiredCiJobs}});
             core.setOutput("failure_class",classification.failureClass);
+            if (classification.failureClass==="infra-transient") { const retry=a.transientCiRetryDecision({failureClass:classification.failureClass,runAttempt:run.run_attempt,maxRetries:c.v2.maxTransientCiRetries}); core.setOutput("budget_state",JSON.stringify(retry)); if(retry.action==="RETRY"){core.setOutput("transient_retry","true");return;} if(retry.action==="NEEDS_HUMAN"){core.setOutput("escalation","true");core.setOutput("reason",retry.reason);return;} }
             if (classification.disposition!=="FIX") { core.setOutput("escalation","true"); core.setOutput("reason",classification.reason); return; }
             const budget=p.fixAttemptDecision({comments,commits,sourceSha:requestedSha,evidence:classification.evidence,maxAttempts:c.v2.maxFixCommits});
             core.setOutput("budget_state",JSON.stringify(budget));
@@ -120,6 +122,21 @@ jobs:
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: steps.classify.outputs.eligible == 'true'
         with: {name: 'trusted-diagnostic-${{ github.run_id }}', path: '${{ runner.temp }}/diagnostic.json', if-no-files-found: error, retention-days: 1}
+
+
+  retry-transient:
+    needs: classify
+    if: needs.classify.outputs.transient_retry == 'true'
+    runs-on: ubuntu-latest
+    permissions: {actions: write, contents: read, issues: read, pull-requests: read}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with: {ref: '${{ github.event.repository.default_branch }}', path: .trusted-policy, persist-credentials: false}
+      - uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        env: {PR: '${{ needs.classify.outputs.pr_number }}', ISSUE: '${{ needs.classify.outputs.issue_number }}', SHA: '${{ needs.classify.outputs.source_sha }}', CI_RUN: '${{ needs.classify.outputs.ci_run_id }}', CI_ATTEMPT: '${{ needs.classify.outputs.ci_run_attempt }}', CLASS: '${{ needs.classify.outputs.failure_class }}'}
+        with:
+          script: |
+            const p=require(`${process.env.GITHUB_WORKSPACE}/.trusted-policy/.github/scripts/agent-pipeline.cjs`),a=require(`${process.env.GITHUB_WORKSPACE}/.trusted-policy/.github/scripts/agent-autonomy.cjs`),c=require(`${process.env.GITHUB_WORKSPACE}/.trusted-policy/.github/agent-pipeline.json`); const prNumber=Number(process.env.PR),issueNumber=Number(process.env.ISSUE),runId=Number(process.env.CI_RUN),attempt=Number(process.env.CI_ATTEMPT),sha=process.env.SHA; const {data:run}=await github.rest.actions.getWorkflowRun({...context.repo,run_id:runId}); const {data:pr}=await github.rest.pulls.get({...context.repo,pull_number:prNumber}); const {data:issue}=await github.rest.issues.get({...context.repo,issue_number:issueNumber}); const pc=await github.paginate(github.rest.issues.listComments,{...context.repo,issue_number:prNumber,per_page:100}),ic=await github.paginate(github.rest.issues.listComments,{...context.repo,issue_number:issueNumber,per_page:100}); if(process.env.CLASS!=="infra-transient"||run.run_attempt!==attempt||!p.authoritativeCiIdentity(run,{prNumber,headSha:sha,conclusion:"failure"})||pr.head.sha!==sha||pr.state!=="open"||issue.state!=="open"||!p.lifecycleAtAgentPr(pr.labels,issue.labels).ok||!p.fullLinkageDecision({prBody:pr.body,prComments:pc,issueComments:ic,...context.repo,issueNumber,prNumber}).ok)return core.setFailed("TRANSIENT_RETRY_TOCTOU_REJECTED"); const retry=a.transientCiRetryDecision({failureClass:"infra-transient",runAttempt:attempt,maxRetries:c.v2.maxTransientCiRetries}); if(retry.action!=="RETRY")return core.setFailed(retry.reason||"TRANSIENT_RETRY_NOT_ALLOWED"); await github.rest.actions.reRunWorkflowFailedJobs({...context.repo,run_id:runId});
 
   record-classification:
     needs: classify

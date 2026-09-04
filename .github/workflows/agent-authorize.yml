@@ -73,6 +73,23 @@ jobs:
               return core.setFailed(existing.reason);
             }
 
+            if (state === 'agent:needs-human') {
+              const link = p.durablePrLinkDecision(comments, { ...context.repo, issueNumber });
+              if (!link.ok) return core.setFailed(link.reason);
+              if (link.prNumber !== null) {
+                const { data: oldPr } = await github.rest.pulls.get({ ...context.repo, pull_number: link.prNumber });
+                const oldPrComments = await github.paginate(github.rest.issues.listComments, { ...context.repo, issue_number: link.prNumber, per_page: 100 });
+                const linkage = p.fullLinkageDecision({ prBody: oldPr.body, prComments: oldPrComments, issueComments: comments, ...context.repo, issueNumber, prNumber: link.prNumber });
+                if (!linkage.ok) return core.setFailed(`OLD_PR_${linkage.reason}`);
+                if (oldPr.state === 'open') await github.rest.pulls.update({ ...context.repo, pull_number: link.prNumber, state: 'closed' });
+                const retired = `<!-- agent-link-retired:v1 repo=${context.repo.owner}/${context.repo.repo} issue=${issueNumber} pr=${link.prNumber} -->`;
+                if (!comments.some(comment => comment.user?.login === 'github-actions[bot]' && (comment.body || '').split('\n').includes(retired))) await github.rest.issues.createComment({...context.repo,issue_number:issueNumber,body:`Retired prior autonomous PR #${link.prNumber} before reauthorization.\n\n${retired}`});
+                if (!oldPrComments.some(comment => comment.user?.login === 'github-actions[bot]' && (comment.body || '').split('\n').includes(retired))) await github.rest.issues.createComment({...context.repo,issue_number:link.prNumber,body:`Retired by a fresh explicit authorization cycle for Issue #${issueNumber}.\n\n${retired}`});
+                const oldNames=a.labelNames(oldPr.labels),oldPreserved=oldNames.filter(label=>!label.startsWith('agent:')); await github.rest.issues.setLabels({...context.repo,issue_number:link.prNumber,labels:[...oldPreserved,'agent:needs-human']});
+                const refreshedComments=await github.paginate(github.rest.issues.listComments,{...context.repo,issue_number:issueNumber,per_page:100}); const retiredDecision=p.durablePrLinkDecision(refreshedComments,{...context.repo,issueNumber}); if(!retiredDecision.ok||retiredDecision.prNumber!==null) return core.setFailed('OLD_PR_RETIREMENT_POSTCONDITION_FAILED');
+              }
+            }
+
             issue = await loadIssue();
             const freshHash = a.issueSpecHash({ title: issue.title, body: issue.body || '', labels: issue.labels });
             if (freshHash !== specHash || issue.state !== 'open' || !p.isImplementation(issue.labels)) {
@@ -120,6 +137,7 @@ jobs:
               title: post.title,
               body: post.body || '',
               labels: post.labels,
+              state: post.state,
             });
             if (!auth.ok || !a.exactAgentState(post.labels, 'agent:running')) {
               return core.setFailed('AUTHORIZATION_POSTCONDITION_FAILED');

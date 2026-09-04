@@ -77,7 +77,8 @@ function parseAuthorization(comments = [], { repo, issueNumber }) {
   };
 }
 
-function authorizationDecision({ comments, repo, issueNumber, title, body, labels }) {
+function authorizationDecision({ comments, repo, issueNumber, title, body, labels, state = "open" }) {
+  if (state !== "open") return { ok: false, reason: "ISSUE_NOT_OPEN" };
   const specHash = issueSpecHash({ title, body, labels });
   if (!specHash) return { ok: false, reason: "ISSUE_NOT_IMPLEMENTATION" };
   const parsed = parseAuthorization(comments, { repo, issueNumber });
@@ -128,6 +129,7 @@ function verificationLifecyclePlan(prLabels, issueLabels) {
 function verificationDecision(input) {
   const checks = [
     [input.authorizationCurrent, "AUTHORIZATION_NOT_CURRENT"],
+    [input.issueOpen, "ISSUE_NOT_OPEN"],
     [input.issueIsImplementation, "ISSUE_NOT_IMPLEMENTATION"],
     [input.linkageValid, "LINKAGE_INVALID"],
     [input.open, "PR_NOT_OPEN"],

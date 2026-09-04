@@ -28,6 +28,7 @@ test("missing and ambiguous authorizations fail closed", () => {
 test("verification requires exact current evidence and no human escalation", () => {
   const base = {
     authorizationCurrent: true,
+    issueOpen: true,
     issueIsImplementation: true,
     linkageValid: true,
     open: true,
@@ -58,6 +59,7 @@ test("new SHA cannot reuse old verification or gate evidence", () => {
 test("gate and merge are exact-head fail-closed decisions", () => {
   const gateInput = {
     authorizationCurrent: true,
+    issueOpen: true,
     issueIsImplementation: true,
     linkageValid: true,
     open: true,
@@ -116,3 +118,9 @@ test("transient CI failures retry only within the bounded budget", () => {
   assert.equal(a.transientCiRetryDecision({ failureClass: "infra-transient", runAttempt: 2, maxRetries: 2 }).reason, "TRANSIENT_RETRY_BUDGET_EXHAUSTED");
   assert.equal(a.transientCiRetryDecision({ failureClass: "security", runAttempt: 1, maxRetries: 2 }).action, "NONE");
 });
+
+
+test("closed Issue invalidates authorization",()=>{assert.equal(a.authorizationDecision({comments:authComments,repo,issueNumber:42,title,body,labels,state:"closed"}).reason,"ISSUE_NOT_OPEN");});
+test("retired durable link is inactive",()=>{const p=require("./agent-pipeline.cjs"),c=[{user:{login:"github-actions[bot]"},body:"<!-- agent-link:v1 repo=Bbambaaamm/Autonomous-Quant-Lab issue=42 pr=70 -->\n<!-- agent-link-retired:v1 repo=Bbambaaamm/Autonomous-Quant-Lab issue=42 pr=70 -->"}];assert.deepEqual(p.durablePrLinkDecision(c,{owner:"Bbambaaamm",repo:"Autonomous-Quant-Lab",issueNumber:42}),{ok:true,prNumber:null});});
+test("newest CI failure defeats older success",()=>{const p=require("./agent-pipeline.cjs"),sha="d".repeat(40),b={name:"CI",event:"pull_request",status:"completed",head_sha:sha,pull_requests:[{number:88}]};assert.equal(p.newestAuthoritativeCiRun([{...b,id:10,conclusion:"success"},{...b,id:11,conclusion:"failure"}],{workflowName:"CI",headSha:sha,prNumber:88}).conclusion,"failure");});
+test("npm registry 503 is infra transient",()=>{const p=require("./agent-pipeline.cjs"),sha="e".repeat(40),r=p.classifyCiFailure({jobs:[{id:7,name:"security",conclusion:"failure",steps:[{name:"npm audit",conclusion:"failure"}]}],runHeadSha:sha,expectedHeadSha:sha,sourceRunId:77,runAttempt:1,logExcerpt:"503 Service Unavailable",config:{requiredCiJobs:["security"],failureClassPolicy:{eligible:[],denied:["infra-transient","security"]},protectedDiagnosticPatterns:[]}});assert.equal(r.failureClass,"infra-transient");});

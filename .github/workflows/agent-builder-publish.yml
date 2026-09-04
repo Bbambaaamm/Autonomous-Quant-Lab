@@ -43,14 +43,17 @@ jobs:
           test -n "$GH_TOKEN"
           owner="${GH_REPO%%/*}"
           branch="agent/issue-${ISSUE}-${SPEC:0:12}"
-          sealed="$(git rev-parse HEAD)"
+          sealed="$(git rev-parse HEAD)"; expected_tree="$(jq -r .tree_sha "$RUNNER_TEMP/s/validated.json")"; test "$(jq -r .base_sha "$RUNNER_TEMP/s/validated.json")" = "$BASE"; test "$(jq -r .spec_hash "$RUNNER_TEMP/s/validated.json")" = "$SPEC"
           owned(){
-            local sha="$1" m p t
-            m="$(gh api "repos/$GH_REPO/git/commits/$sha" --jq .message)" || return 1
-            p="$(gh api "repos/$GH_REPO/commits/$sha" --jq '.parents[0].sha')" || return 1
-            t="$(gh api "repos/$GH_REPO/git/commits/$sha" --jq '.tree.sha')" || return 1
-            test "$p" = "$BASE" || return 1
-            grep -Fxq "Agent-Builder-Seal: v1 issue=$ISSUE spec=$SPEC base=$BASE tree=$t" <<<"$m" || return 1
+          local sha="$1" m p t
+          test "$sha" = "$sealed" || return 1
+          m="$(gh api "repos/$GH_REPO/git/commits/$sha" --jq .message)" || return 1
+          p="$(gh api "repos/$GH_REPO/commits/$sha" --jq '.parents[0].sha')" || return 1
+          t="$(gh api "repos/$GH_REPO/git/commits/$sha" --jq '.tree.sha')" || return 1
+          test "$p" = "$BASE" || return 1
+          test "$t" = "$expected_tree" || return 1
+          grep -Fxq "Agent-Builder-Seal: v1 issue=$ISSUE spec=$SPEC base=$BASE tree=$expected_tree" <<<"$m" || return 1
+          return 0
           }
           prs(){ gh api --paginate --slurp -X GET "repos/$GH_REPO/pulls" -f state=open -f per_page=100 -f head="$owner:$branch"|jq --arg r "$GH_REPO" --arg b "$branch" '[.[][]|select(.head.repo.full_name==$r and .head.ref==$b)]'; }
           q="$(prs)"
@@ -93,7 +96,7 @@ jobs:
             let {data:pr}=await github.rest.pulls.get({...context.repo,pull_number:prn});
             let {data:i}=await github.rest.issues.get({...context.repo,issue_number:n});
             let ic=await github.paginate(github.rest.issues.listComments,{...context.repo,issue_number:n,per_page:100});
-            const auth=a.authorizationDecision({comments:ic,repo,issueNumber:n,title:i.title,body:i.body||'',labels:i.labels});
+            const auth=a.authorizationDecision({comments:ic,repo,issueNumber:n,title:i.title,body:i.body||'',labels:i.labels,state:i.state});
             const commits=await github.paginate(github.rest.pulls.listCommits,{...context.repo,pull_number:prn,per_page:100});
             if(!auth.ok||auth.specHash!==process.env.SPEC||pr.state!=='open'||pr.head.sha!==process.env.HEAD||pr.base.ref!==context.payload.repository.default_branch||p.parseAgentIssue(pr.body)!==n||!a.exactAgentState(i.labels,'agent:running')||commits.length!==1||commits[0].parents?.[0]?.sha!==process.env.BASE) return core.setFailed('PUBLISH_SCOPE_REJECTED');
             let pc=await github.paginate(github.rest.issues.listComments,{...context.repo,issue_number:prn,per_page:100}),il=p.durablePrLinkDecision(ic,{...context.repo,issueNumber:n}),pl=p.durableIssueLinkDecision(pc,{...context.repo,prNumber:prn});
