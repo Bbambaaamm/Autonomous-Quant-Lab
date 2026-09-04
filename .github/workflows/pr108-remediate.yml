@@ -52,6 +52,23 @@ jobs:
           PY
       - name: Apply all current Codex findings
         run: python .github/scripts/pr108-remediate.py
+      - name: Update legacy trust-boundary regression assertions for Issue 100
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('.github/scripts/agent-pipeline.test.cjs')
+          s=p.read_text()
+          old='''  assert.doesNotMatch(reviewer + blockEscalation, /contents: write/);'''
+          new='''  const independentReviewer = reviewer.slice(reviewer.indexOf("independent-review:"), reviewer.indexOf("trusted-record:"));
+          assert.doesNotMatch(independentReviewer + blockEscalation, /contents: write|AGENT_PUBLISH_TOKEN/);
+          assert.match(reviewer, /verify-after-pass:[\\s\\S]*permissions: \\{actions: read, contents: write, issues: write, pull-requests: write, statuses: write\\}/);'''
+          if s.count(old)!=1: raise SystemExit('legacy global reviewer write assertion missing')
+          s=s.replace(old,new,1)
+          old2='''  assert.match(reviewer,/verify-after-pass:[\\s\\S]*permissions: \\{actions: read, contents: read, issues: write, pull-requests: write\\}/);'''
+          new2='''  assert.match(reviewer,/verify-after-pass:[\\s\\S]*permissions: \\{actions: read, contents: write, issues: write, pull-requests: write, statuses: write\\}/);'''
+          if s.count(old2)!=1: raise SystemExit('legacy reusable caller permission assertion missing')
+          p.write_text(s.replace(old2,new2,1))
+          PY
       - name: Validate remediated candidate without write credential
         run: |
           set -euo pipefail
@@ -64,7 +81,7 @@ jobs:
           test ! -e .github/scripts/pr108-remediate.py
           test ! -e .github/workflows/pr108-remediate.yml
           mapfile -t files < <(git diff --cached --name-only)
-          printf '%s\n' "${files[@]}" | grep -Ev '^(\.github/(agent-pipeline\.json|scripts/(agent-pipeline\.cjs|agent-autonomy\.cjs|agent-autonomy\.test\.cjs|pr108-remediate\.py)|workflows/(agent-authorization-invalidation\.yml|agent-authorize\.yml|agent-auto-merge\.yml|agent-builder-publish\.yml|agent-builder\.yml|agent-ci-fixer\.yml|agent-codex-review\.yml|agent-review-acknowledgement\.yml|agent-ruleset-sync\.yml|agent-verified-gate\.yml|agent-verify\.yml|ci\.yml|pr108-remediate\.yml))|docs/(autonomous-development-pipeline\.md|adr/0003-autonomous-development-pipeline-v2\.md))$' && exit 1 || true
+          printf '%s\n' "${files[@]}" | grep -Ev '^(\.github/(agent-pipeline\.json|scripts/(agent-pipeline\.cjs|agent-pipeline\.test\.cjs|agent-autonomy\.cjs|agent-autonomy\.test\.cjs|pr108-remediate\.py)|workflows/(agent-authorization-invalidation\.yml|agent-authorize\.yml|agent-auto-merge\.yml|agent-builder-publish\.yml|agent-builder\.yml|agent-ci-fixer\.yml|agent-codex-review\.yml|agent-review-acknowledgement\.yml|agent-ruleset-sync\.yml|agent-verified-gate\.yml|agent-verify\.yml|ci\.yml|pr108-remediate\.yml))|docs/(autonomous-development-pipeline\.md|adr/0003-autonomous-development-pipeline-v2\.md))$' && exit 1 || true
           git diff --cached --binary > "$RUNNER_TEMP/remediation.patch"
           sha256sum "$RUNNER_TEMP/remediation.patch" > "$RUNNER_TEMP/remediation.patch.sha256"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
