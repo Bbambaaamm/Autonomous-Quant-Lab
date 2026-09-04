@@ -56,6 +56,22 @@ function parseAgentIssue(body) {
   return matches.length === 1 ? Number(matches[0][1]) : null;
 }
 
+function trustedCommentLines(comments) {
+  return comments
+    .filter((comment) => comment.user?.login === "github-actions[bot]")
+    .flatMap((comment) => (comment.body || "").split("\n"));
+}
+
+function retiredLinkSet(comments, { owner, repo }) {
+  const prefix = `<!-- agent-link-retired:v1 repo=${owner}/${repo} issue=`;
+  const matches = trustedCommentLines(comments)
+    .filter((line) => line.startsWith(prefix) && line.endsWith(" -->"))
+    .map((line) => /^<!-- agent-link-retired:v1 repo=[^ ]+ issue=([1-9][0-9]*) pr=([1-9][0-9]*) -->$/.exec(line))
+    .filter(Boolean)
+    .map((match) => `${Number(match[1])}:${Number(match[2])}`);
+  return new Set(matches);
+}
+
 function hasDurableLink(comments, { owner, repo, issueNumber, prNumber }) {
   return parseDurableLink(comments, { owner, repo, prNumber }) === issueNumber;
 }
@@ -63,12 +79,12 @@ function hasDurableLink(comments, { owner, repo, issueNumber, prNumber }) {
 function parseDurableLink(comments, { owner, repo, prNumber }) {
   const prefix = `<!-- agent-link:v1 repo=${owner}/${repo} issue=`;
   const suffix = ` pr=${prNumber} -->`;
-  const issueNumbers = comments
-    .filter((comment) => comment.user?.login === "github-actions[bot]")
-    .flatMap((comment) => (comment.body || "").split("\n"))
+  const retired = retiredLinkSet(comments, { owner, repo });
+  const issueNumbers = trustedCommentLines(comments)
     .filter((line) => line.startsWith(prefix) && line.endsWith(suffix))
     .map((line) => Number(line.slice(prefix.length, -suffix.length)))
-    .filter((number) => Number.isSafeInteger(number) && number > 0);
+    .filter((number) => Number.isSafeInteger(number) && number > 0)
+    .filter((number) => !retired.has(`${number}:${prNumber}`));
   const unique = [...new Set(issueNumbers)];
   return unique.length === 1 ? unique[0] : null;
 }
@@ -76,12 +92,12 @@ function parseDurableLink(comments, { owner, repo, prNumber }) {
 function durablePrLinkDecision(comments, { owner, repo, issueNumber }) {
   const prefix = `<!-- agent-link:v1 repo=${owner}/${repo} issue=${issueNumber} pr=`;
   const suffix = " -->";
-  const prNumbers = comments
-    .filter((comment) => comment.user?.login === "github-actions[bot]")
-    .flatMap((comment) => (comment.body || "").split("\n"))
+  const retired = retiredLinkSet(comments, { owner, repo });
+  const prNumbers = trustedCommentLines(comments)
     .filter((line) => line.startsWith(prefix) && line.endsWith(suffix))
     .map((line) => Number(line.slice(prefix.length, -suffix.length)))
-    .filter((number) => Number.isSafeInteger(number) && number > 0);
+    .filter((number) => Number.isSafeInteger(number) && number > 0)
+    .filter((number) => !retired.has(`${issueNumber}:${number}`));
   const unique = [...new Set(prNumbers)];
   if (unique.length > 1) return { ok: false, reason: "AMBIGUOUS_DURABLE_LINK" };
   return { ok: true, prNumber: unique[0] ?? null };
@@ -90,12 +106,12 @@ function durablePrLinkDecision(comments, { owner, repo, issueNumber }) {
 function durableIssueLinkDecision(comments, { owner, repo, prNumber }) {
   const prefix = `<!-- agent-link:v1 repo=${owner}/${repo} issue=`;
   const suffix = ` pr=${prNumber} -->`;
-  const issueNumbers = comments
-    .filter((comment) => comment.user?.login === "github-actions[bot]")
-    .flatMap((comment) => (comment.body || "").split("\n"))
+  const retired = retiredLinkSet(comments, { owner, repo });
+  const issueNumbers = trustedCommentLines(comments)
     .filter((line) => line.startsWith(prefix) && line.endsWith(suffix))
     .map((line) => Number(line.slice(prefix.length, -suffix.length)))
-    .filter((number) => Number.isSafeInteger(number) && number > 0);
+    .filter((number) => Number.isSafeInteger(number) && number > 0)
+    .filter((number) => !retired.has(`${number}:${prNumber}`));
   const unique = [...new Set(issueNumbers)];
   if (unique.length > 1) return { ok: false, reason: "AMBIGUOUS_DURABLE_LINK" };
   return { ok: true, issueNumber: unique[0] ?? null };
@@ -153,12 +169,13 @@ function failedStepNames(job) {
     .map((step) => step.name.toLowerCase());
 }
 
-function normalizedFailureClass(job) {
+function normalizedFailureClass(job, logExcerpt = "") {
   const name = job.name.toLowerCase();
   const steps = failedStepNames(job).join(" ");
-  const metadata = `${name} ${steps}`;
-  // Infrastructure evidence takes precedence: a timeout is not a source defect.
-  if (job.conclusion === "timed_out" || /runner|network|download|service unavailable/.test(metadata)) return "infra-transient";
+  const diagnostic = String(logExcerpt || "").toLowerCase();
+  const metadata = `${name} ${steps} ${diagnostic}`;
+  const transientEvidence = /network timeout|audit endpoint returned an error|eai_again|econnreset|etimedout|socket hang up|temporary failure|connection reset|502 bad gateway|503 service unavailable|504 gateway timeout/;
+  if (job.conclusion === "timed_out" || transientEvidence.test(diagnostic)) return "infra-transient";
   if (/dependenc|lock|npm ci|uv lock|uv sync/.test(metadata)) return "dependency-lock";
   if (/security|audit|bandit|pip-audit/.test(metadata)) return "security";
   if (/integration-postgres|postgres/.test(metadata)) return "integration-postgres";
@@ -167,7 +184,7 @@ function normalizedFailureClass(job) {
   if (/frontend|npm test|next build/.test(metadata)) return "frontend-test-build";
   if (/mypy|typecheck|type check/.test(metadata)) return "typecheck";
   if (/ruff|lint|format/.test(metadata)) return "lint-format";
-  if (/\bapi\b/.test(metadata)) return "api-test";
+  if (/api/.test(metadata)) return "api-test";
   if (/unit|pytest/.test(metadata)) return "unit-test";
   return "unknown";
 }
@@ -220,7 +237,7 @@ function classifyCiFailure({ jobs, runHeadSha, expectedHeadSha, sourceRunId, run
   }
   const failed = failedAll.filter((job) => authoritative.has(job.name));
   if (failed.length !== 1) return { disposition: "NEEDS_HUMAN", failureClass: failed.length > 1 ? "multiple-failures" : "unknown", reason: "FAILURE_SET_NOT_SINGLE" };
-  const job = failed[0], failureClass = normalizedFailureClass(job);
+  const job = failed[0], failureClass = normalizedFailureClass(job, logExcerpt);
   const eligible = new Set(config.failureClassPolicy?.eligible || []);
   const denied = new Set(config.failureClassPolicy?.denied || []);
   if (!eligible.has(failureClass) && !denied.has(failureClass)) return { disposition: "NEEDS_HUMAN", failureClass: "unknown", reason: "UNCONFIGURED_FAILURE_CLASS" };
@@ -570,12 +587,17 @@ function successfulRequiredJobs(jobs, requiredNames, headSha) {
   return requiredNames.every((name) => latest.get(name)?.conclusion === "success");
 }
 
-function authoritativeCiRunCandidates(runs, { workflowName, headSha, prNumber }) {
+function newestAuthoritativeCiRun(runs, { workflowName, headSha, prNumber }) {
   return runs
     .filter((run) => run.name === workflowName && run.event === "pull_request" &&
-      run.status === "completed" && run.conclusion === "success" && run.head_sha === headSha &&
+      run.status === "completed" && run.head_sha === headSha &&
       run.pull_requests?.length === 1 && run.pull_requests[0].number === prNumber)
-    .sort((left, right) => right.id - left.id);
+    .sort((left, right) => right.id - left.id)[0] ?? null;
+}
+
+function authoritativeCiRunCandidates(runs, binding) {
+  const newest = newestAuthoritativeCiRun(runs, binding);
+  return newest?.conclusion === "success" ? [newest] : [];
 }
 
 function verificationTriggerDecision({ workflowRun, workflowCallInputs = {} }) {
@@ -622,6 +644,7 @@ module.exports = {
   labelNames,
   currentState,
   authoritativeCiRunCandidates,
+  newestAuthoritativeCiRun,
   durablePrLinkDecision,
   durableIssueLinkDecision,
   escalationMutationPlan,

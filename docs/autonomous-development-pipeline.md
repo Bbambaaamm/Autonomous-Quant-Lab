@@ -1,67 +1,51 @@
-# Autonomous Development Pipeline v1
+# Autonomous Development Pipeline v2
 
 ## Purpose and boundary
 
-This pipeline is a GitHub-native, fail-closed handoff protocol for one
-human-approved implementation Issue. It does not select work, write code, fix CI,
-merge, deploy, or authorize an economic/runtime change. Labels, comments, commits,
-workflow runs, and an exact Issue/PR marker form the audit record; there is no
-parallel state database.
+The normal operating model is **one explicit human authorization of one concrete
+`type:implementation` Issue**, followed by a fail-closed autonomous Builder,
+authoritative CI, independent Codex review, exact-SHA verification,
+`agent-verified-gate`, and expected-head automatic merge. Codex/model jobs never
+receive GitHub write credentials. The system remains paper-only and never
+authorizes live trading or an economic/runtime deployment.
 
 ```text
-human-approved implementation Issue
-  → agent:ready → agent:running → Draft PR → agent:pr
-  → ready-for-review PR + approval + exact-head CI → agent:verified
-  → HUMAN MERGE
+human authorizes exact Issue specification once
+  → agent:running → autonomous Builder → Draft PR → agent:pr
+  → newest exact-SHA CI + independent Codex PASS
+  → agent:verified → agent-verified-gate → expected-head AUTO MERGE
 
-agent:running / agent:pr → agent:needs-human
+any stale/ambiguous/conflicting condition → agent:needs-human
 ```
 
-## Maintainer quick-start: standard happy path
+## Maintainer quick-start: normal happy path
 
-Use this checklist for one already approved `type:implementation` Issue. Run all
-state changes through the named GitHub Actions workflows; never edit state labels
-directly.
+- [ ] Create or select one concrete `type:implementation` Issue with an exact,
+      reviewable Definition of Done.
+- [ ] Run **Agent authorize implementation** once with that Issue number. This
+      writes the durable authorization marker bound to the canonical Issue
+      title/body/classification and starts the Builder.
+- [ ] Do not manually create/update the autonomous PR, acknowledge a SHA, approve
+      the PR, rerun CI, reconcile `main`, or merge during the normal path.
+- [ ] The trusted controller publishes the sealed Builder artifact, creates the
+      deterministic linked PR, reconciles current `main` without force-push,
+      handles bounded eligible fixes/transient infrastructure retries, and
+      regenerates all SHA-bound evidence after every head change.
+- [ ] The newest authoritative exact-SHA CI run must have all nine required jobs
+      green and the independent Codex Reviewer must PASS the same SHA.
+- [ ] `agent-verified-gate` then revalidates current authorization, linkage,
+      current-main ancestry, CI, review and verification evidence. The trusted
+      merge controller performs a final fresh TOCTOU evaluation and merges only
+      the expected unchanged head SHA.
+- [ ] If the Issue specification/classification changes, the Issue closes, a
+      conflict occurs, a retry/fix budget is exhausted, or evidence becomes
+      ambiguous, the pair fails closed to `agent:needs-human`. A new explicit
+      authorization is required before autonomous work can resume.
 
-- [ ] Before the pipeline's first repository use, run **Agent label setup** once.
-- [ ] Confirm the Issue has `type:implementation` and no `agent:*` state, then run
-      **Agent state transition** with `previous_state: none` and
-      `next_state: agent:ready`.
-- [ ] Explicitly authorize work by running **Agent state transition** again with
-      `previous_state: agent:ready` and `next_state: agent:running`.
-- [ ] Create a branch from the current default branch, implement only the approved
-      Issue, validate it, and open a Draft PR against the default branch. Include
-      exactly one standalone `- Agent-Issue: #N` marker; do not use an auto-closing
-      reference.
-- [ ] Before final handoff, reconcile the branch with the current default branch if
-      that branch moved, and ensure authoritative CI is produced for the final PR
-      head SHA that will be reviewed.
-- [ ] Run **Agent state transition** with `previous_state: agent:running`,
-      `next_state: agent:pr`, and the Issue and PR numbers. Confirm `agent:pr` is the
-      only `agent:*` state on both objects, the Issue still retains
-      `type:implementation`, unrelated labels remain intact, and matching durable
-      linkage comments were written.
-- [ ] Mark the PR ready for review. Have an eligible reviewer approve the current
-      head SHA or, for the documented single-maintainer case, run **Agent exact-SHA
-      review acknowledgement** with the PR number, full current head SHA, and
-      `REVIEWED_EXACT_SHA_NOT_MERGE_AUTHORIZATION`.
-- [ ] Ensure authoritative **CI** is green for that exact current head SHA. CI may
-      finish before review evidence; a later trusted review/acknowledgement
-      re-evaluates the existing exact-head CI. If review evidence exists first, CI
-      completion provides the verification opportunity. No manual CI rerun is
-      required merely to wake the verifier.
-- [ ] Confirm **Agent verification gate** moved both objects to `agent:verified` on
-      that exact SHA.
-- [ ] Reconfirm repository rules, required checks, review requirements, and current
-      base state, then perform the human merge. `agent:verified` is a handoff result,
-      not merge authorization.
-
-If work blocks in `agent:running` or `agent:pr`, use **Agent state transition** to
-move to `agent:needs-human` with a non-empty reason and the PR number when leaving
-`agent:pr`. Complete the required remediation while the workflow remains paused.
-Then recover explicitly through `agent:needs-human` → `agent:running` →
-`agent:pr`; for a durable-linked PR, recovery reconciles both Issue and PR. There is
-no direct `agent:needs-human` → `agent:pr` transition.
+**Agent exact-SHA review acknowledgement** and the legacy manual state-transition
+workflow are compatibility/recovery tools only. They are not part of the normal
+Issue #100 happy path and never substitute for current Issue authorization,
+newest exact-SHA CI, independent Codex PASS, or `agent-verified-gate`.
 
 ## Classification and human opt-in
 
@@ -142,58 +126,15 @@ body cannot rebind an already authorized PR.
 
 ## Automated verification gate
 
-The write-capable verifier runs after the authoritative workflow named `CI`
-completes successfully for a pull request and re-evaluates after a submitted native
-review or the exact-SHA acknowledgement workflow. A review-triggered evaluation
-queries existing completed `CI` runs and accepts only complete required-job evidence
-for the same current head SHA and PR. It checks metadata through the GitHub API and
-never checks out or executes PR code. It writes `agent:verified` to the
-linked Issue and PR only when all of these are true:
+Issue #100 changes the normal operating contract to **one explicit human authorization at the concrete Issue level**. The trusted authorization marker is bound to the canonical Issue title, body and single `type:implementation` classification. Closing, reopening, or changing approval-relevant Issue data invalidates autonomous progress and requires fresh human authorization.
 
-1. the CI run refers to exactly one PR and its conclusion is `success`;
-2. the PR is open, non-draft, and its current head SHA exactly equals the CI run SHA;
-3. fresh exact-SHA review evidence exists: either GitHub's current review decision
-   is `APPROVED` and an active approval explicitly records the current commit SHA,
-   or an authorized maintainer recorded the v1 review acknowledgement for that SHA;
-4. exactly one valid `Agent-Issue` marker points to a non-PR Issue and exactly
-   matches the trusted durable `agent-link:v1` evidence for this repository and PR;
-5. that Issue is unambiguously `type:implementation`, not epic/roadmap/capability;
-6. both Issue and PR have exactly the state `agent:pr`;
-7. neither object has `agent:needs-human`;
-8. every configured authoritative CI job succeeded on that exact SHA:
-   `agent-pipeline`, `quality`, `unit-research`, `api`, `integration-postgres`,
-   `frontend`, `security`, `container-build`, and `production-smoke`; and
-9. fresh API reads immediately before each side of the paired write still observe
-   the same linkage, classification, review evidence, SHA, open/default-base/non-draft
-   PR, and a state safely reconcilable from `agent:pr` to `agent:verified`.
+Verification is automatic for the exact current PR head. It requires the Issue to be open with current authorization, one active durable Issue ↔ PR link, an open non-draft default-base PR that is not behind `main`, a coherent non-escalated lifecycle, the **newest** authoritative completed CI run for that PR/SHA with all nine required jobs green, and an independent Codex `PASS` for the same SHA. A successful verifier records exact `agent-verified:v2` evidence and invokes `agent-verified-gate`, which revalidates these facts before publishing the trusted required status. The merge controller then performs another full TOCTOU re-evaluation and merges with the expected exact head SHA. If `main` moves, the branch is reconciled without force-push and all SHA-bound evidence is regenerated.
 
-### Review acknowledged versus verified versus merge authorization
+### Human acknowledgement and native PR approval
 
-GitHub does not allow a PR author to approve their own PR. A repository operated by
-one maintainer can therefore use **Agent exact-SHA review acknowledgement** after
-the PR is Ready and in `agent:pr`: the maintainer supplies the full 40-character
-head SHA and confirms `REVIEWED_EXACT_SHA_NOT_MERGE_AUTHORIZATION`. The workflow
-checks permission and current PR metadata, then writes an audit comment containing
-the exact-SHA marker, reviewer, and workflow run. A new commit invalidates it.
+The old exact-SHA human acknowledgement/native-approval handoff is not part of the normal successful path. The sole normal human decision is Issue authorization. Historical acknowledgement tooling is compatibility/recovery only and cannot replace current Issue authorization, newest exact-SHA CI, independent Codex PASS, current-main reconciliation, or `agent-verified-gate`.
 
-`review acknowledged` says only that a human examined that exact revision.
-`agent:verified` additionally says that exact-revision CI, linkage, classification,
-state, and review handoff checks passed. Neither is human merge authorization.
-Required GitHub reviews, rulesets, checks, and branch protection remain higher
-authorities: acknowledgement cannot satisfy or bypass a required GitHub approval.
-
-Native approvals are read through the GitHub reviews API and count only when an
-active `APPROVED` review has `commit_id` equal to the CI/head SHA. A general
-`reviewDecision` without that exact-commit evidence is insufficient.
-
-Thus CI may finish before review evidence without stranding the PR: the later trusted
-review event reuses CI as evidence instead of rerunning CI. It neither executes PR
-code with a write token nor recursively triggers CI. An unknown/ambiguous event or failed condition produces `NO WRITE`, never inferred
-success. A new commit changes the head SHA; normal GitHub CI and review-dismissal
-policy apply, and the PR must return to `agent:pr` before a later run can verify it.
-The list in `.github/agent-pipeline.json` must be reviewed whenever authoritative
-CI job names change. Repository branch protection remains the ultimate required
-check/review authority.
+`Protect main` remains the independent backstop. Under the Issue #100 model it requires no separate native PR approval, retains strict existing CI checks, adds `agent-verified-gate` bound to GitHub Actions, and has no bypass actors.
 
 ## Verification invalidation after a push
 

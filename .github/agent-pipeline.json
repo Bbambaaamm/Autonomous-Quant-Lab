@@ -7,26 +7,125 @@
     "codexSecret": "OPENAI_API_KEY",
     "publishSecret": "AGENT_PUBLISH_TOKEN",
     "reviewerRequired": true,
-    "codexAction": {"revision": "86365089eb2b84e0a8fb0717b304f8bdcb13b20e", "generationProfile": ":read-only", "reviewProfile": ":read-only"},
+    "codexAction": {
+      "revision": "86365089eb2b84e0a8fb0717b304f8bdcb13b20e",
+      "generationProfile": ":read-only",
+      "reviewProfile": ":read-only"
+    },
     "reviewMarker": "agent-codex-review:v2",
     "fixMarker": "agent-fix:v2",
     "classificationMarker": "agent-ci-classification:v2",
-    "classificationSchema": ["repository", "issue", "pr", "sha", "ciRunId", "ciRunAttempt", "failedJobs", "failureClass", "autoFixEligible", "budgetState", "workflow", "workflowRunId"],
+    "classificationSchema": [
+      "repository",
+      "issue",
+      "pr",
+      "sha",
+      "ciRunId",
+      "ciRunAttempt",
+      "failedJobs",
+      "failureClass",
+      "autoFixEligible",
+      "budgetState",
+      "workflow",
+      "workflowRunId"
+    ],
     "failureClassPolicy": {
-      "eligible": ["lint-format", "typecheck", "unit-test", "api-test", "frontend-test-build"],
-      "denied": ["security", "integration-postgres", "container-build", "production-smoke", "dependency-lock", "infra-transient", "multiple-failures", "unknown"]
+      "eligible": [
+        "lint-format",
+        "typecheck",
+        "unit-test",
+        "api-test",
+        "frontend-test-build"
+      ],
+      "denied": [
+        "security",
+        "integration-postgres",
+        "container-build",
+        "production-smoke",
+        "dependency-lock",
+        "infra-transient",
+        "multiple-failures",
+        "unknown"
+      ]
     },
-    "fixScope": {"allowBaselinePrFiles": true, "testAdditionPrefixes": ["backend/tests/"], "testAdditionPatterns": ["^(frontend/(src|app|components)/).*(test|spec)\\.(ts|tsx|js|jsx)$"]},
-    "fixableCiJobs": ["agent-pipeline", "quality", "unit-research", "api", "frontend"],
-    "prohibitedCiJobs": ["security", "integration-postgres", "container-build", "production-smoke"],
-    "protectedPaths": ["backend/src/quantlab/trading.py", "backend/src/quantlab/phase4.py", "backend/src/quantlab/security.py"],
-    "protectedDiagnosticPatterns": ["test_paper_only_architecture.py", "test_phase9_security.py", "authentication", "authorization", "RBAC", "PaperBroker", "RiskEngine", "ExecutionEngine"],
-    "deniedPathPrefixes": [".github/", "docs/ROADMAP.md", "backend/alembic/", "backend/src/quantlab/api/auth", "deploy/", "infra/"],
-    "deniedPathBasenames": ["AGENTS.md", "package.json", "package-lock.json", "pyproject.toml", "uv.lock"],
-    "deniedPathFragments": ["migration", "schema", "secret", "security", "credential", "broker", "execution", "trading", "risk", "live"]
+    "fixScope": {
+      "allowBaselinePrFiles": true,
+      "testAdditionPrefixes": [
+        "backend/tests/"
+      ],
+      "testAdditionPatterns": [
+        "^(frontend/(src|app|components)/).*(test|spec)\\.(ts|tsx|js|jsx)$"
+      ]
+    },
+    "fixableCiJobs": [
+      "agent-pipeline",
+      "quality",
+      "unit-research",
+      "api",
+      "frontend"
+    ],
+    "prohibitedCiJobs": [
+      "security",
+      "integration-postgres",
+      "container-build",
+      "production-smoke"
+    ],
+    "protectedPaths": [
+      "backend/src/quantlab/trading.py",
+      "backend/src/quantlab/phase4.py",
+      "backend/src/quantlab/security.py"
+    ],
+    "protectedDiagnosticPatterns": [
+      "test_paper_only_architecture.py",
+      "test_phase9_security.py",
+      "authentication",
+      "authorization",
+      "RBAC",
+      "PaperBroker",
+      "RiskEngine",
+      "ExecutionEngine"
+    ],
+    "deniedPathPrefixes": [
+      ".github/",
+      "docs/ROADMAP.md",
+      "backend/alembic/",
+      "backend/src/quantlab/api/auth",
+      "deploy/",
+      "infra/"
+    ],
+    "deniedPathBasenames": [
+      "AGENTS.md",
+      "package.json",
+      "package-lock.json",
+      "pyproject.toml",
+      "uv.lock"
+    ],
+    "deniedPathFragments": [
+      "migration",
+      "schema",
+      "secret",
+      "security",
+      "credential",
+      "broker",
+      "execution",
+      "trading",
+      "risk",
+      "live"
+    ],
+    "maxTransientCiRetries": 2,
+    "authorizationMarker": "agent-merge-authorization:v2",
+    "verificationMarker": "agent-verified:v2",
+    "verifiedGateContext": "agent-verified-gate",
+    "mergeMarker": "agent-auto-merge:v2",
+    "builderMaxPatchFiles": 20,
+    "builderMaxPatchBytes": 262144
   },
   "implementationLabel": "type:implementation",
-  "epicLabels": ["type:epic", "type:roadmap", "type:capability"],
+  "epicLabels": [
+    "type:epic",
+    "type:roadmap",
+    "type:capability"
+  ],
   "stateLabels": [
     "agent:ready",
     "agent:running",

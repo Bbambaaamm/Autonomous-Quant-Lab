@@ -1,0 +1,39 @@
+name: Agent authorization invalidation
+
+on:
+  issues:
+    types: [edited, labeled, unlabeled, closed, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  invalidate:
+    if: '!github.event.issue.pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with: {ref: '${{ github.event.repository.default_branch }}', persist-credentials: false, fetch-depth: 1}
+      - name: Fail closed when authorization becomes stale
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        with:
+          script: |
+            const p=require('./.github/scripts/agent-pipeline.cjs'),a=require('./.github/scripts/agent-autonomy.cjs');
+            const issueNumber=context.payload.issue.number,repo=`${context.repo.owner}/${context.repo.repo}`;
+            let {data:issue}=await github.rest.issues.get({...context.repo,issue_number:issueNumber});
+            const comments=await github.paginate(github.rest.issues.listComments,{...context.repo,issue_number:issueNumber,per_page:100});
+            const parsed=a.parseAuthorization(comments,{repo,issueNumber});
+            if(!parsed.ok){ if(parsed.reason==='AUTHORIZATION_MISSING') return core.notice('NO_WRITE: Issue has never been authorized'); return core.setFailed(parsed.reason); }
+            let reason;
+            if(context.payload.action==='closed') reason='ISSUE_CLOSED';
+            else if(context.payload.action==='reopened') reason='ISSUE_REOPEN_REQUIRES_REAUTH';
+            else { const decision=a.authorizationDecision({comments,repo,issueNumber,title:issue.title,body:issue.body||'',labels:issue.labels,state:issue.state}); if(decision.ok) return core.notice('Authorization remains current'); reason=decision.reason; }
+            const setNeedsHuman=async(number,item)=>{ const names=a.labelNames(item.labels),preserved=names.filter(label=>!label.startsWith('agent:')); if(!a.exactAgentState(item.labels,'agent:needs-human')) await github.rest.issues.setLabels({...context.repo,issue_number:number,labels:[...preserved,'agent:needs-human']}); };
+            await setNeedsHuman(issueNumber,issue);
+            const link=p.durablePrLinkDecision(comments,{...context.repo,issueNumber}); if(!link.ok) return core.setFailed(link.reason);
+            if(link.prNumber){ try{ const {data:pr}=await github.rest.pulls.get({...context.repo,pull_number:link.prNumber}); if(pr.state==='open') await setNeedsHuman(link.prNumber,pr); }catch(error){if(error.status!==404)throw error;} }
+            await github.rest.issues.createComment({...context.repo,issue_number:issueNumber,body:`Autonomous merge authorization invalidated fail-closed: ${reason}. A new explicit human authorization is required before further autonomous writes or merge.`});
