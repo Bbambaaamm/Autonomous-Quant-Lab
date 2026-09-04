@@ -91,7 +91,7 @@ jobs:
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
       - name: Link, transition, release Draft and recover completed CI
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
-        env: {ISSUE: '${{ inputs.issue_number }}', SPEC: '${{ inputs.spec_hash }}', PR: '${{ steps.p.outputs.pr }}', HEAD: '${{ steps.p.outputs.sha }}', BASE: '${{ inputs.base_sha }}'}
+        env: {ISSUE: '${{ inputs.issue_number }}', SPEC: '${{ inputs.spec_hash }}', PR: '${{ steps.p.outputs.pr }}', HEAD: '${{ steps.p.outputs.sha }}', BASE: '${{ inputs.base_sha }}', READY_TOKEN: '${{ secrets.AGENT_PUBLISH_TOKEN }}'}
         with:
           script: |
             const p=require('./.github/scripts/agent-pipeline.cjs'),a=require('./.github/scripts/agent-autonomy.cjs'),n=Number(process.env.ISSUE),prn=Number(process.env.PR),repo=`${context.repo.owner}/${context.repo.repo}`;
@@ -110,7 +110,18 @@ jobs:
             await state(n,i.labels);
             ({data:pr}=await github.rest.pulls.get({...context.repo,pull_number:prn}));
             await state(prn,pr.labels);
-            if(pr.draft) await github.graphql('mutation($id:ID!){markPullRequestReadyForReview(input:{pullRequestId:$id}){pullRequest{id}}}',{id:pr.node_id});
+            if(pr.draft){
+              const readyToken=process.env.READY_TOKEN;
+              if(!readyToken) return core.setFailed('READY_TOKEN_MISSING');
+              const response=await fetch('https://api.github.com/graphql',{
+                method:'POST',
+                headers:{authorization:`Bearer ${readyToken}`,accept:'application/vnd.github+json','content-type':'application/json','user-agent':'agent-builder-publish'},
+                body:JSON.stringify({query:'mutation($id:ID!){markPullRequestReadyForReview(input:{pullRequestId:$id}){pullRequest{id isDraft}}}',variables:{id:pr.node_id}}),
+              });
+              const payload=await response.json().catch(()=>null);
+              const released=payload?.data?.markPullRequestReadyForReview?.pullRequest;
+              if(!response.ok||payload?.errors?.length||!released||released.isDraft!==false) return core.setFailed(`READY_RELEASE_FAILED:${response.status}`);
+            }
             ({data:pr}=await github.rest.pulls.get({...context.repo,pull_number:prn}));
             ({data:i}=await github.rest.issues.get({...context.repo,issue_number:n}));
             pc=await github.paginate(github.rest.issues.listComments,{...context.repo,issue_number:prn,per_page:100});
