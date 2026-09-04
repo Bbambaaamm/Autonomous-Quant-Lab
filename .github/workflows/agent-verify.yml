@@ -33,6 +33,8 @@ jobs:
       - id: verify
         name: Verify authorization, current-main, exact CI and independent review
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        env:
+          AGENT_PUBLISH_TOKEN: '${{ secrets.AGENT_PUBLISH_TOKEN }}'
         with:
           script: |
             const p=require('./.github/scripts/agent-pipeline.cjs'),a=require('./.github/scripts/agent-autonomy.cjs'),c=require('./.github/agent-pipeline.json');
@@ -79,7 +81,24 @@ jobs:
             }
             if(state.comparison.data.behind_by>0){
               try {
-                await github.rest.pulls.updateBranch({...context.repo,pull_number:prNumber,expected_head_sha:requestedSha});
+                if(!process.env.AGENT_PUBLISH_TOKEN) return core.setFailed('RECONCILIATION_TOKEN_MISSING');
+                const endpoint=`${process.env.GITHUB_API_URL}/repos/${context.repo.owner}/${context.repo.repo}/pulls/${prNumber}/update-branch`;
+                const response=await fetch(endpoint,{
+                  method:'PUT',
+                  headers:{
+                    accept:'application/vnd.github+json',
+                    authorization:`Bearer ${process.env.AGENT_PUBLISH_TOKEN}`,
+                    'x-github-api-version':'2022-11-28',
+                    'content-type':'application/json',
+                  },
+                  body:JSON.stringify({expected_head_sha:requestedSha}),
+                });
+                if(!response.ok){
+                  const detail=p.redactDiagnostic(await response.text(),512);
+                  const error=new Error(`UPDATE_BRANCH_HTTP_${response.status}:${detail}`);
+                  error.status=response.status;
+                  throw error;
+                }
                 core.notice('AUTO_RECONCILED: new head requires fresh CI and Codex review');
                 return;
               } catch(error) {
