@@ -70,3 +70,22 @@ classification marker before fixing or escalation. The authorized fix scope is d
 baseline PR file list plus narrow test additions, carried through validation, and rechecked during
 publication. Candidate `.github` code is never policy authority in classifier, preparation,
 validation, or publication jobs.
+
+## Issue #100 one-time bootstrap generation boundary
+
+The Issue #100 bootstrap generator is intentionally a **read-only, patch-synthesis trust domain**.
+A read-only workspace, restricted network access, unavailable authenticated Git remote, inability to
+change the live repository ruleset, and inability to run the live end-to-end dogfood rehearsal are
+expected properties of that generation job and are **not** reasons to return `BLOCK`.
+
+Its only responsibility is to inspect the supplied trusted exact-base context and authorized Issue
+specification and return a complete bounded repository patch that encodes the required controller,
+verification, reconciliation, ruleset-management, regression-test, and documentation changes. It
+must not attempt to publish, mutate GitHub, execute repository code, change the active ruleset, or
+perform live acceptance from the model job. Credential-free validation/test/sealing jobs and trusted
+write/controller jobs perform those operations after generation.
+
+For this bootstrap path, `BLOCK` is appropriate only when the authorized requirements cannot be
+safely represented as a repository patch within the explicitly allowed governance paths, or when the
+provided trusted context is insufficient or contradictory. Environment limitations that are part of
+the designed trust separation must never be treated as implementation blockers.
