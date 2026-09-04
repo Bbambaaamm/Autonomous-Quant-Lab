@@ -44,6 +44,8 @@ jobs:
           owner="${GH_REPO%%/*}"
           branch="agent/issue-${ISSUE}-${SPEC:0:12}"
           sealed="$(git rev-parse HEAD)"; expected_tree="$(jq -r .tree_sha "$RUNNER_TEMP/s/validated.json")"; test "$(jq -r .base_sha "$RUNNER_TEMP/s/validated.json")" = "$BASE"; test "$(jq -r .spec_hash "$RUNNER_TEMP/s/validated.json")" = "$SPEC"
+          git remote set-url origin "https://github.com/${GH_REPO}.git"
+          AUTH_HEADER="AUTHORIZATION: basic $(printf x-access-token:%s "$GH_TOKEN" | base64 -w0)"
           owned(){
           local sha="$1" m p t
           test "$sha" = "$sealed" || return 1
@@ -62,15 +64,15 @@ jobs:
             sha="$(jq -r '.[0].head.sha'<<<"$q")"
             owned "$sha"
           else
-            remote="$(gh api "repos/$GH_REPO/git/ref/heads/$branch" --jq .object.sha 2>/dev/null||true)"
+            remote="$(git -c http.extraheader="$AUTH_HEADER" ls-remote --refs origin "refs/heads/$branch" | awk '{print $1}')"
             if test -n "$remote"; then
               owned "$remote"
               sha="$remote"
             else
-              git remote set-url origin "https://github.com/${GH_REPO}.git"
-              gh auth setup-git
-              git push origin "HEAD:refs/heads/$branch"
-              sha="$sealed"
+              test -z "$remote"
+              git -c http.extraheader="$AUTH_HEADER" push origin "HEAD:refs/heads/$branch"
+              sha="$(git -c http.extraheader="$AUTH_HEADER" ls-remote --refs origin "refs/heads/$branch" | awk '{print $1}')"
+              test "$sha" = "$sealed"
             fi
             parent="$(gh api "repos/$GH_REPO/commits/$sha" --jq '.parents[0].sha')"
             tree="$(gh api "repos/$GH_REPO/git/commits/$sha" --jq '.tree.sha')"
