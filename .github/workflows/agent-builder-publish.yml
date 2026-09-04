@@ -84,7 +84,7 @@ jobs:
           - Agent-Issue: #$ISSUE
           <!-- agent-builder-publish:v1 issue=$ISSUE spec=$SPEC base=$parent tree=$tree -->
           BODY
-            GH_TOKEN="$JOB_TOKEN" gh pr create --repo "$GH_REPO" --draft --base main --head "$branch" --title "Agent: Issue #$ISSUE" --body-file "$RUNNER_TEMP/body"
+            gh pr create --repo "$GH_REPO" --draft --base main --head "$branch" --title "Agent: Issue #$ISSUE" --body-file "$RUNNER_TEMP/body"
             q="$(prs)"
             test "$(jq length<<<"$q")" -eq 1
           fi
