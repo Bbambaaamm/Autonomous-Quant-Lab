@@ -128,3 +128,21 @@ test("newest CI failure defeats older success",()=>{const p=require("./agent-pip
 test("npm registry 503 is infra transient",()=>{const p=require("./agent-pipeline.cjs"),sha="e".repeat(40),r=p.classifyCiFailure({jobs:[{id:7,name:"security",conclusion:"failure",steps:[{name:"npm audit",conclusion:"failure"}]}],runHeadSha:sha,expectedHeadSha:sha,sourceRunId:77,runAttempt:1,logExcerpt:"503 Service Unavailable",config:{requiredCiJobs:["security"],failureClassPolicy:{eligible:[],denied:["infra-transient","security"]},protectedDiagnosticPatterns:[]}});assert.equal(r.failureClass,"infra-transient");});
 
 test("ordinary security failure log boilerplate is not transient",()=>{const p=require("./agent-pipeline.cjs"),sha="f".repeat(40),r=p.classifyCiFailure({jobs:[{id:8,name:"security",conclusion:"failure",steps:[{name:"npm audit",conclusion:"failure"}]}],runHeadSha:sha,expectedHeadSha:sha,sourceRunId:78,runAttempt:1,logExcerpt:"Current runner version 2.337.0\nDownloading action\nnpm audit found a critical vulnerability",config:{requiredCiJobs:["security"],failureClassPolicy:{eligible:[],denied:["infra-transient","security"]},protectedDiagnosticPatterns:[]}});assert.equal(r.failureClass,"security");});
+
+test("Issue #112 verifier metadata uses job GITHUB_TOKEN and preserves publish-token boundary", () => {
+  const fs = require("node:fs");
+  const workflow = fs.readFileSync(".github/workflows/agent-verify.yml", "utf8");
+  const verifyJob = workflow.slice(workflow.indexOf("  verify:"), workflow.indexOf("\n  gate:"));
+  const gateJob = workflow.slice(workflow.indexOf("\n  gate:"));
+
+  assert.match(verifyJob, /permissions:\n\s+actions: read\n\s+contents: read\n\s+issues: write\n\s+pull-requests: write/);
+  assert.doesNotMatch(verifyJob, /github-token:\s*\$\{\{\s*secrets\.AGENT_PUBLISH_TOKEN\s*\}\}/);
+  assert.doesNotMatch(verifyJob, /AGENT_PUBLISH_TOKEN/);
+  assert.match(gateJob, /secrets:\n\s+AGENT_PUBLISH_TOKEN:/);
+
+  const headSha = "a".repeat(40);
+  const marker = a.verificationMarker({ repo, issueNumber: 112, prNumber: 113, headSha, specHash: spec, ciRunId: 1234 });
+  const args = { repo, issueNumber: 112, prNumber: 113, headSha, specHash: spec };
+  assert.equal(a.exactVerificationEvidence([{ user: { login: "github-actions[bot]" }, body: marker }], args), true);
+  assert.equal(a.exactVerificationEvidence([{ user: { login: "Bbambaaamm" }, body: marker }], args), false);
+});
