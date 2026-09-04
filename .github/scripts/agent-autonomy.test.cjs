@@ -199,14 +199,35 @@ test("Issue #116 Builder keeps metadata on GITHUB_TOKEN and isolates Draft-to-Re
 
   assert.doesNotMatch(metadata, /github-token:\s*\$\{\{\s*secrets\.AGENT_PUBLISH_TOKEN/);
   assert.match(metadata, /READY_TOKEN:\s*'\$\{\{ secrets\.AGENT_PUBLISH_TOKEN \}\}'/);
-  assert.match(release, /READY_TOKEN_MISSING/);
+  assert.match(release, /draftReadyResponseDecision/);
   assert.match(release, /https:\/\/api\.github\.com\/graphql/);
   assert.match(release, /authorization:`Bearer \$\{readyToken\}`/);
   assert.match(release, /markPullRequestReadyForReview/);
-  assert.match(release, /READY_RELEASE_FAILED/);
+  assert.match(afterRelease, /draftReadyPostconditionDecision/);
   assert.doesNotMatch(beforeRelease, /process\.env\.READY_TOKEN|readyToken/);
   assert.doesNotMatch(afterRelease, /process\.env\.READY_TOKEN|readyToken/);
   assert.match(beforeRelease, /github\.rest\.issues\.createComment/);
   assert.match(beforeRelease, /github\.rest\.issues\.setLabels/);
   assert.match(afterRelease, /github\.rest\.actions\.createWorkflowDispatch/);
+});
+
+test("Issue #116 Draft-to-Ready decisions fail closed for every required failure mode", () => {
+  const ok = {
+    tokenPresent: true,
+    httpOk: true,
+    graphqlErrors: [],
+    releasedId: "PR_node_117",
+    expectedId: "PR_node_117",
+    releasedIsDraft: false,
+  };
+  assert.deepEqual(a.draftReadyResponseDecision(ok), { ok: true });
+  assert.equal(a.draftReadyResponseDecision({ ...ok, tokenPresent: false }).reason, "READY_TOKEN_MISSING");
+  assert.equal(a.draftReadyResponseDecision({ ...ok, httpOk: false }).reason, "READY_HTTP_FAILED");
+  assert.equal(a.draftReadyResponseDecision({ ...ok, graphqlErrors: [{ message: "denied" }] }).reason, "READY_GRAPHQL_FAILED");
+  assert.equal(a.draftReadyResponseDecision({ ...ok, graphqlErrors: { message: "bad shape" } }).reason, "READY_RESPONSE_MALFORMED");
+  assert.equal(a.draftReadyResponseDecision({ ...ok, releasedId: "wrong" }).reason, "READY_RESPONSE_MALFORMED");
+  assert.equal(a.draftReadyResponseDecision({ ...ok, releasedIsDraft: true }).reason, "READY_RESPONSE_MALFORMED");
+  assert.deepEqual(a.draftReadyPostconditionDecision({ draft: false }), { ok: true });
+  assert.equal(a.draftReadyPostconditionDecision({ draft: true }).reason, "READY_DRAFT_POSTCONDITION_FAILED");
+  assert.equal(a.draftReadyPostconditionDecision({ draft: undefined }).reason, "READY_DRAFT_POSTCONDITION_FAILED");
 });
