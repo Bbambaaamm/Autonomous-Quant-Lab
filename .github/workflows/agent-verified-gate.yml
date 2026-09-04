@@ -91,7 +91,7 @@ jobs:
     uses: ./.github/workflows/agent-auto-merge.yml
     permissions:
       actions: read
-      contents: read
+      contents: write
       issues: write
       pull-requests: write
     with:
