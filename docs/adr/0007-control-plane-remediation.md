@@ -31,7 +31,7 @@ The maintenance path is fail-closed and accepts only bounded agent control-plane
 - `docs/autonomous-development-pipeline.md`;
 - the autonomous-pipeline ADRs explicitly allowlisted by the workflow.
 
-For renamed files, both the destination path and `previous_filename` must be allowlisted. It is therefore not possible to move protected non-agent files such as `AGENTS.md` or the authoritative CI workflow into the maintenance allowlist.
+For renamed files, both the destination path and `previous_filename` must be allowlisted. The workflow also requires GitHub's enumerated file count to equal `pr.changed_files` and rejects PRs above the pull-files API's 3,000-file ceiling, so a truncated file list can never be treated as complete.
 
 The maintenance path does not authorize application, trading, broker/execution, database migration, dependency, deployment, or general repository changes.
 
@@ -45,30 +45,36 @@ The secret-free request and the trusted follower independently require:
 4. no conflicting durable Issue ↔ PR linkage;
 5. current-main ancestry (the PR may not be behind `main`);
 6. the newest authoritative pull-request CI run for the exact SHA to be completed successfully with all nine required jobs green — active newer runs are never hidden by pre-filtering for completed runs;
-7. every changed source and destination path inside the maintenance allowlist;
-8. an exact, coherent maintenance entry lifecycle.
+7. a complete, non-truncated changed-file enumeration with every source and destination path inside the maintenance allowlist;
+8. an exact or crash-recoverable maintenance lifecycle.
 
-The request may explicitly bind either an existing `agent:pr` pair or an `agent:needs-human` pair. `agent:needs-human` is never silently overwritten: only after the independent review returns PASS does the trusted follower perform the explicit, audited, idempotent recovery to `agent:pr` that was authorized by that maintenance request. Any conflicting or newly halted lifecycle fails closed.
+The request may bind either an existing `agent:pr` pair or an `agent:needs-human` recovery. If a previous API attempt changed only one side, the next request may resume the allowed previous→next partial state and finish it deterministically. `agent:needs-human` is never silently overwritten: only after the independent review returns PASS does the trusted follower perform the explicit, audited recovery to `agent:pr`. Any unrelated/conflicting agent state fails closed.
+
+Lifecycle writes use a single `setLabels` call per object after a fresh state-plan check, preserving all non-agent labels and writing exactly one target `agent:*` state. Pair-level partial completion remains retryable because subsequent evaluations accept only the explicitly allowed previous/next transition and re-fetch before continuing.
 
 A separate read-only Codex job receives the candidate as untrusted data and the default-branch governance as its trusted baseline. It must return `PASS`, zero findings, scope consistency, no test/governance weakening, and unchanged paper-only/live-trading safety. The model job receives no GitHub write credential.
 
-### Gate and merge
+### Serialization, gate and merge
 
-After PASS and any explicitly authorized recovery, a separate trusted gate job repeatedly re-fetches mutable GitHub state. It permits only the crash-recoverable `agent:pr`/`agent:verified` verification transition, rejects `agent:needs-human`, uses additive/removal state mutations rather than replacing all labels, and requires an exact `agent:verified` pair before publishing evidence.
+The request workflow is serialized by exact PR/SHA. Its trusted follower uses the request run title, which is deterministically bound to that same PR/SHA, as a workflow-level concurrency key with `cancel-in-progress: false`. Duplicate valid requests therefore serialize rather than racing lifecycle or evidence publication.
 
-The gate records exact-SHA maintenance-review evidence and publishes the same required status context used by the normal path:
+After PASS and any explicitly authorized recovery, a separate trusted gate job repeatedly re-fetches mutable GitHub state. It permits only crash-recoverable `agent:pr → agent:verified` progress, rejects `agent:needs-human`, requires an exact `agent:verified` pair before publishing evidence, and requires exactly one bot-authored exact-SHA maintenance review marker after publication.
+
+The gate publishes the same required status context used by the normal path:
 
 `agent-verified-gate`
 
 The ruleset therefore remains unchanged and permanently enabled.
 
-A final merge job uses `AGENT_PUBLISH_TOKEN` only after the trusted gate succeeds. It revalidates the exact head, current authorization, two-sided durable linkage, allowlisted paths including rename sources, newest authoritative CI, current-main ancestry, verified lifecycle, bot-authored maintenance evidence, and bot-authored successful `agent-verified-gate`. It then performs the complete evaluation a second time immediately before the exact-head merge request. Any stale, active, ambiguous, or halted condition fails closed.
+A final merge job uses `AGENT_PUBLISH_TOKEN` only after the trusted gate succeeds. It revalidates the exact head, current authorization, two-sided durable linkage, complete allowlisted file enumeration including rename sources, newest authoritative CI, current-main ancestry, verified lifecycle, exactly one bot-authored maintenance evidence marker, and bot-authored successful `agent-verified-gate`. It then performs the complete evaluation a second time immediately before the exact-head merge request. Any stale, active, ambiguous, incomplete, or halted condition fails closed.
 
 ## Consequences
 
 - Normal application Issues still use the one-authorization zero-click Builder → CI → Reviewer → verifier → gate → auto-merge path.
 - Protected pipeline changes still cannot be generated by the autonomous Builder.
-- Pipeline maintenance requires one explicit human maintenance request, but no ruleset weakening, bypass actor, manual state-transition sequence, or manual gate toggling.
+- Pipeline maintenance requires one explicit human maintenance request, but no ruleset weakening, bypass actor, manual state-transition sequence, or recurring manual gate toggling.
 - Candidate workflow revisions cannot receive maintenance secrets.
+- Duplicate maintenance requests cannot create duplicate exact-SHA gate evidence.
+- Transient partial metadata writes are retryable without manual label surgery.
 - The same permanent `agent-verified-gate` remains the branch-protection backstop for both normal autonomous delivery and trusted control-plane remediation.
 - Live trading remains out of scope and paper-only invariants are unchanged.
