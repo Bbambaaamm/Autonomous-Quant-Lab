@@ -231,3 +231,18 @@ test("Issue #116 Draft-to-Ready decisions fail closed for every required failure
   assert.equal(a.draftReadyPostconditionDecision({ draft: true }).reason, "READY_DRAFT_POSTCONDITION_FAILED");
   assert.equal(a.draftReadyPostconditionDecision({ draft: undefined }).reason, "READY_DRAFT_POSTCONDITION_FAILED");
 });
+
+test("Issue #118 Builder branch identity binds the authorized base and remains retry-idempotent", () => {
+  const workflow = fs.readFileSync(".github/workflows/agent-builder-publish.yml", "utf8");
+  assert.match(workflow, /branch="agent\/issue-\$\{ISSUE\}-\$\{SPEC:0:12\}-\$\{BASE:0:12\}"/);
+
+  const branchFor = (issue, specHash, baseSha) =>
+    `agent/issue-${issue}-${specHash.slice(0, 12)}-${baseSha.slice(0, 12)}`;
+  const specHash = "c".repeat(64);
+  const baseA = "a".repeat(40);
+  const baseB = "b".repeat(40);
+
+  const first = branchFor(109, specHash, baseA);
+  assert.equal(first, branchFor(109, specHash, baseA));
+  assert.notEqual(first, branchFor(109, specHash, baseB));
+});
