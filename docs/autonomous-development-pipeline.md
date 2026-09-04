@@ -280,14 +280,24 @@ Patch generation has an explicit secret preflight and no repository checkout. A 
 credential-free job serializes bounded repairable source files as non-executable JSON; the
 secret-bearing job contains only that source context and diagnostic artifact, so repository scripts
 and tests are mechanically absent while `OPENAI_API_KEY` is present. The immutable Codex action pin
-and read-only profile are wiring-tested. Publication exposes and requires `AGENT_PUBLISH_TOKEN` only in the final push step and never falls back to `GITHUB_TOKEN`.
+and read-only profile are wiring-tested. Trusted Builder publication exposes `AGENT_PUBLISH_TOKEN`
+only inside the publisher for three trigger-capable operations: the exact checked branch Git
+operation, same-repository Draft PR creation (so GitHub emits the authoritative `pull_request` CI
+event), and the isolated Draft-to-Ready GraphQL mutation. All read-only `gh api` queries and
+Issue/PR linkage, label, lifecycle, CI-routing and audit metadata use the job-scoped `GITHUB_TOKEN`.
+Model/generate/validate/seal jobs never receive the publish token. Immediately before Draft-to-Ready,
+the publisher freshly revalidates the exact head, current Issue authorization, two-sided durable
+linkage and exact `agent:pr` lifecycle, then verifies a fresh non-draft postcondition after mutation.
 
 ### Trusted policy, classification, and fix scope
 
 All v2 security decisions are loaded from a separate default-branch checkout. The pull-request
 checkout is candidate data only: it never supplies classifier, path/mode rules, or publisher code.
-Candidate checkout credentials are not persisted, and `AGENT_PUBLISH_TOKEN` is exposed only to the
-final checked push operation after trusted linkage, artifact, path, mode, and scope checks.
+Candidate checkout credentials are not persisted. In Builder publication, `AGENT_PUBLISH_TOKEN` is
+confined to the checked Git branch operation, creation of the same-repository Draft PR required to
+emit authoritative `pull_request` CI, and the isolated Draft-to-Ready request. Read-only repository
+queries and trusted metadata writes remain on the job-scoped `GITHUB_TOKEN`; no candidate code is
+executed while the publish token is present.
 
 Every exact failed authoritative CI run produces one idempotent `agent-ci-classification:v2`
 record. Its encoded payload binds repository, Issue, PR, exact SHA, CI run and attempt, failed

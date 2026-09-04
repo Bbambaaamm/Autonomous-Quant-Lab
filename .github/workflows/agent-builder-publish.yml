@@ -37,10 +37,11 @@ jobs:
           GIT_AUTHOR_DATE="$d" GIT_COMMITTER_DATE="$d" git commit -m 'Autonomous Builder candidate for Issue #${{ inputs.issue_number }}' -m "Agent-Builder-Seal: v1 issue=${{ inputs.issue_number }} spec=${{ inputs.spec_hash }} base=${{ inputs.base_sha }} tree=$tree"
       - id: p
         name: Publish with isolated credential
-        env: {GH_TOKEN: '${{ secrets.AGENT_PUBLISH_TOKEN }}', GH_REPO: '${{ github.repository }}', ISSUE: '${{ inputs.issue_number }}', SPEC: '${{ inputs.spec_hash }}', BASE: '${{ inputs.base_sha }}'}
+        env: {GH_TOKEN: '${{ secrets.AGENT_PUBLISH_TOKEN }}', JOB_TOKEN: '${{ github.token }}', GH_REPO: '${{ github.repository }}', ISSUE: '${{ inputs.issue_number }}', SPEC: '${{ inputs.spec_hash }}', BASE: '${{ inputs.base_sha }}'}
         run: |
           set -euo pipefail
           test -n "$GH_TOKEN"
+          test -n "$JOB_TOKEN"
           owner="${GH_REPO%%/*}"
           branch="agent/issue-${ISSUE}-${SPEC:0:12}"
           sealed="$(git rev-parse HEAD)"; expected_tree="$(jq -r .tree_sha "$RUNNER_TEMP/s/validated.json")"; test "$(jq -r .base_sha "$RUNNER_TEMP/s/validated.json")" = "$BASE"; test "$(jq -r .spec_hash "$RUNNER_TEMP/s/validated.json")" = "$SPEC"
@@ -49,15 +50,15 @@ jobs:
           owned(){
           local sha="$1" m p t
           test "$sha" = "$sealed" || return 1
-          m="$(gh api "repos/$GH_REPO/git/commits/$sha" --jq .message)" || return 1
-          p="$(gh api "repos/$GH_REPO/commits/$sha" --jq '.parents[0].sha')" || return 1
-          t="$(gh api "repos/$GH_REPO/git/commits/$sha" --jq '.tree.sha')" || return 1
+          m="$(GH_TOKEN="$JOB_TOKEN" gh api "repos/$GH_REPO/git/commits/$sha" --jq .message)" || return 1
+          p="$(GH_TOKEN="$JOB_TOKEN" gh api "repos/$GH_REPO/commits/$sha" --jq '.parents[0].sha')" || return 1
+          t="$(GH_TOKEN="$JOB_TOKEN" gh api "repos/$GH_REPO/git/commits/$sha" --jq '.tree.sha')" || return 1
           test "$p" = "$BASE" || return 1
           test "$t" = "$expected_tree" || return 1
           grep -Fxq "Agent-Builder-Seal: v1 issue=$ISSUE spec=$SPEC base=$BASE tree=$expected_tree" <<<"$m" || return 1
           return 0
           }
-          prs(){ gh api --paginate --slurp -X GET "repos/$GH_REPO/pulls" -f state=open -f per_page=100 -f head="$owner:$branch"|jq --arg r "$GH_REPO" --arg b "$branch" '[.[][]|select(.head.repo.full_name==$r and .head.ref==$b)]'; }
+          prs(){ GH_TOKEN="$JOB_TOKEN" gh api --paginate --slurp -X GET "repos/$GH_REPO/pulls" -f state=open -f per_page=100 -f head="$owner:$branch"|jq --arg r "$GH_REPO" --arg b "$branch" '[.[][]|select(.head.repo.full_name==$r and .head.ref==$b)]'; }
           q="$(prs)"
           test "$(jq length<<<"$q")" -le 1
           if test "$(jq length<<<"$q")" -eq 1; then
@@ -74,8 +75,8 @@ jobs:
               sha="$(git -c http.extraheader="$AUTH_HEADER" ls-remote --refs origin "refs/heads/$branch" | awk '{print $1}')"
               test "$sha" = "$sealed"
             fi
-            parent="$(gh api "repos/$GH_REPO/commits/$sha" --jq '.parents[0].sha')"
-            tree="$(gh api "repos/$GH_REPO/git/commits/$sha" --jq '.tree.sha')"
+            parent="$(GH_TOKEN="$JOB_TOKEN" gh api "repos/$GH_REPO/commits/$sha" --jq '.parents[0].sha')"
+            tree="$(GH_TOKEN="$JOB_TOKEN" gh api "repos/$GH_REPO/git/commits/$sha" --jq '.tree.sha')"
             test "$parent" = "$BASE"
             cat > "$RUNNER_TEMP/body" <<BODY
           Implements the exact authorized Issue #$ISSUE through the trusted autonomous Builder.
@@ -91,7 +92,7 @@ jobs:
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
       - name: Link, transition, release Draft and recover completed CI
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
-        env: {ISSUE: '${{ inputs.issue_number }}', SPEC: '${{ inputs.spec_hash }}', PR: '${{ steps.p.outputs.pr }}', HEAD: '${{ steps.p.outputs.sha }}', BASE: '${{ inputs.base_sha }}'}
+        env: {ISSUE: '${{ inputs.issue_number }}', SPEC: '${{ inputs.spec_hash }}', PR: '${{ steps.p.outputs.pr }}', HEAD: '${{ steps.p.outputs.sha }}', BASE: '${{ inputs.base_sha }}', READY_TOKEN: '${{ secrets.AGENT_PUBLISH_TOKEN }}'}
         with:
           script: |
             const p=require('./.github/scripts/agent-pipeline.cjs'),a=require('./.github/scripts/agent-autonomy.cjs'),n=Number(process.env.ISSUE),prn=Number(process.env.PR),repo=`${context.repo.owner}/${context.repo.repo}`;
@@ -107,11 +108,51 @@ jobs:
             if(il.prNumber===null) await github.rest.issues.createComment({...context.repo,issue_number:n,body:`Linked autonomous PR #${prn}.\n\n${marker}`});
             if(pl.issueNumber===null) await github.rest.issues.createComment({...context.repo,issue_number:prn,body:`Linked authorized Issue #${n}.\n\n${marker}`});
             const state=async(num,labels)=>github.rest.issues.setLabels({...context.repo,issue_number:num,labels:[...a.labelNames(labels).filter(x=>!x.startsWith('agent:')),'agent:pr']});
+            ({data:i}=await github.rest.issues.get({...context.repo,issue_number:n}));
+            if(!a.exactAgentState(i.labels,'agent:running')) return core.setFailed('PUBLISH_STATE_CHANGED');
             await state(n,i.labels);
             ({data:pr}=await github.rest.pulls.get({...context.repo,pull_number:prn}));
+            const prAgentStates=a.labelNames(pr.labels).filter(x=>x.startsWith('agent:'));
+            if(prAgentStates.length>0&&!(prAgentStates.length===1&&prAgentStates[0]==='agent:pr')) return core.setFailed('PUBLISH_STATE_CHANGED');
             await state(prn,pr.labels);
-            if(pr.draft) await github.graphql('mutation($id:ID!){markPullRequestReadyForReview(input:{pullRequestId:$id}){pullRequest{id}}}',{id:pr.node_id});
+
             ({data:pr}=await github.rest.pulls.get({...context.repo,pull_number:prn}));
+            ({data:i}=await github.rest.issues.get({...context.repo,issue_number:n}));
+            pc=await github.paginate(github.rest.issues.listComments,{...context.repo,issue_number:prn,per_page:100});
+            ic=await github.paginate(github.rest.issues.listComments,{...context.repo,issue_number:n,per_page:100});
+            const readyAuth=a.authorizationDecision({comments:ic,repo,issueNumber:n,title:i.title,body:i.body||'',labels:i.labels,state:i.state});
+            const readyLifecycle=a.lifecyclePairDecision(pr.labels,i.labels,'agent:pr');
+            const readyLink=p.fullLinkageDecision({prBody:pr.body,prComments:pc,issueComments:ic,...context.repo,issueNumber:n,prNumber:prn});
+            if(!readyAuth.ok||readyAuth.specHash!==process.env.SPEC||pr.state!=='open'||pr.head.sha!==process.env.HEAD||pr.base.ref!==context.payload.repository.default_branch||p.parseAgentIssue(pr.body)!==n||!readyLifecycle.ok||!readyLink.ok) return core.setFailed('READY_PRECONDITION_FAILED');
+            if(pr.draft){
+              const readyToken=process.env.READY_TOKEN;
+              if(!readyToken) return core.setFailed(a.draftReadyResponseDecision({tokenPresent:false}).reason);
+              let response;
+              let payload=null;
+              try{
+                response=await fetch('https://api.github.com/graphql',{
+                  method:'POST',
+                  headers:{authorization:`Bearer ${readyToken}`,accept:'application/vnd.github+json','content-type':'application/json','user-agent':'agent-builder-publish'},
+                  body:JSON.stringify({query:'mutation($id:ID!){markPullRequestReadyForReview(input:{pullRequestId:$id}){pullRequest{id isDraft}}}',variables:{id:pr.node_id}}),
+                });
+                payload=await response.json().catch(()=>null);
+              }catch{
+                return core.setFailed('READY_HTTP_FAILED');
+              }
+              const released=payload?.data?.markPullRequestReadyForReview?.pullRequest;
+              const decision=a.draftReadyResponseDecision({
+                tokenPresent:true,
+                httpOk:response.ok,
+                graphqlErrors:payload?.errors,
+                releasedId:released?.id,
+                expectedId:pr.node_id,
+                releasedIsDraft:released?.isDraft,
+              });
+              if(!decision.ok) return core.setFailed(`${decision.reason}:${response.status}`);
+            }
+            ({data:pr}=await github.rest.pulls.get({...context.repo,pull_number:prn}));
+            const readyPostcondition=a.draftReadyPostconditionDecision({draft:pr.draft});
+            if(!readyPostcondition.ok) return core.setFailed(readyPostcondition.reason);
             ({data:i}=await github.rest.issues.get({...context.repo,issue_number:n}));
             pc=await github.paginate(github.rest.issues.listComments,{...context.repo,issue_number:prn,per_page:100});
             ic=await github.paginate(github.rest.issues.listComments,{...context.repo,issue_number:n,per_page:100});

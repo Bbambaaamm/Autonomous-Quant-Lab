@@ -186,3 +186,48 @@ test("Issue #112 verifier keeps metadata on GITHUB_TOKEN and reconciliation on p
   assert.equal(a.exactVerificationEvidence([{ user: { login: "github-actions[bot]" }, body: marker }], args), true);
   assert.equal(a.exactVerificationEvidence([{ user: { login: "Bbambaaamm" }, body: marker }], args), false);
 });
+
+test("Issue #116 Builder keeps metadata on GITHUB_TOKEN and isolates Draft-to-Ready token", () => {
+  const workflow = fs.readFileSync(".github/workflows/agent-builder-publish.yml", "utf8");
+  const metadataStart = workflow.indexOf("- name: Link, transition, release Draft and recover completed CI");
+  const metadata = workflow.slice(metadataStart);
+  const releaseStart = metadata.indexOf("if(pr.draft){");
+  const releaseEnd = metadata.indexOf("({data:pr}=await github.rest.pulls.get", releaseStart);
+  const release = metadata.slice(releaseStart, releaseEnd);
+  const beforeRelease = metadata.slice(0, releaseStart);
+  const afterRelease = metadata.slice(releaseEnd);
+
+  assert.doesNotMatch(metadata, /github-token:\s*\$\{\{\s*secrets\.AGENT_PUBLISH_TOKEN/);
+  assert.match(metadata, /READY_TOKEN:\s*'\$\{\{ secrets\.AGENT_PUBLISH_TOKEN \}\}'/);
+  assert.match(release, /draftReadyResponseDecision/);
+  assert.match(release, /https:\/\/api\.github\.com\/graphql/);
+  assert.match(release, /authorization:`Bearer \$\{readyToken\}`/);
+  assert.match(release, /markPullRequestReadyForReview/);
+  assert.match(afterRelease, /draftReadyPostconditionDecision/);
+  assert.doesNotMatch(beforeRelease, /process\.env\.READY_TOKEN|readyToken/);
+  assert.doesNotMatch(afterRelease, /process\.env\.READY_TOKEN|readyToken/);
+  assert.match(beforeRelease, /github\.rest\.issues\.createComment/);
+  assert.match(beforeRelease, /github\.rest\.issues\.setLabels/);
+  assert.match(afterRelease, /github\.rest\.actions\.createWorkflowDispatch/);
+});
+
+test("Issue #116 Draft-to-Ready decisions fail closed for every required failure mode", () => {
+  const ok = {
+    tokenPresent: true,
+    httpOk: true,
+    graphqlErrors: [],
+    releasedId: "PR_node_117",
+    expectedId: "PR_node_117",
+    releasedIsDraft: false,
+  };
+  assert.deepEqual(a.draftReadyResponseDecision(ok), { ok: true });
+  assert.equal(a.draftReadyResponseDecision({ ...ok, tokenPresent: false }).reason, "READY_TOKEN_MISSING");
+  assert.equal(a.draftReadyResponseDecision({ ...ok, httpOk: false }).reason, "READY_HTTP_FAILED");
+  assert.equal(a.draftReadyResponseDecision({ ...ok, graphqlErrors: [{ message: "denied" }] }).reason, "READY_GRAPHQL_FAILED");
+  assert.equal(a.draftReadyResponseDecision({ ...ok, graphqlErrors: { message: "bad shape" } }).reason, "READY_RESPONSE_MALFORMED");
+  assert.equal(a.draftReadyResponseDecision({ ...ok, releasedId: "wrong" }).reason, "READY_RESPONSE_MALFORMED");
+  assert.equal(a.draftReadyResponseDecision({ ...ok, releasedIsDraft: true }).reason, "READY_RESPONSE_MALFORMED");
+  assert.deepEqual(a.draftReadyPostconditionDecision({ draft: false }), { ok: true });
+  assert.equal(a.draftReadyPostconditionDecision({ draft: true }).reason, "READY_DRAFT_POSTCONDITION_FAILED");
+  assert.equal(a.draftReadyPostconditionDecision({ draft: undefined }).reason, "READY_DRAFT_POSTCONDITION_FAILED");
+});
