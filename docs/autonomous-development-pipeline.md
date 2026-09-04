@@ -280,14 +280,23 @@ Patch generation has an explicit secret preflight and no repository checkout. A 
 credential-free job serializes bounded repairable source files as non-executable JSON; the
 secret-bearing job contains only that source context and diagnostic artifact, so repository scripts
 and tests are mechanically absent while `OPENAI_API_KEY` is present. The immutable Codex action pin
-and read-only profile are wiring-tested. Publication exposes and requires `AGENT_PUBLISH_TOKEN` only in the final push step and never falls back to `GITHUB_TOKEN`.
+and read-only profile are wiring-tested. Publication exposes and requires `AGENT_PUBLISH_TOKEN` only
+inside the trusted publisher for two audited operations: the exact checked branch push and the
+Draft-to-Ready GraphQL mutation. Linkage comments, labels, lifecycle metadata, CI routing, and
+postconditions remain on the job-scoped `GITHUB_TOKEN`; model/generate/validate/seal jobs never
+receive the publish token. The Ready request uses a dedicated Authorization header and fails closed
+on missing token, transport or HTTP failure, GraphQL errors, malformed response, or a fresh PR read
+that remains Draft.
 
 ### Trusted policy, classification, and fix scope
 
 All v2 security decisions are loaded from a separate default-branch checkout. The pull-request
 checkout is candidate data only: it never supplies classifier, path/mode rules, or publisher code.
-Candidate checkout credentials are not persisted, and `AGENT_PUBLISH_TOKEN` is exposed only to the
-final checked push operation after trusted linkage, artifact, path, mode, and scope checks.
+Candidate checkout credentials are not persisted. `AGENT_PUBLISH_TOKEN` is confined to the trusted
+publisher: it authenticates the checked exact-SHA branch push and the isolated Draft-to-Ready
+request only. It is not used for linkage/label metadata or execution of candidate code. The push
+follows trusted linkage, artifact, path, mode, and scope checks; the Ready request runs only after
+exact authorization/linkage/lifecycle checks and is verified by a fresh non-draft postcondition.
 
 Every exact failed authoritative CI run produces one idempotent `agent-ci-classification:v2`
 record. Its encoded payload binds repository, Issue, PR, exact SHA, CI run and attempt, failed
