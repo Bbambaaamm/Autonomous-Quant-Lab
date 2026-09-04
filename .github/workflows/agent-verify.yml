@@ -34,7 +34,6 @@ jobs:
         name: Verify authorization, current-main, exact CI and independent review
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
         with:
-          github-token: ${{ secrets.AGENT_PUBLISH_TOKEN }}
           script: |
             const p=require('./.github/scripts/agent-pipeline.cjs'),a=require('./.github/scripts/agent-autonomy.cjs'),c=require('./.github/agent-pipeline.json');
             const trigger=p.verificationTriggerDecision({workflowRun:context.payload.workflow_run,workflowCallInputs:{prNumber:'${{ inputs.pr_number || '' }}',headSha:'${{ inputs.head_sha || '' }}'}});
