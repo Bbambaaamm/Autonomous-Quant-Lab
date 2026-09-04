@@ -361,9 +361,6 @@ jobs:
           ref: ${{ needs.prepare.outputs.base_sha }}
           persist-credentials: false
           fetch-depth: 1
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        with:
-          node-version: 24
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: bootstrap-issue-100-generated-${{ github.run_id }}
@@ -375,36 +372,63 @@ jobs:
           git apply --check "$RUNNER_TEMP/candidate.patch"
           git apply "$RUNNER_TEMP/candidate.patch"
           python -m json.tool .github/agent-pipeline.json >/dev/null
-          ruby -e 'require "yaml"; Dir[".github/workflows/*.yml"].sort.each { |p| YAML.load_file(p, aliases: true) }'
-          node <<'NODE'
-          const assert = require('node:assert/strict');
-          const fs = require('node:fs');
-          const path = require('node:path');
-          const read = (p) => fs.readFileSync(p, 'utf8');
-          const config = JSON.parse(read('.github/agent-pipeline.json'));
-          const expectedJobs = [
-            'agent-pipeline', 'quality', 'unit-research', 'api', 'integration-postgres',
-            'frontend', 'security', 'container-build', 'production-smoke',
-          ].sort();
-          assert.deepEqual([...config.requiredCiJobs].sort(), expectedJobs);
-          assert.equal(config.v2.maxFixCommits, 2);
-          assert.equal(config.v2.reviewerRequired, true);
-          const workflowDir = '.github/workflows';
-          const workflows = fs.readdirSync(workflowDir)
-            .filter((name) => name.startsWith('agent-') && name.endsWith('.yml'))
-            .sort()
-            .map((name) => read(path.join(workflowDir, name)))
-            .join('\n');
-          const policyText = [
-            read('.github/scripts/agent-pipeline.cjs'),
-            read('.github/scripts/agent-pipeline.test.cjs'),
-            workflows,
-          ].join('\n');
-          assert.match(policyText, /agent-verified-gate/);
-          assert.match(policyText, /agent:needs-human/);
-          assert.doesNotMatch(policyText, /danger-full-access/);
-          assert.doesNotMatch(policyText, /pull_request_target/);
-          NODE
+          ruby <<'RUBY'
+          require 'yaml'
+          expected_jobs = %w[agent-pipeline quality unit-research api integration-postgres frontend security container-build production-smoke].sort
+          config = JSON.parse(File.read('.github/agent-pipeline.json')) rescue nil
+          raise 'invalid config' unless config
+          raise 'required CI changed' unless config['requiredCiJobs'].sort == expected_jobs
+          raise 'fix budget changed' unless config.dig('v2', 'maxFixCommits') == 2
+          raise 'review gate disabled' unless config.dig('v2', 'reviewerRequired') == true
+
+          workflow_paths = Dir['.github/workflows/agent-*.yml'].sort
+          workflows = workflow_paths.to_h { |p| [p, YAML.load_file(p, aliases: true)] }
+          sources = workflow_paths.to_h { |p| [p, File.read(p)] }
+          raise 'pull_request_target forbidden' if sources.values.any? { |s| s.match?(/^\s*pull_request_target\s*:/) }
+          raise 'danger-full-access forbidden' if sources.values.any? { |s| s.include?('danger-full-access') }
+
+          jobs = []
+          workflows.each do |path, doc|
+            raise "invalid workflow jobs: #{path}" unless doc.is_a?(Hash) && doc['jobs'].is_a?(Hash)
+            doc['jobs'].each { |key, job| jobs << [path, key.to_s, job || {}] }
+          end
+          deep = ->(obj) { obj.is_a?(String) ? obj : JSON.generate(obj) }
+          perms = ->(job) { job.is_a?(Hash) && job['permissions'].is_a?(Hash) ? job['permissions'] : {} }
+          writable = ->(job) { perms.call(job).values.any? { |v| v.to_s == 'write' } }
+          codex = ->(job) { deep.call(job).include?('openai/codex-action@') || deep.call(job).include?('OPENAI_API_KEY') }
+          publisher = ->(job) { deep.call(job).include?('AGENT_PUBLISH_TOKEN') }
+
+          jobs.each do |path, key, job|
+            raise "model/write co-residency: #{path}:#{key}" if codex.call(job) && writable.call(job)
+            raise "model/publisher co-residency: #{path}:#{key}" if codex.call(job) && publisher.call(job)
+          end
+
+          gate = jobs.find { |_, key, job| key.include?('verified-gate') || deep.call(job).include?('agent-verified-gate') }
+          raise 'missing verified gate job' unless gate
+          raise 'verified gate must be trusted/non-Codex' if codex.call(gate[2])
+          gate_perms = perms.call(gate[2])
+          raise 'verified gate lacks status/check write' unless gate_perms['statuses'].to_s == 'write' || gate_perms['checks'].to_s == 'write'
+
+          merge = jobs.find do |_, key, job|
+            text = deep.call(job)
+            (key.include?('merge') || text.match?(/merge/i)) && text.include?('expected_head_sha') && text.include?('agent-verified-gate')
+          end
+          raise 'missing exact-head gated merge job' unless merge
+          raise 'merge job must be trusted/non-Codex' if codex.call(merge[2])
+          merge_perms = perms.call(merge[2])
+          raise 'merge job lacks pull-request write' unless merge_perms['pull-requests'].to_s == 'write'
+
+          auth = jobs.find do |path, key, job|
+            text = deep.call(job)
+            path.include?('authorize') || key.include?('authorize') || (text.include?('spec') && text.include?('sha256'))
+          end
+          raise 'missing Issue specification authorization job' unless auth
+          raise 'authorization must not invoke Codex' if codex.call(auth[2])
+
+          lifecycle_text = sources.values.join("\n")
+          raise 'missing fail-closed needs-human path' unless lifecycle_text.include?('agent:needs-human')
+          raise 'missing exact-head reconciliation' unless lifecycle_text.include?('expected_head_sha')
+          RUBY
 
   seal:
     needs: [prepare, generate, validate-structure, test-candidate, trusted-acceptance]
