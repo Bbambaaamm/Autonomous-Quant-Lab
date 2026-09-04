@@ -112,17 +112,33 @@ jobs:
             await state(prn,pr.labels);
             if(pr.draft){
               const readyToken=process.env.READY_TOKEN;
-              if(!readyToken) return core.setFailed('READY_TOKEN_MISSING');
-              const response=await fetch('https://api.github.com/graphql',{
-                method:'POST',
-                headers:{authorization:`Bearer ${readyToken}`,accept:'application/vnd.github+json','content-type':'application/json','user-agent':'agent-builder-publish'},
-                body:JSON.stringify({query:'mutation($id:ID!){markPullRequestReadyForReview(input:{pullRequestId:$id}){pullRequest{id isDraft}}}',variables:{id:pr.node_id}}),
-              });
-              const payload=await response.json().catch(()=>null);
+              if(!readyToken) return core.setFailed(a.draftReadyResponseDecision({tokenPresent:false}).reason);
+              let response;
+              let payload=null;
+              try{
+                response=await fetch('https://api.github.com/graphql',{
+                  method:'POST',
+                  headers:{authorization:`Bearer ${readyToken}`,accept:'application/vnd.github+json','content-type':'application/json','user-agent':'agent-builder-publish'},
+                  body:JSON.stringify({query:'mutation($id:ID!){markPullRequestReadyForReview(input:{pullRequestId:$id}){pullRequest{id isDraft}}}',variables:{id:pr.node_id}}),
+                });
+                payload=await response.json().catch(()=>null);
+              }catch{
+                return core.setFailed('READY_HTTP_FAILED');
+              }
               const released=payload?.data?.markPullRequestReadyForReview?.pullRequest;
-              if(!response.ok||payload?.errors?.length||!released||released.isDraft!==false) return core.setFailed(`READY_RELEASE_FAILED:${response.status}`);
+              const decision=a.draftReadyResponseDecision({
+                tokenPresent:true,
+                httpOk:response.ok,
+                graphqlErrors:payload?.errors,
+                releasedId:released?.id,
+                expectedId:pr.node_id,
+                releasedIsDraft:released?.isDraft,
+              });
+              if(!decision.ok) return core.setFailed(`${decision.reason}:${response.status}`);
             }
             ({data:pr}=await github.rest.pulls.get({...context.repo,pull_number:prn}));
+            const readyPostcondition=a.draftReadyPostconditionDecision({draft:pr.draft});
+            if(!readyPostcondition.ok) return core.setFailed(readyPostcondition.reason);
             ({data:i}=await github.rest.issues.get({...context.repo,issue_number:n}));
             pc=await github.paginate(github.rest.issues.listComments,{...context.repo,issue_number:prn,per_page:100});
             ic=await github.paginate(github.rest.issues.listComments,{...context.repo,issue_number:n,per_page:100});
