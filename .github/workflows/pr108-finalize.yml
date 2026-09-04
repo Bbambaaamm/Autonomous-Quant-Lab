@@ -1,0 +1,87 @@
+name: PR 108 final remediation
+
+on:
+  push:
+    branches: [agent/issue-100-final-implementation]
+    paths:
+      - .github/scripts/pr108-finalize.py
+      - .github/workflows/pr108-finalize.yml
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    permissions: {contents: read}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Apply final PR 108 remediation
+        run: python .github/scripts/pr108-finalize.py
+      - name: Validate candidate without write credential
+        run: |
+          set -euo pipefail
+          node --test .github/scripts/agent-pipeline.test.cjs .github/scripts/agent-autonomy.test.cjs
+          python -m json.tool .github/agent-pipeline.json >/dev/null
+          ruby -e 'require "yaml"; Dir[".github/workflows/*.yml"].sort.each { |p| YAML.load_file(p, aliases: true) }'
+          git diff --check
+          test ! -e .github/scripts/pr108-finalize.py
+          test ! -e .github/workflows/pr108-finalize.yml
+          git add -A
+          git diff --cached --check
+          git diff --cached --binary > "$RUNNER_TEMP/remediation.patch"
+          (cd "$RUNNER_TEMP" && sha256sum remediation.patch > remediation.patch.sha256)
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: pr108-final-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/remediation.patch
+            ${{ runner.temp }}/remediation.patch.sha256
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    needs: prepare
+    runs-on: ubuntu-latest
+    permissions: {contents: read}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 2
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: pr108-final-${{ github.run_id }}
+          path: ${{ runner.temp }}/remediation
+      - name: Reconstruct exact validated patch
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/remediation"
+          sha256sum -c remediation.patch.sha256
+          cd "$GITHUB_WORKSPACE"
+          git apply --check "$RUNNER_TEMP/remediation/remediation.patch"
+          git apply "$RUNNER_TEMP/remediation/remediation.patch"
+          git diff --check
+          test ! -e .github/scripts/pr108-finalize.py
+          test ! -e .github/workflows/pr108-finalize.yml
+      - name: Publish exact validated tree
+        env:
+          GH_TOKEN: ${{ secrets.AGENT_PUBLISH_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          test -n "$GH_TOKEN"
+          git add -A
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'Finish PR 108 autonomous pipeline remediation'
+          remote="$(gh api "repos/$GH_REPO/git/ref/heads/agent/issue-100-final-implementation" --jq .object.sha)"
+          test "$remote" = "$GITHUB_SHA"
+          git remote set-url origin "https://github.com/${GH_REPO}.git"
+          gh auth setup-git
+          git push origin HEAD:refs/heads/agent/issue-100-final-implementation
