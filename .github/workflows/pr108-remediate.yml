@@ -118,7 +118,7 @@ jobs:
           mapfile -t files < <(git diff --cached --name-only)
           printf '%s\n' "${files[@]}" | grep -Ev '^(\.github/(agent-pipeline\.json|scripts/(agent-pipeline\.cjs|agent-pipeline\.test\.cjs|agent-autonomy\.cjs|agent-autonomy\.test\.cjs|pr108-remediate\.py)|workflows/(agent-authorization-invalidation\.yml|agent-authorize\.yml|agent-auto-merge\.yml|agent-builder-publish\.yml|agent-builder\.yml|agent-ci-fixer\.yml|agent-codex-review\.yml|agent-review-acknowledgement\.yml|agent-ruleset-sync\.yml|agent-verified-gate\.yml|agent-verify\.yml|ci\.yml|pr108-remediate\.yml))|docs/(autonomous-development-pipeline\.md|adr/0003-autonomous-development-pipeline-v2\.md))$' && exit 1 || true
           git diff --cached --binary > "$RUNNER_TEMP/remediation.patch"
-          sha256sum "$RUNNER_TEMP/remediation.patch" > "$RUNNER_TEMP/remediation.patch.sha256"
+          (cd "$RUNNER_TEMP" && sha256sum remediation.patch > remediation.patch.sha256)
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: pr108-remediation-${{ github.run_id }}
