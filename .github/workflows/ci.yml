@@ -228,7 +228,7 @@ jobs:
       - run: npm install --global npm@11.17.0
       - run: npm ci --ignore-scripts
         working-directory: frontend
-      - name: npm audit with bounded network retry
+      - name: Production npm audit with bounded network retry
         working-directory: frontend
         env:
           npm_config_fetch_timeout: "60000"
@@ -256,7 +256,11 @@ jobs:
             done
           }
           audit_with_retry npm audit --omit=dev --audit-level=high
-          audit_with_retry npm audit --audit-level=critical
+      - name: Critical dependency scan (Trivy)
+        run: >-
+          docker run --rm -v "$PWD:/work:ro" aquasec/trivy:0.66.0
+          filesystem --exit-code 1 --severity CRITICAL --scanners vuln
+          --skip-version-check /work/frontend
       - name: Repository secret and misconfiguration scan
         run: >-
           docker run --rm -v "$PWD:/work:ro" aquasec/trivy:0.66.0
