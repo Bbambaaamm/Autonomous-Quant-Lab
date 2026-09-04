@@ -161,6 +161,34 @@ function mergeDecision(input) {
   return { ok: true };
 }
 
+function draftReadyResponseDecision({
+  tokenPresent,
+  httpOk,
+  graphqlErrors,
+  releasedId,
+  expectedId,
+  releasedIsDraft,
+}) {
+  if (!tokenPresent) return { ok: false, reason: "READY_TOKEN_MISSING" };
+  if (httpOk !== true) return { ok: false, reason: "READY_HTTP_FAILED" };
+  if (graphqlErrors !== undefined && !Array.isArray(graphqlErrors)) {
+    return { ok: false, reason: "READY_RESPONSE_MALFORMED" };
+  }
+  if (Array.isArray(graphqlErrors) && graphqlErrors.length > 0) {
+    return { ok: false, reason: "READY_GRAPHQL_FAILED" };
+  }
+  if (typeof expectedId !== "string" || expectedId.length === 0 || releasedId !== expectedId || releasedIsDraft !== false) {
+    return { ok: false, reason: "READY_RESPONSE_MALFORMED" };
+  }
+  return { ok: true };
+}
+
+function draftReadyPostconditionDecision({ draft }) {
+  return draft === false
+    ? { ok: true }
+    : { ok: false, reason: "READY_DRAFT_POSTCONDITION_FAILED" };
+}
+
 const BUILDER_DENIED_PREFIXES = [
   ".github/",
   "backend/alembic/",
@@ -263,6 +291,8 @@ module.exports = {
   verificationDecision,
   gateDecision,
   mergeDecision,
+  draftReadyResponseDecision,
+  draftReadyPostconditionDecision,
   safeRelativePath,
   builderPathAllowed,
   validateBuilderPaths,
