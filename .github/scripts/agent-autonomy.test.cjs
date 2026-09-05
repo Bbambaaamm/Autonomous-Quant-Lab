@@ -333,7 +333,11 @@ test("Issue #118 maintenance carries and freshly revalidates requester authority
     assert.match(section, /username:actor/);
   }
   assert.ok((gate.match(/await maintainerOk\(\)/g) || []).length >= 4);
-  assert.ok((merge.match(/await maintainerOk\(\)/g) || []).length >= 3);
+  assert.ok((merge.match(/await maintainerOk\(\)/g) || []).length >= 2);
+  const mergeWrite = merge.indexOf("github.rest.pulls.merge");
+  const auditWrite = merge.indexOf("github.rest.issues.createComment", mergeWrite);
+  assert.ok(mergeWrite >= 0 && auditWrite > mergeWrite);
+  assert.doesNotMatch(merge.slice(mergeWrite, auditWrite), /maintainerOk/);
   assert.match(gate, /MAINTAINER_PERMISSION_REVOKED/);
   assert.match(merge, /MAINTAINER_PERMISSION_REVOKED/);
 });
