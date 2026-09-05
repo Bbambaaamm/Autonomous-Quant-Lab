@@ -246,3 +246,36 @@ test("Issue #118 Builder branch identity binds the authorized base and remains r
   assert.equal(first, branchFor(109, specHash, baseA));
   assert.notEqual(first, branchFor(109, specHash, baseB));
 });
+
+test("Issue #118 Builder revalidates authorization immediately before trigger-capable writes", () => {
+  const workflow = fs.readFileSync(".github/workflows/agent-builder-publish.yml", "utf8");
+  const publish = workflow.slice(workflow.indexOf("- id: p"), workflow.indexOf("- name: Link, transition"));
+  const revalidation = publish.slice(publish.indexOf("revalidate_issue(){"), publish.indexOf("owned(){"));
+  assert.match(revalidation, /authorizationDecision/);
+  assert.match(revalidation, /p\.isImplementation\(issue\.labels\)/);
+  assert.match(revalidation, /exactAgentState\(issue\.labels,\"agent:running\"\)/);
+  assert.match(revalidation, /GH_TOKEN=\"\$JOB_TOKEN\" gh api/);
+
+  const push = publish.indexOf('git -c http.extraheader="$AUTH_HEADER" push origin "HEAD:refs/heads/$branch"');
+  const create = publish.indexOf('gh pr create --repo "$GH_REPO"');
+  const calls = [...publish.matchAll(/^\s+revalidate_issue$/gm)].map(match => match.index);
+  assert.equal(calls.length, 2);
+  assert.ok(calls[0] < push);
+  assert.ok(calls[1] > push && calls[1] < create);
+});
+
+test("Issue #118 control-plane recovery revalidates full binding before each lifecycle write", () => {
+  const workflow = fs.readFileSync(".github/workflows/agent-control-plane-remediation.yml", "utf8");
+  const recover = workflow.slice(workflow.indexOf("  recover:"), workflow.indexOf("\n  gate:"));
+  assert.match(recover, /const baseBindingOk=.*s\.auth\.ok&&s\.auth\.specHash===spec.*s\.pr\.head\.sha===headSha/);
+  assert.match(recover, /const fullBindingOk=.*baseBindingOk\(s\).*fullLinkageDecision/);
+
+  const issueWrite = recover.indexOf("await setState(issueNumber");
+  const prWrite = recover.indexOf("await setState(prNumber");
+  const issueGuard = recover.lastIndexOf("if(!fullBindingOk(s))", issueWrite);
+  const prGuard = recover.lastIndexOf("if(!fullBindingOk(s))", prWrite);
+  assert.ok(issueGuard >= 0 && issueGuard < issueWrite);
+  assert.ok(prGuard > issueWrite && prGuard < prWrite);
+  assert.match(recover.slice(issueGuard, issueWrite), /RECOVERY_STATE_CHANGED/);
+  assert.match(recover.slice(prGuard, prWrite), /RECOVERY_PARTIAL_CONFLICT/);
+});
