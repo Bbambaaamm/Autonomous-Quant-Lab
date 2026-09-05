@@ -68,6 +68,14 @@ The ruleset therefore remains unchanged and permanently enabled.
 
 A final merge job uses `AGENT_PUBLISH_TOKEN` only after the trusted gate succeeds. It revalidates the exact head, current authorization, two-sided durable linkage, complete allowlisted file enumeration including rename sources, newest authoritative CI, current-main ancestry, verified lifecycle, exactly one bot-authored maintenance evidence marker, and bot-authored successful `agent-verified-gate`. It then performs the complete evaluation a second time immediately before the exact-head merge request. Any stale, active, ambiguous, incomplete, or halted condition fails closed.
 
+### Issue #118 hardening contract
+
+Builder publication branches are deterministic for one authorization base and include the authorized base SHA: `agent/issue-${ISSUE}-${SPEC:0:12}-${BASE:0:12}`. Retrying the same Issue/spec/base therefore reuses the same identity, while reauthorization after `main` advances uses a different branch and cannot collide with a retired branch from an older base.
+
+Control-plane recovery, gate, and merge treat the human requester's authority as mutable. The actor identity is carried from the trusted request artifact and repository `write`, `maintain`, or `admin` permission is freshly checked before authorization-sensitive gate and merge writes. The permission check immediately before the irreversible exact-head merge is mandatory. Once GitHub reports that merge as successful, the audit comment records that completed fact even if authority changes afterwards; an already-completed merge must not lose its sole audit record because a post-merge permission lookup changes or fails.
+
+The live `Protect main` ruleset is also a mutable prerequisite. Gate and merge require one active branch ruleset with no bypass actors, `main` included and no exclusions, strict required-status enforcement, pull-request/deletion/non-fast-forward protection, and the exact trusted required check set `api`, `container-build`, `frontend`, `integration-postgres`, `production-smoke`, `quality`, `security`, `unit-research`, and `agent-verified-gate`. Every required check must be bound to the GitHub Actions integration ID `15368`. Any missing, duplicated, extra, or differently bound required check fails closed.
+
 ## Consequences
 
 - Normal application Issues still use the one-authorization zero-click Builder → CI → Reviewer → verifier → gate → auto-merge path.
