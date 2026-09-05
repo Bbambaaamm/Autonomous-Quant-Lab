@@ -312,6 +312,7 @@ test("Issue #118 maintenance gate and merge require live strict Protect main rul
     assert.match(section, /strict_required_status_checks_policy===true/);
     assert.match(section, /required\.some\(x=>x\.context===a\.GATE_CONTEXT\)/);
     assert.match(section, /include\.includes\(`refs\/heads\/\$\{def\}`\)/);
+    assert.match(section, /Array\.isArray\(exclude\)&&exclude\.length===0/);
     assert.match(section, /ruleset=await rulesetHealthy\(\)/);
     assert.match(section, /const ok=ruleset&&/);
   }
