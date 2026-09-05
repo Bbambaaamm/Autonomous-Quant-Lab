@@ -103,35 +103,50 @@ jobs:
         env: {ISSUE: '${{ inputs.issue_number }}', SPEC: '${{ inputs.spec_hash }}', PR: '${{ steps.p.outputs.pr }}', HEAD: '${{ steps.p.outputs.sha }}', BASE: '${{ inputs.base_sha }}', READY_TOKEN: '${{ secrets.AGENT_PUBLISH_TOKEN }}'}
         with:
           script: |
-            const p=require('./.github/scripts/agent-pipeline.cjs'),a=require('./.github/scripts/agent-autonomy.cjs'),n=Number(process.env.ISSUE),prn=Number(process.env.PR),repo=`${context.repo.owner}/${context.repo.repo}`;
-            let {data:pr}=await github.rest.pulls.get({...context.repo,pull_number:prn});
-            let {data:i}=await github.rest.issues.get({...context.repo,issue_number:n});
-            let ic=await github.paginate(github.rest.issues.listComments,{...context.repo,issue_number:n,per_page:100});
-            const auth=a.authorizationDecision({comments:ic,repo,issueNumber:n,title:i.title,body:i.body||'',labels:i.labels,state:i.state});
-            const commits=await github.paginate(github.rest.pulls.listCommits,{...context.repo,pull_number:prn,per_page:100});
-            if(!auth.ok||auth.specHash!==process.env.SPEC||pr.state!=='open'||pr.head.sha!==process.env.HEAD||pr.base.ref!==context.payload.repository.default_branch||p.parseAgentIssue(pr.body)!==n||!a.exactAgentState(i.labels,'agent:running')||commits.length!==1||commits[0].parents?.[0]?.sha!==process.env.BASE) return core.setFailed('PUBLISH_SCOPE_REJECTED');
-            let pc=await github.paginate(github.rest.issues.listComments,{...context.repo,issue_number:prn,per_page:100}),il=p.durablePrLinkDecision(ic,{...context.repo,issueNumber:n}),pl=p.durableIssueLinkDecision(pc,{...context.repo,prNumber:prn});
-            if(!il.ok||!pl.ok||(il.prNumber!==null&&il.prNumber!==prn)||(pl.issueNumber!==null&&pl.issueNumber!==n)) return core.setFailed('LINK_CONFLICT');
+            const p=require('./.github/scripts/agent-pipeline.cjs'),a=require('./.github/scripts/agent-autonomy.cjs'),n=Number(process.env.ISSUE),prn=Number(process.env.PR),repo=`${context.repo.owner}/${context.repo.repo}`,def=context.payload.repository.default_branch;
+            const snapshot=async()=>{
+              const {data:pr}=await github.rest.pulls.get({...context.repo,pull_number:prn});
+              const {data:i}=await github.rest.issues.get({...context.repo,issue_number:n});
+              const ic=await github.paginate(github.rest.issues.listComments,{...context.repo,issue_number:n,per_page:100});
+              const pc=await github.paginate(github.rest.issues.listComments,{...context.repo,issue_number:prn,per_page:100});
+              const commits=await github.paginate(github.rest.pulls.listCommits,{...context.repo,pull_number:prn,per_page:100});
+              const auth=a.authorizationDecision({comments:ic,repo,issueNumber:n,title:i.title,body:i.body||'',labels:i.labels,state:i.state});
+              const il=p.durablePrLinkDecision(ic,{...context.repo,issueNumber:n}),pl=p.durableIssueLinkDecision(pc,{...context.repo,prNumber:prn});
+              return {pr,i,ic,pc,commits,auth,il,pl};
+            };
+            const immutableBindingOk=s=>s.auth.ok&&s.auth.specHash===process.env.SPEC&&s.i.state==='open'&&p.isImplementation(s.i.labels)&&s.pr.state==='open'&&s.pr.head.sha===process.env.HEAD&&s.pr.base.ref===def&&p.parseAgentIssue(s.pr.body)===n&&s.commits.length===1&&s.commits[0].parents?.[0]?.sha===process.env.BASE;
+            const linkConflict=s=>!s.il.ok||!s.pl.ok||(s.il.prNumber!==null&&s.il.prNumber!==prn)||(s.pl.issueNumber!==null&&s.pl.issueNumber!==n);
+            const fullLinkOk=s=>p.fullLinkageDecision({prBody:s.pr.body,prComments:s.pc,issueComments:s.ic,...context.repo,issueNumber:n,prNumber:prn}).ok;
+            const prStates=s=>a.labelNames(s.pr.labels).filter(x=>x.startsWith('agent:'));
+            const preLinkLifecycleOk=s=>(a.exactAgentState(s.i.labels,'agent:running')||a.exactAgentState(s.i.labels,'agent:pr'))&&(prStates(s).length===0||(prStates(s).length===1&&prStates(s)[0]==='agent:pr'));
             const marker=`<!-- agent-link:v1 repo=${repo} issue=${n} pr=${prn} -->`;
-            if(il.prNumber===null) await github.rest.issues.createComment({...context.repo,issue_number:n,body:`Linked autonomous PR #${prn}.\n\n${marker}`});
-            if(pl.issueNumber===null) await github.rest.issues.createComment({...context.repo,issue_number:prn,body:`Linked authorized Issue #${n}.\n\n${marker}`});
+            let s=await snapshot();
+            if(!immutableBindingOk(s)||linkConflict(s)||!preLinkLifecycleOk(s)) return core.setFailed('PUBLISH_SCOPE_REJECTED');
+            if(s.il.prNumber===null){
+              s=await snapshot(); if(!immutableBindingOk(s)||linkConflict(s)||!preLinkLifecycleOk(s)) return core.setFailed('LINK_BINDING_CHANGED');
+              if(s.il.prNumber===null) await github.rest.issues.createComment({...context.repo,issue_number:n,body:`Linked autonomous PR #${prn}.\n\n${marker}`});
+            }
+            s=await snapshot();
+            if(!immutableBindingOk(s)||linkConflict(s)||!preLinkLifecycleOk(s)) return core.setFailed('LINK_BINDING_CHANGED');
+            if(s.pl.issueNumber===null){
+              s=await snapshot(); if(!immutableBindingOk(s)||linkConflict(s)||!preLinkLifecycleOk(s)) return core.setFailed('LINK_BINDING_CHANGED');
+              if(s.pl.issueNumber===null) await github.rest.issues.createComment({...context.repo,issue_number:prn,body:`Linked authorized Issue #${n}.\n\n${marker}`});
+            }
             const state=async(num,labels)=>github.rest.issues.setLabels({...context.repo,issue_number:num,labels:[...a.labelNames(labels).filter(x=>!x.startsWith('agent:')),'agent:pr']});
-            ({data:i}=await github.rest.issues.get({...context.repo,issue_number:n}));
-            if(!a.exactAgentState(i.labels,'agent:running')) return core.setFailed('PUBLISH_STATE_CHANGED');
-            await state(n,i.labels);
-            ({data:pr}=await github.rest.pulls.get({...context.repo,pull_number:prn}));
-            const prAgentStates=a.labelNames(pr.labels).filter(x=>x.startsWith('agent:'));
-            if(prAgentStates.length>0&&!(prAgentStates.length===1&&prAgentStates[0]==='agent:pr')) return core.setFailed('PUBLISH_STATE_CHANGED');
-            await state(prn,pr.labels);
+            s=await snapshot();
+            if(!immutableBindingOk(s)||!fullLinkOk(s)||linkConflict(s)||!preLinkLifecycleOk(s)) return core.setFailed('PUBLISH_STATE_CHANGED');
+            if(a.exactAgentState(s.i.labels,'agent:running')) await state(n,s.i.labels);
+            s=await snapshot();
+            const states=prStates(s);
+            if(!immutableBindingOk(s)||!fullLinkOk(s)||linkConflict(s)||!a.exactAgentState(s.i.labels,'agent:pr')||(states.length>0&&!(states.length===1&&states[0]==='agent:pr'))) return core.setFailed('PUBLISH_STATE_CHANGED');
+            if(states.length===0) await state(prn,s.pr.labels);
 
-            ({data:pr}=await github.rest.pulls.get({...context.repo,pull_number:prn}));
-            ({data:i}=await github.rest.issues.get({...context.repo,issue_number:n}));
-            pc=await github.paginate(github.rest.issues.listComments,{...context.repo,issue_number:prn,per_page:100});
-            ic=await github.paginate(github.rest.issues.listComments,{...context.repo,issue_number:n,per_page:100});
-            const readyAuth=a.authorizationDecision({comments:ic,repo,issueNumber:n,title:i.title,body:i.body||'',labels:i.labels,state:i.state});
-            const readyLifecycle=a.lifecyclePairDecision(pr.labels,i.labels,'agent:pr');
-            const readyLink=p.fullLinkageDecision({prBody:pr.body,prComments:pc,issueComments:ic,...context.repo,issueNumber:n,prNumber:prn});
-            if(!readyAuth.ok||readyAuth.specHash!==process.env.SPEC||pr.state!=='open'||pr.head.sha!==process.env.HEAD||pr.base.ref!==context.payload.repository.default_branch||p.parseAgentIssue(pr.body)!==n||!readyLifecycle.ok||!readyLink.ok) return core.setFailed('READY_PRECONDITION_FAILED');
+            s=await snapshot();
+            const readyAuth=s.auth;
+            const readyLifecycle=a.lifecyclePairDecision(s.pr.labels,s.i.labels,'agent:pr');
+            const readyLink=p.fullLinkageDecision({prBody:s.pr.body,prComments:s.pc,issueComments:s.ic,...context.repo,issueNumber:n,prNumber:prn});
+            if(!immutableBindingOk(s)||!readyAuth.ok||readyAuth.specHash!==process.env.SPEC||!readyLifecycle.ok||!readyLink.ok) return core.setFailed('READY_PRECONDITION_FAILED');
+            let {pr}=s;
             if(pr.draft){
               const readyToken=process.env.READY_TOKEN;
               if(!readyToken) return core.setFailed(a.draftReadyResponseDecision({tokenPresent:false}).reason);
@@ -158,13 +173,10 @@ jobs:
               });
               if(!decision.ok) return core.setFailed(`${decision.reason}:${response.status}`);
             }
-            ({data:pr}=await github.rest.pulls.get({...context.repo,pull_number:prn}));
+            s=await snapshot(); pr=s.pr;
             const readyPostcondition=a.draftReadyPostconditionDecision({draft:pr.draft});
             if(!readyPostcondition.ok) return core.setFailed(readyPostcondition.reason);
-            ({data:i}=await github.rest.issues.get({...context.repo,issue_number:n}));
-            pc=await github.paginate(github.rest.issues.listComments,{...context.repo,issue_number:prn,per_page:100});
-            ic=await github.paginate(github.rest.issues.listComments,{...context.repo,issue_number:n,per_page:100});
-            if(!a.lifecyclePairDecision(pr.labels,i.labels,'agent:pr').ok||!p.fullLinkageDecision({prBody:pr.body,prComments:pc,issueComments:ic,...context.repo,issueNumber:n,prNumber:prn}).ok||pr.head.sha!==process.env.HEAD||pr.draft) return core.setFailed('PUBLISH_POSTCONDITION_FAILED');
+            if(!immutableBindingOk(s)||!a.lifecyclePairDecision(pr.labels,s.i.labels,'agent:pr').ok||!p.fullLinkageDecision({prBody:pr.body,prComments:s.pc,issueComments:s.ic,...context.repo,issueNumber:n,prNumber:prn}).ok||pr.draft) return core.setFailed('PUBLISH_POSTCONDITION_FAILED');
 
             const runs=await github.paginate(github.rest.actions.listWorkflowRunsForRepo,{...context.repo,event:'pull_request',head_sha:pr.head.sha,per_page:100});
             const exact=runs.filter(run=>run.name==='CI'&&run.head_sha===pr.head.sha&&run.pull_requests?.length===1&&run.pull_requests[0].number===prn).sort((x,y)=>y.id-x.id);
@@ -172,9 +184,9 @@ jobs:
             const ci=exact[0];
             if(ci.status!=='completed') return core.notice('POST_LINK_CI_IN_PROGRESS');
             if(ci.conclusion==='success'){
-              await github.rest.actions.createWorkflowDispatch({...context.repo,workflow_id:'agent-codex-review.yml',ref:context.payload.repository.default_branch,inputs:{pr_number:String(prn),head_sha:pr.head.sha}});
+              await github.rest.actions.createWorkflowDispatch({...context.repo,workflow_id:'agent-codex-review.yml',ref:def,inputs:{pr_number:String(prn),head_sha:pr.head.sha}});
             }else if(ci.conclusion==='failure'){
-              await github.rest.actions.createWorkflowDispatch({...context.repo,workflow_id:'agent-ci-fixer.yml',ref:context.payload.repository.default_branch,inputs:{invocation_mode:'failed-ci',pr_number:String(prn),head_sha:pr.head.sha,ci_run_id:String(ci.id)}});
+              await github.rest.actions.createWorkflowDispatch({...context.repo,workflow_id:'agent-ci-fixer.yml',ref:def,inputs:{invocation_mode:'failed-ci',pr_number:String(prn),head_sha:pr.head.sha,ci_run_id:String(ci.id)}});
             }else{
               return core.setFailed(`POST_LINK_CI_UNSUPPORTED_CONCLUSION:${ci.conclusion}`);
             }
