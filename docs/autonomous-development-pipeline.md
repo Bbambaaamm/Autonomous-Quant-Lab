@@ -316,3 +316,32 @@ The fixer job-level guard treats an explicit reusable `review-block` invocation 
 regardless of the caller's inherited event context. Direct `workflow_run` entry remains limited to
 failed authoritative CI, while `workflow_dispatch` is limited to an explicit failed-CI replay; the
 inner trusted invocation decision and exact linkage, lifecycle, SHA, and CI checks remain mandatory.
+
+### Base-bound Builder publication and control-plane maintenance
+
+Builder branch identity is deterministic for one authorized base:
+`agent/issue-${ISSUE}-${SPEC:0:12}-${BASE:0:12}`. Retries of the same
+Issue/spec/base reuse the same identity. After `main` advances and the Issue is
+reauthorized, the new base changes the branch identity, so a retired branch from an
+older base cannot collide with the new sealed candidate.
+
+Protected `.github` and agent-pipeline changes use the two-workflow control-plane
+maintenance path; they never require disabling or weakening `Protect main`. The
+human request binds the exact Issue, PR and head SHA. Its actor must have
+`write`, `maintain`, or `admin` permission. That actor identity is carried into the
+trusted follower, and authority is freshly revalidated before authorization-sensitive
+gate writes and immediately before the irreversible exact-head merge.
+
+Gate and merge also re-read the live `Protect main` ruleset. They require exactly
+one active branch ruleset protecting `main`, no exclusions or bypass actors, strict
+required-status enforcement, pull-request/deletion/non-fast-forward protection, and
+exactly these required checks, all bound to GitHub Actions integration `15368`:
+`api`, `container-build`, `frontend`, `integration-postgres`, `production-smoke`,
+`quality`, `security`, `unit-research`, and `agent-verified-gate`. Missing,
+duplicated, extra, or differently bound required checks fail closed.
+
+Once GitHub reports an exact-head merge as successful, the maintenance Issue audit
+comment records that completed irreversible action. A permission change after the
+successful merge does not suppress the audit record; requester authority is a
+precondition for privileged writes and the merge itself, not for recording a merge
+that has already happened.
