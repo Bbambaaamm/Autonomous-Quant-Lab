@@ -300,7 +300,7 @@ test("Issue #118 control-plane recovery revalidates mutable authority, CI and an
   assert.ok(prGuard > issueWrite && prGuard < prWrite);
 });
 
-test("Issue #118 maintenance gate and merge require live strict Protect main ruleset with no bypass", () => {
+test("Issue #118 maintenance gate and merge preserve the exact trusted Protect main checks", () => {
   const workflow = fs.readFileSync(".github/workflows/agent-control-plane-remediation.yml", "utf8");
   const gate = workflow.slice(workflow.indexOf("  gate:"), workflow.indexOf("\n  merge:"));
   const merge = workflow.slice(workflow.indexOf("  merge:"));
@@ -310,10 +310,30 @@ test("Issue #118 maintenance gate and merge require live strict Protect main rul
     assert.match(section, /name==='Protect main'.*target==='branch'.*enforcement==='active'/);
     assert.match(section, /r\.bypass_actors\.length===0/);
     assert.match(section, /strict_required_status_checks_policy===true/);
-    assert.match(section, /required\.filter\(x=>x\.context===a\.GATE_CONTEXT&&x\.integration_id===15368\)\.length===1/);
+    assert.match(section, /const expectedChecks=\['api','container-build','frontend','integration-postgres','production-smoke','quality','security','unit-research',a\.GATE_CONTEXT\]/);
+    assert.match(section, /required\.length===expectedChecks\.length&&expectedChecks\.every\(ctx=>required\.filter\(x=>x\.context===ctx&&x\.integration_id===15368\)\.length===1\)/);
     assert.match(section, /include\.includes\(`refs\/heads\/\$\{def\}`\)/);
     assert.match(section, /Array\.isArray\(exclude\)&&exclude\.length===0/);
     assert.match(section, /ruleset=await rulesetHealthy\(\)/);
-    assert.match(section, /const ok=ruleset&&/);
+    assert.match(section, /maintainer&&ruleset&&/);
   }
+});
+
+test("Issue #118 maintenance carries and freshly revalidates requester authority through gate and merge writes", () => {
+  const workflow = fs.readFileSync(".github/workflows/agent-control-plane-remediation.yml", "utf8");
+  const prepare = workflow.slice(workflow.indexOf("  prepare:"), workflow.indexOf("\n  independent-review:"));
+  const gate = workflow.slice(workflow.indexOf("  gate:"), workflow.indexOf("\n  merge:"));
+  const merge = workflow.slice(workflow.indexOf("  merge:"));
+  assert.match(prepare, /request_actor: \$\{\{ steps\.prepare\.outputs\.request_actor \}\}/);
+  assert.match(prepare, /request_actor:request\.actor/);
+  for (const section of [gate, merge]) {
+    assert.match(section, /ACTOR: '\$\{\{ needs\.prepare\.outputs\.request_actor \}\}'/);
+    assert.match(section, /const maintainerOk=async\(\)=>/);
+    assert.match(section, /getCollaboratorPermissionLevel/);
+    assert.match(section, /username:actor/);
+  }
+  assert.ok((gate.match(/await maintainerOk\(\)/g) || []).length >= 4);
+  assert.ok((merge.match(/await maintainerOk\(\)/g) || []).length >= 3);
+  assert.match(gate, /MAINTAINER_PERMISSION_REVOKED/);
+  assert.match(merge, /MAINTAINER_PERMISSION_REVOKED/);
 });
