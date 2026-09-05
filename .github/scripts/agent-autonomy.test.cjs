@@ -281,7 +281,7 @@ test("Issue #118 Builder metadata writes revalidate complete authorization, head
   assert.ok(metadata.lastIndexOf("fullLinkOk(s)",prStateWrite)>issueStateWrite);
 });
 
-test("Issue #118 control-plane recovery revalidates mutable authority, CI and ancestry before writes", () => {
+test("Issue #118 control-plane recovery revalidates mutable authority, ruleset, CI and ancestry before writes", () => {
   const workflow = fs.readFileSync(".github/workflows/agent-control-plane-remediation.yml", "utf8");
   const recover = workflow.slice(workflow.indexOf("  recover:"), workflow.indexOf("\n  gate:"));
   assert.match(recover, /permissions: \{actions: read, contents: read, issues: write, pull-requests: write\}/);
@@ -289,7 +289,18 @@ test("Issue #118 control-plane recovery revalidates mutable authority, CI and an
   assert.match(recover, /compareCommits/);
   assert.match(recover, /listWorkflowRunsForRepo/);
   assert.match(recover, /successfulRequiredJobs/);
-  assert.match(recover, /const mutableGuardsOk=.*permission\.permission.*behind_by===0.*ciRun\.conclusion==='success'.*successfulRequiredJobs/);
+  assert.match(recover, /const rulesetHealthy=async\(\)=>/);
+  assert.match(recover, /GET \/repos\/\{owner\}\/\{repo\}\/rulesets/);
+  assert.match(recover, /name==='Protect main'.*target==='branch'.*enforcement==='active'/);
+  assert.match(recover, /r\.bypass_actors\.length===0/);
+  assert.match(recover, /strict_required_status_checks_policy===true/);
+  assert.match(recover, /const expectedChecks=\['api','container-build','frontend','integration-postgres','production-smoke','quality','security','unit-research',a\.GATE_CONTEXT\]/);
+  assert.match(recover, /required\.length===expectedChecks\.length&&expectedChecks\.every\(ctx=>required\.filter\(x=>x\.context===ctx&&x\.integration_id===15368\)\.length===1\)/);
+  assert.match(recover, /include\.includes\(`refs\/heads\/\$\{def\}`\)/);
+  assert.match(recover, /Array\.isArray\(exclude\)&&exclude\.length===0/);
+  assert.match(recover, /const ruleset=await rulesetHealthy\(\)/);
+  assert.match(recover, /return \{pr,issue,ic,pc,auth,permission,comparison,ciRun,jobs,ruleset\}/);
+  assert.match(recover, /const mutableGuardsOk=s=>s\.ruleset&&\['admin','maintain','write'\]\.includes\(s\.permission\.permission\).*behind_by===0.*ciRun\.conclusion==='success'.*successfulRequiredJobs/);
   assert.match(recover, /const baseBindingOk=.*entryOk\(s\)&&mutableGuardsOk\(s\).*s\.auth\.ok.*s\.pr\.head\.sha===headSha/);
   assert.match(recover, /const fullBindingOk=.*baseBindingOk\(s\).*fullLinkageDecision/);
   const issueWrite = recover.indexOf("await setState(issueNumber");
