@@ -192,7 +192,7 @@ test("Issue #116 Builder keeps metadata on GITHUB_TOKEN and isolates Draft-to-Re
   const metadataStart = workflow.indexOf("- name: Link, transition, release Draft and recover completed CI");
   const metadata = workflow.slice(metadataStart);
   const releaseStart = metadata.indexOf("if(pr.draft){");
-  const releaseEnd = metadata.indexOf("({data:pr}=await github.rest.pulls.get", releaseStart);
+  const releaseEnd = metadata.indexOf("s=await snapshot(); pr=s.pr", releaseStart);
   const release = metadata.slice(releaseStart, releaseEnd);
   const beforeRelease = metadata.slice(0, releaseStart);
   const afterRelease = metadata.slice(releaseEnd);
@@ -264,18 +264,55 @@ test("Issue #118 Builder revalidates authorization immediately before trigger-ca
   assert.ok(calls[1] > push && calls[1] < create);
 });
 
-test("Issue #118 control-plane recovery revalidates full binding before each lifecycle write", () => {
+test("Issue #118 Builder metadata writes revalidate complete authorization, head and linkage", () => {
+  const workflow = fs.readFileSync(".github/workflows/agent-builder-publish.yml", "utf8");
+  const metadata = workflow.slice(workflow.indexOf("- name: Link, transition, release Draft"));
+  assert.match(metadata, /const snapshot=async\(\)=>/);
+  assert.match(metadata, /const immutableBindingOk=.*s\.auth\.ok.*s\.pr\.head\.sha===process\.env\.HEAD.*parents\?\.\[0\]\?\.sha===process\.env\.BASE/);
+  assert.match(metadata, /const fullLinkOk=.*fullLinkageDecision/);
+  assert.match(metadata, /LINK_BINDING_CHANGED/);
+  const issueLinkWrite=metadata.indexOf("issue_number:n,body:`Linked autonomous PR");
+  const prLinkWrite=metadata.indexOf("issue_number:prn,body:`Linked authorized Issue");
+  const issueStateWrite=metadata.indexOf("await state(n,s.i.labels)");
+  const prStateWrite=metadata.indexOf("await state(prn,s.pr.labels)");
+  assert.ok(metadata.lastIndexOf("immutableBindingOk(s)",issueLinkWrite)>=0);
+  assert.ok(metadata.lastIndexOf("immutableBindingOk(s)",prLinkWrite)>issueLinkWrite);
+  assert.ok(metadata.lastIndexOf("fullLinkOk(s)",issueStateWrite)>prLinkWrite);
+  assert.ok(metadata.lastIndexOf("fullLinkOk(s)",prStateWrite)>issueStateWrite);
+});
+
+test("Issue #118 control-plane recovery revalidates mutable authority, CI and ancestry before writes", () => {
   const workflow = fs.readFileSync(".github/workflows/agent-control-plane-remediation.yml", "utf8");
   const recover = workflow.slice(workflow.indexOf("  recover:"), workflow.indexOf("\n  gate:"));
-  assert.match(recover, /const baseBindingOk=.*s\.auth\.ok&&s\.auth\.specHash===spec.*s\.pr\.head\.sha===headSha/);
+  assert.match(recover, /permissions: \{actions: read, contents: read, issues: write, pull-requests: write\}/);
+  assert.match(recover, /getCollaboratorPermissionLevel/);
+  assert.match(recover, /compareCommits/);
+  assert.match(recover, /listWorkflowRunsForRepo/);
+  assert.match(recover, /successfulRequiredJobs/);
+  assert.match(recover, /const mutableGuardsOk=.*permission\.permission.*behind_by===0.*ciRun\.conclusion==='success'.*successfulRequiredJobs/);
+  assert.match(recover, /const baseBindingOk=.*entryOk\(s\)&&mutableGuardsOk\(s\).*s\.auth\.ok.*s\.pr\.head\.sha===headSha/);
   assert.match(recover, /const fullBindingOk=.*baseBindingOk\(s\).*fullLinkageDecision/);
-
   const issueWrite = recover.indexOf("await setState(issueNumber");
   const prWrite = recover.indexOf("await setState(prNumber");
   const issueGuard = recover.lastIndexOf("if(!fullBindingOk(s))", issueWrite);
   const prGuard = recover.lastIndexOf("if(!fullBindingOk(s))", prWrite);
   assert.ok(issueGuard >= 0 && issueGuard < issueWrite);
   assert.ok(prGuard > issueWrite && prGuard < prWrite);
-  assert.match(recover.slice(issueGuard, issueWrite), /RECOVERY_STATE_CHANGED/);
-  assert.match(recover.slice(prGuard, prWrite), /RECOVERY_PARTIAL_CONFLICT/);
+});
+
+test("Issue #118 maintenance gate and merge require live strict Protect main ruleset with no bypass", () => {
+  const workflow = fs.readFileSync(".github/workflows/agent-control-plane-remediation.yml", "utf8");
+  const gate = workflow.slice(workflow.indexOf("  gate:"), workflow.indexOf("\n  merge:"));
+  const merge = workflow.slice(workflow.indexOf("  merge:"));
+  for (const section of [gate, merge]) {
+    assert.match(section, /const rulesetHealthy=async\(\)=>/);
+    assert.match(section, /GET \/repos\/\{owner\}\/\{repo\}\/rulesets/);
+    assert.match(section, /name==='Protect main'.*target==='branch'.*enforcement==='active'/);
+    assert.match(section, /r\.bypass_actors\.length===0/);
+    assert.match(section, /strict_required_status_checks_policy===true/);
+    assert.match(section, /required\.some\(x=>x\.context===a\.GATE_CONTEXT\)/);
+    assert.match(section, /include\.includes\(`refs\/heads\/\$\{def\}`\)/);
+    assert.match(section, /ruleset=await rulesetHealthy\(\)/);
+    assert.match(section, /const ok=ruleset&&/);
+  }
 });
