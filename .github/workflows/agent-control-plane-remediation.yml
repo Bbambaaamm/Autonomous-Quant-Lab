@@ -12,7 +12,41 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # This job is deliberately isolated: it executes no checkout/candidate code and
+  # the elevated credential is used by github-script for GET requests only.
+  ruleset-audit:
+    runs-on: ubuntu-latest
+    permissions: {actions: read, contents: read}
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: control-plane-request-${{ github.event.workflow_run.id }}
+          path: ${{ runner.temp }}/request
+          github-token: ${{ github.token }}
+          run-id: ${{ github.event.workflow_run.id }}
+      - uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        env: {REQUEST_FILE: '${{ runner.temp }}/request/request.json', OUTPUT_FILE: '${{ runner.temp }}/ruleset-audit.json'}
+        with:
+          github-token: ${{ secrets.AGENT_PUBLISH_TOKEN }}
+          script: |
+            const fs = require('fs');
+            const request = JSON.parse(fs.readFileSync(process.env.REQUEST_FILE));
+            const run = context.payload.workflow_run;
+            if (Number(request.requestRunId) !== Number(run.id) || Number(request.requestRunAttempt) !== Number(run.run_attempt) ||
+                request.actor !== run.actor?.login) return core.setFailed('RULESET_AUDIT_REQUEST_PROVENANCE_INVALID');
+            const {data: summaries} = await github.request('GET /repos/{owner}/{repo}/rulesets', context.repo);
+            const summary = summaries.filter(x => x.name === 'Protect main' && x.target === 'branch');
+            if (summary.length !== 1) return core.setFailed('RULESET_AMBIGUOUS');
+            const {data: ruleset} = await github.request('GET /repos/{owner}/{repo}/rulesets/{ruleset_id}', {...context.repo, ruleset_id: summary[0].id});
+            if (!Object.hasOwn(ruleset, 'bypass_actors') || !Array.isArray(ruleset.bypass_actors)) return core.setFailed('RULESET_BYPASS_UNKNOWN');
+            fs.writeFileSync(process.env.OUTPUT_FILE, JSON.stringify({repo: `${context.repo.owner}/${context.repo.repo}`,
+              requestRunId: Number(run.id), requestRunAttempt: Number(run.run_attempt),
+              defaultBranch: context.payload.repository.default_branch, ruleset}));
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with: {name: 'control-plane-ruleset-${{ github.run_id }}', path: '${{ runner.temp }}/ruleset-audit.json', if-no-files-found: error, retention-days: 1}
+
   prepare:
+    needs: ruleset-audit
     if: >-
       github.event.workflow_run.conclusion == 'success' &&
       github.event.workflow_run.event == 'workflow_dispatch' &&
@@ -40,14 +74,16 @@ jobs:
           path: ${{ runner.temp }}/request
           github-token: ${{ github.token }}
           run-id: ${{ github.event.workflow_run.id }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with: {name: 'control-plane-ruleset-${{ github.run_id }}', path: '${{ runner.temp }}/ruleset'}
       - id: prepare
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
         with:
           script: |
-            const fs=require('fs'),p=require('./.github/scripts/agent-pipeline.cjs'),a=require('./.github/scripts/agent-autonomy.cjs'),c=require('./.github/agent-pipeline.json');
+            const fs=require('fs'),p=require('./.github/scripts/agent-pipeline.cjs'),a=require('./.github/scripts/agent-autonomy.cjs'),c=require('./.github/agent-pipeline.json'),g=require('./.github/scripts/agent-maintenance-guards.cjs');
             const request=JSON.parse(fs.readFileSync(`${process.env.RUNNER_TEMP}/request/request.json`)),run=context.payload.workflow_run,repo=`${context.repo.owner}/${context.repo.repo}`,def=context.payload.repository.default_branch;
             const issueNumber=Number(request.issueNumber),prNumber=Number(request.prNumber),headSha=request.headSha;
-            if(run.conclusion!=='success'||run.event!=='workflow_dispatch'||run.head_branch!==def||run.head_repository?.full_name!==repo||run.path!=='.github/workflows/agent-control-plane-remediation-request.yml'||Number(request.requestRunId)!==Number(run.id)||request.actor!==run.actor?.login) return core.setFailed('UNTRUSTED_REQUEST_RUN');
+            if(run.conclusion!=='success'||run.event!=='workflow_dispatch'||run.head_branch!==def||run.head_repository?.full_name!==repo||run.path!=='.github/workflows/agent-control-plane-remediation-request.yml'||Number(request.requestRunId)!==Number(run.id)||Number(request.requestRunAttempt)!==Number(run.run_attempt)||request.actor!==run.actor?.login) return core.setFailed('UNTRUSTED_REQUEST_RUN');
             if(!Number.isSafeInteger(issueNumber)||issueNumber<1||!Number.isSafeInteger(prNumber)||prNumber<1||!/^[0-9a-f]{40}$/.test(headSha)||!/^[0-9a-f]{64}$/.test(request.specHash||'')||!['agent:needs-human','agent:pr'].includes(request.entryState)) return core.setFailed('INVALID_REQUEST_ARTIFACT');
             const {data:permission}=await github.rest.repos.getCollaboratorPermissionLevel({...context.repo,username:request.actor});
             if(!['admin','maintain','write'].includes(permission.permission)) return core.setFailed('MAINTAINER_PERMISSION_REQUIRED');
@@ -67,6 +103,10 @@ jobs:
             if(comparison.data.behind_by!==0) return core.setFailed('PR_BEHIND_MAIN');
             const runs=await github.paginate(github.rest.actions.listWorkflowRunsForRepo,{...context.repo,event:'pull_request',head_sha:headSha,per_page:100}),ciRun=newestCi(runs),jobs=ciRun?.status==='completed'?await github.paginate(github.rest.actions.listJobsForWorkflowRun,{...context.repo,run_id:ciRun.id,filter:'all',per_page:100}):null;
             if(!ciRun||ciRun.status!=='completed'||ciRun.conclusion!=='success'||!p.successfulRequiredJobs(jobs,c.requiredCiJobs,headSha)) return core.setFailed('NEWEST_REQUIRED_CI_NOT_GREEN');
+            const audit=JSON.parse(fs.readFileSync(`${process.env.RUNNER_TEMP}/ruleset/ruleset-audit.json`));
+            const requiredChecks=c.requiredCiJobs.concat([a.GATE_CONTEXT]).map(context=>({context,integration_id:15368}));
+            const rules=g.rulesetDecision(audit.ruleset,{defaultBranch:def,requiredChecks});
+            if(audit.repo!==repo||audit.requestRunId!==Number(run.id)||audit.requestRunAttempt!==Number(run.run_attempt)||audit.defaultBranch!==def||!rules.ok) return core.setFailed(rules.reason||'RULESET_AUDIT_PROVENANCE_INVALID');
             const governance={};
             for(const file of ['AGENTS.md','.github/agent-pipeline.json','docs/autonomous-development-pipeline.md','docs/adr/0003-autonomous-development-pipeline-v2.md','docs/adr/0006-conditional-autonomous-merge.md']) governance[file]=fs.readFileSync(file,'utf8');
             const scope={...request,baseSha:pr.base.sha,title:p.redactDiagnostic(issue.title,256),body:p.redactDiagnostic(issue.body||'',16384),changedFiles:changed.map(x=>({filename:x.filename,status:x.status,previous_filename:x.previous_filename||null}))};
@@ -115,9 +155,9 @@ jobs:
         env: {HEAD_SHA: '${{ needs.prepare.outputs.head_sha }}'}
         run: |
           test -s "$RUNNER_TEMP/review.json"
-          test "$(jq -r .reviewed_sha "$RUNNER_TEMP/review.json")" = "$HEAD_SHA"
-          jq -e '.result=="PASS" and (.findings|length)==0 and .issue_scope_consistent and (.test_or_governance_weakened|not) and .paper_only_live_trading_safe' "$RUNNER_TEMP/review.json"
+          node -e "require('./.github/scripts/agent-maintenance-guards.cjs').strictReviewArtifact(JSON.parse(require('fs').readFileSync(process.env.RUNNER_TEMP+'/review.json')), process.env.HEAD_SHA)"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
         with: {name: 'control-plane-review-${{ github.run_id }}', path: '${{ runner.temp }}/review.json', if-no-files-found: error, retention-days: 7}
 
   recover:

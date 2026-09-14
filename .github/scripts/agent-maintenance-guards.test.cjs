@@ -6,6 +6,7 @@ const clone = (value) => structuredClone(value);
 const expected = {
   repo: "owner/repo", defaultBranch: "main", issueNumber: 123, prNumber: 125,
   headSha: "a".repeat(40), baseSha: "b".repeat(40), specHash: "c".repeat(64),
+  requester: "maintainer", requestRunId: 71, requestRunAttempt: 2,
   requiredChecks: ["api", "quality", "security", "unit-research", "integration-postgres", "frontend", "container-build", "production-smoke", "agent-verified-gate"]
     .map((context) => ({context, integration_id: 15368})),
 };
@@ -22,7 +23,10 @@ const valid = () => ({
   issue: {number: 123, state: "open", labels: ["type:implementation", "agent:needs-human"]},
   authorization: {ok: true, specHash: expected.specHash}, requesterPermission: "admin",
   currentMainSha: expected.baseSha, behindBy: 0, markerIssueNumber: 123,
-  linksConflict: false, fullLinkageValid: true, fileScopeValid: true, ruleset: clone(ruleset),
+  linksConflict: false, fullLinkageValid: true, fileScopeValid: true,
+  requestOrigin: {actor: "maintainer", runId: 71, runAttempt: 2,
+    workflowPath: ".github/workflows/agent-control-plane-remediation-request.yml", headRepository: expected.repo, headBranch: "main"},
+  rulesetAudit: {repo: expected.repo, requestRunId: 71, requestRunAttempt: 2, defaultBranch: "main", ruleset: clone(ruleset)},
   ci: {repo: expected.repo, headSha: expected.headSha, prNumber: 125, event: "pull_request", name: "CI",
     status: "completed", conclusion: "success", isNewest: true, requiredJobsSuccessful: true, runId: 9, runAttempt: 1},
 });
@@ -65,17 +69,20 @@ const mutations = [
   ["CI not pull_request", s => {s.ci.event = "push";}],
   ["invalid attempt", s => {s.ci.runAttempt = 0;}],
   ["scope expansion", s => {s.fileScopeValid = false;}],
-  ["missing bypass_actors", s => {delete s.ruleset.bypass_actors;}],
-  ["null bypass_actors", s => {s.ruleset.bypass_actors = null;}],
-  ["actual bypass", s => {s.ruleset.bypass_actors = [{actor_id: 1}];}],
-  ["disabled protection", s => {s.ruleset.enforcement = "disabled";}],
-  ["non-strict protection", s => {s.ruleset.rules[3].parameters.strict_required_status_checks_policy = false;}],
-  ["lost security check", s => {s.ruleset.rules[3].parameters.required_status_checks = s.ruleset.rules[3].parameters.required_status_checks.filter(c => c.context !== "security");}],
-  ["wrong gate App", s => {s.ruleset.rules[3].parameters.required_status_checks.at(-1).integration_id = 999;}],
-  ["duplicate gate", s => {s.ruleset.rules[3].parameters.required_status_checks.push(clone(expected.requiredChecks.at(-1)));}],
-  ["unprotected branch", s => {s.ruleset.conditions.ref_name.include = ["refs/heads/dev"];}],
-  ["excluded main", s => {s.ruleset.conditions.ref_name.exclude = ["refs/heads/main"];}],
-  ["missing PR requirement", s => {s.ruleset.rules = s.ruleset.rules.filter(r => r.type !== "pull_request");}],
+  ["different request actor", s => {s.requestOrigin.actor = "attacker";}],
+  ["different request attempt", s => {s.requestOrigin.runAttempt = 3;}],
+  ["different audit provenance", s => {s.rulesetAudit.requestRunId = 72;}],
+  ["missing bypass_actors", s => {delete s.rulesetAudit.ruleset.bypass_actors;}],
+  ["null bypass_actors", s => {s.rulesetAudit.ruleset.bypass_actors = null;}],
+  ["actual bypass", s => {s.rulesetAudit.ruleset.bypass_actors = [{actor_id: 1}];}],
+  ["disabled protection", s => {s.rulesetAudit.ruleset.enforcement = "disabled";}],
+  ["non-strict protection", s => {s.rulesetAudit.ruleset.rules[3].parameters.strict_required_status_checks_policy = false;}],
+  ["lost security check", s => {s.rulesetAudit.ruleset.rules[3].parameters.required_status_checks = s.rulesetAudit.ruleset.rules[3].parameters.required_status_checks.filter(c => c.context !== "security");}],
+  ["wrong gate App", s => {s.rulesetAudit.ruleset.rules[3].parameters.required_status_checks.at(-1).integration_id = 999;}],
+  ["duplicate gate", s => {s.rulesetAudit.ruleset.rules[3].parameters.required_status_checks.push(clone(expected.requiredChecks.at(-1)));}],
+  ["unprotected branch", s => {s.rulesetAudit.ruleset.conditions.ref_name.include = ["refs/heads/dev"];}],
+  ["excluded main", s => {s.rulesetAudit.ruleset.conditions.ref_name.exclude = ["refs/heads/main"];}],
+  ["missing PR requirement", s => {s.rulesetAudit.ruleset.rules = s.rulesetAudit.ruleset.rules.filter(r => r.type !== "pull_request");}],
 ];
 for (const [name, mutate] of mutations) {
   test(`rejects ${name} before initial write and between writes`, async () => {

@@ -85,6 +85,12 @@ function bindingDecision(snapshot, expected, options = {}) {
     return fail("ISSUE_BINDING_CHANGED");
   }
   if (snapshot.authorization?.ok !== true || snapshot.authorization.specHash !== expected.specHash) return fail("AUTHORIZATION_CHANGED");
+  if (snapshot.requestOrigin?.actor !== expected.requester ||
+      snapshot.requestOrigin?.runId !== expected.requestRunId ||
+      snapshot.requestOrigin?.runAttempt !== expected.requestRunAttempt ||
+      snapshot.requestOrigin?.workflowPath !== ".github/workflows/agent-control-plane-remediation-request.yml" ||
+      snapshot.requestOrigin?.headRepository !== expected.repo ||
+      snapshot.requestOrigin?.headBranch !== expected.defaultBranch) return fail("REQUEST_ORIGIN_CHANGED");
   if (!["admin", "maintain", "write"].includes(snapshot.requesterPermission)) return fail("REQUESTER_PERMISSION_REVOKED");
   if (snapshot.currentMainSha !== expected.baseSha || snapshot.behindBy !== 0) return fail("MAIN_CHANGED");
   if (snapshot.markerIssueNumber !== expected.issueNumber || snapshot.linksConflict !== false) return fail("LINKAGE_CONFLICT");
@@ -104,7 +110,17 @@ function bindingDecision(snapshot, expected, options = {}) {
     return fail("NEWEST_REQUIRED_CI_NOT_GREEN");
   }
   if (snapshot.fileScopeValid !== true) return fail("FILE_SCOPE_CHANGED");
-  return rulesetDecision(snapshot.ruleset, expected);
+  if (snapshot.rulesetAudit?.repo !== expected.repo || snapshot.rulesetAudit?.requestRunId !== expected.requestRunId ||
+      snapshot.rulesetAudit?.requestRunAttempt !== expected.requestRunAttempt || snapshot.rulesetAudit?.defaultBranch !== expected.defaultBranch) {
+    return fail("RULESET_AUDIT_PROVENANCE_CHANGED");
+  }
+  return rulesetDecision(snapshot.rulesetAudit.ruleset, expected);
+}
+
+function strictReviewArtifact(review, headSha) {
+  const decision = reviewDecision(review, headSha);
+  if (!decision.ok) throw new Error(decision.reason);
+  return Object.freeze(structuredClone(review));
 }
 
 // All operations are trusted functions, never commands or callback names taken
@@ -126,4 +142,4 @@ async function guardedSequence({ snapshot, validate, operations, postvalidate = 
   return final;
 }
 
-module.exports = { rulesetDecision, reviewDecision, bindingDecision, guardedSequence };
+module.exports = { rulesetDecision, reviewDecision, bindingDecision, guardedSequence, strictReviewArtifact };

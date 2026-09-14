@@ -2,7 +2,8 @@
 
 ## Status
 
-Accepted for the Autonomous Development Pipeline v2 control plane.
+Candidate implementation complete; trust-root adoption is blocked pending an
+explicit, independently reviewed maintainer decision.
 
 ## Context
 
@@ -54,6 +55,16 @@ Lifecycle writes use a single `setLabels` call per object after a fresh state-pl
 
 A separate read-only Codex job receives the candidate as untrusted data and the default-branch governance as its trusted baseline. It must return `PASS`, zero findings, scope consistency, no test/governance weakening, and unchanged paper-only/live-trading safety. The model job receives no GitHub write credential.
 
+GitHub may omit `bypass_actors` from ruleset responses when the caller lacks
+ruleset-write authority. Therefore a dedicated audit job uses the existing
+maintenance authority for two fixed GET endpoints only. It checks out and
+executes no repository or candidate code while that credential is present. The
+result is a provenance-bound artifact; missing or null `bypass_actors` is
+unknown and blocks. The Codex reviewer receives only this bounded evidence, not
+the credential. All later mutation decisions bind the evidence to the request
+run and attempt and retain every configured check name, GitHub App binding, and
+additional ruleset restriction.
+
 ### Serialization, gate and merge
 
 The request workflow is serialized by exact PR/SHA. Its trusted follower uses the request run title, which is deterministically bound to that same PR/SHA, as a workflow-level concurrency key with `cancel-in-progress: false`. Duplicate valid requests therefore serialize rather than racing lifecycle or evidence publication.
@@ -78,3 +89,20 @@ A final merge job uses `AGENT_PUBLISH_TOKEN` only after the trusted gate succeed
 - Transient partial metadata writes are retryable without manual label surgery.
 - The same permanent `agent-verified-gate` remains the branch-protection backstop for both normal autonomous delivery and trusted control-plane remediation.
 - Live trading remains out of scope and paper-only invariants are unchanged.
+
+## Verification and adoption status
+
+Local Node tests are mocked controller/guard regressions only. GitHub-hosted CI,
+the credential-isolated ruleset GET, and real Codex review are separate evidence
+and cannot be inferred from local success. A PASS review artifact is required
+before gate evidence can exist; a BLOCK review is retained for diagnosis but
+cannot create PASS or gate evidence.
+
+This candidate cannot repair the follower already executing from `main`:
+`workflow_run` deliberately loads that trusted default-branch revision. The
+legitimate bootstrap is an independently reviewed maintainer trust-root change
+that adopts this follower onto `main` through the repository's protected change
+process. Until a maintainer explicitly selects and performs that one-time
+adoption without forged statuses, bypass actors, removed checks, force pushes,
+or candidate execution with secrets, **adoption remains BLOCKED**. No candidate
+workflow run or this ADR self-certifies adoption.
