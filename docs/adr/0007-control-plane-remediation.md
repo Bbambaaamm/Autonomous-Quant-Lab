@@ -143,3 +143,24 @@ CodeQL, HTTP failure, source/attempt provenance, BLOCK, and exact-head merge.
 Local Node results, GitHub-hosted PR CI, independent code/security review, a real
 credential-isolated canary, and actual adoption are separate acceptance records.
 None may be inferred from the others.
+
+## Review closure: merge ownership, request wrapper and attempt caller
+
+Every request and every pre-write snapshot now requires the PR's `auto_merge`
+field to be explicitly null. Enabled or missing auto-merge evidence is rejected,
+not disabled automatically. This prevents knowingly publishing the gate for a
+PR already configured to merge outside the isolated expected-head adapter.
+Concurrent maintainer changes can still race an API read, as documented above.
+
+The actual request wrapper, not only the runtime, admits an unmanaged PR when
+and only when the Issue is exactly `agent:needs-human`, classification and
+authorization are valid, and the PR has no agent state. Other ambiguous states
+remain rejected. Behavioral tests execute the workflow's real inline request
+script and then exercise link/recovery with the emitted binding.
+
+Request retries require `github.triggering_actor` to equal the original
+`github.actor`. The live originating run is revalidated before each write with
+both `actor.login` and `triggering_actor.login` equal to the bound requester.
+A different or missing attempt caller stops the run; the original actor is not
+silently used as a substitute for the person initiating a later attempt. A new
+maintainer can create a fresh explicitly authorized request instead.

@@ -39,7 +39,7 @@ function protection(r) {
 
 function originValid(run, expected) {
   return run?.id === expected.requestRunId && run.run_attempt === expected.requestRunAttempt &&
-    run.actor?.login === expected.requester && run.event === "workflow_dispatch" &&
+    run.actor?.login === expected.requester && run.triggering_actor?.login === expected.requester && run.event === "workflow_dispatch" &&
     run.status === "completed" && run.conclusion === "success" && run.path === REQUEST_PATH &&
     run.head_repository?.full_name === expected.repo && run.repository?.full_name === expected.repo &&
     run.head_branch === expected.defaultBranch && run.head_sha === expected.baseSha;

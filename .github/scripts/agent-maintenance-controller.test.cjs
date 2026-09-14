@@ -25,7 +25,7 @@ test("newest CI and required jobs are derived from API objects, never caller boo
 function apiFixture() {
   const calls = [], labels = ["type:implementation", "agent:pr"];
   const data = {
-    pr: {number: 127, state: "open", draft: false, changed_files: 1, body: "Agent-Issue: #126", labels: ["agent:pr"],
+    pr: {number: 127, state: "open", draft: false, auto_merge: null, changed_files: 1, body: "Agent-Issue: #126", labels: ["agent:pr"],
       head: {sha: expected.headSha, repo: {full_name: expected.repo}}, base: {ref: "main", sha: expected.baseSha, repo: {full_name: expected.repo}}},
     issue: {number: 126, state: "open", title: "repair", body: "spec", labels},
   };

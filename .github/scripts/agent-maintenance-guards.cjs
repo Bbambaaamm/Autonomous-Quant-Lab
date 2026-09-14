@@ -75,7 +75,7 @@ function bindingDecision(snapshot, expected, options = {}) {
       !Number.isSafeInteger(expected.issueNumber) || expected.issueNumber < 1 ||
       !Number.isSafeInteger(expected.prNumber) || expected.prNumber < 1) return fail("EXPECTED_BINDING_INVALID");
   const { pr, issue } = snapshot;
-  if (pr?.number !== expected.prNumber || pr.state !== "open" || pr.draft !== false ||
+  if (pr?.number !== expected.prNumber || pr.state !== "open" || pr.draft !== false || pr.auto_merge !== null ||
       pr.head?.sha !== expected.headSha || pr.base?.ref !== expected.defaultBranch ||
       pr.head?.repo?.full_name !== expected.repo || pr.base?.repo?.full_name !== expected.repo ||
       pr.base?.sha !== expected.baseSha) return fail("PR_BINDING_CHANGED");

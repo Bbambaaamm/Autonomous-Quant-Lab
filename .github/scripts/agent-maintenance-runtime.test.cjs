@@ -15,12 +15,12 @@ function fixture() {
   const specHash = a.issueSpecHash(issue);
   const request = {repo, issueNumber: 126, prNumber: 127, headSha: head, specHash, actor: "alice", requestRunId: 88,
     requestRunAttempt: 1, entryState: "agent:needs-human", reason: "Reviewed maintenance request"};
-  const origin = {id: 88, run_attempt: 1, actor: {login: "alice"}, event: "workflow_dispatch", status: "completed", conclusion: "success",
+  const origin = {id: 88, run_attempt: 1, actor: {login: "alice"}, triggering_actor: {login: "alice"}, event: "workflow_dispatch", status: "completed", conclusion: "success",
     path: ".github/workflows/agent-control-plane-remediation-request.yml", head_sha: base, head_branch: "main", head_repository: {full_name: repo}, repository: {full_name: repo}};
   const context = {repo: {owner: "owner", repo: "repo"}, sha: base, eventName: "workflow_run", runId: 900, runAttempt: 1,
     payload: {repository: {default_branch: "main"}, workflow_run: clone(origin)}};
   const expected = m.expectedFrom(request, context);
-  const pr = {number: 127, state: "open", draft: false, body: "Agent-Issue: #126", labels: ["agent:needs-human", "priority:high"], changed_files: 1,
+  const pr = {number: 127, state: "open", draft: false, auto_merge: null, body: "Agent-Issue: #126", labels: ["agent:needs-human", "priority:high"], changed_files: 1,
     head: {sha: head, repo: {full_name: repo}}, base: {sha: base, ref: "main", repo: {full_name: repo}}};
   const ci = {id: 100, run_attempt: 1, name: "CI", path: ".github/workflows/ci.yml", event: "pull_request", status: "completed", conclusion: "success",
     head_sha: head, pull_requests: [{number: 127}], head_repository: {full_name: repo}, repository: {full_name: repo}};
@@ -70,6 +70,10 @@ test("real production entrypoints link, recover, gate and exact-head merge; ever
 });
 
 const drift=[
+  ["GitHub auto-merge enabled",d=>{d.pr.auto_merge={merge_method:"merge"};}],
+  ["GitHub auto-merge unknown",d=>{delete d.pr.auto_merge;}],
+  ["different request attempt caller",d=>{d.origin.triggering_actor={login:"bob"};}],
+  ["missing request attempt caller",d=>{delete d.origin.triggering_actor;}],
   ["head",d=>{d.pr.head.sha="d".repeat(40);}],
   ["authorization",d=>{d.issue.body+=" changed";}],
   ["closed Issue",d=>{d.issue.state="closed";}],
@@ -165,4 +169,47 @@ for(const [name,change] of drift) test(`production merge denies ${name} after su
 test("authoritative CI source is byte-identical to the trusted baseline",()=>{
  const crypto=require('node:crypto'),data=fs.readFileSync('.github/workflows/ci.yml');
  assert.equal(crypto.createHash('sha1').update(Buffer.concat([Buffer.from(`blob ${data.length}\0`),data])).digest('hex'),'5fdf5ffc35a675a8e82b43255206a3cd8f978238');
+});
+
+
+// Run the real workflow_dispatch request script, not a duplicated state formula.
+function requestWrapperFixture() {
+  const f=fixture(), vm=require('node:vm'), pipeline=require('./agent-pipeline.cjs');
+  const yaml=fs.readFileSync('.github/workflows/agent-control-plane-remediation-request.yml','utf8');
+  const source=yaml.split('          script: |\n')[1].split('      - uses: actions/upload-artifact@')[0]
+    .split('\n').filter(Boolean).map(line=>line.slice(12)).join('\n');
+  const script=vm.runInNewContext(`(async function(require,github,context,process,core){${source}\n})`);
+  const output=[], errors=[];
+  const env={ISSUE:'126',PR:'127',HEAD:f.expected.headSha,REASON:'Exact authorized recovery',
+    GITHUB_RUN_ATTEMPT:'1',TRIGGERING_ACTOR:'alice',RUNNER_TEMP:'/mock'};
+  const context={...f.context,actor:'alice',ref:'refs/heads/main',runId:88};
+  const load=name=>name==='fs'?{writeFileSync:(_path,text)=>output.push(JSON.parse(text))}:
+    name==='./.github/scripts/agent-pipeline.cjs'?pipeline:
+    name==='./.github/scripts/agent-autonomy.cjs'?a:
+    name==='./.github/agent-pipeline.json'?c:(()=>{throw new Error('Unexpected import');})();
+  return {...f,env,output,errors,execute:()=>script(load,f.github,context,{env},{setFailed:msg=>errors.push(msg)})};
+}
+test('request wrapper admits exact needs-human Issue with unmanaged PR then actual runtime recovers it',async()=>{
+ const f=requestWrapperFixture();f.d.pr.labels=['priority:high'];await f.execute();
+ assert.deepEqual(f.errors,[]);assert.equal(f.output.length,1);assert.equal(f.output[0].entryState,'agent:needs-human');
+ const r=await f.seal();await r.link();await r.recover();assert.ok(f.d.pr.labels.includes('agent:pr'));
+ assert.ok(f.d.pr.labels.includes('priority:high'));assert.ok(f.d.issue.labels.includes('team:quant'));
+});
+for(const issueState of ['agent:running','agent:ready','agent:pr'])test(`request wrapper refuses unmanaged PR with ${issueState} Issue`,async()=>{
+ const f=requestWrapperFixture();f.d.pr.labels=['priority:high'];f.d.issue.labels=['type:implementation',issueState];await f.execute();
+ assert.deepEqual(f.errors,['MAINTENANCE_LIFECYCLE_REJECTED']);assert.equal(f.output.length,0);
+});
+for(const condition of ['enabled','missing'])test(`request wrapper rejects ${condition} auto-merge before creating artifact`,async()=>{
+ const f=requestWrapperFixture();if(condition==='enabled')f.d.pr.auto_merge={merge_method:'merge'};else delete f.d.pr.auto_merge;
+ await f.execute();assert.ok(f.errors.includes('MAINTENANCE_SCOPE_REJECTED'));assert.equal(f.output.length,0);
+});
+for(const caller of ['bob',''])test(`request wrapper rejects rerun attributed to ${caller||'missing caller'}`,async()=>{
+ const f=requestWrapperFixture();f.env.GITHUB_RUN_ATTEMPT='2';f.env.TRIGGERING_ACTOR=caller;await f.execute();
+ assert.deepEqual(f.errors,['REQUEST_ATTEMPT_ACTOR_MISMATCH']);assert.equal(f.output.length,0);
+});
+test('request wrapper accepts same-author rerun and binds its actual attempt',async()=>{
+ const f=requestWrapperFixture();f.env.GITHUB_RUN_ATTEMPT='2';await f.execute();assert.deepEqual(f.errors,[]);
+ assert.equal(f.output[0].actor,'alice');assert.equal(f.output[0].requestRunAttempt,2);
+ const expected={...f.expected,requestRunAttempt:2};const origin={...f.d.origin,run_attempt:2};
+ assert.equal(m.originValid(origin,expected),true);origin.triggering_actor.login='bob';assert.equal(m.originValid(origin,expected),false);
 });

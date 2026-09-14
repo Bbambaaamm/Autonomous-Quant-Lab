@@ -46,17 +46,19 @@ jobs:
           PR: '${{ inputs.pr_number }}'
           HEAD: '${{ inputs.head_sha }}'
           REASON: '${{ inputs.reason }}'
+          TRIGGERING_ACTOR: '${{ github.triggering_actor }}'
         with:
           script: |
             const fs=require('fs'),p=require('./.github/scripts/agent-pipeline.cjs'),a=require('./.github/scripts/agent-autonomy.cjs'),c=require('./.github/agent-pipeline.json');
             const issueNumber=Number(process.env.ISSUE),prNumber=Number(process.env.PR),headSha=process.env.HEAD,reason=process.env.REASON.trim(),repo=`${context.repo.owner}/${context.repo.repo}`;
             if(context.ref!==`refs/heads/${context.payload.repository.default_branch}`) return core.setFailed('REQUEST_MUST_RUN_FROM_DEFAULT_BRANCH');
+            if(process.env.TRIGGERING_ACTOR!==context.actor) return core.setFailed('REQUEST_ATTEMPT_ACTOR_MISMATCH');
             if(!Number.isSafeInteger(issueNumber)||issueNumber<1||!Number.isSafeInteger(prNumber)||prNumber<1||!/^[0-9a-f]{40}$/.test(headSha)||!reason) return core.setFailed('INVALID_MAINTENANCE_BINDING');
             const {data:permission}=await github.rest.repos.getCollaboratorPermissionLevel({...context.repo,username:context.actor});
             if(!['admin','maintain','write'].includes(permission.permission)) return core.setFailed('MAINTAINER_PERMISSION_REQUIRED');
             const {data:pr}=await github.rest.pulls.get({...context.repo,pull_number:prNumber});
             const {data:issue}=await github.rest.issues.get({...context.repo,issue_number:issueNumber});
-            if(pr.state!=='open'||pr.draft||pr.base.ref!==context.payload.repository.default_branch||pr.head.sha!==headSha||p.parseAgentIssue(pr.body)!==issueNumber||issue.state!=='open'||!p.isImplementation(issue.labels)) return core.setFailed('MAINTENANCE_SCOPE_REJECTED');
+            if(pr.state!=='open'||pr.draft||pr.auto_merge!==null||pr.base.ref!==context.payload.repository.default_branch||pr.head.sha!==headSha||p.parseAgentIssue(pr.body)!==issueNumber||issue.state!=='open'||!p.isImplementation(issue.labels)) return core.setFailed('MAINTENANCE_SCOPE_REJECTED');
             const issueComments=await github.paginate(github.rest.issues.listComments,{...context.repo,issue_number:issueNumber,per_page:100});
             const prComments=await github.paginate(github.rest.issues.listComments,{...context.repo,issue_number:prNumber,per_page:100});
             const auth=a.authorizationDecision({comments:issueComments,repo,issueNumber,title:issue.title,body:issue.body||'',labels:issue.labels,state:issue.state});
@@ -65,7 +67,9 @@ jobs:
             if(!issueLink.ok||!prLink.ok||(issueLink.prNumber!==null&&issueLink.prNumber!==prNumber)||(prLink.issueNumber!==null&&prLink.issueNumber!==issueNumber)) return core.setFailed('MAINTENANCE_LINK_CONFLICT');
             const issueRecovery=p.stateMutationPlan(issue.labels,'agent:needs-human','agent:pr');
             const prRecovery=p.stateMutationPlan(pr.labels,'agent:needs-human','agent:pr');
-            const entryState=a.verificationLifecyclePlan(pr.labels,issue.labels).ok?'agent:pr':(issueRecovery.ok&&prRecovery.ok?'agent:needs-human':null);
+            const unmanagedPr=Array.isArray(pr.labels)&&a.labelNames(pr.labels).every(name=>typeof name==='string'&&!name.startsWith('agent:'));
+            const explicitUnmanagedRecovery=a.exactAgentState(issue.labels,'agent:needs-human')&&unmanagedPr;
+            const entryState=a.verificationLifecyclePlan(pr.labels,issue.labels).ok?'agent:pr':((issueRecovery.ok&&prRecovery.ok)||explicitUnmanagedRecovery?'agent:needs-human':null);
             if(!entryState) return core.setFailed('MAINTENANCE_LIFECYCLE_REJECTED');
             const allowed=path=>/^\.github\/workflows\/agent-[^/]+\.yml$/.test(path)||/^\.github\/scripts\/agent-[^/]+\.cjs$/.test(path)||path==='.github/agent-pipeline.json'||path==='docs/autonomous-development-pipeline.md'||path==='docs/adr/0003-autonomous-development-pipeline-v2.md'||path==='docs/adr/0006-conditional-autonomous-merge.md'||path==='docs/adr/0007-control-plane-remediation.md';
             const changed=await github.paginate(github.rest.pulls.listFiles,{...context.repo,pull_number:prNumber,per_page:100});

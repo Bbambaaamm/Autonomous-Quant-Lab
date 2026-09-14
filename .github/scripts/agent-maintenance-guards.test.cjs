@@ -17,7 +17,7 @@ const ruleset = {
     {type: "required_status_checks", parameters: {strict_required_status_checks_policy: true, required_status_checks: clone(expected.requiredChecks)}}]),
 };
 const valid = () => ({
-  pr: {number: 125, state: "open", draft: false, labels: ["agent:needs-human", "priority:high"],
+  pr: {number: 125, state: "open", draft: false, auto_merge: null, labels: ["agent:needs-human", "priority:high"],
     head: {sha: expected.headSha, repo: {full_name: expected.repo}},
     base: {ref: "main", sha: expected.baseSha, repo: {full_name: expected.repo}}},
   issue: {number: 123, state: "open", labels: ["type:implementation", "agent:needs-human"]},
