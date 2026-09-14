@@ -11,13 +11,40 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  prepare:
+  route:
     if: >-
       github.event.workflow_run.conclusion == 'success' &&
       github.event.workflow_run.event == 'workflow_dispatch' &&
       github.event.workflow_run.head_branch == github.event.repository.default_branch &&
       github.event.workflow_run.path == '.github/workflows/agent-control-plane-remediation-request.yml' &&
       github.event.workflow_run.head_repository.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions: {actions: read, contents: read}
+    outputs:
+      production_route: ${{ steps.route.outputs.production_route }}
+      canary_route: ${{ steps.route.outputs.canary_route }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with: {ref: '${{ github.workflow_sha }}', persist-credentials: false, fetch-depth: 1}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: control-plane-request-${{ github.event.workflow_run.id }}-${{ github.event.workflow_run.run_attempt }}
+          path: ${{ runner.temp }}/maintenance
+          github-token: ${{ github.token }}
+          run-id: ${{ github.event.workflow_run.id }}
+      - name: Classify trusted request without mutation credentials
+        id: route
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b
+        env: {DIRECTORY: '${{ runner.temp }}/maintenance', TRUSTED_SHA: '${{ github.workflow_sha }}'}
+        with:
+          script: |
+            const ctx={repo:context.repo,payload:context.payload,eventName:context.eventName,sha:process.env.TRUSTED_SHA,runId:context.runId,runAttempt:Number(process.env.GITHUB_RUN_ATTEMPT)};
+            await require('./.github/scripts/agent-maintenance-runtime.cjs').run({phase:'route',github,context:ctx,core,directory:process.env.DIRECTORY});
+
+  prepare:
+    needs: route
+    if: needs.route.outputs.production_route == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions: {actions: read, contents: read, issues: read, pull-requests: read}
@@ -62,7 +89,8 @@ jobs:
           retention-days: 7
 
   independent-review:
-    needs: prepare
+    needs: [route, prepare]
+    if: needs.route.outputs.production_route == 'true' && needs.prepare.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions: {contents: read}
@@ -123,7 +151,8 @@ jobs:
           retention-days: 7
 
   recover:
-    needs: [prepare, independent-review]
+    needs: [route, prepare, independent-review]
+    if: needs.route.outputs.production_route == 'true' && needs.prepare.result == 'success' && needs.independent-review.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions: {actions: read, contents: read, issues: write, pull-requests: write}
@@ -155,7 +184,8 @@ jobs:
             await runtime.run({phase:"recover",github,context:ctx,core,auditToken:process.env.RULESET_AUDIT_TOKEN,mergeToken:process.env.MERGE_TOKEN,directory:process.env.DIRECTORY});
 
   gate:
-    needs: [prepare, recover]
+    needs: [route, prepare, recover]
+    if: needs.route.outputs.production_route == 'true' && needs.prepare.result == 'success' && needs.recover.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions: {actions: read, contents: read, issues: write, pull-requests: write, statuses: write}
@@ -187,7 +217,8 @@ jobs:
             await runtime.run({phase:"gate",github,context:ctx,core,auditToken:process.env.RULESET_AUDIT_TOKEN,mergeToken:process.env.MERGE_TOKEN,directory:process.env.DIRECTORY});
 
   merge:
-    needs: [prepare, gate]
+    needs: [route, prepare, gate]
+    if: needs.route.outputs.production_route == 'true' && needs.prepare.result == 'success' && needs.gate.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions: {actions: read, contents: read, issues: read, pull-requests: read}

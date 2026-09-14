@@ -16,6 +16,7 @@ function fixture() {
   const specHash = a.issueSpecHash(issue);
   const request = {repo, issueNumber: 126, prNumber: 127, headSha: head, specHash, actor: "alice", requestRunId: 88,
     requestRunAttempt: 1, entryState: "agent:needs-human", reason: "Reviewed maintenance request",
+    mode: "production", canary_only: false,
     authorization: {commentId: 1, actor: "alice", runId: 77, specHash}};
   const origin = {id: 88, run_attempt: 1, actor: {login: "alice"}, triggering_actor: {login: "alice"}, event: "workflow_dispatch", status: "completed", conclusion: "success",
     path: ".github/workflows/agent-control-plane-remediation-request.yml", head_sha: base, head_branch: "main", head_repository: {full_name: repo}, repository: {full_name: repo}};
@@ -176,13 +177,15 @@ test("read-only API boundary denies every maintenance mutation adapter",async()=
 });
 test("executable canary run performs live-shaped reads and emits the bounded schema without writes",async()=>{
  const f=fixture(),directory=fs.mkdtempSync(path.join(os.tmpdir(),"maintenance-canary-"));
+ f.request.mode="canary_only";f.request.canary_only=true;
  fs.writeFileSync(path.join(directory,"request.json"),JSON.stringify(f.request));
  const outputs=[];const fetcher=async url=>({ok:true,text:async()=>JSON.stringify(url.includes("rulesets?")?
    [{id:99,name:"Protect main",target:"branch"}]:f.d.ruleset)});
  const report=await m.run({phase:"canary",github:f.github,context:f.context,core:{setOutput:(k,v)=>outputs.push([k,v])},
    auditToken:"collector-only-token",directory,fetcher});
- assert.deepEqual(outputs,[["result","PASS"]]);assert.equal(report.mode,"read-only");
- assert.deepEqual(Object.keys(report).sort(),["authorization","baseSha","ci","filesHash","headSha","issueNumber","mode","prNumber","protectionHash","repository","requestRunAttempt","requestRunId","version"].sort());
+ assert.deepEqual(outputs,[["result","SNAPSHOT_COLLECTED"]]);assert.equal(report.mode,"read-only-snapshot");
+ assert.equal(report.result,"SNAPSHOT_COLLECTED");assert.equal(report.operationalAcceptance,"PENDING");
+ assert.deepEqual(Object.keys(report).sort(),["authorization","baseSha","ci","filesHash","headSha","issueNumber","mode","operationalAcceptance","prNumber","protectionHash","repository","requestRunAttempt","requestRunId","result","version"].sort());
  assert.equal(f.writes.length,0);assert.deepEqual(JSON.parse(fs.readFileSync(path.join(directory,"canary-report.json"))),report);
 });
 test("canary workflow is default-branch read-only and has an explicit invocation schema",()=>{
@@ -242,7 +245,8 @@ function requestWrapperFixture() {
   const output=[], errors=[];
   const env={ISSUE:'126',PR:'127',HEAD:f.expected.headSha,REASON:'Exact authorized recovery',
     GITHUB_RUN_ATTEMPT:'1',TRIGGERING_ACTOR:'alice',RUNNER_TEMP:'/mock'};
-  const context={...f.context,actor:'alice',ref:'refs/heads/main',runId:88};
+  const context={...f.context,actor:'alice',ref:'refs/heads/main',runId:88,
+    payload:{...f.context.payload,inputs:{canary_only:false}}};
   const load=name=>name==='fs'?{writeFileSync:(_path,text)=>output.push(JSON.parse(text))}:
     name==='./.github/scripts/agent-pipeline.cjs'?pipeline:
     name==='./.github/scripts/agent-autonomy.cjs'?a:
@@ -340,3 +344,56 @@ for (const interruption of ["before-write", "after-write"]) {
     assert.ok(!f.writes.some(w => ["status", "merge"].includes(w.name)));
   });
 }
+
+test("real request wrapper safely defaults deliberate requests to explicit production mode",async()=>{
+ const f=requestWrapperFixture();await f.execute();assert.deepEqual(f.errors,[]);
+ assert.equal(f.output[0].mode,"production");assert.equal(f.output[0].canary_only,false);
+});
+test("real request wrapper creates only an explicitly boolean canary request",async()=>{
+ const f=requestWrapperFixture();f.requestContext.payload.inputs.canary_only=true;await f.execute();
+ assert.deepEqual(f.errors,[]);assert.equal(f.output[0].mode,"canary_only");assert.equal(f.output[0].canary_only,true);
+});
+for(const value of [undefined,null,"true","false",1]) test(`real request wrapper rejects ambiguous canary mode ${String(value)}`,async()=>{
+ const f=requestWrapperFixture();if(value===undefined)delete f.requestContext.payload.inputs.canary_only;else f.requestContext.payload.inputs.canary_only=value;
+ await f.execute();assert.deepEqual(f.errors,["REQUEST_MODE_INVALID"]);assert.equal(f.output.length,0);assert.equal(f.writes.length,0);
+});
+for(const pair of [[undefined,undefined],["production",null],["canary_only","true"],["other",false],["production",true],["canary_only",false]])
+ test(`artifact mode ${String(pair[0])}/${String(pair[1])} fails closed`,()=>{
+  const f=fixture();f.request.mode=pair[0];f.request.canary_only=pair[1];assert.throws(()=>m.expectedFrom(f.request,f.context),/REQUEST_BINDING_INVALID/);
+ });
+test("trusted route classifies exact artifact and a canary route cannot release production jobs",async()=>{
+ const f=fixture(),directory=fs.mkdtempSync(path.join(os.tmpdir(),"maintenance-route-")),outputs=[];
+ f.request.mode="canary_only";f.request.canary_only=true;fs.writeFileSync(path.join(directory,"request.json"),JSON.stringify(f.request));
+ const report=await m.run({phase:"route",github:f.github,context:f.context,core:{setOutput:(k,v)=>outputs.push([k,v])},directory});
+ assert.equal(report.mode,"canary_only");assert.deepEqual(outputs,[["production_route","false"],["canary_route","true"]]);assert.equal(f.writes.length,0);
+ const workflow=fs.readFileSync(".github/workflows/agent-control-plane-remediation.yml","utf8");
+ for(const job of ["prepare","independent-review","recover","gate","merge"]) assert.match(workflow,new RegExp(`${job}:[\\s\\S]*?if: [^\\n]*production_route == 'true'`));
+ const route=workflow.split("  route:")[1].split("\n  prepare:")[0];assert.doesNotMatch(route,/AGENT_PUBLISH_TOKEN|OPENAI_API_KEY|MERGE_TOKEN|issues: write|pull-requests: write|statuses: write/);
+});
+test("successful route job without an explicit production output cannot release writers",()=>{
+ const workflow=fs.readFileSync(".github/workflows/agent-control-plane-remediation.yml","utf8");
+ for(const job of ["recover","gate","merge"]) assert.match(workflow,new RegExp(`${job}:[\\s\\S]*?needs\\.route\\.outputs\\.production_route == 'true'`));
+});
+test("selected canary run id cannot be swapped with a run sharing its attempt",()=>{
+ const f=fixture(),swapped={...f.d.origin,id:89};assert.equal(m.originValid(swapped,f.expected),false);
+});
+test("sealed evidence rejects a tampered mode",async()=>{
+ const f=fixture();await f.seal();f.deps.bundle.request.mode="canary_only";f.deps.bundle.request.canary_only=true;
+ assert.throws(()=>m.validateBundle(f.deps.bundle,f.context),/BUNDLE_EXPECTATION_INVALID/);
+});
+for(const phase of ["prepare","recover","gate","merge"]) test(`direct ${phase} entrypoint rejects canary-only artifacts before credentials or writes`,async()=>{
+ const f=fixture(),directory=fs.mkdtempSync(path.join(os.tmpdir(),"maintenance-mode-"));f.request.mode="canary_only";f.request.canary_only=true;
+ fs.writeFileSync(path.join(directory,"request.json"),JSON.stringify(f.request));
+ await assert.rejects(m.run({phase,github:f.github,context:f.context,core:{setOutput(){}},directory}),/PRODUCTION_MODE_REQUIRED/);assert.equal(f.writes.length,0);
+});
+test("direct runtime mutation methods reject canary evidence",()=>{
+ const f=fixture();f.expected.mode="canary_only";f.expected.canaryOnly=true;
+ assert.throws(()=>m.runtime(f.deps),/PRODUCTION_MODE_REQUIRED/);assert.equal(f.writes.length,0);
+});
+test("collector schema never reports review or gate PASS",async()=>{
+ const f=fixture(),directory=fs.mkdtempSync(path.join(os.tmpdir(),"maintenance-result-"));
+ f.request.mode="canary_only";f.request.canary_only=true;fs.writeFileSync(path.join(directory,"request.json"),JSON.stringify(f.request));
+ const fetcher=async url=>({ok:true,text:async()=>JSON.stringify(url.includes("rulesets?")?[{id:99,name:"Protect main",target:"branch"}]:f.d.ruleset)});
+ const report=await m.run({phase:"canary",github:f.github,context:f.context,core:{setOutput(){}},auditToken:"read-token",directory,fetcher});
+ assert.equal(report.result,"SNAPSHOT_COLLECTED");assert.ok(!JSON.stringify(report).includes('"PASS"'));assert.equal(f.writes.length,0);
+});

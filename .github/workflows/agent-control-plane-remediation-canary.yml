@@ -42,7 +42,7 @@ jobs:
             const runId=Number(process.env.REQUEST_RUN_ID),attempt=Number(process.env.REQUEST_RUN_ATTEMPT);
             if(!Number.isSafeInteger(runId)||runId<1||!Number.isSafeInteger(attempt)||attempt<1) throw new Error('CANARY_INPUT_INVALID');
             const origin=(await github.rest.actions.getWorkflowRun({...context.repo,run_id:runId})).data;
-            if(origin.run_attempt!==attempt) throw new Error('CANARY_REQUEST_ATTEMPT_CHANGED');
+            if(origin.id!==runId||origin.run_attempt!==attempt) throw new Error('CANARY_REQUEST_ORIGIN_CHANGED');
             const ctx={repo:context.repo,payload:{repository:context.payload.repository,workflow_run:origin},eventName:'workflow_run',sha:context.sha,runId:context.runId,runAttempt:Number(process.env.GITHUB_RUN_ATTEMPT)};
             const runtime=require('./.github/scripts/agent-maintenance-runtime.cjs');
             await runtime.run({phase:'canary',github,context:ctx,core,auditToken:process.env.RULESET_AUDIT_TOKEN,directory:process.env.DIRECTORY});

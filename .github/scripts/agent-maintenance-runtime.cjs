@@ -51,6 +51,7 @@ function expectedFrom(request, context) {
     issueNumber: request.issueNumber, prNumber: request.prNumber, headSha: request.headSha,
     baseSha: context.sha, specHash: request.specHash, requester: request.actor, authorization,
     requestRunId: request.requestRunId, requestRunAttempt: request.requestRunAttempt, entryState: request.entryState,
+    mode: request.mode, canaryOnly: request.canary_only,
     requiredJobNames: c.requiredCiJobs, requiredChecks: REQUIRED_CHECKS};
   ensure(request.repo === expected.repo && expected.defaultBranch === "main" &&
     positive(expected.issueNumber) && positive(expected.prNumber) && positive(expected.requestRunId) &&
@@ -59,6 +60,8 @@ function expectedFrom(request, context) {
     authorization && positive(authorization.commentId) && positive(authorization.runId) &&
     /^[A-Za-z0-9-]{1,39}$/.test(authorization.actor || "") && authorization.specHash === expected.specHash &&
     ["agent:pr", "agent:needs-human"].includes(expected.entryState) &&
+    ((expected.mode === "production" && expected.canaryOnly === false) ||
+      (expected.mode === "canary_only" && expected.canaryOnly === true)) &&
     typeof request.reason === "string" && request.reason.trim().length > 0 && request.reason.length <= 1024,
   "REQUEST_BINDING_INVALID");
   ensure(context.eventName === "workflow_run" && originValid(context.payload.workflow_run, expected), "REQUEST_ORIGIN_INVALID");
@@ -112,8 +115,12 @@ function rulesetReader(repo, token, fetcher = fetch) {
   };
 }
 
-function runtime({github, context, expected, readRuleset, bundle = null, review = null, mergePull = null}) {
+function runtime({github, context, expected, readRuleset, bundle = null, review = null, mergePull = null, readOnlyCanary = false}) {
   ensure(typeof readRuleset === "function", "FRESH_RULESET_READER_REQUIRED");
+  ensure(readOnlyCanary
+    ? expected.mode === "canary_only" && expected.canaryOnly === true
+    : expected.mode === "production" && expected.canaryOnly === false,
+  readOnlyCanary ? "CANARY_MODE_REQUIRED" : "PRODUCTION_MODE_REQUIRED");
   const repoArgs = context.repo;
   const requestStates = expected.entryState === "agent:needs-human" ? ["agent:needs-human", "agent:pr"] : ["agent:pr", "agent:verified"];
   const reviewMarker = `<!-- agent-control-plane-review:v2 sha=${expected.headSha} issue=${expected.issueNumber} pr=${expected.prNumber} spec=${expected.specHash} source=${expected.baseSha} bundle=${bundle?.digest || "none"} -->`;
@@ -249,9 +256,16 @@ function readOnlyGithub(github) {
 }
 
 async function run({phase, github, context, core, auditToken, mergeToken, directory, fetcher = fetch}) {
-  ensure(["prepare", "canary", "recover", "gate", "merge"].includes(phase), "UNKNOWN_MAINTENANCE_PHASE");
+  ensure(["route", "prepare", "canary", "recover", "gate", "merge"].includes(phase), "UNKNOWN_MAINTENANCE_PHASE");
   const request = JSON.parse(fs.readFileSync(`${directory}/request.json`, "utf8"));
   const expected = expectedFrom(request, context);
+  if (phase === "route") {
+    core.setOutput("production_route", expected.mode === "production" ? "true" : "false");
+    core.setOutput("canary_route", expected.mode === "canary_only" ? "true" : "false");
+    return {mode: expected.mode, requestRunId: expected.requestRunId, requestRunAttempt: expected.requestRunAttempt};
+  }
+  if (phase === "canary") ensure(expected.mode === "canary_only" && expected.canaryOnly === true, "CANARY_MODE_REQUIRED");
+  else ensure(expected.mode === "production" && expected.canaryOnly === false, "PRODUCTION_MODE_REQUIRED");
   const readRuleset = rulesetReader(expected.repo, auditToken, fetcher);
   if (phase === "prepare") {
     const s = await runtime({github, context, expected, readRuleset}).snapshot(undefined, true);
@@ -271,14 +285,15 @@ async function run({phase, github, context, core, auditToken, mergeToken, direct
     return bundle;
   }
   if (phase === "canary") {
-    const s = await runtime({github: readOnlyGithub(github), context, expected, readRuleset}).snapshot(undefined, true);
-    const report = {version: 1, mode: "read-only", repository: expected.repo, issueNumber: expected.issueNumber,
+    const s = await runtime({github: readOnlyGithub(github), context, expected, readRuleset, readOnlyCanary: true}).snapshot(undefined, true);
+    const report = {version: 2, result: "SNAPSHOT_COLLECTED", mode: "read-only-snapshot", operationalAcceptance: "PENDING",
+      repository: expected.repo, issueNumber: expected.issueNumber,
       prNumber: expected.prNumber, headSha: expected.headSha, baseSha: expected.baseSha,
       authorization: expected.authorization, requestRunId: expected.requestRunId,
       requestRunAttempt: expected.requestRunAttempt, ci: {runId: s.ci.runId, runAttempt: s.ci.runAttempt},
       protectionHash: digest(s.protection), filesHash: s.filesHash};
     fs.writeFileSync(`${directory}/canary-report.json`, JSON.stringify(report));
-    core.setOutput("result", "PASS"); return report;
+    core.setOutput("result", "SNAPSHOT_COLLECTED"); return report;
   }
   const bundle = JSON.parse(fs.readFileSync(`${directory}/evidence.json`, "utf8"));
   validateBundle(bundle, context);

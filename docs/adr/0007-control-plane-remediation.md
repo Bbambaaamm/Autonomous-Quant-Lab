@@ -213,18 +213,36 @@ complete authorization identity, and the runtime re-derives and compares it on
 every snapshot. These tests use simulated GitHub API objects; they are not a
 production canary.
 
-For the resulting commit, local verification is 362 passing tests with zero
+For the resulting commit, local verification is 385 passing tests with zero
 failures or skips through the original two-suite command, plus syntax, all 22
 Actions YAML documents, and diff validation. Exact-head GitHub-hosted CI with all
 nine authoritative jobs remains required and must not be inferred from local
 results.
 
-The executable operational acceptance path is
-`agent-control-plane-remediation-canary.yml`. It accepts only the ID and attempt
-of an artifact-producing successful request for a dedicated, eligible synthetic
-**non-Draft** PR and its authorized synthetic Issue. The request wrapper and
-runtime Draft rejection are unchanged. After this workflow has been independently
-reviewed and adopted on the default branch, an authorized maintainer invokes:
+The bounded live collector is `agent-control-plane-remediation-canary.yml`.
+It accepts only the ID and attempt of an artifact-producing successful request
+for a dedicated, eligible synthetic **non-Draft** PR and its authorized synthetic
+Issue. The request UI has a required Boolean `canary_only` control whose safe
+default is `false`, preserving deliberate ordinary remediation. The artifact
+records both the exact enum `mode` (`production` or `canary_only`) and the exact
+Boolean. Missing, null, string-valued, unknown, legacy, or contradictory values
+fail closed.
+
+The ordinary follower first downloads and classifies that exact artifact in a
+read-only routing job. It binds the originating run ID and attempt, repository,
+workflow path, default-branch source SHA, actor and triggering actor, as well as
+the authorization and target identities. That job has no Issue, PR, status,
+publisher, model, merge, or ruleset credential. Every production job requires
+the explicit `production_route == 'true'` output in addition to successful
+prerequisites; routing success alone cannot release a writer. The runtime also
+requires production mode again at prepare/recover/gate/merge entrypoints. The
+canary consumer independently requires `canary_only === true` and the matching
+enum, and verifies that the UI-selected run ID and attempt are the artifact's
+origin.
+
+After these workflows have been independently reviewed and adopted on the
+default branch, an authorized maintainer creates the isolated request with the
+Boolean canary option selected, then invokes:
 
 ```bash
 gh workflow run agent-control-plane-remediation-canary.yml --ref main \
@@ -232,23 +250,32 @@ gh workflow run agent-control-plane-remediation-canary.yml --ref main \
 ```
 
 The inputs are positive integers. The output artifact
-`maintenance-read-only-canary-<run>-<attempt>/canary-report.json` is a versioned
-object containing `mode: "read-only"`, repository, Issue/PR/head/base, complete
+`maintenance-read-only-canary-<run>-<attempt>/canary-report.json` is a version 2
+object with `result: "SNAPSHOT_COLLECTED"`, `mode: "read-only-snapshot"`, and
+`operationalAcceptance: "PENDING"`, plus repository, Issue/PR/head/base, complete
 authorization identity, request and CI run/attempt identities, and protection/file
-hashes. The job's ordinary token has only Actions/contents/Issue/PR read
-permissions. Its API facade rejects comment, label, status, workflow-dispatch and
-merge methods. No publisher or merge client is constructed. The ruleset credential
-exists only in the already-trusted fixed-GET collector step; it is not supplied to
-candidate code or a model. Missing authorization, omitted `bypass_actors`, API
-permission failure, an absent request artifact, or producer/provenance mismatch
-fails the run and produces no valid report.
+hashes. It never emits a review or gate PASS marker. The job's ordinary token has
+only Actions/contents/Issue/PR read permissions. Its API facade rejects comment,
+label, status and workflow-dispatch methods, and no publisher or merge client is
+constructed. The ruleset credential exists only in the trusted fixed-GET
+collector step; it is not supplied to candidate code or a model. Missing
+authorization, omitted `bypass_actors`, API permission failure, an absent request
+artifact, or producer/provenance mismatch fails the run and produces no valid
+report.
 
-That invocation performs live read-only GitHub metadata, CI and ruleset calls.
-The suite's replacement-authorization, missing-field, escalation and denied-write
-cases are fixture/replay fault injections, not live acceptance. The workflow added
-on this candidate branch is not dispatchable as a trusted default-branch workflow
-before adoption. This workspace has neither GitHub authorization nor a configured
-remote, and no eligible dedicated synthetic request run ID/attempt or trusted
-default-branch producer evidence was supplied, so the live command was not run.
-Those are the exact remaining live-acceptance prerequisites; no evidence was
-synthesized to replace them.
+This result measures only one bounded live metadata/CI/protection snapshot. It
+does **not** execute production prepare publication, independent review, linkage,
+recovery, gate or merge and is not operational acceptance. Mocked/replayed fault
+injection, the live read-only collection, GitHub-hosted CI, independent review,
+default-branch adoption and full operational acceptance remain separate records.
+The negative fixture tests exercise invalid modes, swapped run IDs, tampered
+sealed evidence, denied writes and direct production-entrypoint rejection; they
+are not presented as live evidence.
+
+The workflow added on this candidate branch is not dispatchable as a trusted
+default-branch workflow before adoption. This workspace has neither GitHub
+authorization nor a configured remote, and no eligible dedicated synthetic
+canary-only request run ID/attempt or trusted default-branch producer evidence
+was supplied, so no live command was run. Those remain the exact live-collection
+prerequisites, followed separately by hosted CI, independent review, adoption and
+full operational acceptance; no mock result substitutes for any of them.
