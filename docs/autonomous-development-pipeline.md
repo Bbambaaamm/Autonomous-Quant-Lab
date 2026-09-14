@@ -316,3 +316,14 @@ The fixer job-level guard treats an explicit reusable `review-block` invocation 
 regardless of the caller's inherited event context. Direct `workflow_run` entry remains limited to
 failed authoritative CI, while `workflow_dispatch` is limited to an explicit failed-CI replay; the
 inner trusted invocation decision and exact linkage, lifecycle, SHA, and CI checks remain mandatory.
+
+## Issue #123 Reviewer evidence credential boundary
+
+The independent Reviewer remains read-only with respect to repository state. Its model job receives
+only `actions: read`, `checks: read`, `contents: read`, `issues: read`, and `pull-requests: read`.
+The job-scoped `${{ github.token }}` is exposed as `GH_TOKEN` only on the `Independent bounded review`
+step so the model can inspect exact workflow/check/Issue/PR metadata for the bound SHA. This token
+is evidence access, not mutation authority; it is never replaced by `AGENT_PUBLISH_TOKEN`, never
+made available to repository execution, and does not weaken exact-SHA, lifecycle, linkage, or
+fail-closed BLOCK semantics. `OPENAI_API_KEY` remains separate. If the Reviewer cannot verify the
+required GitHub evidence with this read-only credential, it must BLOCK rather than synthesize PASS.

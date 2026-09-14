@@ -74,3 +74,13 @@ validation, or publication jobs.
 ## Issue #100 bootstrap boundary — retired
 
 The one-time Issue #100 bootstrap publisher/generator was migration infrastructure only and is now retired. It is not an active authorization, generation, publication, verification, or merge boundary. The authoritative post-#100 model is ADR 0006 and the current default-branch agent authorization, Builder, fixer, independent Reviewer, verifier, gate, merge, and ruleset-sync workflows. Model execution remains read-only; validation/sealing remain credential-free; trusted mutation jobs receive only narrowly required credentials.
+
+## Issue #123 Reviewer evidence credential boundary
+
+The independent Reviewer may receive the job-scoped GitHub token only as `GH_TOKEN` on the
+`Independent bounded review` step and only with `actions: read`, `checks: read`, `contents: read`,
+`issues: read`, and `pull-requests: read`. This credential exists solely so the read-only model can
+verify exact workflow/check/Issue/PR evidence for the bound repository, PR, and SHA. It is not
+mutation authority, is never replaced by `AGENT_PUBLISH_TOKEN`, and is not exposed to repository
+execution. `OPENAI_API_KEY` remains a separate model credential. Missing or unusable evidence access
+must produce fail-closed `BLOCK`, never synthesized PASS evidence.
