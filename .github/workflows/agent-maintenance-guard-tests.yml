@@ -1,0 +1,22 @@
+name: Maintenance guard regressions
+
+on:
+  pull_request:
+    paths:
+      - '.github/scripts/agent-maintenance-*.cjs'
+      - '.github/workflows/agent-maintenance-guard-tests.yml'
+      - '.github/workflows/agent-control-plane-remediation*.yml'
+
+permissions: {contents: read}
+
+jobs:
+  maintenance-guard-regressions:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with: {persist-credentials: false}
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with: {node-version: '24'}
+      - run: node --check .github/scripts/agent-maintenance-guards.cjs
+      - run: node --test .github/scripts/agent-maintenance-guards.test.cjs
