@@ -17,3 +17,15 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with: {node-version: '24'}
       - run: node --test .github/scripts/agent-maintenance-guards.test.cjs .github/scripts/agent-maintenance-controller.test.cjs .github/scripts/agent-maintenance-runtime.test.cjs
+      - name: Export bounded tracked maintenance sources for scoped repair validation
+        run: |
+          git archive --format=tar HEAD .github AGENTS.md docs/autonomous-development-pipeline.md docs/adr > "$RUNNER_TEMP/maintenance-source.tar"
+          git rev-parse HEAD > "$RUNNER_TEMP/source-sha.txt"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: maintenance-source-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/maintenance-source.tar
+            ${{ runner.temp }}/source-sha.txt
+          if-no-files-found: error
+          retention-days: 1
