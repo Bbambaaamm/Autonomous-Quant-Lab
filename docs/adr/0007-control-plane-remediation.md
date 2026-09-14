@@ -1,108 +1,145 @@
-# ADR 0007 — Trusted control-plane remediation path
+# ADR 0007 — Trusted control-plane remediation
 
-## Status
+## Status and adoption boundary
 
-Candidate implementation complete; trust-root adoption is blocked pending an
-explicit, independently reviewed maintainer decision.
+Implementation candidate for Issue #126. The production controller is wired to
+`agent-maintenance-runtime.cjs`; tests execute those entrypoints with simulated
+GitHub responses. This is NOT a statement that the candidate has been deployed,
+independently approved, or exercised with production credentials.
 
-## Context
+The current default-branch follower is defective. Updating this PR does not
+update the follower running from `main`. There is no self-adoption mechanism in
+this change. Under the present rules, successful `agent-verified-gate` evidence is
+mandatory and only an already trusted producer may issue it. Re-running the
+known-broken producer is not an adoption plan. A maintainer must explicitly
+resolve that one-time trust-root adoption policy after independent review of the
+exact candidate. Until then adoption is BLOCKED; this implementation neither
+changes rules nor manufactures a gate to cross that boundary.
 
-The normal autonomous Builder deliberately cannot modify `.github`, agent governance, credentials, deployment controls, security policy, or other protected control-plane surfaces. That is a required safety property. A consequence is a bootstrap deadlock when the trusted pipeline itself needs repair: the ordinary autonomous verifier and `agent-verified-gate` cannot safely certify a candidate that changes the machinery used to produce that certification.
+No bypass actors, force push, required-check removal, model mutation credential,
+or execution of unreviewed candidate controller code with secrets is introduced.
+Normal workflow use must never require recurring gate toggling.
 
-Temporarily removing `agent-verified-gate` from the `main` ruleset is not an acceptable recurring maintenance procedure. It is easy to forget to restore, creates unnecessary operational risk, and makes pipeline repair dependent on repeated repository-admin configuration changes.
+## Request and trusted source
 
-## Decision
+`agent-control-plane-remediation-request.yml` is a secret-free `workflow_dispatch`
+request on the default branch. It verifies the maintainer, exact authorized Issue
+specification, PR/head identity, lifecycle, complete changed-file enumeration,
+current-main ancestry and newest CI. It records the real request run ID and
+`GITHUB_RUN_ATTEMPT`; this field must not rely on an absent toolkit property.
+The request checks out its exact `github.sha`, not a moving branch ref.
 
-Introduce a two-workflow trusted maintenance path:
+`agent-control-plane-remediation.yml` accepts only a successful completed request
+from the exact request path/default branch/same repository. Trusted jobs check
+out the follower's immutable `github.workflow_sha`. The request's source SHA,
+current default-branch SHA and reviewed base SHA must equal that trusted source.
+A changed source, new attempt, actor mismatch, revoked permission or stale
+specification stops work; candidate code cannot become the policy baseline.
+Maintenance runs serialize repository-wide. This does not make other GitHub
+workflows or human operations part of a transaction.
 
-1. `.github/workflows/agent-control-plane-remediation-request.yml` — a secret-free manual request workflow;
-2. `.github/workflows/agent-control-plane-remediation.yml` — the secret-bearing trusted follower, triggered only by `workflow_run` after a successful request run from the default branch.
+## Evidence and credential domains
 
-The manual request binds an already authorized concrete `type:implementation` Issue, exact PR number, exact 40-character head SHA, and non-empty human maintenance reason. The dispatching actor must have `write`, `maintain`, or `admin` repository permission.
+The trusted collector reads repository-scoped PR and Issue metadata, real
+bot-authored authorization/linkage, requester permission, request-run provenance,
+file scope, main ancestry, and all nine authoritative CI job results. It selects
+the newest matching CI before testing its status, so a newer running or failed
+run is not hidden behind an older completed success.
 
-The request workflow has no `OPENAI_API_KEY` or `AGENT_PUBLISH_TOKEN`. The follower rejects any request run that did not execute from the repository default branch, did not originate from the exact request workflow path, or whose actor/run identity does not match the request artifact. Consequently a collaborator cannot modify a PR-branch copy of the maintenance workflow and then use that candidate revision to receive secrets.
+Ruleset visibility is a separate authority boundary. GitHub omits `bypass_actors`
+without ruleset-write access. A missing or null field is UNKNOWN, never proof of
+an empty list. In trusted controller steps only, the existing maintenance
+credential is supplied to a fixed GET-only `rulesetReader`. It uses only the
+public GitHub ruleset collection/detail endpoints, rejects redirects and failed
+HTTP responses, and never returns the credential or raw response bodies in errors.
+No PR-controlled code runs in these jobs. The model never receives this token.
 
-### Allowed scope
+The controller re-reads protection on EVERY pre-write snapshot; an old audit
+artifact cannot stand in for the current ruleset. Actual merge authority is used
+only by a separate bounded adapter for the expected-head PR merge PUT. These
+adapters constrain trusted code's use of the credential; they do not pretend the
+underlying token itself has only GET permissions.
 
-The maintenance path is fail-closed and accepts only bounded agent control-plane surfaces:
+The model receives a bounded local evidence bundle and trusted governance as
+data, not a GitHub mutation token and not a requirement to improvise API access.
+The evidence binds repository, Issue, PR, head, base, specification, request run
+and attempt, producer run/attempt/source, newest CI identity/attempt, complete file
+set and ruleset fingerprint. Checksum establishes integrity only; trusted
+same-run immutable artifact provenance establishes the producing domain.
 
-- `.github/workflows/agent-*.yml`;
-- `.github/scripts/agent-*.cjs`;
-- `.github/agent-pipeline.json`;
-- `docs/autonomous-development-pipeline.md`;
-- the autonomous-pipeline ADRs explicitly allowlisted by the workflow.
+Candidate files and embedded Issue text remain untrusted. The reviewer keeps the
+pinned Codex action, read-only profile, zero-findings PASS requirement and all
+paper-only constraints. Its output validator uses only Node built-ins and cannot
+import candidate repository code. Trusted mutation jobs independently validate
+all output fields again with the pinned trusted implementation. BLOCK, malformed
+output, missing evidence or uncertainty cannot produce gate success. Failed
+review artifacts are retained for seven days; all artifact names include run
+attempt. Recovery after failure uses a fresh full request, not a failed-job-only
+retry that would mix outputs from different attempts.
 
-For renamed files, both the destination path and `previous_filename` must be allowlisted. The workflow also requires GitHub's enumerated file count to equal `pr.changed_files` and rejects PRs above the pull-files API's 3,000-file ceiling, so a truncated file list can never be treated as complete.
+## Nine CI jobs are not the same list as nine branch checks
 
-The maintenance path does not authorize application, trading, broker/execution, database migration, dependency, deployment, or general repository changes.
+The unchanged `.github/agent-pipeline.json` lists nine authoritative CI jobs,
+including `agent-pipeline`. All must succeed. The current reviewed `Protect main`
+baseline independently requires eight CI contexts plus `agent-verified-gate`,
+all bound to GitHub Actions App 15368. It does not contain an additional required
+branch check named `agent-pipeline`. The controller validates these two contracts
+separately rather than accidentally demanding ten branch checks.
 
-### Required evidence
+Protection must remain active, target exactly main with no exclusions, enforce
+strict branch freshness, preserve PR/deletion/non-fast-forward restrictions,
+explicitly contain zero bypass actors, and retain the CodeQL high-or-higher/error
+restriction. The sealed fingerprint includes all additional rules and parameters.
+ANY change after review, even a newly added restriction, requires fresh evidence
+rather than silently substituting a different baseline. No ruleset is written.
 
-The secret-free request and the trusted follower independently require:
+## Production entrypoints and pre-write semantics
 
-1. current exact Issue authorization;
-2. open non-draft PR against the default branch;
-3. exact unchanged PR head SHA and Issue marker;
-4. no conflicting durable Issue ↔ PR linkage;
-5. current-main ancestry (the PR may not be behind `main`);
-6. the newest authoritative pull-request CI run for the exact SHA to be completed successfully with all nine required jobs green — active newer runs are never hidden by pre-filtering for completed runs;
-7. a complete, non-truncated changed-file enumeration with every source and destination path inside the maintenance allowlist;
-8. an exact or crash-recoverable maintenance lifecycle.
+All production phases call `run` in the trusted runtime:
 
-The request may bind either an existing `agent:pr` pair or an `agent:needs-human` recovery. If a previous API attempt changed only one side, the next request may resume the allowed previous→next partial state and finish it deterministically. `agent:needs-human` is never silently overwritten: only after the independent review returns PASS does the trusted follower perform the explicit, audited recovery to `agent:pr`. Any unrelated/conflicting agent state fails closed.
+* `prepare` collects and seals bounded current API evidence without changing
+  GitHub state.
+* `recover` runs `link` and `recover`. Each missing durable link comment and each
+  Issue/PR state write gets a new complete validated snapshot. Both partial
+  recovery orders are supported. An initially unmanaged PR is admitted only for
+  an explicitly requested needs-human recovery. Conflicts never get reset.
+* `gate` separately validates before each state write, review-evidence comment
+  and success status. It requires exact verified state before publishing the
+  gate, zero findings, the same reviewed evidence, and a unique trusted marker.
+* `merge` checks the newest bot-authored gate bound to this run, performs a fresh
+  full snapshot, confirms the gate did not change, and calls merge with the exact
+  expected head. It verifies the returned merge against the closed PR. No
+  follow-up mutation is performed after merge.
 
-Lifecycle writes use a single `setLabels` call per object after a fresh state-plan check, preserving all non-agent labels and writing exactly one target `agent:*` state. Pair-level partial completion remains retryable because subsequent evaluations accept only the explicitly allowed previous/next transition and re-fetch before continuing.
+Recovery never downgrades a legitimate partially verified pair. Gate does not
+accept a new needs-human state. Repeated link/recovery operations are idempotent.
+Foreign labels from the freshly read object are preserved.
 
-A separate read-only Codex job receives the candidate as untrusted data and the default-branch governance as its trusted baseline. It must return `PASS`, zero findings, scope consistency, no test/governance weakening, and unchanged paper-only/live-trading safety. The model job receives no GitHub write credential.
+GitHub does not offer a transaction across Issue authorization, labels, CI,
+protection and PR merge. These checks narrow, but cannot eliminate, the interval
+between the last read and a write. Atomic per-object label replacement also
+cannot guarantee retention of a label added concurrently after that read. The
+expected-head merge condition and GitHub's independently enforced rules remain
+backstops. No transactional guarantee is claimed.
 
-GitHub may omit `bypass_actors` from ruleset responses when the caller lacks
-ruleset-write authority. Therefore a dedicated audit job uses the existing
-maintenance authority for two fixed GET endpoints only. It checks out and
-executes no repository or candidate code while that credential is present. The
-result is a provenance-bound artifact; missing or null `bypass_actors` is
-unknown and blocks. The Codex reviewer receives only this bounded evidence, not
-the credential. All later mutation decisions bind the evidence to the request
-run and attempt and retain every configured check name, GitHub App binding, and
-additional ruleset restriction.
+## Scope and tests
 
-### Serialization, gate and merge
+Maintenance remains limited to allowlisted agent workflows/scripts/configuration
+and the explicitly listed pipeline ADRs. Renames must have both paths allowed;
+API enumeration must equal `pr.changed_files` and not exceed the API ceiling.
+Application code, dependencies/lockfiles, AGENTS, trading, live execution,
+strategy deployment, and general infrastructure changes remain excluded.
 
-The request workflow is serialized by exact PR/SHA. Its trusted follower uses the request run title, which is deterministically bound to that same PR/SHA, as a workflow-level concurrency key with `cancel-in-progress: false`. Duplicate valid requests therefore serialize rather than racing lifecycle or evidence publication.
+The authoritative `ci.yml` is restored byte-for-byte to the trusted base. The
+already-required `agent-autonomy.test.cjs` entrypoint loads the existing pure
+regressions and new runtime regressions; an optional unprivileged runner is not
+a substitute for the nine-job CI. Existing tests are retained.
 
-After PASS and any explicitly authorized recovery, a separate trusted gate job repeatedly re-fetches mutable GitHub state. It permits only crash-recoverable `agent:pr → agent:verified` progress, rejects `agent:needs-human`, requires an exact `agent:verified` pair before publishing evidence, and requires exactly one bot-authored exact-SHA maintenance review marker after publication.
-
-The gate publishes the same required status context used by the normal path:
-
-`agent-verified-gate`
-
-The ruleset therefore remains unchanged and permanently enabled.
-
-A final merge job uses `AGENT_PUBLISH_TOKEN` only after the trusted gate succeeds. It revalidates the exact head, current authorization, two-sided durable linkage, complete allowlisted file enumeration including rename sources, newest authoritative CI, current-main ancestry, verified lifecycle, exactly one bot-authored maintenance evidence marker, and bot-authored successful `agent-verified-gate`. It then performs the complete evaluation a second time immediately before the exact-head merge request. Any stale, active, ambiguous, incomplete, or halted condition fails closed.
-
-## Consequences
-
-- Normal application Issues still use the one-authorization zero-click Builder → CI → Reviewer → verifier → gate → auto-merge path.
-- Protected pipeline changes still cannot be generated by the autonomous Builder.
-- Pipeline maintenance requires one explicit human maintenance request, but no ruleset weakening, bypass actor, manual state-transition sequence, or recurring manual gate toggling.
-- Candidate workflow revisions cannot receive maintenance secrets.
-- Duplicate maintenance requests cannot create duplicate exact-SHA gate evidence.
-- Transient partial metadata writes are retryable without manual label surgery.
-- The same permanent `agent-verified-gate` remains the branch-protection backstop for both normal autonomous delivery and trusted control-plane remediation.
-- Live trading remains out of scope and paper-only invariants are unchanged.
-
-## Verification and adoption status
-
-Local Node tests are mocked controller/guard regressions only. GitHub-hosted CI,
-the credential-isolated ruleset GET, and real Codex review are separate evidence
-and cannot be inferred from local success. A PASS review artifact is required
-before gate evidence can exist; a BLOCK review is retained for diagnosis but
-cannot create PASS or gate evidence.
-
-This candidate cannot repair the follower already executing from `main`:
-`workflow_run` deliberately loads that trusted default-branch revision. The
-legitimate bootstrap is an independently reviewed maintainer trust-root change
-that adopts this follower onto `main` through the repository's protected change
-process. Until a maintainer explicitly selects and performs that one-time
-adoption without forged statuses, bypass actors, removed checks, force pushes,
-or candidate execution with secrets, **adoption remains BLOCKED**. No candidate
-workflow run or this ADR self-certifies adoption.
+Runtime tests use actual project authorization/linkage/job helpers and mutable
+simulated API fixtures. They exercise successful link/recover/gate/merge,
+pre-first-write denial, between-write head/auth/CI/protection/permission drift,
+both partial orderings, missing/null bypass information, wrong Apps, retained
+CodeQL, HTTP failure, source/attempt provenance, BLOCK, and exact-head merge.
+Local Node results, GitHub-hosted PR CI, independent code/security review, a real
+credential-isolated canary, and actual adoption are separate acceptance records.
+None may be inferred from the others.

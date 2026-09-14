@@ -97,9 +97,11 @@ function bindingDecision(snapshot, expected, options = {}) {
   if (options.allowPartialLinks !== true && snapshot.fullLinkageValid !== true) return fail("LINKAGE_INCOMPLETE");
   const states = options.states || ["agent:needs-human", "agent:pr"];
   if (!Array.isArray(states) || states.length === 0) return fail("LIFECYCLE_EXPECTATION_INVALID");
-  for (const labels of [pr.labels, issue.labels]) {
+  for (const [index, labels] of [pr.labels, issue.labels].entries()) {
     if (!Array.isArray(labels) || names(labels).some((name) => typeof name !== "string")) return fail("LIFECYCLE_CHANGED");
     const state = names(labels).filter((name) => name.startsWith("agent:"));
+    if (index === 0 && state.length === 0 && options.allowUnmanagedPr === true &&
+        options.allowPartialLinks === true && expected.entryState === "agent:needs-human") continue;
     if (state.length !== 1 || !states.includes(state[0])) return fail("LIFECYCLE_CHANGED");
   }
   const ci = snapshot.ci;

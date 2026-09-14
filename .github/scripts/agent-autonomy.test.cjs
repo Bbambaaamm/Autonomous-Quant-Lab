@@ -231,3 +231,9 @@ test("Issue #116 Draft-to-Ready decisions fail closed for every required failure
   assert.equal(a.draftReadyPostconditionDecision({ draft: true }).reason, "READY_DRAFT_POSTCONDITION_FAILED");
   assert.equal(a.draftReadyPostconditionDecision({ draft: undefined }).reason, "READY_DRAFT_POSTCONDITION_FAILED");
 });
+
+
+// Maintenance regressions run under the unchanged authoritative CI entrypoint.
+require("./agent-maintenance-guards.test.cjs");
+require("./agent-maintenance-controller.test.cjs");
+require("./agent-maintenance-runtime.test.cjs");
