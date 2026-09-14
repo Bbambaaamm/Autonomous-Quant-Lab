@@ -332,16 +332,17 @@ human request binds the exact Issue, PR and head SHA. Its actor must have
 trusted follower, and authority is freshly revalidated before authorization-sensitive
 gate writes and immediately before the irreversible exact-head merge.
 
-Gate and merge also re-read the live `Protect main` ruleset. They require exactly
+Recovery, gate, and merge also re-read the live `Protect main` ruleset. They require exactly
 one active branch ruleset protecting `main`, no exclusions or bypass actors, strict
 required-status enforcement, pull-request/deletion/non-fast-forward protection, and
-exactly these required checks, all bound to GitHub Actions integration `15368`:
-`api`, `container-build`, `frontend`, `integration-postgres`, `production-smoke`,
-`quality`, `security`, `unit-research`, and `agent-verified-gate`. Missing,
-duplicated, extra, or differently bound required checks fail closed.
+exactly one `agent-verified-gate` required check bound to GitHub Actions integration
+`15368`. Additional ordinary required checks are accepted; trusted exact-SHA CI job
+validation continues to use `.github/agent-pipeline.json`. A missing, duplicated, or
+differently bound gate check fails closed.
 
-Once GitHub reports an exact-head merge as successful, the maintenance Issue audit
-comment records that completed irreversible action. A permission change after the
-successful merge does not suppress the audit record; requester authority is a
-precondition for privileged writes and the merge itself, not for recording a merge
-that has already happened.
+`AGENT_PUBLISH_TOKEN` performs only the exact-head merge after the fresh guards pass.
+Once GitHub reports success, a separate `GITHUB_TOKEN` step freshly verifies that the
+PR is merged and closed, the original head is unchanged, the merge commit matches the
+merge response, and the PR body still binds the exact Issue. Only then does it record
+the completed irreversible action; the audit needs no blanket post-merge requester-
+authority exception and does not broaden PAT authority.
