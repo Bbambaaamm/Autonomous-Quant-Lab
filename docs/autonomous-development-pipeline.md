@@ -316,3 +316,33 @@ The fixer job-level guard treats an explicit reusable `review-block` invocation 
 regardless of the caller's inherited event context. Direct `workflow_run` entry remains limited to
 failed authoritative CI, while `workflow_dispatch` is limited to an explicit failed-CI replay; the
 inner trusted invocation decision and exact linkage, lifecycle, SHA, and CI checks remain mandatory.
+
+### Base-bound Builder publication and control-plane maintenance
+
+Builder branch identity is deterministic for one authorized base:
+`agent/issue-${ISSUE}-${SPEC:0:12}-${BASE:0:12}`. Retries of the same
+Issue/spec/base reuse the same identity. After `main` advances and the Issue is
+reauthorized, the new base changes the branch identity, so a retired branch from an
+older base cannot collide with the new sealed candidate.
+
+Protected `.github` and agent-pipeline changes use the two-workflow control-plane
+maintenance path; they never require disabling or weakening `Protect main`. The
+human request binds the exact Issue, PR and head SHA. Its actor must have
+`write`, `maintain`, or `admin` permission. That actor identity is carried into the
+trusted follower, and authority is freshly revalidated before authorization-sensitive
+gate writes and immediately before the irreversible exact-head merge.
+
+Recovery, gate, and merge also re-read the live `Protect main` ruleset. They require exactly
+one active branch ruleset protecting `main`, no exclusions or bypass actors, strict
+required-status enforcement, pull-request/deletion/non-fast-forward protection, and
+exactly one `agent-verified-gate` required check bound to GitHub Actions integration
+`15368`. Additional ordinary required checks are accepted; trusted exact-SHA CI job
+validation continues to use `.github/agent-pipeline.json`. A missing, duplicated, or
+differently bound gate check fails closed.
+
+`AGENT_PUBLISH_TOKEN` performs only the exact-head merge after the fresh guards pass.
+Once GitHub reports success, a separate `GITHUB_TOKEN` step freshly verifies that the
+PR is merged and closed, the original head is unchanged, the merge commit matches the
+merge response, and the PR body still binds the exact Issue. Only then does it record
+the completed irreversible action; the audit needs no blanket post-merge requester-
+authority exception and does not broaden PAT authority.

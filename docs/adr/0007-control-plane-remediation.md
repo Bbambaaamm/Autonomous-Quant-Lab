@@ -66,7 +66,15 @@ The gate publishes the same required status context used by the normal path:
 
 The ruleset therefore remains unchanged and permanently enabled.
 
-A final merge job uses `AGENT_PUBLISH_TOKEN` only after the trusted gate succeeds. It revalidates the exact head, current authorization, two-sided durable linkage, complete allowlisted file enumeration including rename sources, newest authoritative CI, current-main ancestry, verified lifecycle, exactly one bot-authored maintenance evidence marker, and bot-authored successful `agent-verified-gate`. It then performs the complete evaluation a second time immediately before the exact-head merge request. Any stale, active, ambiguous, incomplete, or halted condition fails closed.
+A final merge job uses `AGENT_PUBLISH_TOKEN` only after the trusted gate succeeds. It revalidates the exact head, current authorization, two-sided durable linkage, complete allowlisted file enumeration including rename sources, newest authoritative CI, current-main ancestry, verified lifecycle, exactly one bot-authored maintenance evidence marker, and bot-authored successful `agent-verified-gate`. It then performs the complete evaluation a second time immediately before the exact-head merge request. The PAT-backed step performs no post-merge write. A separate job-token step freshly confirms the PR is merged and closed, the original exact head is unchanged, the merge commit matches the merge response, and the PR body still binds the exact Issue before recording only the completed merge. Any stale, active, ambiguous, incomplete, or halted condition fails closed.
+
+### Issue #118 hardening contract
+
+Builder publication branches are deterministic for one authorization base and include the authorized base SHA: `agent/issue-${ISSUE}-${SPEC:0:12}-${BASE:0:12}`. Retrying the same Issue/spec/base therefore reuses the same identity, while reauthorization after `main` advances uses a different branch and cannot collide with a retired branch from an older base.
+
+Control-plane recovery, gate, and merge treat the human requester's authority as mutable. The actor identity is carried from the trusted request artifact and repository `write`, `maintain`, or `admin` permission is freshly checked before authorization-sensitive gate and merge writes. The permission check immediately before the irreversible exact-head merge is mandatory. Once GitHub reports that merge as successful, the isolated job-token audit step validates the immutable merge binding and records that completed fact without a blanket requester-authority exception or any further use of `AGENT_PUBLISH_TOKEN`.
+
+The live `Protect main` ruleset is also a mutable prerequisite. Recovery, gate, and merge require one active branch ruleset with no bypass actors, `main` included and no exclusions, strict required-status enforcement, pull-request/deletion/non-fast-forward protection, and exactly one `agent-verified-gate` required check bound to the GitHub Actions integration ID `15368`. Additional ordinary required checks are accepted because trusted CI job validation remains governed by `.github/agent-pipeline.json`; a missing, duplicated, or differently bound gate check fails closed.
 
 ## Consequences
 
