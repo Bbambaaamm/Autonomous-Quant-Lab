@@ -29,7 +29,7 @@ jobs:
       reason: ${{ steps.meta.outputs.reason }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with: {ref: '${{ github.event.repository.default_branch }}', persist-credentials: false}
+        with: {ref: '${{ github.workflow_sha }}', persist-credentials: false}
       - id: meta
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
         env:
@@ -46,10 +46,10 @@ jobs:
             let ciRun;
             if(context.eventName==="workflow_run") ciRun=context.payload.workflow_run;
             else {
-              const runs=await github.paginate(github.rest.actions.listWorkflowRuns,{...context.repo,workflow_id:"ci.yml",event:"pull_request",status:"completed",per_page:100});
-              const matches=runs.filter(run=>p.authoritativeCiIdentity(run,{prNumber,headSha:sha,conclusion:"success"}));
-              if(matches.length!==1) return core.notice('NO_WRITE: exact authoritative green CI missing or ambiguous');
-              ciRun=matches[0];
+              const runs=await github.paginate(github.rest.actions.listWorkflowRuns,{...context.repo,workflow_id:"ci.yml",event:"pull_request",per_page:100});
+              const newest=runs.filter(run=>run.path===".github/workflows/ci.yml"&&run.head_sha===sha&&run.pull_requests?.length===1&&run.pull_requests[0].number===prNumber).sort((x,y)=>y.id-x.id)[0];
+              if(!newest||!p.authoritativeCiIdentity(newest,{prNumber,headSha:sha,conclusion:"success"})) return core.notice('NO_WRITE: exact authoritative green CI missing or ambiguous');
+              ciRun=newest;
             }
             if(!p.authoritativeCiIdentity(ciRun,{prNumber,headSha:sha,conclusion:"success"})) return core.notice('NO_WRITE: non-authoritative CI identity');
             const {data:issue}=await github.rest.issues.get({...context.repo,issue_number:issueNumber});
@@ -131,11 +131,38 @@ jobs:
             if(commit.sha!==headSha) throw new Error('EVIDENCE_COMMIT_MISMATCH');
             const {data:checks}=await github.rest.checks.listForRef({...context.repo,ref:headSha,per_page:100});
             if(!Array.isArray(checks.check_runs)||checks.check_runs.length<1) throw new Error('EVIDENCE_CHECKS_MISSING');
-            const {data:runs}=await github.rest.actions.listWorkflowRunsForRepo({...context.repo,head_sha:headSha,event:"pull_request",status:"completed",per_page:100});
-            if(!Array.isArray(runs.workflow_runs)) throw new Error('EVIDENCE_RUNS_MISSING');
-            const ci=runs.workflow_runs.filter(run=>run.name==="CI"&&run.head_sha===headSha&&run.event==="pull_request"&&run.pull_requests?.some(item=>item.number===prNumber)).sort((a,b)=>b.id-a.id)[0];
-            if(!ci||ci.conclusion!=="success") throw new Error('EVIDENCE_AUTHORITATIVE_CI_MISSING');
-            const evidence={version:1,repository,prNumber,issueNumber,headSha,baseSha,defaultBranch:repo.default_branch,ci:{id:ci.id,runAttempt:ci.run_attempt,conclusion:ci.conclusion},checks:checks.check_runs.map(run=>({id:run.id,name:run.name,status:run.status,conclusion:run.conclusion,headSha:run.head_sha})).slice(0,100)};
+            // Trusted workflow-owned copy; regression tests bind it to the existing predicate.
+            function successfulRequiredJobs(jobs, requiredNames, headSha) {
+              const latest = new Map();
+              for (const job of jobs) {
+                // listJobsForWorkflowRun jobs have no head_sha; callers bind the containing run to headSha.
+                if (job.head_sha !== undefined && job.head_sha !== headSha) continue;
+                const old = latest.get(job.name);
+                if (!old || job.run_attempt >= old.run_attempt) latest.set(job.name, job);
+              }
+              return requiredNames.every((name) => latest.get(name)?.conclusion === "success");
+            }
+            const governance=JSON.parse(fs.readFileSync('.codex-input/trusted-governance.json','utf8'));
+            const config=JSON.parse(governance['.github/agent-pipeline.json']);
+            if(!Array.isArray(config.requiredCiJobs)||config.requiredCiJobs.length===0||new Set(config.requiredCiJobs).size!==config.requiredCiJobs.length||config.requiredCiJobs.some(name=>typeof name!=="string"||!name)) throw new Error('EVIDENCE_REQUIRED_JOBS_INVALID');
+            const {data:workflow}=await github.rest.actions.getWorkflow({...context.repo,workflow_id:"ci.yml"});
+            if(!Number.isSafeInteger(workflow.id)||workflow.id<1||workflow.path!==".github/workflows/ci.yml"||workflow.state!=="active") throw new Error('EVIDENCE_WORKFLOW_MISMATCH');
+            const binding=run=>run.name==="CI"&&run.path===workflow.path&&run.workflow_id===workflow.id&&run.head_sha===headSha&&run.event==="pull_request"&&run.pull_requests?.length===1&&run.pull_requests[0].number===prNumber&&run.head_repository?.full_name===repository&&run.repository?.full_name===repository;
+            const listRuns=async()=>github.paginate(github.rest.actions.listWorkflowRunsForRepo,{...context.repo,head_sha:headSha,event:"pull_request",per_page:100});
+            const runs=await listRuns();
+            if(!Array.isArray(runs)) throw new Error('EVIDENCE_RUNS_MISSING');
+            const ci=runs.filter(binding).sort((a,b)=>b.id-a.id)[0];
+            if(!ci||ci.status!=="completed"||ci.conclusion!=="success"||!Number.isSafeInteger(ci.run_attempt)||ci.run_attempt<1) throw new Error('EVIDENCE_AUTHORITATIVE_CI_MISSING');
+            const jobs=await github.paginate(github.rest.actions.listJobsForWorkflowRun,{...context.repo,run_id:ci.id,filter:"all",per_page:100});
+            if(!Array.isArray(jobs)||!successfulRequiredJobs(jobs,config.requiredCiJobs,headSha)) throw new Error('EVIDENCE_REQUIRED_JOBS_FAILED');
+            const {data:fresh}=await github.rest.actions.getWorkflowRun({...context.repo,run_id:ci.id});
+            const after=await listRuns();
+            if(!Array.isArray(after)) throw new Error('EVIDENCE_RUNS_MISSING');
+            const newest=after.filter(binding).sort((a,b)=>b.id-a.id)[0];
+            if(!binding(fresh)||fresh.id!==ci.id||fresh.status!=="completed"||fresh.conclusion!=="success"||fresh.run_attempt!==ci.run_attempt||!newest||newest.id!==ci.id||newest.run_attempt!==ci.run_attempt||newest.status!=="completed"||newest.conclusion!=="success") throw new Error('EVIDENCE_CI_CHANGED');
+            const latest=new Map();
+            for(const job of jobs){if(job.head_sha!==undefined&&job.head_sha!==headSha)continue;const old=latest.get(job.name);if(!old||job.run_attempt>=old.run_attempt)latest.set(job.name,job);}
+            const evidence={version:1,repository,prNumber,issueNumber,headSha,baseSha,defaultBranch:repo.default_branch,ci:{id:ci.id,workflowId:workflow.id,path:workflow.path,runAttempt:ci.run_attempt,conclusion:ci.conclusion,jobs:config.requiredCiJobs.map(name=>({name,id:latest.get(name).id,conclusion:latest.get(name).conclusion,runAttempt:latest.get(name).run_attempt}))},checks:checks.check_runs.map(run=>({id:run.id,name:run.name,status:run.status,conclusion:run.conclusion,headSha:run.head_sha})).slice(0,100)};
             fs.writeFileSync('.codex-input/evidence-access.json',JSON.stringify(evidence));
       - name: Build deterministic bounded review prompt
         env: {HEAD_SHA: '${{ needs.prepare.outputs.head_sha }}', BASE_SHA: '${{ needs.prepare.outputs.base_sha }}'}

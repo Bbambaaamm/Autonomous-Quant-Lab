@@ -989,3 +989,58 @@ for (const [name, mutate] of issue123Mutations) {
     assert.throws(() => assertIssue123ReadonlyReviewer(altered), assert.AssertionError);
   });
 }
+
+// Execute the actual trusted inline preflight with mocked GitHub responses.
+function issue123PreflightFixture() {
+  const vm = require('node:vm');
+  const workflow = fs.readFileSync('.github/workflows/agent-codex-review.yml','utf8');
+  const block = workflow.split('      - name: Trusted exact evidence-access preflight\n')[1].split('      - name: Build deterministic bounded review prompt')[0];
+  const source = block.split('          script: |\n')[1].split('\n').filter(Boolean).map(line=>line.slice(12)).join('\n');
+  const fn = vm.runInNewContext(`(async function(require,github,context,process){${source}\n})`);
+  const repository='owner/repo',sha='a'.repeat(40),base='b'.repeat(40),calls=[],written=[];
+  const run={id:10,workflow_id:1,path:'.github/workflows/ci.yml',name:'CI',event:'pull_request',head_sha:sha,run_attempt:1,status:'completed',conclusion:'success',pull_requests:[{number:125}],head_repository:{full_name:repository},repository:{full_name:repository}};
+  const data={runs:[run],jobs:agentConfig.requiredCiJobs.map((name,i)=>({id:i+1,name,conclusion:'success',run_attempt:1})),workflow:{id:1,path:run.path,state:'active'},readCount:0,afterJobs:null,deny:false};
+  const context={repo:{owner:'owner',repo:'repo'},payload:{repository:{default_branch:'main'}}};
+  const get=(name,body)=>async(args)=>{calls.push({name,args});if(data.deny)throw new Error('HTTP_403');return {data:structuredClone(typeof body==='function'?body():body)};};
+  const github={rest:{repos:{get:get('repo',{full_name:repository,default_branch:'main'}),getCommit:get('commit',{sha})},
+    pulls:{get:get('pr',{number:125,state:'open',head:{sha},base:{sha:base,ref:'main',repo:{full_name:repository}}})},issues:{get:get('issue',{number:123,state:'open'})},
+    checks:{listForRef:get('checks',{check_runs:[{id:1,name:'quality',head_sha:sha,status:'completed',conclusion:'success'}]})},
+    actions:{getWorkflow:get('workflow',()=>data.workflow),listWorkflowRunsForRepo:'runs',listJobsForWorkflowRun:'jobs',getWorkflowRun:get('fresh',()=>data.runs.find(x=>x.id===10))}},
+    paginate:async(method,args)=>{calls.push({name:method,args});if(data.deny)throw new Error('HTTP_403');if(method==='runs'){assert.equal(args.status,undefined);data.readCount++;return structuredClone(data.runs);}assert.equal(args.filter,'all');const result=structuredClone(data.jobs);if(data.afterJobs)data.afterJobs(data);return result;}};
+  const requireMock=(name)=>{assert.equal(name,'fs');return {readFileSync:()=>JSON.stringify({'.github/agent-pipeline.json':JSON.stringify(agentConfig)}),writeFileSync:(path,body)=>written.push(JSON.parse(body))};};
+  const execute=()=>fn(requireMock,github,context,{env:{EXPECTED_REPOSITORY:repository,EXPECTED_PR:'125',EXPECTED_ISSUE:'123',EXPECTED_HEAD:sha,EXPECTED_BASE:base}});
+  return {execute,data,calls,written,run,source};
+}
+
+test('Issue #123 inline required-job predicate exactly matches trusted canonical helper',()=>{
+ const {source}=issue123PreflightFixture();
+ const helper=source.slice(source.indexOf('function successfulRequiredJobs('),source.indexOf('\nconst governance='));
+ assert.equal(helper.replace(/\s+/g,''),pipeline.successfulRequiredJobs.toString().replace(/\s+/g,''));
+});
+test('Issue #123 actual preflight binds workflow and all nine jobs before evidence publication',async()=>{
+ const f=issue123PreflightFixture();await f.execute();assert.equal(f.written.length,1);assert.equal(f.written[0].ci.jobs.length,9);assert.equal(f.data.readCount,2);assert.equal(f.written[0].ci.path,'.github/workflows/ci.yml');
+});
+for(const status of ['queued','in_progress','pending','waiting'])test(`Issue #123 preflight rejects newest ${status} CI rather than older green`,async()=>{
+ const f=issue123PreflightFixture();f.data.runs.push({...f.run,id:11,status,conclusion:null});await assert.rejects(f.execute(),/EVIDENCE_AUTHORITATIVE_CI_MISSING/);assert.equal(f.written.length,0);
+});
+for(const state of ['failure','cancelled','skipped'])test(`Issue #123 preflight rejects a required job with ${state}`,async()=>{
+ const f=issue123PreflightFixture();f.data.jobs[0].conclusion=state;await assert.rejects(f.execute(),/EVIDENCE_REQUIRED_JOBS_FAILED/);assert.equal(f.written.length,0);
+});
+test('Issue #123 preflight rejects missing required job',async()=>{
+ const f=issue123PreflightFixture();f.data.jobs.pop();await assert.rejects(f.execute(),/EVIDENCE_REQUIRED_JOBS_FAILED/);assert.equal(f.written.length,0);
+});
+test('Issue #123 preflight composes latest failed-job retry attempts using canonical semantics',async()=>{
+ const f=issue123PreflightFixture();f.data.jobs[0].conclusion='failure';f.data.jobs.push({...f.data.jobs[0],id:99,run_attempt:2,conclusion:'success'});await f.execute();assert.equal(f.written[0].ci.jobs[0].runAttempt,2);
+});
+for(const field of ['path','workflow_id'])test(`Issue #123 preflight rejects a CI impersonator with wrong ${field}`,async()=>{
+ const f=issue123PreflightFixture();f.data.runs[0][field]=field==='path'?'.github/workflows/fake.yml':2;await assert.rejects(f.execute(),/EVIDENCE_AUTHORITATIVE_CI_MISSING/);assert.equal(f.written.length,0);
+});
+test('Issue #123 preflight stops when a new run arrives while fetching jobs',async()=>{
+ const f=issue123PreflightFixture();f.data.afterJobs=d=>d.runs.push({...f.run,id:11});await assert.rejects(f.execute(),/EVIDENCE_CI_CHANGED/);assert.equal(f.written.length,0);
+});
+test('Issue #123 preflight stops when the chosen run is retried while fetching jobs',async()=>{
+ const f=issue123PreflightFixture();f.data.afterJobs=d=>{d.runs[0].run_attempt=2;d.runs[0].status='in_progress';};await assert.rejects(f.execute(),/EVIDENCE_CI_CHANGED/);assert.equal(f.written.length,0);
+});
+test('Issue #123 API 403 cannot produce an evidence bundle',async()=>{
+ const f=issue123PreflightFixture();f.data.deny=true;await assert.rejects(f.execute(),/HTTP_403/);assert.equal(f.written.length,0);
+});
