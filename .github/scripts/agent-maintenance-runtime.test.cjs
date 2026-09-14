@@ -245,13 +245,20 @@ function requestWrapperFixture() {
   const output=[], errors=[];
   const env={ISSUE:'126',PR:'127',HEAD:f.expected.headSha,REASON:'Exact authorized recovery',
     GITHUB_RUN_ATTEMPT:'1',TRIGGERING_ACTOR:'alice',RUNNER_TEMP:'/mock'};
+  // Actions exposes typed inputs separately from the string-valued event payload.
+  const inputs={canary_only:false};
   const context={...f.context,actor:'alice',ref:'refs/heads/main',runId:88,
-    payload:{...f.context.payload,inputs:{canary_only:false}}};
+    payload:{...f.context.payload,inputs:{canary_only:'false'}}};
   const load=name=>name==='fs'?{writeFileSync:(_path,text)=>output.push(JSON.parse(text))}:
     name==='./.github/scripts/agent-pipeline.cjs'?pipeline:
     name==='./.github/scripts/agent-autonomy.cjs'?a:
     name==='./.github/agent-pipeline.json'?c:(()=>{throw new Error('Unexpected import');})();
-  return {...f,env,output,errors,requestContext:context,execute:()=>script(load,f.github,context,{env},{setFailed:msg=>errors.push(msg)})};
+  const execute=(transportOverrides={})=>{
+    context.payload.inputs=Object.fromEntries(Object.entries(inputs).map(([key,value])=>[key,String(value)]));
+    const transported={...env,CANARY_ONLY_JSON:JSON.stringify(inputs.canary_only),...transportOverrides};
+    return script(load,f.github,context,{env:transported},{setFailed:msg=>errors.push(msg)});
+  };
+  return {...f,env,inputs,output,errors,requestContext:context,execute};
 }
 test('request wrapper admits exact needs-human Issue with unmanaged PR then actual runtime recovers it',async()=>{
  const f=requestWrapperFixture();f.d.pr.labels=['priority:high'];await f.execute();
@@ -340,7 +347,7 @@ for (const interruption of ["before-write", "after-write"]) {
     assert.equal(f.writes.filter(w => w.name === "labels").length, 2);
     const completedWrites = f.writes.length;
     await next.recover();
-    assert.equal(f.writes.length, completedWrites, "completed retry is idempotent");
+    assert.equal(f.writes.length, completedWrites, "completed retry is idempotentence");
     assert.ok(!f.writes.some(w => ["status", "merge"].includes(w.name)));
   });
 }
@@ -350,11 +357,11 @@ test("real request wrapper safely defaults deliberate requests to explicit produ
  assert.equal(f.output[0].mode,"production");assert.equal(f.output[0].canary_only,false);
 });
 test("real request wrapper creates only an explicitly boolean canary request",async()=>{
- const f=requestWrapperFixture();f.requestContext.payload.inputs.canary_only=true;await f.execute();
+ const f=requestWrapperFixture();f.inputs.canary_only=true;await f.execute();
  assert.deepEqual(f.errors,[]);assert.equal(f.output[0].mode,"canary_only");assert.equal(f.output[0].canary_only,true);
 });
 for(const value of [undefined,null,"true","false",1]) test(`real request wrapper rejects ambiguous canary mode ${String(value)}`,async()=>{
- const f=requestWrapperFixture();if(value===undefined)delete f.requestContext.payload.inputs.canary_only;else f.requestContext.payload.inputs.canary_only=value;
+ const f=requestWrapperFixture();if(value===undefined)delete f.inputs.canary_only;else f.inputs.canary_only=value;
  await f.execute();assert.deepEqual(f.errors,["REQUEST_MODE_INVALID"]);assert.equal(f.output.length,0);assert.equal(f.writes.length,0);
 });
 for(const pair of [[undefined,undefined],["production",null],["canary_only","true"],["other",false],["production",true],["canary_only",false]])
@@ -396,4 +403,30 @@ test("collector schema never reports review or gate PASS",async()=>{
  const fetcher=async url=>({ok:true,text:async()=>JSON.stringify(url.includes("rulesets?")?[{id:99,name:"Protect main",target:"branch"}]:f.d.ruleset)});
  const report=await m.run({phase:"canary",github:f.github,context:f.context,core:{setOutput(){}},auditToken:"read-token",directory,fetcher});
  assert.equal(report.result,"SNAPSHOT_COLLECTED");assert.ok(!JSON.stringify(report).includes('"PASS"'));assert.equal(f.writes.length,0);
+});
+
+
+// GitHub workflow_dispatch serializes github.event.inputs booleans as strings.
+// Only toJSON(inputs.canary_only) carries the typed value into github-script.
+for(const value of [false,true]) test(`dispatch input ${value} survives the real string-valued event payload`,async()=>{
+ const f=requestWrapperFixture();f.inputs.canary_only=value;await f.execute();
+ assert.equal(f.requestContext.payload.inputs.canary_only,String(value));
+ assert.deepEqual(f.errors,[]);assert.equal(f.output.length,1);
+ assert.equal(f.output[0].canary_only,value);
+ assert.equal(f.output[0].mode,value?"canary_only":"production");
+ assert.equal(f.writes.length,0);
+});
+for(const transport of [undefined,"","null",'"true"','"false"',"0","{}","[]","TRUE"])
+ test(`typed canary input rejects invalid transport ${String(transport)} without event fallback`,async()=>{
+  const f=requestWrapperFixture();await f.execute({CANARY_ONLY_JSON:transport});
+  assert.equal(f.requestContext.payload.inputs.canary_only,"false");
+  assert.deepEqual(f.errors,["REQUEST_MODE_INVALID"]);
+  assert.equal(f.output.length,0);assert.equal(f.writes.length,0);
+ });
+test("dispatch input wiring serializes typed inputs and never reads the untyped payload",()=>{
+ const workflow=fs.readFileSync(".github/workflows/agent-control-plane-remediation-request.yml","utf8");
+ assert.match(workflow,/CANARY_ONLY_JSON: '\$\{\{ toJSON\(inputs\.canary_only\) \}\}'/);
+ const source=workflow.split("          script: |\n")[1].split("      - uses: actions/upload-artifact@")[0];
+ assert.doesNotMatch(source,/context\.payload\.inputs/);
+ assert.match(source,/JSON\.parse\(process\.env\.CANARY_ONLY_JSON\)/);
 });
