@@ -811,7 +811,7 @@ test("Issue #96 Reviewer metadata writers have compatible least-privilege grants
     assert.doesNotMatch(section,/contents: write|OPENAI_API_KEY/,name);
   }
   const model=job(reviewer,"independent-review");
-  assert.match(model,/permissions: \{contents: read\}/);
+  assertIssue123ReadonlyReviewer(reviewer);
   assert.doesNotMatch(model,/issues: write|pull-requests: write|contents: write/);
   assert.match(model,/OPENAI_API_KEY/);
   assert.match(job(reviewer,"trusted-record"),/result\.reviewed_sha!==process\.env\.SHA[\s\S]*createComment[\s\S]*agent-codex-review:v2 sha=\$\{process\.env\.SHA\}/);
@@ -889,3 +889,72 @@ test("v2 classify job guard admits reusable review-block despite inherited calle
   assert.match(fixer,/SOURCE_CONTEXT_MAX_BYTES=917504/);
   assert.match(fixer,/test "\$\(stat -c%s \.codex-input\/prompt\.md\)" -lt 1048576/);
 });
+
+// Issue #123: source-wiring regression, not a replacement for sandbox/API acceptance.
+// Fail closed when the deliberately bounded inline YAML contract changes.
+function assertIssue123ReadonlyReviewer(workflow) {
+  const jobs = [...workflow.matchAll(/^  independent-review:\n([\s\S]*?)(?=^  [A-Za-z0-9_-]+:\n|(?![\s\S]))/gm)];
+  assert.equal(jobs.length, 1, "exactly one independent-review job is required");
+  const model = jobs[0][0];
+  const maps = [...model.matchAll(/^    permissions: \{([^}\n]+)\}\s*$/gm)];
+  assert.equal(maps.length, 1, "one explicit model job permission map is required");
+  const expected = ["actions", "checks", "contents", "issues", "pull-requests"];
+  const entries = maps[0][1].split(",").map((entry) => entry.trim().split(/:\s*/));
+  assert.equal(entries.length, expected.length, "no additional or duplicate permissions");
+  assert.deepEqual(entries.map(([key]) => key).sort(), expected);
+  for (const [key, value, extra] of entries) {
+    assert.equal(value, "read", `${key} must be read-only`);
+    assert.equal(extra, undefined, "malformed permission entry");
+  }
+  const steps = [...model.matchAll(/^      - name: Independent bounded review\n([\s\S]*?)(?=^      - |(?![\s\S]))/gm)];
+  assert.equal(steps.length, 1, "exactly one model review step is required");
+  const reviewStep = steps[0][0];
+  assert.match(reviewStep, /^        env:\n          GH_TOKEN: '\$\{\{ github\.token \}\}'$/m);
+  assert.equal((workflow.match(/\bGH_TOKEN\s*:/g) || []).length, 1,
+    "GH_TOKEN assignment must be confined to the model-review step");
+  assert.match(reviewStep, /^        uses: openai\/codex-action@[0-9a-f]{40}(?:\s+#.*)?$/m);
+  assert.match(reviewStep, /^          permission-profile: ':read-only'$/m);
+  assert.match(model, /persist-credentials: false/);
+  assert.match(model, /Do not run repository code\./);
+  assert.doesNotMatch(model, /AGENT_PUBLISH_TOKEN|GITHUB_ENV|persist-credentials: true|danger-full-access|safety-strategy:\s*['"]?unsafe/);
+  assert.doesNotMatch(model, /\b[\w-]+:\s*write\b|permissions:\s*write-all/);
+  // OPENAI_API_KEY is passed to the pinned action/proxy, not supplied as GH_TOKEN.
+  for (const secret of model.matchAll(/\$\{\{\s*secrets\.([A-Za-z0-9_]+)\s*\}\}/g)) {
+    assert.equal(secret[1], "OPENAI_API_KEY", "no repository mutation secret in model job");
+  }
+}
+
+test("Issue #123 Reviewer evidence uses exactly bounded read permissions and step-scoped token", () => {
+  assertIssue123ReadonlyReviewer(fs.readFileSync(".github/workflows/agent-codex-review.yml", "utf8"));
+});
+
+const issue123Mutations = [
+  ...["actions", "checks", "contents", "issues", "pull-requests"].map((name) => [
+    `${name} write escalation`,
+    (text) => text.replace(`${name}: read`, `${name}: write`),
+  ]),
+  ["additional read scope", (text) => text.replace("actions: read,", "packages: read, actions: read,")],
+  ["missing required scope", (text) => text.replace("checks: read, ", "")],
+  ["duplicate scope", (text) => text.replace("checks: read,", "actions: read,")],
+  ["inherited job permissions", (text) => text.replace(/^    permissions:.*\n/m, "")],
+  ["missing metadata token", (text) => text.replace(/^          GH_TOKEN:.*\n/m, "")],
+  ["publish token instead of job token", (text) => text.replace("GH_TOKEN: '${{ github.token }}'", "GH_TOKEN: '${{ secrets.AGENT_PUBLISH_TOKEN }}'")],
+  ["token at job scope", (text) => text.replace("    steps:\n", "    env:\n      GH_TOKEN: '${{ github.token }}'\n    steps:\n")],
+  ["token in another step", (text) => text + "\n  another-job:\n    steps:\n      - run: true\n        env: {GH_TOKEN: '${{ github.token }}'}\n"],
+  ["workspace write profile", (text) => text.replace("permission-profile: ':read-only'", "permission-profile: ':workspace'")],
+  ["floating action version", (text) => text.replace(/openai\/codex-action@[0-9a-f]{40}/, "openai/codex-action@main")],
+  ["persistent checkout credential", (text) => text.replace("persist-credentials: false", "persist-credentials: true")],
+  ["additional model secret", (text) => text.replace("        env:\n", "        env:\n          OTHER: '${{ secrets.WRITE_TOKEN }}'\n")],
+  ["token persisted between steps", (text) => text.replace("    steps:\n", '    steps:\n      - run: echo "GH_TOKEN=x" >> "$GITHUB_ENV"\n')],
+  ["duplicate model review job", (text) => text + "\n" + text],
+];
+for (const [name, mutate] of issue123Mutations) {
+  test(`Issue #123 read-only boundary rejects ${name}`, () => {
+    const workflow = fs.readFileSync(".github/workflows/agent-codex-review.yml", "utf8");
+    const model = workflow.match(/^  independent-review:\n([\s\S]*?)(?=^  [A-Za-z0-9_-]+:\n|(?![\s\S]))/m);
+    assert.ok(model, "model job fixture exists");
+    const altered = mutate(model[0]);
+    assert.notEqual(altered, model[0], "mutation must actually change the model fixture");
+    assert.throws(() => assertIssue123ReadonlyReviewer(altered), assert.AssertionError);
+  });
+}
