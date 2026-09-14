@@ -6,6 +6,7 @@ const clone = (value) => structuredClone(value);
 const expected = {
   repo: "owner/repo", defaultBranch: "main", issueNumber: 123, prNumber: 125,
   headSha: "a".repeat(40), baseSha: "b".repeat(40), specHash: "c".repeat(64),
+  authorization: {commentId: 7, actor: "alice", runId: 11, specHash: "c".repeat(64)},
   requester: "maintainer", requestRunId: 71, requestRunAttempt: 2,
   requiredChecks: ["api", "quality", "security", "unit-research", "integration-postgres", "frontend", "container-build", "production-smoke", "agent-verified-gate"]
     .map((context) => ({context, integration_id: 15368})),
@@ -21,7 +22,7 @@ const valid = () => ({
     head: {sha: expected.headSha, repo: {full_name: expected.repo}},
     base: {ref: "main", sha: expected.baseSha, repo: {full_name: expected.repo}}},
   issue: {number: 123, state: "open", labels: ["type:implementation", "agent:needs-human"]},
-  authorization: {ok: true, specHash: expected.specHash}, requesterPermission: "admin",
+  authorization: {ok: true, ...expected.authorization}, requesterPermission: "admin",
   currentMainSha: expected.baseSha, behindBy: 0, markerIssueNumber: 123,
   linksConflict: false, fullLinkageValid: true, fileScopeValid: true,
   requestOrigin: {actor: "maintainer", runId: 71, runAttempt: 2,
@@ -49,6 +50,9 @@ const mutations = [
   ["PR masquerading as Issue", s => {s.issue.pull_request = {};}],
   ["conflicting classification", s => {s.issue.labels.push("type:epic");}],
   ["stale authorization", s => {s.authorization.specHash = "d".repeat(64);}],
+  ["replacement authorization comment", s => {s.authorization.commentId++;}],
+  ["replacement authorization actor", s => {s.authorization.actor = "bob";}],
+  ["replacement authorization run", s => {s.authorization.runId++;}],
   ["missing authorization", s => {s.authorization = undefined;}],
   ["revoked maintainer", s => {s.requesterPermission = "read";}],
   ["moved main", s => {s.currentMainSha = "d".repeat(40);}],

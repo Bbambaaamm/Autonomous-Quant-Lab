@@ -79,8 +79,10 @@ underlying token itself has only GET permissions.
 The model receives a bounded local evidence bundle and trusted governance as
 data, not a GitHub mutation token and not a requirement to improvise API access.
 The evidence binds repository, Issue, PR, head, base, specification, request run
-and attempt, producer run/attempt/source, newest CI identity/attempt, complete file
-set and ruleset fingerprint. Checksum establishes integrity only; trusted
+and attempt, the authorization comment ID/actor/run/specification hash, producer
+run/attempt/source, newest CI identity/attempt, complete file set and ruleset
+fingerprint. A replacement authorization with the same specification hash cannot
+adopt an earlier request or review. Missing identity fields fail closed. Checksum establishes integrity only; trusted
 same-run immutable artifact provenance establishes the producing domain.
 
 Candidate files and embedded Issue text remain untrusted. The reviewer keeps the
@@ -133,6 +135,11 @@ All production phases call `run` in the trusted runtime:
 Recovery never downgrades a legitimate partially verified pair. Gate does not
 accept a new needs-human state. Repeated link/recovery operations are idempotent.
 Foreign labels from the freshly read object are preserved.
+Recovery also remembers each object observed or written in the recovered state
+during the current operation. If that object is subsequently returned to
+`agent:needs-human`, the next object write is refused rather than overwriting the
+new escalation. Legitimate partial recovery and a new, fully bound request remain
+supported.
 
 GitHub does not offer a transaction across Issue authorization, labels, CI,
 protection and PR merge. These checks narrow, but cannot eliminate, the interval
@@ -192,3 +199,32 @@ request run. It rejects the old producer bundle, collects new evidence, resumes
 through the production runtime, preserves foreign labels and proves idempotence.
 The after-write case fails on the Issue-first implementation and passes when the
 PR is written first. These are mocked API tests, not live recovery acceptance.
+
+## Review 34842655515 closure and outstanding acceptance
+
+The regression suite now changes a recovered PR or Issue back to
+`agent:needs-human` between the two production recovery writes and proves that
+only the first label mutation occurs. It also replaces the authorization comment
+with a different comment ID while retaining the exact specification hash, both
+before the first write and between writes. The trusted request wrapper emits the
+complete authorization identity, and the runtime re-derives and compares it on
+every snapshot. These tests use simulated GitHub API objects; they are not a
+production canary.
+
+For the resulting commit, local verification is 356 passing tests with zero
+failures or skips through the original two-suite command, plus syntax, all 21
+Actions YAML documents, and diff validation. Exact-head GitHub-hosted CI with all
+nine authoritative jobs remains required and must not be inferred from local
+results.
+
+A bounded operational acceptance must run only after this exact commit is
+independently reviewed and adopted through the existing trusted path. It should
+use a dedicated synthetic maintenance Issue and Draft PR confined to the
+allowlist, collect a real credential-isolated evidence bundle, and exercise
+read-only rejection cases for missing authorization identity, a replacement
+same-hash authorization, and an intervening needs-human escalation. No gate,
+merge, ruleset change, production label mutation, or candidate-code execution
+with credentials is part of that canary. This workspace has no GitHub credential
+or configured remote, so it cannot publish the commit, observe exact-head CI, or
+perform that authorized operational test. Those acceptance items remain
+unverified; their requirements are not reduced.

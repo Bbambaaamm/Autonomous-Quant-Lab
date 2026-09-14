@@ -14,7 +14,8 @@ function fixture() {
   const issue = {number: 126, title: "Repair maintenance", body: "Explicit bounded specification", state: "open", labels: ["type:implementation", "agent:needs-human", "team:quant"]};
   const specHash = a.issueSpecHash(issue);
   const request = {repo, issueNumber: 126, prNumber: 127, headSha: head, specHash, actor: "alice", requestRunId: 88,
-    requestRunAttempt: 1, entryState: "agent:needs-human", reason: "Reviewed maintenance request"};
+    requestRunAttempt: 1, entryState: "agent:needs-human", reason: "Reviewed maintenance request",
+    authorization: {commentId: 1, actor: "alice", runId: 77, specHash}};
   const origin = {id: 88, run_attempt: 1, actor: {login: "alice"}, triggering_actor: {login: "alice"}, event: "workflow_dispatch", status: "completed", conclusion: "success",
     path: ".github/workflows/agent-control-plane-remediation-request.yml", head_sha: base, head_branch: "main", head_repository: {full_name: repo}, repository: {full_name: repo}};
   const context = {repo: {owner: "owner", repo: "repo"}, sha: base, eventName: "workflow_run", runId: 900, runAttempt: 1,
@@ -53,7 +54,8 @@ function fixture() {
   const review={reviewed_sha:head,result:"PASS",findings:[],issue_scope_consistent:true,test_or_governance_weakened:false,paper_only_live_trading_safe:true,summary:"Independently checked."};
   const deps={github,context,expected,readRuleset,review,mergePull};
   const seal=async()=>{const s=await m.runtime({...deps,review:null}).snapshot(undefined,true);
-    const evidence={repository:repo,headSha:head,baseSha:base,ci:s.ci,filesHash:s.filesHash,protectionHash:m.digest(s.protection),protection:s.protection};
+    const evidence={repository:repo,headSha:head,baseSha:base,ci:s.ci,filesHash:s.filesHash,protectionHash:m.digest(s.protection),protection:s.protection,
+      authorization: clone(expected.authorization)};
     const bundle={version:2,producer:m.producer(context),request,expected,evidence};
     bundle.digest=m.digest({producer:bundle.producer,expected,evidence});deps.bundle=bundle;return m.runtime(deps);};
   const addLinks=()=>{const marker=`<!-- agent-link:v1 repo=${repo} issue=126 pr=127 -->`;
@@ -76,6 +78,7 @@ const drift=[
   ["missing request attempt caller",d=>{delete d.origin.triggering_actor;}],
   ["head",d=>{d.pr.head.sha="d".repeat(40);}],
   ["authorization",d=>{d.issue.body+=" changed";}],
+  ["replacement authorization with same specification",d=>{d.issueComments[0].id=2;}],
   ["closed Issue",d=>{d.issue.state="closed";}],
   ["classification",d=>{d.issue.labels.push("type:epic");}],
   ["requester authority",d=>{d.permission="read";}],
@@ -130,6 +133,18 @@ for(const phase of ["link","recover","gate"])test(`production ${phase} denies fo
 test("gate refuses new needs-human after review",async()=>{
  const f=fixture();f.addLinks();const r=await f.seal();await r.recover();const count=f.writes.length;f.d.pr.labels=["agent:needs-human"];
  await assert.rejects(r.gate());assert.equal(f.writes.length,count);
+});
+for (const reverted of ["pr", "issue"]) test(`recovery stops the next write when recovered ${reverted} is escalated`, async()=>{
+ const f=fixture();f.addLinks();
+ if(reverted==="issue") f.d.issue.labels=f.d.issue.labels.map(x=>x==="agent:needs-human"?"agent:pr":x);
+ const r=await f.seal();f.d.afterWrite=(d,w)=>{if(w.length===1)d[reverted].labels=d[reverted].labels.filter(x=>!x.startsWith("agent:")).concat("agent:needs-human");};
+ await assert.rejects(r.recover(),/RECOVERY_PROGRESS_REVOKED/);
+ assert.equal(f.writes.filter(x=>x.name==="labels").length,1,"escalation stops the following label mutation");
+ assert.ok(f.d[reverted].labels.includes("agent:needs-human"));
+});
+test("new authorization with the same specification cannot reuse an old review bundle",async()=>{
+ const f=fixture(),r=await f.seal();f.d.issueComments[0].id=2;
+ await assert.rejects(r.recover(),/AUTHORIZATION_CHANGED/);assert.equal(f.writes.length,0);
 });
 test("production does not erase an already verified half on a fresh explicit request",async()=>{
  const f=fixture();f.addLinks();f.request.entryState="agent:pr";f.expected.entryState="agent:pr";
@@ -192,8 +207,15 @@ function requestWrapperFixture() {
 test('request wrapper admits exact needs-human Issue with unmanaged PR then actual runtime recovers it',async()=>{
  const f=requestWrapperFixture();f.d.pr.labels=['priority:high'];await f.execute();
  assert.deepEqual(f.errors,[]);assert.equal(f.output.length,1);assert.equal(f.output[0].entryState,'agent:needs-human');
+ assert.deepEqual(f.output[0].authorization,{commentId:1,actor:'alice',runId:77,specHash:f.expected.specHash});
  const r=await f.seal();await r.link();await r.recover();assert.ok(f.d.pr.labels.includes('agent:pr'));
  assert.ok(f.d.pr.labels.includes('priority:high'));assert.ok(f.d.issue.labels.includes('team:quant'));
+});
+test('request and evidence reject missing or substituted authorization identity',async()=>{
+ const f=requestWrapperFixture();await f.execute();const request=clone(f.output[0]);delete request.authorization.commentId;
+ assert.throws(()=>m.expectedFrom(request,f.context),/REQUEST_BINDING_INVALID/);
+ const r=await f.seal();f.deps.bundle.evidence.authorization.commentId=2;
+ await assert.rejects(r.link(),/BUNDLE_EVIDENCE_INVALID/);assert.equal(f.writes.length,0);
 });
 for(const issueState of ['agent:running','agent:ready','agent:pr'])test(`request wrapper refuses unmanaged PR with ${issueState} Issue`,async()=>{
  const f=requestWrapperFixture();f.d.pr.labels=['priority:high'];f.d.issue.labels=['type:implementation',issueState];await f.execute();

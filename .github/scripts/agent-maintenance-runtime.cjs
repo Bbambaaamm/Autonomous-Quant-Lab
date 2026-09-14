@@ -46,15 +46,18 @@ function originValid(run, expected) {
 }
 
 function expectedFrom(request, context) {
+  const authorization = request.authorization;
   const expected = {repo: `${context.repo.owner}/${context.repo.repo}`, defaultBranch: context.payload.repository.default_branch,
     issueNumber: request.issueNumber, prNumber: request.prNumber, headSha: request.headSha,
-    baseSha: context.sha, specHash: request.specHash, requester: request.actor,
+    baseSha: context.sha, specHash: request.specHash, requester: request.actor, authorization,
     requestRunId: request.requestRunId, requestRunAttempt: request.requestRunAttempt, entryState: request.entryState,
     requiredJobNames: c.requiredCiJobs, requiredChecks: REQUIRED_CHECKS};
   ensure(request.repo === expected.repo && expected.defaultBranch === "main" &&
     positive(expected.issueNumber) && positive(expected.prNumber) && positive(expected.requestRunId) &&
     positive(expected.requestRunAttempt) && SHA.test(expected.headSha || "") && SHA.test(expected.baseSha || "") &&
     /^[0-9a-f]{64}$/.test(expected.specHash || "") && /^[A-Za-z0-9-]{1,39}$/.test(expected.requester || "") &&
+    authorization && positive(authorization.commentId) && positive(authorization.runId) &&
+    /^[A-Za-z0-9-]{1,39}$/.test(authorization.actor || "") && authorization.specHash === expected.specHash &&
     ["agent:pr", "agent:needs-human"].includes(expected.entryState) &&
     typeof request.reason === "string" && request.reason.trim().length > 0 && request.reason.length <= 1024,
   "REQUEST_BINDING_INVALID");
@@ -72,7 +75,8 @@ function validateBundle(bundle, context) {
   const expected = expectedFrom(bundle.request, context);
   ensure(canonical(expected) === canonical(bundle.expected), "BUNDLE_EXPECTATION_INVALID");
   ensure(bundle.evidence?.headSha === expected.headSha && bundle.evidence.baseSha === expected.baseSha &&
-    bundle.evidence.repository === expected.repo && positive(bundle.evidence.ci?.runId) && positive(bundle.evidence.ci.runAttempt), "BUNDLE_EVIDENCE_INVALID");
+    bundle.evidence.repository === expected.repo && positive(bundle.evidence.ci?.runId) && positive(bundle.evidence.ci.runAttempt) &&
+    canonical(bundle.evidence.authorization) === canonical(expected.authorization), "BUNDLE_EVIDENCE_INVALID");
   ensure(bundle.digest === digest({producer: bundle.producer, expected, evidence: bundle.evidence}), "BUNDLE_DIGEST_INVALID");
   return expected;
 }
@@ -168,9 +172,15 @@ function runtime({github, context, expected, readRuleset, bundle = null, review 
   const recover = async () => {
     // Keep needs-human on the Issue until the previously unmanaged PR has a
     // resumable state. A fresh request can then recover a lost first response.
+    const recovered = new Set();
     for (const side of ["pr", "issue"]) await checkedWrite(requestStates, true, async s => {
       ensure(s.fullLinkageValid, "LINKAGE_INCOMPLETE");
+      for (const completed of recovered) ensure(a.exactAgentState(s[completed].labels, "agent:pr") ||
+        a.exactAgentState(s[completed].labels, "agent:verified"), "RECOVERY_PROGRESS_REVOKED");
+      for (const candidate of ["pr", "issue"]) if (a.exactAgentState(s[candidate].labels, "agent:pr") ||
+        a.exactAgentState(s[candidate].labels, "agent:verified")) recovered.add(candidate);
       if (!a.exactAgentState(s[side].labels, "agent:verified")) await setState(side === "issue" ? expected.issueNumber : expected.prNumber, s[side].labels, "agent:pr");
+      recovered.add(side);
     });
     await snapshot(expected.entryState === "agent:needs-human" ? ["agent:pr"] : ["agent:pr", "agent:verified"]);
   };
@@ -217,7 +227,8 @@ async function run({phase, github, context, core, auditToken, mergeToken, direct
     const evidence = {repository: expected.repo, headSha: expected.headSha, baseSha: expected.baseSha,
       ci: s.ci, filesHash: s.filesHash, protectionHash: digest(s.protection), protection: s.protection,
       files: s.files.map(x => ({filename: x.filename, status: x.status, previous_filename: x.previous_filename || null})),
-      authorization: {specHash: s.authorization.specHash, actor: s.authorization.actor, runId: s.authorization.runId},
+      authorization: {commentId: s.authorization.commentId, specHash: s.authorization.specHash,
+        actor: s.authorization.actor, runId: s.authorization.runId},
       title: p.redactDiagnostic(s.issue.title, 256), body: p.redactDiagnostic(s.issue.body || "", 16384)};
     const bundle = {version: 2, producer: producer(context), request, expected, evidence};
     bundle.digest = digest({producer: bundle.producer, expected, evidence});

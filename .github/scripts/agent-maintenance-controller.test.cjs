@@ -5,6 +5,7 @@ const {collectSnapshot, controller, requiredCiEvidence} = require("./agent-maint
 
 const expected = {repo: "owner/repo", defaultBranch: "main", issueNumber: 126, prNumber: 127,
   headSha: "a".repeat(40), baseSha: "b".repeat(40), specHash: "c".repeat(64), requester: "alice",
+  authorization: {commentId: 1, actor: "alice", runId: 77, specHash: "c".repeat(64)},
   requestRunId: 88, requestRunAttempt: 3, requiredJobNames: ["agent-pipeline"],
   requiredChecks: [{context: "agent-verified-gate", integration_id: 15368}]};
 const ruleset = {name: "Protect main", target: "branch", enforcement: "active", bypass_actors: [],
@@ -44,7 +45,7 @@ function apiFixture() {
   const pipeline = {parseAgentIssue: () => 126, durablePrLinkDecision: () => ({ok: true, prNumber: 127}),
     durableIssueLinkDecision: () => ({ok: true, issueNumber: 126}), fullLinkageDecision: () => ({ok: true}),
     successfulRequiredJobs: () => true};
-  const autonomy = {authorizationDecision: () => ({ok: true, specHash: expected.specHash})};
+  const autonomy = {authorizationDecision: () => ({ok: true, ...expected.authorization})};
   return {github, context: {repo: {owner: "owner", repo: "repo"}}, expected, pipeline, autonomy,
     rulesetAudit: {repo: expected.repo, requestRunId: 88, requestRunAttempt: 3, defaultBranch: "main", ruleset}, calls, data};
 }

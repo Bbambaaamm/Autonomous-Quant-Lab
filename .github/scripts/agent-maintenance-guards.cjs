@@ -84,7 +84,11 @@ function bindingDecision(snapshot, expected, options = {}) {
       names(issue.labels).some((name) => ["type:epic", "type:roadmap", "type:capability"].includes(name))) {
     return fail("ISSUE_BINDING_CHANGED");
   }
-  if (snapshot.authorization?.ok !== true || snapshot.authorization.specHash !== expected.specHash) return fail("AUTHORIZATION_CHANGED");
+  const authorization = snapshot.authorization;
+  if (authorization?.ok !== true || !expected.authorization ||
+      authorization.commentId !== expected.authorization.commentId || authorization.actor !== expected.authorization.actor ||
+      authorization.runId !== expected.authorization.runId || authorization.specHash !== expected.authorization.specHash ||
+      authorization.specHash !== expected.specHash) return fail("AUTHORIZATION_CHANGED");
   if (snapshot.requestOrigin?.actor !== expected.requester ||
       snapshot.requestOrigin?.runId !== expected.requestRunId ||
       snapshot.requestOrigin?.runAttempt !== expected.requestRunAttempt ||
