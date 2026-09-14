@@ -213,69 +213,97 @@ complete authorization identity, and the runtime re-derives and compares it on
 every snapshot. These tests use simulated GitHub API objects; they are not a
 production canary.
 
-For the resulting commit, local verification is 385 passing tests with zero
-failures or skips through the original two-suite command, plus syntax, all 22
-Actions YAML documents, and diff validation. Exact-head GitHub-hosted CI with all
-nine authoritative jobs remains required and must not be inferred from local
-results.
+For the earlier canary-isolation revision, local verification recorded 385
+passing tests and 22 workflow YAML documents. These historical numbers do not
+apply to later revisions. The scope-correction results are recorded below;
+exact-head hosted CI remains separately required.
 
-The bounded live collector is `agent-control-plane-remediation-canary.yml`.
-It accepts only the ID and attempt of an artifact-producing successful request
-for a dedicated, eligible synthetic **non-Draft** PR and its authorized synthetic
-Issue. The request UI has a required Boolean `canary_only` control whose safe
-default is `false`, preserving deliberate ordinary remediation. The artifact
-records both the exact enum `mode` (`production` or `canary_only`) and the exact
-Boolean. Missing, null, string-valued, unknown, legacy, or contradictory values
-fail closed.
+## Review 5199699417: keep collection inside the authorized follower
 
-The ordinary follower first downloads and classifies that exact artifact in a
-read-only routing job. It binds the originating run ID and attempt, repository,
-workflow path, default-branch source SHA, actor and triggering actor, as well as
-the authorization and target identities. That job has no Issue, PR, status,
-publisher, model, merge, or ruleset credential. Every production job requires
-the explicit `production_route == 'true'` output in addition to successful
-prerequisites; routing success alone cannot release a writer. The runtime also
-requires production mode again at prepare/recover/gate/merge entrypoints. The
-canary consumer independently requires `canary_only === true` and the matching
-enum, and verifies that the UI-selected run ID and attempt are the artifact's
-origin.
+The separately added `agent-control-plane-remediation-canary.yml` was outside
+Issue #126's enumerated workflow scope and has been removed. No Issue text,
+authorization or allowed-file policy is expanded. Its read-only collection now
+lives in the `canary` job of the already-authorized
+`agent-control-plane-remediation.yml`, behind the existing request and route.
 
-After these workflows have been independently reviewed and adopted on the
-default branch, an authorized maintainer creates the isolated request with the
-Boolean canary option selected, then invokes:
+The request UI carries the Boolean `canary_only` through
+`toJSON(inputs.canary_only)` into strict JSON Boolean parsing. The string-valued
+`github.event.inputs` payload is not an alternative authority. The artifact
+records both the enum `mode` (`production` or `canary_only`) and the exact Boolean.
+Missing, null, string-valued, unknown, legacy or contradictory values fail closed.
+
+The follower's credential-free routing job validates the originating request's
+run ID/attempt, repository, workflow path, source revision and actor identities.
+`canary` requires route success, `canary_route == 'true'` AND
+`production_route == 'false'`. Every production job retains its explicit
+production-route condition and original prerequisites. A successful route with
+missing outputs cannot select either path. Runtime mode validation remains a
+separate check: production entrypoints reject canary-only artifacts.
+
+The collector checks out `github.workflow_sha` with credentials not persisted,
+downloads the request artifact named by the actual workflow_run event's ID and
+attempt, and passes that unmodified event to the production runtime. There is no
+separate UI-selected run or synthesized workflow_run context. The runtime checks
+that the artifact matches that origin, authorization, target and current source.
+The ordinary job token grants only Actions/contents/Issue/PR read permissions.
+The existing ruleset audit credential is step-scoped to the trusted fixed-GET
+collector; no candidate checkout, model credential or merge client is involved.
+The unchanged read-only API facade rejects maintenance mutation methods.
+
+### Invocation after independently reviewed default-branch adoption
+
+Do not run the old follower on main to validate candidate-only code. After the
+reviewed request/follower revision is legitimately adopted, use a dedicated,
+eligible synthetic non-Draft PR and its independently authorized synthetic Issue,
+with green exact-head CI and a current base. On GitHub, dispatch the existing
+**Agent control-plane remediation request** from `main`, fill its exact Issue,
+PR, head and reason, and select **canary_only**. The equivalent CLI invocation is:
 
 ```bash
-gh workflow run agent-control-plane-remediation-canary.yml --ref main \
-  -f request_run_id=123456789 -f request_run_attempt=1
+gh workflow run agent-control-plane-remediation-request.yml --ref main \
+  -f issue_number=<synthetic-issue> -f pr_number=<synthetic-pr> \
+  -f head_sha=<exact-head> -f reason='Authorized read-only snapshot acceptance' \
+  -F canary_only=true
 ```
 
-The inputs are positive integers. The output artifact
-`maintenance-read-only-canary-<run>-<attempt>/canary-report.json` is a version 2
-object with `result: "SNAPSHOT_COLLECTED"`, `mode: "read-only-snapshot"`, and
-`operationalAcceptance: "PENDING"`, plus repository, Issue/PR/head/base, complete
-authorization identity, request and CI run/attempt identities, and protection/file
-hashes. It never emits a review or gate PASS marker. The job's ordinary token has
-only Actions/contents/Issue/PR read permissions. Its API facade rejects comment,
-label, status and workflow-dispatch methods, and no publisher or merge client is
-constructed. The ruleset credential exists only in the trusted fixed-GET
-collector step; it is not supplied to candidate code or a model. Missing
-authorization, omitted `bypass_actors`, API permission failure, an absent request
-artifact, or producer/provenance mismatch fails the run and produces no valid
-report.
+No second workflow dispatch is required. The request's successful completion
+starts the existing follower, which must run `route` then `canary`; `prepare`,
+`independent-review`, `recover`, `gate` and `merge` must be skipped. Missing or
+ambiguous routing data must not expose production credentials or enable writers.
 
-This result measures only one bounded live metadata/CI/protection snapshot. It
-does **not** execute production prepare publication, independent review, linkage,
-recovery, gate or merge and is not operational acceptance. Mocked/replayed fault
-injection, the live read-only collection, GitHub-hosted CI, independent review,
-default-branch adoption and full operational acceptance remain separate records.
-The negative fixture tests exercise invalid modes, swapped run IDs, tampered
-sealed evidence, denied writes and direct production-entrypoint rejection; they
-are not presented as live evidence.
+The follower uploads
+`maintenance-read-only-canary-<follower-run>-<attempt>/canary-report.json`. Its
+unchanged version-2 schema includes `result: "SNAPSHOT_COLLECTED"`,
+`mode: "read-only-snapshot"`, `operationalAcceptance: "PENDING"`, repository,
+Issue/PR/head/base, complete authorization identity, request and CI run/attempt
+identities and protection/file hashes. It emits no review or gate PASS. Missing
+authorization, omitted bypass_actors, API permission failures or mismatched
+request/source identities fail collection without a valid report.
 
-The workflow added on this candidate branch is not dispatchable as a trusted
-default-branch workflow before adoption. This workspace has neither GitHub
-authorization nor a configured remote, and no eligible dedicated synthetic
-canary-only request run ID/attempt or trusted default-branch producer evidence
-was supplied, so no live command was run. Those remain the exact live-collection
-prerequisites, followed separately by hosted CI, independent review, adoption and
-full operational acceptance; no mock result substitutes for any of them.
+This measures a bounded live metadata/CI/protection snapshot, not execution of
+production publication, review, linkage, recovery, gate or merge. Required live
+denial-path evidence and separately authorized end-to-end operational acceptance
+remain outstanding. Mocked fault injection must never be reported as live proof.
+
+### Regression evidence for the scope correction
+
+The original two-suite command passed 397 tests on the inspected source. Nine new
+scope/integration checks failed before the correction: the unauthorized file
+still existed and the existing follower had no canary job. Tests now execute the
+real request wrapper, real route script and real collector script with simulated
+network responses. They verify snapshot reporting, zero mutations, request
+run/attempt substitution, missing/production mode, replacement authorization,
+explicit mutually exclusive routing, trusted source and credential boundaries.
+The obsolete standalone-workflow contract test was migrated to the follower job;
+its read-only and request-provenance assertions remain. No existing behavioral
+regression was removed, and authoritative CI definitions remain unchanged.
+
+The scope-corrected implementation passes 406 tests with zero failures or skips
+on Node 22.16.0. All 21 remaining workflow YAML files parse, JavaScript syntax
+checks pass, and git diff --check is clean. These are local results.
+
+These local regressions are not a live canary. Publication, new hosted CI,
+independent review, trusted-main adoption, actual live collection/denial-path
+results and operational acceptance must be recorded separately for the final
+revision. No live request, gate, merge, deployment or real label mutation is
+performed as part of this scope correction.

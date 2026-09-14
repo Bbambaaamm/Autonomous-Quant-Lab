@@ -188,9 +188,9 @@ test("executable canary run performs live-shaped reads and emits the bounded sch
  assert.deepEqual(Object.keys(report).sort(),["authorization","baseSha","ci","filesHash","headSha","issueNumber","mode","operationalAcceptance","prNumber","protectionHash","repository","requestRunAttempt","requestRunId","result","version"].sort());
  assert.equal(f.writes.length,0);assert.deepEqual(JSON.parse(fs.readFileSync(path.join(directory,"canary-report.json"))),report);
 });
-test("canary workflow is default-branch read-only and has an explicit invocation schema",()=>{
- const workflow=fs.readFileSync(".github/workflows/agent-control-plane-remediation-canary.yml","utf8");
- assert.match(workflow,/request_run_id:/);assert.match(workflow,/request_run_attempt:/);assert.match(workflow,/phase:'canary'/);
+test("canary job uses the authorized default-branch follower and exact request schema",()=>{
+ const workflow=followerJob("canary");
+ assert.match(workflow,/github\.event\.workflow_run\.id/);assert.match(workflow,/github\.event\.workflow_run\.run_attempt/);assert.match(workflow,/phase:'canary'/);
  assert.match(workflow,/issues: read, pull-requests: read/);
  assert.doesNotMatch(workflow,/issues: write|pull-requests: write|statuses: write|MERGE_TOKEN|codex-action|createComment|setLabels|createCommitStatus/);
 });
@@ -375,7 +375,7 @@ test("trusted route classifies exact artifact and a canary route cannot release 
  assert.equal(report.mode,"canary_only");assert.deepEqual(outputs,[["production_route","false"],["canary_route","true"]]);assert.equal(f.writes.length,0);
  const workflow=fs.readFileSync(".github/workflows/agent-control-plane-remediation.yml","utf8");
  for(const job of ["prepare","independent-review","recover","gate","merge"]) assert.match(workflow,new RegExp(`${job}:[\\s\\S]*?if: [^\\n]*production_route == 'true'`));
- const route=workflow.split("  route:")[1].split("\n  prepare:")[0];assert.doesNotMatch(route,/AGENT_PUBLISH_TOKEN|OPENAI_API_KEY|MERGE_TOKEN|issues: write|pull-requests: write|statuses: write/);
+ const route=followerJob("route");assert.doesNotMatch(route,/AGENT_PUBLISH_TOKEN|OPENAI_API_KEY|MERGE_TOKEN|issues: write|pull-requests: write|statuses: write/);
 });
 test("successful route job without an explicit production output cannot release writers",()=>{
  const workflow=fs.readFileSync(".github/workflows/agent-control-plane-remediation.yml","utf8");
@@ -429,4 +429,99 @@ test("dispatch input wiring serializes typed inputs and never reads the untyped 
  const source=workflow.split("          script: |\n")[1].split("      - uses: actions/upload-artifact@")[0];
  assert.doesNotMatch(source,/context\.payload\.inputs/);
  assert.match(source,/JSON\.parse\(process\.env\.CANARY_ONLY_JSON\)/);
+});
+
+
+// Scope regression 5199699417: execute the real authorized follower scripts.
+function followerJob(name) {
+  const workflow=fs.readFileSync('.github/workflows/agent-control-plane-remediation.yml','utf8');
+  const match=workflow.match(new RegExp(`^  ${name}:\\n[\\s\\S]*?(?=^  [a-z][a-z0-9-]*:\\n|(?![\\s\\S]))`,'m'));
+  assert.ok(match,`missing authorized follower job ${name}`);return match[0];
+}
+function followerScript(name) {
+  const job=followerJob(name), block=job.split('          script: |\n')[1];
+  assert.ok(block,`missing script in ${name}`);
+  const source=block.split('\n').slice(0,block.split('\n').findIndex(line=>line.trim() && !line.startsWith('            ')))
+    .map(line=>line.slice(12)).join('\n');
+  // The source is the workflow script itself; only external APIs are replaced.
+  return require('node:vm').runInNewContext(`(async function(require,github,context,process,core){${source}\n})`);
+}
+async function followerCanaryFixture(run) {
+  const f=requestWrapperFixture();f.inputs.canary_only=true;await f.execute();
+  assert.deepEqual(f.errors,[]);
+  const directory=fs.mkdtempSync(path.join(os.tmpdir(),'scoped-canary-'));
+  const request=clone(f.output[0]),outputs=[];
+  fs.writeFileSync(path.join(directory,'request.json'),JSON.stringify(request));
+  const fetcher=async(url,options)=>{
+    assert.equal(options.method,'GET');assert.equal(options.redirect,'error');
+    assert.ok(url.startsWith('https://api.github.com/repos/owner/repo/rulesets'));
+    return {ok:true,text:async()=>JSON.stringify(url.includes('rulesets?')?
+      [{id:99,name:'Protect main',target:'branch'}]:f.d.ruleset)};
+  };
+  const load=name=>{
+    assert.equal(name,'./.github/scripts/agent-maintenance-runtime.cjs');
+    return {...m,run:args=>m.run({...args,fetcher})};
+  };
+  const env={DIRECTORY:directory,TRUSTED_SHA:f.context.sha,GITHUB_RUN_ATTEMPT:'1',RULESET_AUDIT_TOKEN:'synthetic-audit-only'};
+  const execute=job=>followerScript(job)(load,f.github,f.context,{env},{setOutput:(key,value)=>outputs.push([key,value])});
+  try { await run({...f,directory,request,outputs,env,execute}); }
+  finally { fs.rmSync(directory,{recursive:true,force:true}); }
+}
+test('scoped canary has no separately authorized workflow file',()=>{
+  assert.equal(fs.existsSync('.github/workflows/agent-control-plane-remediation-canary.yml'),false);
+  assert.match(followerJob('canary'),/needs: route/);
+});
+test('scoped canary executes actual request, route and collector scripts without mutation',async()=>{
+  await followerCanaryFixture(async f=>{
+    await f.execute('route');assert.deepEqual(f.outputs,[['production_route','false'],['canary_route','true']]);
+    f.outputs.length=0;await f.execute('canary');
+    assert.deepEqual(f.outputs,[['result','SNAPSHOT_COLLECTED']]);
+    const report=JSON.parse(fs.readFileSync(path.join(f.directory,'canary-report.json'),'utf8'));
+    assert.equal(report.result,'SNAPSHOT_COLLECTED');assert.equal(report.operationalAcceptance,'PENDING');
+    assert.equal(report.requestRunId,f.request.requestRunId);assert.equal(report.requestRunAttempt,f.request.requestRunAttempt);
+    assert.equal(report.headSha,f.request.headSha);assert.equal(report.baseSha,f.env.TRUSTED_SHA);
+    assert.equal(f.writes.length,0);
+  });
+});
+for(const [name,change] of [
+  ['production mode',q=>{q.mode='production';q.canary_only=false;}],
+  ['missing mode',q=>{delete q.mode;delete q.canary_only;}],
+  ['swapped request run',q=>{q.requestRunId++;}],
+  ['swapped request attempt',q=>{q.requestRunAttempt++;}],
+  ['replacement authorization',q=>{q.authorization.commentId++;}],
+]) test(`scoped canary real job denies ${name} without writes or report`,async()=>{
+  await followerCanaryFixture(async f=>{
+    change(f.request);fs.writeFileSync(path.join(f.directory,'request.json'),JSON.stringify(f.request));
+    await assert.rejects(f.execute('canary'));assert.equal(f.writes.length,0);
+    assert.deepEqual(f.outputs,[]);assert.equal(fs.existsSync(path.join(f.directory,'canary-report.json')),false);
+  });
+});
+test('scoped follower routes canary and production jobs exclusively from explicit outputs',()=>{
+  const eligible=(name,route)=>{
+    const condition=followerJob(name).match(/^    if: (.+)$/m)?.[1];assert.ok(condition);
+    const needs={route,...Object.fromEntries(['prepare','independent-review','recover','gate'].map(x=>[x,{result:'success'}]))};
+    // Evaluate only the simple actual equality/conjunction job conditions used here.
+    assert.match(condition,/^[a-zA-Z0-9_.\s'=&!-]+$/);
+    return require('node:vm').runInNewContext(`Boolean(${condition.replace(/needs\.([a-z][a-z0-9-]*)/g,'needs["$1"]')})`,{needs});
+  };
+  const canary={result:'success',outputs:{canary_route:'true',production_route:'false'}};
+  const ordinary={result:'success',outputs:{canary_route:'false',production_route:'true'}};
+  assert.equal(eligible('canary',canary),true);assert.equal(eligible('canary',ordinary),false);
+  for(const route of [{result:'success',outputs:{}},{result:'failure',outputs:canary.outputs},
+    {result:'success',outputs:{canary_route:'true',production_route:'true'}}]) assert.equal(eligible('canary',route),false);
+  for(const job of ['prepare','independent-review','recover','gate','merge']) {
+    assert.equal(eligible(job,canary),false,`${job} cannot run for canary`);
+    assert.equal(eligible(job,ordinary),true,`${job} retains its ordinary route`);
+    assert.equal(eligible(job,{result:'success',outputs:{}}),false);
+  }
+});
+test('scoped collector retains source, request-artifact and credential boundaries',()=>{
+  const job=followerJob('canary');
+  assert.match(job,/ref: '\$\{\{ github\.workflow_sha \}\}'/);assert.match(job,/persist-credentials: false/);
+  assert.match(job,/run-id: \$\{\{ github\.event\.workflow_run\.id \}\}/);
+  assert.match(job,/control-plane-request-\$\{\{ github\.event\.workflow_run\.id \}\}-\$\{\{ github\.event\.workflow_run\.run_attempt \}\}/);
+  assert.match(job,/permissions: \{actions: read, contents: read, issues: read, pull-requests: read\}/);
+  assert.match(job,/phase:'canary'/);assert.match(job,/payload:context\.payload/);
+  assert.doesNotMatch(job,/contents: write|issues: write|pull-requests: write|statuses: write|MERGE_TOKEN|OPENAI_API_KEY|codex-action|phase:'(?:recover|gate|merge)'/);
+  assert.match(job,/maintenance-read-only-canary-\$\{\{ github\.run_id \}\}-\$\{\{ github\.run_attempt \}\}/);
 });
