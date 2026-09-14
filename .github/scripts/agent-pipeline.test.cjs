@@ -910,12 +910,37 @@ function assertIssue123ReadonlyReviewer(workflow) {
   assert.equal(steps.length, 1, "exactly one model review step is required");
   const reviewStep = steps[0][0];
   assert.match(reviewStep, /^        env:\n          GH_TOKEN: '\$\{\{ github\.token \}\}'$/m);
-  assert.equal((workflow.match(/\bGH_TOKEN\s*:/g) || []).length, 1,
-    "GH_TOKEN assignment must be confined to the model-review step");
+  const expression = /\$\{\{[\s\S]*?\}\}/g;
+  const tokenAccess = /\b(?:github\s*(?:\.\s*token|\[\s*['"]token['"]\s*\])|secrets\s*(?:\.\s*GITHUB_TOKEN|\[\s*['"]GITHUB_TOKEN['"]\s*\]))/gi;
+  const jobTokenReferences = [...model.matchAll(expression)].flatMap((item) =>
+    [...item[0].matchAll(tokenAccess)].map((access) => ({ expression: item[0], access: access[0] })));
+  assert.equal(jobTokenReferences.length, 1,
+    "the job credential must have exactly one expression in the model job");
+  assert.equal(jobTokenReferences[0].expression, "${{ github.token }}",
+    "the sole job credential expression must use the GitHub job token, never a secret or alias");
+  assert.equal(jobTokenReferences[0].access, "github.token");
+  assert.equal([...reviewStep.matchAll(expression)].flatMap((item) => [...item[0].matchAll(tokenAccess)]).length, 1,
+    "the sole job credential expression must be confined to the model-review step");
   assert.match(reviewStep, /^        uses: openai\/codex-action@[0-9a-f]{40}(?:\s+#.*)?$/m);
   assert.match(reviewStep, /^          permission-profile: ':read-only'$/m);
-  assert.match(model, /persist-credentials: false/);
+  const checkouts = model.split(/(?=^      - )/m).filter((step) =>
+    /^      - (?:name:.*\n        )?uses: actions\/checkout@/m.test(step));
+  assert.ok(checkouts.length >= 1, "model job must have a checkout");
+  for (const checkout of checkouts) {
+    assert.match(checkout, /persist-credentials:\s*false(?:[,}\n]|$)/,
+      "every model-job checkout must explicitly disable credential persistence");
+    assert.doesNotMatch(checkout, /persist-credentials:\s*(?:true|null)(?:[,}\n]|$)/);
+  }
   assert.match(model, /Do not run repository code\./);
+  assert.match(model, /name: Trusted exact evidence-access preflight[\s\S]*pulls\.get[\s\S]*repos\.getCommit[\s\S]*checks\.listForRef[\s\S]*actions\.listWorkflowRunsForRepo/);
+  assert.match(model, /evidence-access\.json[\s\S]*review-prompt\.md/);
+  const preflight = model.slice(model.indexOf("- name: Trusted exact evidence-access preflight"), model.indexOf("- name: Build deterministic bounded review prompt"));
+  for (const failure of ["EVIDENCE_BINDING_INVALID", "EVIDENCE_REPOSITORY_MISMATCH", "EVIDENCE_PR_MISMATCH", "EVIDENCE_ISSUE_MISMATCH", "EVIDENCE_COMMIT_MISMATCH", "EVIDENCE_CHECKS_MISSING", "EVIDENCE_RUNS_MISSING", "EVIDENCE_AUTHORITATIVE_CI_MISSING"])
+    assert.match(preflight, new RegExp(`throw new Error\\('${failure}'\\)`), `${failure} must fail the preflight step`);
+  assert.doesNotMatch(preflight, /continue-on-error/);
+  assert.ok(model.indexOf("Trusted exact evidence-access preflight") < model.indexOf("Independent bounded review"));
+  assert.match(model, /jq -e[\s\S]*evidence-access\.json[\s\S]*test -s "\$RUNNER_TEMP\/review\.json"/,
+    "trusted evidence binding must gate acceptance of model output");
   assert.doesNotMatch(model, /AGENT_PUBLISH_TOKEN|GITHUB_ENV|persist-credentials: true|danger-full-access|safety-strategy:\s*['"]?unsafe/);
   assert.doesNotMatch(model, /\b[\w-]+:\s*write\b|permissions:\s*write-all/);
   // OPENAI_API_KEY is passed to the pinned action/proxy, not supplied as GH_TOKEN.
@@ -940,10 +965,16 @@ const issue123Mutations = [
   ["missing metadata token", (text) => text.replace(/^          GH_TOKEN:.*\n/m, "")],
   ["publish token instead of job token", (text) => text.replace("GH_TOKEN: '${{ github.token }}'", "GH_TOKEN: '${{ secrets.AGENT_PUBLISH_TOKEN }}'")],
   ["token at job scope", (text) => text.replace("    steps:\n", "    env:\n      GH_TOKEN: '${{ github.token }}'\n    steps:\n")],
-  ["token in another step", (text) => text + "\n  another-job:\n    steps:\n      - run: true\n        env: {GH_TOKEN: '${{ github.token }}'}\n"],
+  ["JOB_TOKEN alias in another step", (text) => text.replace("    steps:\n", "    steps:\n      - run: true\n        env: {JOB_TOKEN: '${{ github.token }}'}\n")],
+  ["same-step job token alias", (text) => text.replace("          GH_TOKEN: '${{ github.token }}'", "          GH_TOKEN: '${{ github.token }}'\n          JOB_TOKEN: '${{ github.token }}'")],
+  ["bracket job token alias", (text) => text.replace("    steps:\n", "    steps:\n      - run: true\n        env: {JOB_TOKEN: '${{ github[\"token\"] }}'}\n")],
+  ["GITHUB_TOKEN secret alias", (text) => text.replace("    steps:\n", "    steps:\n      - run: true\n        env: {JOB_TOKEN: '${{ secrets.GITHUB_TOKEN }}'}\n")],
+  ["compound same-step token alias", (text) => text.replace("${{ github.token }}", "${{ github.token || github['token'] }}")],
   ["workspace write profile", (text) => text.replace("permission-profile: ':read-only'", "permission-profile: ':workspace'")],
   ["floating action version", (text) => text.replace(/openai\/codex-action@[0-9a-f]{40}/, "openai/codex-action@main")],
   ["persistent checkout credential", (text) => text.replace("persist-credentials: false", "persist-credentials: true")],
+  ["checkout with omitted credential policy", (text) => text.replace("persist-credentials: false", "fetch-depth: 1")],
+  ["second checkout without credential policy", (text) => text.replace("    steps:\n", "    steps:\n      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262\n")],
   ["additional model secret", (text) => text.replace("        env:\n", "        env:\n          OTHER: '${{ secrets.WRITE_TOKEN }}'\n")],
   ["token persisted between steps", (text) => text.replace("    steps:\n", '    steps:\n      - run: echo "GH_TOKEN=x" >> "$GITHUB_ENV"\n')],
   ["duplicate model review job", (text) => text + "\n" + text],

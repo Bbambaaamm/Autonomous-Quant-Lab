@@ -325,5 +325,11 @@ The job-scoped `${{ github.token }}` is exposed as `GH_TOKEN` only on the `Indep
 step so the model can inspect exact workflow/check/Issue/PR metadata for the bound SHA. This token
 is evidence access, not mutation authority; it is never replaced by `AGENT_PUBLISH_TOKEN`, never
 made available to repository execution, and does not weaken exact-SHA, lifecycle, linkage, or
-fail-closed BLOCK semantics. `OPENAI_API_KEY` remains separate. If the Reviewer cannot verify the
-required GitHub evidence with this read-only credential, it must BLOCK rather than synthesize PASS.
+fail-closed BLOCK semantics. Every checkout in the model job explicitly disables credential
+persistence. Before model invocation, a pinned trusted API action uses the same job credential to
+re-read the exact repository, open Issue and PR, head commit, base, checks, and newest authoritative
+CI result. It writes a bounded evidence bundle into the model's local prompt; an API denial,
+missing response, mismatched binding, absent checks, or non-successful CI stops the job before the
+model and therefore cannot become PASS. The post-action schema guard rechecks the bundle binding.
+`OPENAI_API_KEY` remains separate, and no repository code executes in the credential-bearing model
+step.

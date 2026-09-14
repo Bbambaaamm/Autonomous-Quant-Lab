@@ -107,6 +107,36 @@ jobs:
         with: {ref: '${{ needs.prepare.outputs.head_sha }}', fetch-depth: 0, persist-credentials: false}
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with: {name: 'review-scope-${{ github.run_id }}', path: '.codex-input'}
+      - name: Trusted exact evidence-access preflight
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        env:
+          EXPECTED_REPOSITORY: '${{ github.repository }}'
+          EXPECTED_PR: '${{ needs.prepare.outputs.pr_number }}'
+          EXPECTED_ISSUE: '${{ needs.prepare.outputs.issue_number }}'
+          EXPECTED_HEAD: '${{ needs.prepare.outputs.head_sha }}'
+          EXPECTED_BASE: '${{ needs.prepare.outputs.base_sha }}'
+        with:
+          script: |
+            const fs=require('fs');
+            const repository=process.env.EXPECTED_REPOSITORY,prNumber=Number(process.env.EXPECTED_PR),issueNumber=Number(process.env.EXPECTED_ISSUE);
+            const headSha=process.env.EXPECTED_HEAD,baseSha=process.env.EXPECTED_BASE;
+            if(repository!==`${context.repo.owner}/${context.repo.repo}`||!Number.isSafeInteger(prNumber)||prNumber<1||!Number.isSafeInteger(issueNumber)||issueNumber<1||![headSha,baseSha].every(sha=>/^[0-9a-f]{40}$/.test(sha))) throw new Error('EVIDENCE_BINDING_INVALID');
+            const {data:repo}=await github.rest.repos.get(context.repo);
+            if(repo.full_name!==repository||repo.default_branch!==context.payload.repository.default_branch) throw new Error('EVIDENCE_REPOSITORY_MISMATCH');
+            const {data:pr}=await github.rest.pulls.get({...context.repo,pull_number:prNumber});
+            if(pr.number!==prNumber||pr.state!=="open"||pr.head.sha!==headSha||pr.base.sha!==baseSha||pr.base.repo?.full_name!==repository||pr.base.ref!==repo.default_branch) throw new Error('EVIDENCE_PR_MISMATCH');
+            const {data:issue}=await github.rest.issues.get({...context.repo,issue_number:issueNumber});
+            if(issue.number!==issueNumber||issue.state!=="open"||issue.pull_request) throw new Error('EVIDENCE_ISSUE_MISMATCH');
+            const {data:commit}=await github.rest.repos.getCommit({...context.repo,ref:headSha});
+            if(commit.sha!==headSha) throw new Error('EVIDENCE_COMMIT_MISMATCH');
+            const {data:checks}=await github.rest.checks.listForRef({...context.repo,ref:headSha,per_page:100});
+            if(!Array.isArray(checks.check_runs)||checks.check_runs.length<1) throw new Error('EVIDENCE_CHECKS_MISSING');
+            const {data:runs}=await github.rest.actions.listWorkflowRunsForRepo({...context.repo,head_sha:headSha,event:"pull_request",status:"completed",per_page:100});
+            if(!Array.isArray(runs.workflow_runs)) throw new Error('EVIDENCE_RUNS_MISSING');
+            const ci=runs.workflow_runs.filter(run=>run.name==="CI"&&run.head_sha===headSha&&run.event==="pull_request"&&run.pull_requests?.some(item=>item.number===prNumber)).sort((a,b)=>b.id-a.id)[0];
+            if(!ci||ci.conclusion!=="success") throw new Error('EVIDENCE_AUTHORITATIVE_CI_MISSING');
+            const evidence={version:1,repository,prNumber,issueNumber,headSha,baseSha,defaultBranch:repo.default_branch,ci:{id:ci.id,runAttempt:ci.run_attempt,conclusion:ci.conclusion},checks:checks.check_runs.map(run=>({id:run.id,name:run.name,status:run.status,conclusion:run.conclusion,headSha:run.head_sha})).slice(0,100)};
+            fs.writeFileSync('.codex-input/evidence-access.json',JSON.stringify(evidence));
       - name: Build deterministic bounded review prompt
         env: {HEAD_SHA: '${{ needs.prepare.outputs.head_sha }}', BASE_SHA: '${{ needs.prepare.outputs.base_sha }}'}
         run: |
@@ -118,7 +148,9 @@ jobs:
           cat .codex-input/authorized-scope.json >> .codex-input/review-prompt.md
           printf '\n--- END UNTRUSTED AUTHORIZED ISSUE DATA ---\n--- BEGIN TRUSTED GOVERNANCE ---\n' >> .codex-input/review-prompt.md
           cat .codex-input/trusted-governance.json >> .codex-input/review-prompt.md
-          printf '\n--- END TRUSTED GOVERNANCE ---\nBase SHA: %s\nExact SHA: %s\n' "$BASE_SHA" "$HEAD_SHA" >> .codex-input/review-prompt.md
+          printf '\n--- END TRUSTED GOVERNANCE ---\n--- BEGIN TRUSTED FRESH GITHUB EVIDENCE ---\n' >> .codex-input/review-prompt.md
+          cat .codex-input/evidence-access.json >> .codex-input/review-prompt.md
+          printf '\n--- END TRUSTED FRESH GITHUB EVIDENCE ---\nBase SHA: %s\nExact SHA: %s\n' "$BASE_SHA" "$HEAD_SHA" >> .codex-input/review-prompt.md
           test "$(stat -c%s .codex-input/review-prompt.md)" -le 131072
       - run: test "$(git rev-parse HEAD)" = "$HEAD_SHA" && git cat-file -e "$BASE_SHA^{commit}" && git diff --quiet "$BASE_SHA" "$HEAD_SHA" -- AGENTS.md .github/agent-pipeline.json docs/autonomous-development-pipeline.md docs/adr/0003-autonomous-development-pipeline-v2.md
         env: {HEAD_SHA: '${{ needs.prepare.outputs.head_sha }}', BASE_SHA: '${{ needs.prepare.outputs.base_sha }}'}
@@ -138,10 +170,11 @@ jobs:
             {"type":"object","additionalProperties":false,"required":["reviewed_sha","result","findings","issue_scope_consistent","test_or_governance_weakened","paper_only_live_trading_safe","summary"],"properties":{"reviewed_sha":{"type":"string","pattern":"^[0-9a-f]{40}$"},"result":{"type":"string","enum":["PASS","BLOCK"]},"findings":{"type":"array","maxItems":50,"items":{"type":"object","additionalProperties":false,"required":["severity","location","message"],"properties":{"severity":{"type":"string","enum":["critical","high","medium","low"]},"location":{"type":"string","maxLength":512},"message":{"type":"string","maxLength":2048}}}},"issue_scope_consistent":{"type":"boolean"},"test_or_governance_weakened":{"type":"boolean"},"paper_only_live_trading_safe":{"type":"boolean"},"summary":{"type":"string","maxLength":4096}}}
           prompt-file: .codex-input/review-prompt.md
       - run: |
+          jq -e --arg repo "$EXPECTED_REPOSITORY" --argjson pr "$EXPECTED_PR" --arg head "$HEAD_SHA" --arg base "$BASE_SHA" '.version==1 and .repository==$repo and .prNumber==$pr and .headSha==$head and .baseSha==$base and .ci.conclusion=="success" and (.checks|length)>0' .codex-input/evidence-access.json
           test -s "$RUNNER_TEMP/review.json"
           test "$(jq -r .reviewed_sha "$RUNNER_TEMP/review.json")" = "$HEAD_SHA"
           jq -e '(.result=="BLOCK" or (.findings|length)==0) and (if .result=="PASS" then .issue_scope_consistent and (.test_or_governance_weakened|not) and .paper_only_live_trading_safe else true end)' "$RUNNER_TEMP/review.json"
-        env: {HEAD_SHA: '${{ needs.prepare.outputs.head_sha }}'}
+        env: {EXPECTED_REPOSITORY: '${{ github.repository }}', EXPECTED_PR: '${{ needs.prepare.outputs.pr_number }}', HEAD_SHA: '${{ needs.prepare.outputs.head_sha }}', BASE_SHA: '${{ needs.prepare.outputs.base_sha }}'}
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with: {name: 'codex-review-${{ github.run_id }}', path: '${{ runner.temp }}/review.json', if-no-files-found: error, retention-days: 7}
 
