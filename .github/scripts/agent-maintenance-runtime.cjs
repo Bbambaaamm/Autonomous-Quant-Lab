@@ -76,7 +76,8 @@ function validateBundle(bundle, context) {
   ensure(canonical(expected) === canonical(bundle.expected), "BUNDLE_EXPECTATION_INVALID");
   ensure(bundle.evidence?.headSha === expected.headSha && bundle.evidence.baseSha === expected.baseSha &&
     bundle.evidence.repository === expected.repo && positive(bundle.evidence.ci?.runId) && positive(bundle.evidence.ci.runAttempt) &&
-    canonical(bundle.evidence.authorization) === canonical(expected.authorization), "BUNDLE_EVIDENCE_INVALID");
+    canonical(bundle.evidence.authorization) === canonical(expected.authorization) &&
+    ["pr", "issue"].every(side => typeof bundle.evidence.recoveryProgress?.[side] === "boolean"), "BUNDLE_EVIDENCE_INVALID");
   ensure(bundle.digest === digest({producer: bundle.producer, expected, evidence: bundle.evidence}), "BUNDLE_DIGEST_INVALID");
   return expected;
 }
@@ -117,6 +118,16 @@ function runtime({github, context, expected, readRuleset, bundle = null, review 
   const requestStates = expected.entryState === "agent:needs-human" ? ["agent:needs-human", "agent:pr"] : ["agent:pr", "agent:verified"];
   const reviewMarker = `<!-- agent-control-plane-review:v2 sha=${expected.headSha} issue=${expected.issueNumber} pr=${expected.prNumber} spec=${expected.specHash} source=${expected.baseSha} bundle=${bundle?.digest || "none"} -->`;
   const targetUrl = `https://github.com/${expected.repo}/actions/runs/${context.runId}/attempts/${context.runAttempt}`;
+  // Recovery is one monotonic operation, including its linkage phase. Seed it
+  // from the trusted prepare evidence so a fresh runtime cannot forget that an
+  // object was already restored before this process began.
+  const recovered = new Set(["pr", "issue"].filter(side => bundle?.evidence?.recoveryProgress?.[side] === true));
+  const observeRecovery = s => {
+    for (const completed of recovered) ensure(a.exactAgentState(s[completed].labels, "agent:pr") ||
+      a.exactAgentState(s[completed].labels, "agent:verified"), "RECOVERY_PROGRESS_REVOKED");
+    for (const side of ["pr", "issue"]) if (a.exactAgentState(s[side].labels, "agent:pr") ||
+      a.exactAgentState(s[side].labels, "agent:verified")) recovered.add(side);
+  };
   const snapshot = async (states = requestStates, partial = false) => {
     const s = await collectSnapshot({github, context, expected, pipeline: p, autonomy: a,
       rulesetAudit: {repo: expected.repo, requestRunId: expected.requestRunId, requestRunAttempt: expected.requestRunAttempt,
@@ -145,6 +156,7 @@ function runtime({github, context, expected, readRuleset, bundle = null, review 
     }
     const decisions = s.prComments.filter(x => x.user?.login === "github-actions[bot]" && String(x.body || "").split("\n").includes(reviewMarker));
     ensure(decisions.length <= 1, "REVIEW_EVIDENCE_AMBIGUOUS"); s.reviewRecorded = decisions.length === 1;
+    if (partial) observeRecovery(s);
     return s;
   };
   const requireReview = () => {
@@ -172,13 +184,8 @@ function runtime({github, context, expected, readRuleset, bundle = null, review 
   const recover = async () => {
     // Keep needs-human on the Issue until the previously unmanaged PR has a
     // resumable state. A fresh request can then recover a lost first response.
-    const recovered = new Set();
     for (const side of ["pr", "issue"]) await checkedWrite(requestStates, true, async s => {
       ensure(s.fullLinkageValid, "LINKAGE_INCOMPLETE");
-      for (const completed of recovered) ensure(a.exactAgentState(s[completed].labels, "agent:pr") ||
-        a.exactAgentState(s[completed].labels, "agent:verified"), "RECOVERY_PROGRESS_REVOKED");
-      for (const candidate of ["pr", "issue"]) if (a.exactAgentState(s[candidate].labels, "agent:pr") ||
-        a.exactAgentState(s[candidate].labels, "agent:verified")) recovered.add(candidate);
       if (!a.exactAgentState(s[side].labels, "agent:verified")) await setState(side === "issue" ? expected.issueNumber : expected.prNumber, s[side].labels, "agent:pr");
       recovered.add(side);
     });
@@ -217,8 +224,32 @@ function runtime({github, context, expected, readRuleset, bundle = null, review 
   return {snapshot, link, recover, gate, merge};
 }
 
+async function executePhase(r, phase, core = {setOutput() {}}) {
+  if (phase === "recover") { await r.link(); await r.recover(); }
+  if (phase === "gate") await r.gate();
+  if (phase === "merge") core.setOutput("merge_sha", await r.merge());
+}
+
+function readOnlyGithub(github) {
+  const deny = async () => { throw new Error("READ_ONLY_API_WRITE_DENIED"); };
+  const pulls = {get: github.rest.pulls.get, listFiles: github.rest.pulls.listFiles};
+  const issues = {get: github.rest.issues.get, listComments: github.rest.issues.listComments,
+    createComment: deny, setLabels: deny};
+  const repos = {getCollaboratorPermissionLevel: github.rest.repos.getCollaboratorPermissionLevel,
+    getBranch: github.rest.repos.getBranch, compareCommits: github.rest.repos.compareCommits,
+    listCommitStatusesForRef: github.rest.repos.listCommitStatusesForRef, createCommitStatus: deny};
+  const actions = {listWorkflowRunsForRepo: github.rest.actions.listWorkflowRunsForRepo,
+    listJobsForWorkflowRun: github.rest.actions.listJobsForWorkflowRun, getWorkflowRun: github.rest.actions.getWorkflowRun,
+    dispatchWorkflow: deny};
+  const allowed = new Set([pulls.listFiles, issues.listComments, repos.listCommitStatusesForRef,
+    actions.listWorkflowRunsForRepo, actions.listJobsForWorkflowRun]);
+  return {rest: {pulls, issues, repos, actions}, paginate(method, args) {
+    ensure(allowed.has(method), "READ_ONLY_API_METHOD_DENIED"); return github.paginate(method, args);
+  }};
+}
+
 async function run({phase, github, context, core, auditToken, mergeToken, directory, fetcher = fetch}) {
-  ensure(["prepare", "recover", "gate", "merge"].includes(phase), "UNKNOWN_MAINTENANCE_PHASE");
+  ensure(["prepare", "canary", "recover", "gate", "merge"].includes(phase), "UNKNOWN_MAINTENANCE_PHASE");
   const request = JSON.parse(fs.readFileSync(`${directory}/request.json`, "utf8"));
   const expected = expectedFrom(request, context);
   const readRuleset = rulesetReader(expected.repo, auditToken, fetcher);
@@ -229,6 +260,8 @@ async function run({phase, github, context, core, auditToken, mergeToken, direct
       files: s.files.map(x => ({filename: x.filename, status: x.status, previous_filename: x.previous_filename || null})),
       authorization: {commentId: s.authorization.commentId, specHash: s.authorization.specHash,
         actor: s.authorization.actor, runId: s.authorization.runId},
+      recoveryProgress: Object.fromEntries(["pr", "issue"].map(side => [side,
+        a.exactAgentState(s[side].labels, "agent:pr") || a.exactAgentState(s[side].labels, "agent:verified")])),
       title: p.redactDiagnostic(s.issue.title, 256), body: p.redactDiagnostic(s.issue.body || "", 16384)};
     const bundle = {version: 2, producer: producer(context), request, expected, evidence};
     bundle.digest = digest({producer: bundle.producer, expected, evidence});
@@ -236,6 +269,16 @@ async function run({phase, github, context, core, auditToken, mergeToken, direct
     fs.writeFileSync(`${directory}/evidence.json`, text);
     core.setOutput("head_sha", expected.headSha); core.setOutput("base_sha", expected.baseSha);
     return bundle;
+  }
+  if (phase === "canary") {
+    const s = await runtime({github: readOnlyGithub(github), context, expected, readRuleset}).snapshot(undefined, true);
+    const report = {version: 1, mode: "read-only", repository: expected.repo, issueNumber: expected.issueNumber,
+      prNumber: expected.prNumber, headSha: expected.headSha, baseSha: expected.baseSha,
+      authorization: expected.authorization, requestRunId: expected.requestRunId,
+      requestRunAttempt: expected.requestRunAttempt, ci: {runId: s.ci.runId, runAttempt: s.ci.runAttempt},
+      protectionHash: digest(s.protection), filesHash: s.filesHash};
+    fs.writeFileSync(`${directory}/canary-report.json`, JSON.stringify(report));
+    core.setOutput("result", "PASS"); return report;
   }
   const bundle = JSON.parse(fs.readFileSync(`${directory}/evidence.json`, "utf8"));
   validateBundle(bundle, context);
@@ -251,8 +294,6 @@ async function run({phase, github, context, core, auditToken, mergeToken, direct
     ensure(response.ok, "MERGE_HTTP_FAILED"); return response.json();
   } : null;
   const r = runtime({github, context, expected, readRuleset, bundle, review, mergePull});
-  if (phase === "recover") { await r.link(); await r.recover(); }
-  if (phase === "gate") await r.gate();
-  if (phase === "merge") core.setOutput("merge_sha", await r.merge());
+  await executePhase(r, phase, core);
 }
-module.exports = {REQUIRED_CHECKS, protection, originValid, expectedFrom, producer, validateBundle, rulesetReader, runtime, run, digest};
+module.exports = {REQUIRED_CHECKS, protection, originValid, expectedFrom, producer, validateBundle, rulesetReader, runtime, executePhase, readOnlyGithub, run, digest};

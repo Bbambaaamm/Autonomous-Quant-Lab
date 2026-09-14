@@ -1,0 +1,54 @@
+name: Agent control-plane remediation read-only canary
+
+on:
+  workflow_dispatch:
+    inputs:
+      request_run_id:
+        description: Successful remediation-request run for an eligible synthetic non-Draft PR
+        required: true
+        type: string
+      request_run_attempt:
+        description: Exact attempt that produced the request artifact
+        required: true
+        type: string
+
+permissions: {contents: read}
+
+jobs:
+  read-only-canary:
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions: {actions: read, contents: read, issues: read, pull-requests: read}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with: {ref: '${{ github.sha }}', persist-credentials: false, fetch-depth: 1}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: control-plane-request-${{ inputs.request_run_id }}-${{ inputs.request_run_attempt }}
+          path: ${{ runner.temp }}/maintenance-canary
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.request_run_id }}
+      - name: Collect bounded live read-only evidence
+        id: canary
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b
+        env:
+          DIRECTORY: '${{ runner.temp }}/maintenance-canary'
+          REQUEST_RUN_ID: '${{ inputs.request_run_id }}'
+          REQUEST_RUN_ATTEMPT: '${{ inputs.request_run_attempt }}'
+          RULESET_AUDIT_TOKEN: '${{ secrets.AGENT_PUBLISH_TOKEN }}'
+        with:
+          script: |
+            const runId=Number(process.env.REQUEST_RUN_ID),attempt=Number(process.env.REQUEST_RUN_ATTEMPT);
+            if(!Number.isSafeInteger(runId)||runId<1||!Number.isSafeInteger(attempt)||attempt<1) throw new Error('CANARY_INPUT_INVALID');
+            const origin=(await github.rest.actions.getWorkflowRun({...context.repo,run_id:runId})).data;
+            if(origin.run_attempt!==attempt) throw new Error('CANARY_REQUEST_ATTEMPT_CHANGED');
+            const ctx={repo:context.repo,payload:{repository:context.payload.repository,workflow_run:origin},eventName:'workflow_run',sha:context.sha,runId:context.runId,runAttempt:Number(process.env.GITHUB_RUN_ATTEMPT)};
+            const runtime=require('./.github/scripts/agent-maintenance-runtime.cjs');
+            await runtime.run({phase:'canary',github,context:ctx,core,auditToken:process.env.RULESET_AUDIT_TOKEN,directory:process.env.DIRECTORY});
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: maintenance-read-only-canary-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/maintenance-canary/canary-report.json
+          if-no-files-found: error
+          retention-days: 7

@@ -8,6 +8,7 @@ const a = require("./agent-autonomy.cjs");
 const c = require("../agent-pipeline.json");
 const m = require("./agent-maintenance-runtime.cjs");
 const clone = x => structuredClone(x);
+const executeRecover = r => m.executePhase ? m.executePhase(r,"recover") : (async()=>{await r.link();await r.recover();})();
 
 function fixture() {
   const repo = "owner/repo", head = "a".repeat(40), base = "b".repeat(40), writes = [];
@@ -55,7 +56,8 @@ function fixture() {
   const deps={github,context,expected,readRuleset,review,mergePull};
   const seal=async()=>{const s=await m.runtime({...deps,review:null}).snapshot(undefined,true);
     const evidence={repository:repo,headSha:head,baseSha:base,ci:s.ci,filesHash:s.filesHash,protectionHash:m.digest(s.protection),protection:s.protection,
-      authorization: clone(expected.authorization)};
+      authorization: clone(expected.authorization),recoveryProgress:Object.fromEntries(["pr","issue"].map(side=>[side,
+        a.exactAgentState(s[side].labels,"agent:pr")||a.exactAgentState(s[side].labels,"agent:verified")]))};
     const bundle={version:2,producer:m.producer(context),request,expected,evidence};
     bundle.digest=m.digest({producer:bundle.producer,expected,evidence});deps.bundle=bundle;return m.runtime(deps);};
   const addLinks=()=>{const marker=`<!-- agent-link:v1 repo=${repo} issue=126 pr=127 -->`;
@@ -145,6 +147,49 @@ for (const reverted of ["pr", "issue"]) test(`recovery stops the next write when
 test("new authorization with the same specification cannot reuse an old review bundle",async()=>{
  const f=fixture(),r=await f.seal();f.d.issueComments[0].id=2;
  await assert.rejects(r.recover(),/AUTHORIZATION_CHANGED/);assert.equal(f.writes.length,0);
+});
+test("real recover wrapper carries initial PR progress through linkage writes",async()=>{
+ const f=fixture();f.d.pr.labels=["agent:pr","priority:high"];
+ const r=await f.seal();f.d.afterWrite=(d,w)=>{if(w.length===1)d.pr.labels=["agent:needs-human","priority:high"];};
+ await assert.rejects(executeRecover(r),/RECOVERY_PROGRESS_REVOKED/);
+ assert.equal(f.writes.filter(x=>x.name==="comment").length,1);
+ assert.equal(f.writes.filter(x=>x.name==="labels").length,0);
+ assert.ok(f.d.pr.labels.includes("agent:needs-human"));
+});
+test("fresh runtime honors progress sealed before an intervening escalation",async()=>{
+ const f=fixture();f.d.pr.labels=["agent:pr","priority:high"];const first=await f.seal();
+ f.d.pr.labels=["agent:needs-human","priority:high"];
+ const fresh=m.runtime(f.deps);await assert.rejects(executeRecover(fresh),/RECOVERY_PROGRESS_REVOKED/);
+ assert.equal(f.writes.length,0);void first;
+});
+test("symmetric initial Issue progress is not erased after linkage",async()=>{
+ const f=fixture();f.d.issue.labels=["type:implementation","agent:pr","team:quant"];
+ const r=await f.seal();f.d.afterWrite=(d,w)=>{if(w.length===1)d.issue.labels=["type:implementation","agent:needs-human","team:quant"];};
+ await assert.rejects(executeRecover(r),/RECOVERY_PROGRESS_REVOKED/);
+ assert.equal(f.writes.filter(x=>x.name==="comment").length,1);assert.equal(f.writes.filter(x=>x.name==="labels").length,0);
+});
+test("read-only API boundary denies every maintenance mutation adapter",async()=>{
+ const f=fixture(),ro=m.readOnlyGithub(f.github);
+ for(const call of [()=>ro.rest.issues.createComment({}),()=>ro.rest.issues.setLabels({}),()=>ro.rest.repos.createCommitStatus({})])
+   await assert.rejects(call,/READ_ONLY_API_WRITE_DENIED/);
+ assert.equal(f.writes.length,0);
+});
+test("executable canary run performs live-shaped reads and emits the bounded schema without writes",async()=>{
+ const f=fixture(),directory=fs.mkdtempSync(path.join(os.tmpdir(),"maintenance-canary-"));
+ fs.writeFileSync(path.join(directory,"request.json"),JSON.stringify(f.request));
+ const outputs=[];const fetcher=async url=>({ok:true,text:async()=>JSON.stringify(url.includes("rulesets?")?
+   [{id:99,name:"Protect main",target:"branch"}]:f.d.ruleset)});
+ const report=await m.run({phase:"canary",github:f.github,context:f.context,core:{setOutput:(k,v)=>outputs.push([k,v])},
+   auditToken:"collector-only-token",directory,fetcher});
+ assert.deepEqual(outputs,[["result","PASS"]]);assert.equal(report.mode,"read-only");
+ assert.deepEqual(Object.keys(report).sort(),["authorization","baseSha","ci","filesHash","headSha","issueNumber","mode","prNumber","protectionHash","repository","requestRunAttempt","requestRunId","version"].sort());
+ assert.equal(f.writes.length,0);assert.deepEqual(JSON.parse(fs.readFileSync(path.join(directory,"canary-report.json"))),report);
+});
+test("canary workflow is default-branch read-only and has an explicit invocation schema",()=>{
+ const workflow=fs.readFileSync(".github/workflows/agent-control-plane-remediation-canary.yml","utf8");
+ assert.match(workflow,/request_run_id:/);assert.match(workflow,/request_run_attempt:/);assert.match(workflow,/phase:'canary'/);
+ assert.match(workflow,/issues: read, pull-requests: read/);
+ assert.doesNotMatch(workflow,/issues: write|pull-requests: write|statuses: write|MERGE_TOKEN|codex-action|createComment|setLabels|createCommitStatus/);
 });
 test("production does not erase an already verified half on a fresh explicit request",async()=>{
  const f=fixture();f.addLinks();f.request.entryState="agent:pr";f.expected.entryState="agent:pr";

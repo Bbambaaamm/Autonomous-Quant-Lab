@@ -136,10 +136,12 @@ Recovery never downgrades a legitimate partially verified pair. Gate does not
 accept a new needs-human state. Repeated link/recovery operations are idempotent.
 Foreign labels from the freshly read object are preserved.
 Recovery also remembers each object observed or written in the recovered state
-during the current operation. If that object is subsequently returned to
-`agent:needs-human`, the next object write is refused rather than overwriting the
-new escalation. Legitimate partial recovery and a new, fully bound request remain
-supported.
+during the complete operation, starting with the state sealed by `prepare` and
+continuing through every linkage and label snapshot. If that object is subsequently
+returned to `agent:needs-human`, the next linkage or label write is refused rather
+than overwriting the new escalation. The sealed progress also prevents a newly
+constructed runtime from forgetting a pre-existing restored state. Legitimate
+partial recovery and a genuinely new, fully bound request remain supported.
 
 GitHub does not offer a transaction across Issue authorization, labels, CI,
 protection and PR merge. These checks narrow, but cannot eliminate, the interval
@@ -211,20 +213,42 @@ complete authorization identity, and the runtime re-derives and compares it on
 every snapshot. These tests use simulated GitHub API objects; they are not a
 production canary.
 
-For the resulting commit, local verification is 356 passing tests with zero
-failures or skips through the original two-suite command, plus syntax, all 21
+For the resulting commit, local verification is 362 passing tests with zero
+failures or skips through the original two-suite command, plus syntax, all 22
 Actions YAML documents, and diff validation. Exact-head GitHub-hosted CI with all
 nine authoritative jobs remains required and must not be inferred from local
 results.
 
-A bounded operational acceptance must run only after this exact commit is
-independently reviewed and adopted through the existing trusted path. It should
-use a dedicated synthetic maintenance Issue and Draft PR confined to the
-allowlist, collect a real credential-isolated evidence bundle, and exercise
-read-only rejection cases for missing authorization identity, a replacement
-same-hash authorization, and an intervening needs-human escalation. No gate,
-merge, ruleset change, production label mutation, or candidate-code execution
-with credentials is part of that canary. This workspace has no GitHub credential
-or configured remote, so it cannot publish the commit, observe exact-head CI, or
-perform that authorized operational test. Those acceptance items remain
-unverified; their requirements are not reduced.
+The executable operational acceptance path is
+`agent-control-plane-remediation-canary.yml`. It accepts only the ID and attempt
+of an artifact-producing successful request for a dedicated, eligible synthetic
+**non-Draft** PR and its authorized synthetic Issue. The request wrapper and
+runtime Draft rejection are unchanged. After this workflow has been independently
+reviewed and adopted on the default branch, an authorized maintainer invokes:
+
+```bash
+gh workflow run agent-control-plane-remediation-canary.yml --ref main \
+  -f request_run_id=123456789 -f request_run_attempt=1
+```
+
+The inputs are positive integers. The output artifact
+`maintenance-read-only-canary-<run>-<attempt>/canary-report.json` is a versioned
+object containing `mode: "read-only"`, repository, Issue/PR/head/base, complete
+authorization identity, request and CI run/attempt identities, and protection/file
+hashes. The job's ordinary token has only Actions/contents/Issue/PR read
+permissions. Its API facade rejects comment, label, status, workflow-dispatch and
+merge methods. No publisher or merge client is constructed. The ruleset credential
+exists only in the already-trusted fixed-GET collector step; it is not supplied to
+candidate code or a model. Missing authorization, omitted `bypass_actors`, API
+permission failure, an absent request artifact, or producer/provenance mismatch
+fails the run and produces no valid report.
+
+That invocation performs live read-only GitHub metadata, CI and ruleset calls.
+The suite's replacement-authorization, missing-field, escalation and denied-write
+cases are fixture/replay fault injections, not live acceptance. The workflow added
+on this candidate branch is not dispatchable as a trusted default-branch workflow
+before adoption. This workspace has neither GitHub authorization nor a configured
+remote, and no eligible dedicated synthetic request run ID/attempt or trusted
+default-branch producer evidence was supplied, so the live command was not run.
+Those are the exact remaining live-acceptance prerequisites; no evidence was
+synthesized to replace them.
