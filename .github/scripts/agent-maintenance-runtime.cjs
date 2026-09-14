@@ -166,7 +166,9 @@ function runtime({github, context, expected, readRuleset, bundle = null, review 
     await snapshot(requestStates, true);
   };
   const recover = async () => {
-    for (const side of ["issue", "pr"]) await checkedWrite(requestStates, true, async s => {
+    // Keep needs-human on the Issue until the previously unmanaged PR has a
+    // resumable state. A fresh request can then recover a lost first response.
+    for (const side of ["pr", "issue"]) await checkedWrite(requestStates, true, async s => {
       ensure(s.fullLinkageValid, "LINKAGE_INCOMPLETE");
       if (!a.exactAgentState(s[side].labels, "agent:verified")) await setState(side === "issue" ? expected.issueNumber : expected.prNumber, s[side].labels, "agent:pr");
     });

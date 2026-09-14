@@ -45,7 +45,7 @@ function fixture() {
       createCommitStatus: async args => { const status={...args, id:300+writes.length, creator: {login:"github-actions[bot]"}};
         d.statuses.unshift(status); record("status",args);return {data:status}; }},
     actions: {listWorkflowRunsForRepo:"runs",listJobsForWorkflowRun:"jobs",
-      getWorkflowRun:async args=>read(args.run_id===88?d.origin:d.runs.find(x=>x.id===args.run_id))}},
+      getWorkflowRun:async args=>read(args.run_id===d.origin.id?d.origin:d.runs.find(x=>x.id===args.run_id))}},
     paginate:async(method,args)=>{if(d.failRead)throw new Error("HTTP_403");
       return clone(method==="files"?d.files:method==="comments"?(args.issue_number===126?d.issueComments:d.prComments):method==="runs"?d.runs:method==="jobs"?d.jobs:d.statuses);}};
   const readRuleset=async()=>{d.rulesetReads++;if(d.failRead)throw new Error("HTTP_403");return clone(d.ruleset);};
@@ -187,7 +187,7 @@ function requestWrapperFixture() {
     name==='./.github/scripts/agent-pipeline.cjs'?pipeline:
     name==='./.github/scripts/agent-autonomy.cjs'?a:
     name==='./.github/agent-pipeline.json'?c:(()=>{throw new Error('Unexpected import');})();
-  return {...f,env,output,errors,execute:()=>script(load,f.github,context,{env},{setFailed:msg=>errors.push(msg)})};
+  return {...f,env,output,errors,requestContext:context,execute:()=>script(load,f.github,context,{env},{setFailed:msg=>errors.push(msg)})};
 }
 test('request wrapper admits exact needs-human Issue with unmanaged PR then actual runtime recovers it',async()=>{
  const f=requestWrapperFixture();f.d.pr.labels=['priority:high'];await f.execute();
@@ -213,3 +213,63 @@ test('request wrapper accepts same-author rerun and binds its actual attempt',as
  const expected={...f.expected,requestRunAttempt:2};const origin={...f.d.origin,run_attempt:2};
  assert.equal(m.originValid(origin,expected),true);origin.triggering_actor.login='bob';assert.equal(m.originValid(origin,expected),false);
 });
+
+// A fresh workflow_dispatch must be able to resume a lost label-write response.
+for (const interruption of ["before-write", "after-write"]) {
+  test(`unmanaged recovery survives ${interruption} interruption and a fresh request`, async () => {
+    const f = requestWrapperFixture();
+    f.d.pr.labels = ["priority:high"];
+    await f.execute();
+    assert.deepEqual(f.errors, []);
+    const first = await f.seal();
+    await first.link();
+    const originalSetLabels = f.github.rest.issues.setLabels;
+    let interrupted = false;
+    f.github.rest.issues.setLabels = async args => {
+      if (!interrupted) {
+        interrupted = true;
+        if (interruption === "after-write") await originalSetLabels(args);
+        throw new Error("SIMULATED_LABEL_RESPONSE_LOSS");
+      }
+      return originalSetLabels(args);
+    };
+    await assert.rejects(first.recover(), /SIMULATED_LABEL_RESPONSE_LOSS/);
+    const beforeRetry = f.writes.filter(w => w.name === "labels");
+    assert.equal(beforeRetry.length, interruption === "after-write" ? 1 : 0);
+    f.github.rest.issues.setLabels = originalSetLabels;
+
+    // Execute the real request wrapper again with a distinct request run ID.
+    f.requestContext.runId = 89;
+    await f.execute();
+    assert.deepEqual(f.errors, [], "fresh request must accept the reachable partial state");
+    assert.equal(f.output.length, 2);
+    const freshRequest = f.output[1];
+    assert.equal(freshRequest.requestRunId, 89);
+    assert.equal(freshRequest.entryState, "agent:needs-human");
+    assert.ok(f.d.issue.labels.includes("agent:needs-human"));
+    if (interruption === "after-write") {
+      assert.equal(beforeRetry[0].args.issue_number, 127, "unmanaged PR is written first");
+      assert.ok(f.d.pr.labels.includes("agent:pr"));
+    }
+
+    // New producer, origin and evidence; the old bundle cannot authorize this run.
+    f.d.origin.id = 89;
+    f.context.payload.workflow_run = clone(f.d.origin);
+    f.context.runId = 901;
+    assert.throws(() => m.validateBundle(f.deps.bundle, f.context), /PROVENANCE/);
+    Object.assign(f.request, freshRequest);
+    Object.assign(f.expected, m.expectedFrom(freshRequest, f.context));
+    const next = await f.seal();
+    await next.link();
+    await next.recover();
+    assert.ok(f.d.pr.labels.includes("agent:pr"));
+    assert.ok(f.d.issue.labels.includes("agent:pr"));
+    assert.ok(f.d.pr.labels.includes("priority:high"));
+    assert.ok(f.d.issue.labels.includes("team:quant"));
+    assert.equal(f.writes.filter(w => w.name === "labels").length, 2);
+    const completedWrites = f.writes.length;
+    await next.recover();
+    assert.equal(f.writes.length, completedWrites, "completed retry is idempotent");
+    assert.ok(!f.writes.some(w => ["status", "merge"].includes(w.name)));
+  });
+}

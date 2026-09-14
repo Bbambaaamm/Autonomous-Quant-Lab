@@ -7,14 +7,30 @@ Implementation candidate for Issue #126. The production controller is wired to
 GitHub responses. This is NOT a statement that the candidate has been deployed,
 independently approved, or exercised with production credentials.
 
-The current default-branch follower is defective. Updating this PR does not
-update the follower running from `main`. There is no self-adoption mechanism in
-this change. Under the present rules, successful `agent-verified-gate` evidence is
-mandatory and only an already trusted producer may issue it. Re-running the
-known-broken producer is not an adoption plan. A maintainer must explicitly
-resolve that one-time trust-root adoption policy after independent review of the
-exact candidate. Until then adoption is BLOCKED; this implementation neither
-changes rules nor manufactures a gate to cross that boundary.
+The current maintenance follower is defective, but it is not the only trusted
+adoption route. At base `94611601bcd3fd683bc54f9f5d6023e4abc5951c`, the existing
+`agent-state-transition.yml` and `agent-codex-review.yml` provide a separate
+path for this exact diff. The normal reviewer excludes four protected paths:
+`AGENTS.md`, `.github/agent-pipeline.json`, `docs/autonomous-development-pipeline.md`
+and `docs/adr/0003-autonomous-development-pipeline-v2.md`. This candidate changes
+none of them. Do not generalize this route to candidates that change those files.
+
+After current Issue authorization, green exact-head CI and code review, a
+maintainer can use the default-branch Agent state transition workflow to move
+an unlinked needs-human Issue to `agent:running` (without a PR input), then to
+`agent:pr` with this PR number. The second transition labels and durably links
+the unmanaged PR and attempts to dispatch the existing normal reviewer. Make
+the PR non-draft before verification. If automatic dispatch does not occur, the
+existing default-branch Agent Codex review workflow accepts `pr_number` and the
+current exact `head_sha`; do not alter lifecycle or fabricate review markers.
+
+A real exact-head zero-finding review must pass the existing verifier, gate and
+expected-head merge controls. A standalone Codex comment or green PR CI is not
+that acceptance. The existing reviewer may still return BLOCK for code or
+unavailable evidence; diagnose the actual result without substituting an
+exception. No new trust-root policy decision is required merely to use this
+already-trusted route. Updating this PR alone does not adopt it. The repaired
+maintenance follower still needs real runtime acceptance after adoption.
 
 No bypass actors, force push, required-check removal, model mutation credential,
 or execution of unreviewed candidate controller code with secrets is introduced.
@@ -102,7 +118,10 @@ All production phases call `run` in the trusted runtime:
 * `recover` runs `link` and `recover`. Each missing durable link comment and each
   Issue/PR state write gets a new complete validated snapshot. Both partial
   recovery orders are supported. An initially unmanaged PR is admitted only for
-  an explicitly requested needs-human recovery. Conflicts never get reset.
+  an explicitly requested needs-human recovery. The PR state is updated before
+  the Issue state, keeping the Issue at needs-human if the first write's response
+  is lost. A fresh request can resume that exact partial state. Conflicts never
+  get reset; an arbitrary agent:pr Issue with an unmanaged PR remains rejected.
 * `gate` separately validates before each state write, review-evidence comment
   and success status. It requires exact verified state before publishing the
   gate, zero findings, the same reviewed evidence, and a unique trusted marker.
@@ -164,3 +183,12 @@ both `actor.login` and `triggering_actor.login` equal to the bound requester.
 A different or missing attempt caller stops the run; the original actor is not
 silently used as a substitute for the person initiating a later attempt. A new
 maintainer can create a fresh explicitly authorized request instead.
+
+## Fresh-request interruption regression
+
+The recovery test executes the real request wrapper, interrupts the first label
+write both before and after the mock API applies it, then submits a different
+request run. It rejects the old producer bundle, collects new evidence, resumes
+through the production runtime, preserves foreign labels and proves idempotence.
+The after-write case fails on the Issue-first implementation and passes when the
+PR is written first. These are mocked API tests, not live recovery acceptance.
