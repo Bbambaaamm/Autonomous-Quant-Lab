@@ -86,6 +86,14 @@ execution. Every model-job checkout sets `persist-credentials: false`. A pinned 
 uses the same job credential to read and bind fresh repository, Issue, PR, head/base, commit, check,
 and authoritative CI metadata into a bounded local evidence bundle before model invocation. A
 failed, forbidden, missing, stale, or mismatched read terminates the job, and the output guard checks
-the bundle binding again before accepting model output. `OPENAI_API_KEY` remains a separate model
+the bundle binding again before accepting model output. The bundle binds repository, Issue, PR,
+head/base, exact review-workflow source revision, producer run/attempt, authoritative CI workflow
+ID/path/run/attempt, and all configured required-job results. A credential-free contract step then
+validates the exact prompt inputs and records their SHA-256 integrity separately from producer
+provenance. Those explicitly named paths and their manifest are uploaded with a source/head/run/
+attempt-bound immutable artifact name before model execution, retaining diagnostic inputs even if
+the model or later processing fails. This proves only trusted preflight verification of bounded CI
+evidence; it is not canary or production operational acceptance and does not alter Issue #126's
+acceptance contract. `OPENAI_API_KEY` remains a separate model
 credential; neither a preparation-job read nor a model-authored flag can substitute for this
 preflight.

@@ -115,12 +115,16 @@ jobs:
           EXPECTED_ISSUE: '${{ needs.prepare.outputs.issue_number }}'
           EXPECTED_HEAD: '${{ needs.prepare.outputs.head_sha }}'
           EXPECTED_BASE: '${{ needs.prepare.outputs.base_sha }}'
+          EXPECTED_SOURCE_SHA: '${{ github.workflow_sha }}'
+          PRODUCER_RUN_ID: '${{ github.run_id }}'
+          PRODUCER_RUN_ATTEMPT: '${{ github.run_attempt }}'
         with:
           script: |
             const fs=require('fs');
             const repository=process.env.EXPECTED_REPOSITORY,prNumber=Number(process.env.EXPECTED_PR),issueNumber=Number(process.env.EXPECTED_ISSUE);
-            const headSha=process.env.EXPECTED_HEAD,baseSha=process.env.EXPECTED_BASE;
-            if(repository!==`${context.repo.owner}/${context.repo.repo}`||!Number.isSafeInteger(prNumber)||prNumber<1||!Number.isSafeInteger(issueNumber)||issueNumber<1||![headSha,baseSha].every(sha=>/^[0-9a-f]{40}$/.test(sha))) throw new Error('EVIDENCE_BINDING_INVALID');
+            const headSha=process.env.EXPECTED_HEAD,baseSha=process.env.EXPECTED_BASE,sourceSha=process.env.EXPECTED_SOURCE_SHA;
+            const producerRunId=Number(process.env.PRODUCER_RUN_ID),producerRunAttempt=Number(process.env.PRODUCER_RUN_ATTEMPT);
+            if(repository!==`${context.repo.owner}/${context.repo.repo}`||!Number.isSafeInteger(prNumber)||prNumber<1||!Number.isSafeInteger(issueNumber)||issueNumber<1||![headSha,baseSha,sourceSha].every(sha=>/^[0-9a-f]{40}$/.test(sha))||![producerRunId,producerRunAttempt].every(value=>Number.isSafeInteger(value)&&value>0)) throw new Error('EVIDENCE_BINDING_INVALID');
             const {data:repo}=await github.rest.repos.get(context.repo);
             if(repo.full_name!==repository||repo.default_branch!==context.payload.repository.default_branch) throw new Error('EVIDENCE_REPOSITORY_MISMATCH');
             const {data:pr}=await github.rest.pulls.get({...context.repo,pull_number:prNumber});
@@ -162,7 +166,7 @@ jobs:
             if(!binding(fresh)||fresh.id!==ci.id||fresh.status!=="completed"||fresh.conclusion!=="success"||fresh.run_attempt!==ci.run_attempt||!newest||newest.id!==ci.id||newest.run_attempt!==ci.run_attempt||newest.status!=="completed"||newest.conclusion!=="success") throw new Error('EVIDENCE_CI_CHANGED');
             const latest=new Map();
             for(const job of jobs){if(job.head_sha!==undefined&&job.head_sha!==headSha)continue;const old=latest.get(job.name);if(!old||job.run_attempt>=old.run_attempt)latest.set(job.name,job);}
-            const evidence={version:1,repository,prNumber,issueNumber,headSha,baseSha,defaultBranch:repo.default_branch,ci:{id:ci.id,workflowId:workflow.id,path:workflow.path,runAttempt:ci.run_attempt,conclusion:ci.conclusion,jobs:config.requiredCiJobs.map(name=>({name,id:latest.get(name).id,conclusion:latest.get(name).conclusion,runAttempt:latest.get(name).run_attempt}))},checks:checks.check_runs.map(run=>({id:run.id,name:run.name,status:run.status,conclusion:run.conclusion,headSha:run.head_sha})).slice(0,100)};
+            const evidence={version:2,repository,prNumber,issueNumber,headSha,baseSha,defaultBranch:repo.default_branch,producer:{workflowPath:'.github/workflows/agent-codex-review.yml',sourceSha,runId:producerRunId,runAttempt:producerRunAttempt},ci:{id:ci.id,workflowId:workflow.id,path:workflow.path,runAttempt:ci.run_attempt,status:ci.status,conclusion:ci.conclusion,jobs:config.requiredCiJobs.map(name=>({name,id:latest.get(name).id,conclusion:latest.get(name).conclusion,runAttempt:latest.get(name).run_attempt}))},checks:checks.check_runs.map(run=>({id:run.id,name:run.name,status:run.status,conclusion:run.conclusion,headSha:run.head_sha})).slice(0,100)};
             fs.writeFileSync('.codex-input/evidence-access.json',JSON.stringify(evidence));
       - name: Build deterministic bounded review prompt
         env: {HEAD_SHA: '${{ needs.prepare.outputs.head_sha }}', BASE_SHA: '${{ needs.prepare.outputs.base_sha }}'}
@@ -179,6 +183,45 @@ jobs:
           cat .codex-input/evidence-access.json >> .codex-input/review-prompt.md
           printf '\n--- END TRUSTED FRESH GITHUB EVIDENCE ---\nBase SHA: %s\nExact SHA: %s\n' "$BASE_SHA" "$HEAD_SHA" >> .codex-input/review-prompt.md
           test "$(stat -c%s .codex-input/review-prompt.md)" -le 131072
+      - name: Validate and seal exact bounded model evidence
+        env:
+          EXPECTED_REPOSITORY: '${{ github.repository }}'
+          EXPECTED_PR: '${{ needs.prepare.outputs.pr_number }}'
+          EXPECTED_ISSUE: '${{ needs.prepare.outputs.issue_number }}'
+          EXPECTED_HEAD: '${{ needs.prepare.outputs.head_sha }}'
+          EXPECTED_BASE: '${{ needs.prepare.outputs.base_sha }}'
+          EXPECTED_SOURCE_SHA: '${{ github.workflow_sha }}'
+          PRODUCER_RUN_ID: '${{ github.run_id }}'
+          PRODUCER_RUN_ATTEMPT: '${{ github.run_attempt }}'
+        run: |
+          node <<'NODE'
+          const fs=require('fs'),crypto=require('crypto');
+          const paths=['.codex-input/authorized-scope.json','.codex-input/trusted-governance.json','.codex-input/evidence-access.json','.codex-input/review-prompt.md'];
+          for(const path of paths) if(!fs.existsSync(path)||!fs.statSync(path).isFile()) throw new Error(`EVIDENCE_FILE_MISSING:${path}`);
+          const evidence=JSON.parse(fs.readFileSync(paths[2],'utf8'));
+          const positive=value=>Number.isSafeInteger(Number(value))&&Number(value)>0;
+          if(evidence.version!==2||evidence.repository!==process.env.EXPECTED_REPOSITORY||evidence.prNumber!==Number(process.env.EXPECTED_PR)||evidence.issueNumber!==Number(process.env.EXPECTED_ISSUE)||evidence.headSha!==process.env.EXPECTED_HEAD||evidence.baseSha!==process.env.EXPECTED_BASE) throw new Error('EVIDENCE_CONTRACT_BINDING_INVALID');
+          if(evidence.producer?.workflowPath!=='.github/workflows/agent-codex-review.yml'||evidence.producer.sourceSha!==process.env.EXPECTED_SOURCE_SHA||evidence.producer.runId!==Number(process.env.PRODUCER_RUN_ID)||evidence.producer.runAttempt!==Number(process.env.PRODUCER_RUN_ATTEMPT)||!positive(evidence.producer.runId)||!positive(evidence.producer.runAttempt)) throw new Error('EVIDENCE_PRODUCER_INVALID');
+          if(!positive(evidence.ci?.id)||!positive(evidence.ci?.workflowId)||!positive(evidence.ci?.runAttempt)||evidence.ci.path!=='.github/workflows/ci.yml'||evidence.ci.status!=='completed'||evidence.ci.conclusion!=='success'||!Array.isArray(evidence.ci.jobs)||!evidence.ci.jobs.length||evidence.ci.jobs.some(job=>!positive(job.id)||!positive(job.runAttempt)||job.conclusion!=='success')) throw new Error('EVIDENCE_CI_CONTRACT_INVALID');
+          const prompt=fs.readFileSync(paths[3],'utf8');
+          for(const path of paths.slice(0,3)) if(!prompt.includes(fs.readFileSync(path,'utf8'))) throw new Error(`EVIDENCE_PROMPT_CONTENT_INVALID:${path}`);
+          const integrity=Object.fromEntries(paths.map(path=>[path,crypto.createHash('sha256').update(fs.readFileSync(path)).digest('hex')]));
+          fs.writeFileSync('.codex-input/evidence-manifest.json',JSON.stringify({version:1,provenance:evidence.producer,binding:{repository:evidence.repository,issueNumber:evidence.issueNumber,prNumber:evidence.prNumber,headSha:evidence.headSha,baseSha:evidence.baseSha},boundedPaths:paths,integrity}));
+          NODE
+      - name: Retain immutable exact model evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: 'codex-review-evidence-${{ github.workflow_sha }}-${{ needs.prepare.outputs.head_sha }}-${{ github.run_id }}-${{ github.run_attempt }}'
+          path: |
+            .codex-input/authorized-scope.json
+            .codex-input/trusted-governance.json
+            .codex-input/evidence-access.json
+            .codex-input/review-prompt.md
+            .codex-input/evidence-manifest.json
+          if-no-files-found: error
+          include-hidden-files: true
+          retention-days: 7
+          overwrite: false
       - run: test "$(git rev-parse HEAD)" = "$HEAD_SHA" && git cat-file -e "$BASE_SHA^{commit}" && git diff --quiet "$BASE_SHA" "$HEAD_SHA" -- AGENTS.md .github/agent-pipeline.json docs/autonomous-development-pipeline.md docs/adr/0003-autonomous-development-pipeline-v2.md
         env: {HEAD_SHA: '${{ needs.prepare.outputs.head_sha }}', BASE_SHA: '${{ needs.prepare.outputs.base_sha }}'}
       - name: Fail closed when reviewer credential is absent
@@ -197,7 +240,7 @@ jobs:
             {"type":"object","additionalProperties":false,"required":["reviewed_sha","result","findings","issue_scope_consistent","test_or_governance_weakened","paper_only_live_trading_safe","summary"],"properties":{"reviewed_sha":{"type":"string","pattern":"^[0-9a-f]{40}$"},"result":{"type":"string","enum":["PASS","BLOCK"]},"findings":{"type":"array","maxItems":50,"items":{"type":"object","additionalProperties":false,"required":["severity","location","message"],"properties":{"severity":{"type":"string","enum":["critical","high","medium","low"]},"location":{"type":"string","maxLength":512},"message":{"type":"string","maxLength":2048}}}},"issue_scope_consistent":{"type":"boolean"},"test_or_governance_weakened":{"type":"boolean"},"paper_only_live_trading_safe":{"type":"boolean"},"summary":{"type":"string","maxLength":4096}}}
           prompt-file: .codex-input/review-prompt.md
       - run: |
-          jq -e --arg repo "$EXPECTED_REPOSITORY" --argjson pr "$EXPECTED_PR" --arg head "$HEAD_SHA" --arg base "$BASE_SHA" '.version==1 and .repository==$repo and .prNumber==$pr and .headSha==$head and .baseSha==$base and .ci.conclusion=="success" and (.checks|length)>0' .codex-input/evidence-access.json
+          jq -e --arg repo "$EXPECTED_REPOSITORY" --argjson pr "$EXPECTED_PR" --arg head "$HEAD_SHA" --arg base "$BASE_SHA" '.version==2 and .repository==$repo and .prNumber==$pr and .headSha==$head and .baseSha==$base and .ci.status=="completed" and .ci.conclusion=="success" and (.checks|length)>0' .codex-input/evidence-access.json
           test -s "$RUNNER_TEMP/review.json"
           test "$(jq -r .reviewed_sha "$RUNNER_TEMP/review.json")" = "$HEAD_SHA"
           jq -e '(.result=="BLOCK" or (.findings|length)==0) and (if .result=="PASS" then .issue_scope_consistent and (.test_or_governance_weakened|not) and .paper_only_live_trading_safe else true end)' "$RUNNER_TEMP/review.json"

@@ -330,6 +330,19 @@ persistence. Before model invocation, a pinned trusted API action uses the same 
 re-read the exact repository, open Issue and PR, head commit, base, checks, and newest authoritative
 CI result. It writes a bounded evidence bundle into the model's local prompt; an API denial,
 missing response, mismatched binding, absent checks, or non-successful CI stops the job before the
-model and therefore cannot become PASS. The post-action schema guard rechecks the bundle binding.
+model and therefore cannot become PASS. The bundle records the review workflow's exact source SHA,
+producer run ID and attempt, authoritative CI workflow ID/path/run/attempt, and every configured
+required-job result. After newest-run revalidation, a credential-free contract step checks those
+bindings and the exact prompt contents, then writes a separate SHA-256 integrity map for four
+explicit bounded input paths. Before the model runs, those exact inputs and their manifest are
+uploaded under an immutable name containing source SHA, head SHA, producer run ID, and producer
+attempt. Because publication precedes model execution, diagnostic evidence remains available when
+the model or a later step fails. Producer provenance describes where evidence came from; hashes
+describe byte integrity and do not independently establish provenance. The post-action schema guard
+rechecks the bundle binding.
+
+This preflight establishes only that the bounded CI evidence was successfully and freshly verified
+for review. It does **not** establish staging, canary, production, or other operational acceptance,
+and it does not reinterpret the separate Issue #126 acceptance requirements.
 `OPENAI_API_KEY` remains separate, and no repository code executes in the credential-bearing model
 step.
