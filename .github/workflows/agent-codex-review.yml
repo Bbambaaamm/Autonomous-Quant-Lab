@@ -15,7 +15,42 @@ concurrency:
 permissions: {contents: read}
 
 jobs:
+  validate-source:
+    runs-on: ubuntu-latest
+    permissions: {actions: read, contents: read}
+    outputs:
+      source_sha: ${{ steps.source.outputs.source_sha }}
+      default_branch: ${{ steps.source.outputs.default_branch }}
+    steps:
+      - id: source
+        name: Validate trusted workflow source before checkout
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        env:
+          CONTEXT_REPOSITORY: '${{ github.repository }}'
+          CONTEXT_REF: '${{ github.ref }}'
+          CONTEXT_SOURCE_SHA: '${{ github.workflow_sha }}'
+          CONTEXT_RUN_ID: '${{ github.run_id }}'
+          CONTEXT_RUN_ATTEMPT: '${{ github.run_attempt }}'
+          CONTEXT_EVENT: '${{ github.event_name }}'
+        with:
+          script: |
+            const repository=`${context.repo.owner}/${context.repo.repo}`,sourceSha=process.env.CONTEXT_SOURCE_SHA;
+            const runId=Number(process.env.CONTEXT_RUN_ID),runAttempt=Number(process.env.CONTEXT_RUN_ATTEMPT);
+            if(process.env.CONTEXT_REPOSITORY!==repository||!/^[0-9a-f]{40}$/.test(sourceSha)||![runId,runAttempt].every(Number.isSafeInteger)||runId<1||runAttempt<1||!['workflow_dispatch','workflow_run'].includes(process.env.CONTEXT_EVENT)) throw new Error('SOURCE_CONTEXT_INVALID');
+            const {data:repo}=await github.rest.repos.get(context.repo);
+            if(repo.full_name!==repository||!repo.default_branch) throw new Error('SOURCE_REPOSITORY_INVALID');
+            const expectedRef=`refs/heads/${repo.default_branch}`;
+            if(process.env.CONTEXT_REF!==expectedRef) throw new Error('SOURCE_REF_NOT_DEFAULT');
+            const readBranch=async()=>{const {data}=await github.rest.repos.getBranch({...context.repo,branch:repo.default_branch});return data;};
+            const before=await readBranch();
+            const {data:workflow}=await github.rest.actions.getWorkflow({...context.repo,workflow_id:'agent-codex-review.yml'});
+            const {data:run}=await github.rest.actions.getWorkflowRun({...context.repo,run_id:runId});
+            const after=await readBranch();
+            if(workflow.path!=='.github/workflows/agent-codex-review.yml'||workflow.state!=='active'||run.id!==runId||run.run_attempt!==runAttempt||run.event!==process.env.CONTEXT_EVENT||run.repository?.full_name!==repository||run.path!==workflow.path||run.head_branch!==repo.default_branch||run.head_sha!==sourceSha||before.commit?.sha!==sourceSha||after.commit?.sha!==sourceSha) throw new Error('SOURCE_NOT_CURRENT_DEFAULT');
+            core.setOutput('source_sha',sourceSha);core.setOutput('default_branch',repo.default_branch);
+
   prepare:
+    needs: validate-source
     if: (github.event_name == 'workflow_dispatch') || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.pull_requests[0])
     runs-on: ubuntu-latest
     permissions: {actions: read, contents: read, issues: read, pull-requests: read}
@@ -29,7 +64,7 @@ jobs:
       reason: ${{ steps.meta.outputs.reason }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with: {ref: '${{ github.workflow_sha }}', persist-credentials: false}
+        with: {ref: '${{ needs.validate-source.outputs.source_sha }}', persist-credentials: false}
       - id: meta
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
         env:
@@ -37,7 +72,7 @@ jobs:
           REQUEST_SHA: '${{ inputs.head_sha || github.event.workflow_run.head_sha }}'
         with:
           script: |
-            const fs=require('fs'),p=require('./.github/scripts/agent-pipeline.cjs');
+            const fs=require('fs'),p=require('./.github/scripts/agent-pipeline.cjs'),a=require('./.github/scripts/agent-autonomy.cjs');
             const prNumber=Number(process.env.REQUEST_PR),sha=process.env.REQUEST_SHA;
             if(!Number.isSafeInteger(prNumber)||prNumber<1||!/^[0-9a-f]{40}$/.test(sha)) return core.notice('NO_WRITE: invalid binding');
             const {data:pr}=await github.rest.pulls.get({...context.repo,pull_number:prNumber});
@@ -55,7 +90,8 @@ jobs:
             const {data:issue}=await github.rest.issues.get({...context.repo,issue_number:issueNumber});
             const prComments=await github.paginate(github.rest.issues.listComments,{...context.repo,issue_number:prNumber,per_page:100});
             const issueComments=await github.paginate(github.rest.issues.listComments,{...context.repo,issue_number:issueNumber,per_page:100});
-            if(!p.isImplementation(issue.labels)||!p.lifecycleAtAgentPr(pr.labels,issue.labels).ok||!p.fullLinkageDecision({prBody:pr.body,prComments,issueComments,...context.repo,issueNumber,prNumber}).ok) return core.notice('NO_WRITE: lifecycle/linkage');
+            const repository=`${context.repo.owner}/${context.repo.repo}`,auth=a.authorizationDecision({comments:issueComments,repo:repository,issueNumber,title:issue.title,body:issue.body||'',labels:issue.labels,state:issue.state});
+            if(!auth.ok||!p.isImplementation(issue.labels)||!p.lifecycleAtAgentPr(pr.labels,issue.labels).ok||!p.fullLinkageDecision({prBody:pr.body,prComments,issueComments,...context.repo,issueNumber,prNumber}).ok) return core.notice('NO_WRITE: authorization/lifecycle/linkage');
             const body=p.redactDiagnostic(issue.body,16384);
             const protectedGovernance=["AGENTS.md",".github/agent-pipeline.json","docs/autonomous-development-pipeline.md","docs/adr/0003-autonomous-development-pipeline-v2.md"];
             const changed=await github.paginate(github.rest.pulls.listFiles,{...context.repo,pull_number:prNumber,per_page:100});
@@ -65,25 +101,27 @@ jobs:
             }
             const governance={}; for(const file of protectedGovernance) governance[file]=fs.readFileSync(file,'utf8');
             fs.writeFileSync(`${process.env.RUNNER_TEMP}/trusted-governance.json`,JSON.stringify(governance));
-            fs.writeFileSync(`${process.env.RUNNER_TEMP}/authorized-scope.json`,JSON.stringify({issueNumber,title:p.redactDiagnostic(issue.title,256),body,headSha:sha}));
+            fs.writeFileSync(`${process.env.RUNNER_TEMP}/authorized-scope.json`,JSON.stringify({version:3,repository,issueNumber,prNumber,headSha:sha,baseSha:pr.base.sha,specHash:auth.specHash,authorization:{actor:auth.actor,runId:auth.runId,commentId:auth.commentId},classification:a.implementationClassification(issue.labels),display:{title:p.redactDiagnostic(issue.title,256),body}}));
             for(const [k,v] of Object.entries({eligible:'true',pr_number:prNumber,issue_number:issueNumber,head_sha:sha,base_sha:pr.base.sha})) core.setOutput(k,v);
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: steps.meta.outputs.eligible == 'true'
         with: {name: 'review-scope-${{ github.run_id }}', path: '${{ runner.temp }}/*.json', if-no-files-found: error, retention-days: 1}
 
   governance-escalation:
-    needs: prepare
+    needs: [validate-source, prepare]
     if: needs.prepare.outputs.escalation == 'true'
     runs-on: ubuntu-latest
     permissions: {contents: read, issues: write, pull-requests: write}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with: {ref: '${{ github.event.repository.default_branch }}', persist-credentials: false}
+        with: {ref: '${{ needs.validate-source.outputs.source_sha }}', persist-credentials: false}
       - uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
-        env: {PR: '${{ needs.prepare.outputs.pr_number }}', ISSUE: '${{ needs.prepare.outputs.issue_number }}', SHA: '${{ needs.prepare.outputs.head_sha }}'}
+        env: {PR: '${{ needs.prepare.outputs.pr_number }}', ISSUE: '${{ needs.prepare.outputs.issue_number }}', SHA: '${{ needs.prepare.outputs.head_sha }}', SOURCE_SHA: '${{ needs.validate-source.outputs.source_sha }}'}
         with:
           script: |
             const p=require('./.github/scripts/agent-pipeline.cjs'),prNumber=Number(process.env.PR),issueNumber=Number(process.env.ISSUE);
+            const {data:repo}=await github.rest.repos.get(context.repo),{data:branch}=await github.rest.repos.getBranch({...context.repo,branch:repo.default_branch});
+            if(branch.commit?.sha!==process.env.SOURCE_SHA) return core.setFailed('STALE_GOVERNANCE_SOURCE_NO_WRITE');
             const {data:pr}=await github.rest.pulls.get({...context.repo,pull_number:prNumber});
             const {data:issue}=await github.rest.issues.get({...context.repo,issue_number:issueNumber});
             const prComments=await github.paginate(github.rest.issues.listComments,{...context.repo,issue_number:prNumber,per_page:100});
@@ -98,7 +136,7 @@ jobs:
             await github.rest.issues.createComment({...context.repo,issue_number:prNumber,body:`Trusted governance changed at exact SHA ${process.env.SHA}; independent automation stopped for human review.`});
 
   independent-review:
-    needs: prepare
+    needs: [validate-source, prepare]
     if: needs.prepare.outputs.eligible == 'true'
     runs-on: ubuntu-latest
     permissions: {actions: read, checks: read, contents: read, issues: read, pull-requests: read}
@@ -115,12 +153,12 @@ jobs:
           EXPECTED_ISSUE: '${{ needs.prepare.outputs.issue_number }}'
           EXPECTED_HEAD: '${{ needs.prepare.outputs.head_sha }}'
           EXPECTED_BASE: '${{ needs.prepare.outputs.base_sha }}'
-          EXPECTED_SOURCE_SHA: '${{ github.workflow_sha }}'
+          EXPECTED_SOURCE_SHA: '${{ needs.validate-source.outputs.source_sha }}'
           PRODUCER_RUN_ID: '${{ github.run_id }}'
           PRODUCER_RUN_ATTEMPT: '${{ github.run_attempt }}'
         with:
           script: |
-            const fs=require('fs');
+            const fs=require('fs'),crypto=require('crypto');
             const repository=process.env.EXPECTED_REPOSITORY,prNumber=Number(process.env.EXPECTED_PR),issueNumber=Number(process.env.EXPECTED_ISSUE);
             const headSha=process.env.EXPECTED_HEAD,baseSha=process.env.EXPECTED_BASE,sourceSha=process.env.EXPECTED_SOURCE_SHA;
             const producerRunId=Number(process.env.PRODUCER_RUN_ID),producerRunAttempt=Number(process.env.PRODUCER_RUN_ATTEMPT);
@@ -131,10 +169,16 @@ jobs:
             if(pr.number!==prNumber||pr.state!=="open"||pr.head.sha!==headSha||pr.base.sha!==baseSha||pr.base.repo?.full_name!==repository||pr.base.ref!==repo.default_branch) throw new Error('EVIDENCE_PR_MISMATCH');
             const {data:issue}=await github.rest.issues.get({...context.repo,issue_number:issueNumber});
             if(issue.number!==issueNumber||issue.state!=="open"||issue.pull_request) throw new Error('EVIDENCE_ISSUE_MISMATCH');
+            const scope=JSON.parse(fs.readFileSync('.codex-input/authorized-scope.json','utf8'));
+            const labels=(issue.labels||[]).map(x=>typeof x==='string'?x:x?.name).filter(Boolean),types=labels.filter(x=>x.startsWith('type:'));
+            const classification=types.length===1&&types[0]==='type:implementation'?'type:implementation':null;
+            const specHash=classification?crypto.createHash('sha256').update(JSON.stringify({title:String(issue.title||''),body:String(issue.body||''),classification}),'utf8').digest('hex'):null;
+            const prefix=`<!-- agent-merge-authorization:v2 repo=${repository} issue=${issueNumber} `;
+            const authLines=(await github.paginate(github.rest.issues.listComments,{...context.repo,issue_number:issueNumber,per_page:100})).filter(x=>x.user?.login==='github-actions[bot]').flatMap(x=>String(x.body||'').split('\n').map(line=>({line,id:x.id}))).filter(x=>x.line.startsWith(prefix)&&x.line.endsWith(' -->'));
+            const auth=authLines.length===1?/^<!-- agent-merge-authorization:v2 repo=\S+ issue=\d+ spec=([0-9a-f]{64}) actor=([A-Za-z0-9-]{1,39}) run=([1-9][0-9]*) -->$/.exec(authLines[0].line):null;
+            if(scope.version!==3||scope.repository!==repository||scope.issueNumber!==issueNumber||scope.prNumber!==prNumber||scope.headSha!==headSha||scope.baseSha!==baseSha||scope.specHash!==specHash||scope.classification!==classification||!auth||auth[1]!==specHash||scope.authorization?.actor!==auth[2]||scope.authorization?.runId!==Number(auth[3])||scope.authorization?.commentId!==authLines[0].id) throw new Error('EVIDENCE_AUTHORIZATION_CHANGED');
             const {data:commit}=await github.rest.repos.getCommit({...context.repo,ref:headSha});
             if(commit.sha!==headSha) throw new Error('EVIDENCE_COMMIT_MISMATCH');
-            const {data:checks}=await github.rest.checks.listForRef({...context.repo,ref:headSha,per_page:100});
-            if(!Array.isArray(checks.check_runs)||checks.check_runs.length<1) throw new Error('EVIDENCE_CHECKS_MISSING');
             // Trusted workflow-owned copy; regression tests bind it to the existing predicate.
             function successfulRequiredJobs(jobs, requiredNames, headSha) {
               const latest = new Map();
@@ -166,7 +210,7 @@ jobs:
             if(!binding(fresh)||fresh.id!==ci.id||fresh.status!=="completed"||fresh.conclusion!=="success"||fresh.run_attempt!==ci.run_attempt||!newest||newest.id!==ci.id||newest.run_attempt!==ci.run_attempt||newest.status!=="completed"||newest.conclusion!=="success") throw new Error('EVIDENCE_CI_CHANGED');
             const latest=new Map();
             for(const job of jobs){if(job.head_sha!==undefined&&job.head_sha!==headSha)continue;const old=latest.get(job.name);if(!old||job.run_attempt>=old.run_attempt)latest.set(job.name,job);}
-            const evidence={version:2,repository,prNumber,issueNumber,headSha,baseSha,defaultBranch:repo.default_branch,producer:{workflowPath:'.github/workflows/agent-codex-review.yml',sourceSha,runId:producerRunId,runAttempt:producerRunAttempt},ci:{id:ci.id,workflowId:workflow.id,path:workflow.path,runAttempt:ci.run_attempt,status:ci.status,conclusion:ci.conclusion,jobs:config.requiredCiJobs.map(name=>({name,id:latest.get(name).id,conclusion:latest.get(name).conclusion,runAttempt:latest.get(name).run_attempt}))},checks:checks.check_runs.map(run=>({id:run.id,name:run.name,status:run.status,conclusion:run.conclusion,headSha:run.head_sha})).slice(0,100)};
+            const evidence={version:3,repository,prNumber,issueNumber,headSha,baseSha,defaultBranch:repo.default_branch,specHash,authorization:scope.authorization,producer:{workflowPath:'.github/workflows/agent-codex-review.yml',sourceSha,runId:producerRunId,runAttempt:producerRunAttempt,event:context.eventName},ci:{id:ci.id,workflowId:workflow.id,path:workflow.path,runAttempt:ci.run_attempt,status:ci.status,conclusion:ci.conclusion,jobs:config.requiredCiJobs.map(name=>({name,id:latest.get(name).id,conclusion:latest.get(name).conclusion,runAttempt:latest.get(name).run_attempt}))}};
             fs.writeFileSync('.codex-input/evidence-access.json',JSON.stringify(evidence));
       - name: Build deterministic bounded review prompt
         env: {HEAD_SHA: '${{ needs.prepare.outputs.head_sha }}', BASE_SHA: '${{ needs.prepare.outputs.base_sha }}'}
@@ -190,7 +234,7 @@ jobs:
           EXPECTED_ISSUE: '${{ needs.prepare.outputs.issue_number }}'
           EXPECTED_HEAD: '${{ needs.prepare.outputs.head_sha }}'
           EXPECTED_BASE: '${{ needs.prepare.outputs.base_sha }}'
-          EXPECTED_SOURCE_SHA: '${{ github.workflow_sha }}'
+          EXPECTED_SOURCE_SHA: '${{ needs.validate-source.outputs.source_sha }}'
           PRODUCER_RUN_ID: '${{ github.run_id }}'
           PRODUCER_RUN_ATTEMPT: '${{ github.run_attempt }}'
         run: |
@@ -200,13 +244,14 @@ jobs:
           for(const path of paths) if(!fs.existsSync(path)||!fs.statSync(path).isFile()) throw new Error(`EVIDENCE_FILE_MISSING:${path}`);
           const evidence=JSON.parse(fs.readFileSync(paths[2],'utf8'));
           const positive=value=>Number.isSafeInteger(Number(value))&&Number(value)>0;
-          if(evidence.version!==2||evidence.repository!==process.env.EXPECTED_REPOSITORY||evidence.prNumber!==Number(process.env.EXPECTED_PR)||evidence.issueNumber!==Number(process.env.EXPECTED_ISSUE)||evidence.headSha!==process.env.EXPECTED_HEAD||evidence.baseSha!==process.env.EXPECTED_BASE) throw new Error('EVIDENCE_CONTRACT_BINDING_INVALID');
+          const scope=JSON.parse(fs.readFileSync(paths[0],'utf8'));
+          if(evidence.version!==3||scope.version!==3||evidence.repository!==process.env.EXPECTED_REPOSITORY||evidence.prNumber!==Number(process.env.EXPECTED_PR)||evidence.issueNumber!==Number(process.env.EXPECTED_ISSUE)||evidence.headSha!==process.env.EXPECTED_HEAD||evidence.baseSha!==process.env.EXPECTED_BASE||evidence.specHash!==scope.specHash||JSON.stringify(evidence.authorization)!==JSON.stringify(scope.authorization)) throw new Error('EVIDENCE_CONTRACT_BINDING_INVALID');
           if(evidence.producer?.workflowPath!=='.github/workflows/agent-codex-review.yml'||evidence.producer.sourceSha!==process.env.EXPECTED_SOURCE_SHA||evidence.producer.runId!==Number(process.env.PRODUCER_RUN_ID)||evidence.producer.runAttempt!==Number(process.env.PRODUCER_RUN_ATTEMPT)||!positive(evidence.producer.runId)||!positive(evidence.producer.runAttempt)) throw new Error('EVIDENCE_PRODUCER_INVALID');
           if(!positive(evidence.ci?.id)||!positive(evidence.ci?.workflowId)||!positive(evidence.ci?.runAttempt)||evidence.ci.path!=='.github/workflows/ci.yml'||evidence.ci.status!=='completed'||evidence.ci.conclusion!=='success'||!Array.isArray(evidence.ci.jobs)||!evidence.ci.jobs.length||evidence.ci.jobs.some(job=>!positive(job.id)||!positive(job.runAttempt)||job.conclusion!=='success')) throw new Error('EVIDENCE_CI_CONTRACT_INVALID');
           const prompt=fs.readFileSync(paths[3],'utf8');
           for(const path of paths.slice(0,3)) if(!prompt.includes(fs.readFileSync(path,'utf8'))) throw new Error(`EVIDENCE_PROMPT_CONTENT_INVALID:${path}`);
           const integrity=Object.fromEntries(paths.map(path=>[path,crypto.createHash('sha256').update(fs.readFileSync(path)).digest('hex')]));
-          fs.writeFileSync('.codex-input/evidence-manifest.json',JSON.stringify({version:1,provenance:evidence.producer,binding:{repository:evidence.repository,issueNumber:evidence.issueNumber,prNumber:evidence.prNumber,headSha:evidence.headSha,baseSha:evidence.baseSha},boundedPaths:paths,integrity}));
+          fs.writeFileSync('.codex-input/evidence-manifest.json',JSON.stringify({version:2,provenance:evidence.producer,binding:{repository:evidence.repository,issueNumber:evidence.issueNumber,prNumber:evidence.prNumber,headSha:evidence.headSha,baseSha:evidence.baseSha,specHash:evidence.specHash,authorization:evidence.authorization,ci:evidence.ci},boundedPaths:paths,integrity}));
           NODE
       - name: Retain immutable exact model evidence
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -239,40 +284,65 @@ jobs:
           output-schema: >-
             {"type":"object","additionalProperties":false,"required":["reviewed_sha","result","findings","issue_scope_consistent","test_or_governance_weakened","paper_only_live_trading_safe","summary"],"properties":{"reviewed_sha":{"type":"string","pattern":"^[0-9a-f]{40}$"},"result":{"type":"string","enum":["PASS","BLOCK"]},"findings":{"type":"array","maxItems":50,"items":{"type":"object","additionalProperties":false,"required":["severity","location","message"],"properties":{"severity":{"type":"string","enum":["critical","high","medium","low"]},"location":{"type":"string","maxLength":512},"message":{"type":"string","maxLength":2048}}}},"issue_scope_consistent":{"type":"boolean"},"test_or_governance_weakened":{"type":"boolean"},"paper_only_live_trading_safe":{"type":"boolean"},"summary":{"type":"string","maxLength":4096}}}
           prompt-file: .codex-input/review-prompt.md
-      - run: |
-          jq -e --arg repo "$EXPECTED_REPOSITORY" --argjson pr "$EXPECTED_PR" --arg head "$HEAD_SHA" --arg base "$BASE_SHA" '.version==2 and .repository==$repo and .prNumber==$pr and .headSha==$head and .baseSha==$base and .ci.status=="completed" and .ci.conclusion=="success" and (.checks|length)>0' .codex-input/evidence-access.json
-          test -s "$RUNNER_TEMP/review.json"
-          test "$(jq -r .reviewed_sha "$RUNNER_TEMP/review.json")" = "$HEAD_SHA"
-          jq -e '(.result=="BLOCK" or (.findings|length)==0) and (if .result=="PASS" then .issue_scope_consistent and (.test_or_governance_weakened|not) and .paper_only_live_trading_safe else true end)' "$RUNNER_TEMP/review.json"
-        env: {EXPECTED_REPOSITORY: '${{ github.repository }}', EXPECTED_PR: '${{ needs.prepare.outputs.pr_number }}', HEAD_SHA: '${{ needs.prepare.outputs.head_sha }}', BASE_SHA: '${{ needs.prepare.outputs.base_sha }}'}
+      - name: Revalidate all bindings after model execution
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        env:
+          EXPECTED_SOURCE_SHA: '${{ needs.validate-source.outputs.source_sha }}'
+          PRODUCER_RUN_ID: '${{ github.run_id }}'
+          PRODUCER_RUN_ATTEMPT: '${{ github.run_attempt }}'
+        with:
+          script: |
+            const fs=require('fs'),crypto=require('crypto'),evidence=JSON.parse(fs.readFileSync('.codex-input/evidence-access.json')),scope=JSON.parse(fs.readFileSync('.codex-input/authorized-scope.json')),result=JSON.parse(fs.readFileSync(`${process.env.RUNNER_TEMP}/review.json`));
+            if(result.reviewed_sha!==evidence.headSha||(result.result!=='BLOCK'&&(result.findings.length||!result.issue_scope_consistent||result.test_or_governance_weakened||!result.paper_only_live_trading_safe))) throw new Error('MODEL_OUTPUT_INVALID');
+            const {data:repo}=await github.rest.repos.get(context.repo),{data:branch}=await github.rest.repos.getBranch({...context.repo,branch:repo.default_branch}),{data:run}=await github.rest.actions.getWorkflowRun({...context.repo,run_id:Number(process.env.PRODUCER_RUN_ID)});
+            if(repo.full_name!==evidence.repository||branch.commit?.sha!==process.env.EXPECTED_SOURCE_SHA||run.run_attempt!==Number(process.env.PRODUCER_RUN_ATTEMPT)||run.head_sha!==process.env.EXPECTED_SOURCE_SHA||run.head_branch!==repo.default_branch||run.path!==evidence.producer.workflowPath||run.event!==evidence.producer.event) throw new Error('POST_MODEL_SOURCE_CHANGED');
+            const {data:pr}=await github.rest.pulls.get({...context.repo,pull_number:evidence.prNumber}),{data:issue}=await github.rest.issues.get({...context.repo,issue_number:evidence.issueNumber});
+            const comments=await github.paginate(github.rest.issues.listComments,{...context.repo,issue_number:evidence.issueNumber,per_page:100}),labels=(issue.labels||[]).map(x=>typeof x==='string'?x:x?.name).filter(Boolean),types=labels.filter(x=>x.startsWith('type:')),classification=types.length===1&&types[0]==='type:implementation'?'type:implementation':null;
+            const specHash=classification?crypto.createHash('sha256').update(JSON.stringify({title:String(issue.title||''),body:String(issue.body||''),classification})).digest('hex'):null,prefix=`<!-- agent-merge-authorization:v2 repo=${evidence.repository} issue=${evidence.issueNumber} `;
+            const lines=comments.filter(x=>x.user?.login==='github-actions[bot]').flatMap(x=>String(x.body||'').split('\n').map(line=>({line,id:x.id}))).filter(x=>x.line.startsWith(prefix)&&x.line.endsWith(' -->')),auth=lines.length===1?/ spec=([0-9a-f]{64}) actor=([A-Za-z0-9-]{1,39}) run=([1-9][0-9]*) -->$/.exec(lines[0].line):null;
+            if(pr.head.sha!==evidence.headSha||pr.base.sha!==evidence.baseSha||pr.base.ref!==repo.default_branch||issue.state!=='open'||specHash!==scope.specHash||classification!==scope.classification||!auth||auth[1]!==scope.specHash||auth[2]!==scope.authorization.actor||Number(auth[3])!==scope.authorization.runId||lines[0].id!==scope.authorization.commentId) throw new Error('POST_MODEL_SCOPE_CHANGED');
+            const binding=x=>x.name==='CI'&&x.path===evidence.ci.path&&x.workflow_id===evidence.ci.workflowId&&x.head_sha===evidence.headSha&&x.event==='pull_request'&&x.pull_requests?.length===1&&x.pull_requests[0].number===evidence.prNumber&&x.repository?.full_name===evidence.repository&&x.head_repository?.full_name===evidence.repository;
+            const runs=await github.paginate(github.rest.actions.listWorkflowRunsForRepo,{...context.repo,head_sha:evidence.headSha,event:'pull_request',per_page:100}),ci=runs.filter(binding).sort((a,b)=>b.id-a.id)[0];
+            if(!ci||ci.id!==evidence.ci.id||ci.run_attempt!==evidence.ci.runAttempt||ci.status!=='completed'||ci.conclusion!=='success') throw new Error('POST_MODEL_CI_CHANGED');
+            const jobs=await github.paginate(github.rest.actions.listJobsForWorkflowRun,{...context.repo,run_id:ci.id,filter:'all',per_page:100}),latest=new Map();for(const job of jobs){const old=latest.get(job.name);if(!old||job.run_attempt>=old.run_attempt)latest.set(job.name,job);}
+            if(evidence.ci.jobs.some(old=>{const job=latest.get(old.name);return !job||job.id!==old.id||job.run_attempt!==old.runAttempt||job.conclusion!==old.conclusion;})) throw new Error('POST_MODEL_JOBS_CHANGED');
+            fs.copyFileSync('.codex-input/evidence-access.json',`${process.env.RUNNER_TEMP}/evidence-access.json`);fs.copyFileSync('.codex-input/authorized-scope.json',`${process.env.RUNNER_TEMP}/authorized-scope.json`);
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with: {name: 'codex-review-${{ github.run_id }}', path: '${{ runner.temp }}/review.json', if-no-files-found: error, retention-days: 7}
+        with: {name: 'codex-review-${{ github.run_id }}', path: '${{ runner.temp }}/*.json', if-no-files-found: error, retention-days: 7}
 
   trusted-record:
-    needs: [prepare, independent-review]
+    needs: [validate-source, prepare, independent-review]
     runs-on: ubuntu-latest
-    permissions: {contents: read, issues: write, pull-requests: write}
+    permissions: {actions: read, contents: read, issues: write, pull-requests: write}
     outputs:
       pass: ${{ steps.record.outputs.pass }}
       blocked: ${{ steps.record.outputs.blocked }}
       block_reason: ${{ steps.record.outputs.block_reason }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with: {ref: '${{ github.event.repository.default_branch }}', persist-credentials: false}
+        with: {ref: '${{ needs.validate-source.outputs.source_sha }}', persist-credentials: false}
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with: {name: 'codex-review-${{ github.run_id }}', path: '${{ runner.temp }}'}
       - id: record
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
-        env: {PR: '${{ needs.prepare.outputs.pr_number }}', ISSUE: '${{ needs.prepare.outputs.issue_number }}', SHA: '${{ needs.prepare.outputs.head_sha }}'}
+        env: {PR: '${{ needs.prepare.outputs.pr_number }}', ISSUE: '${{ needs.prepare.outputs.issue_number }}', SHA: '${{ needs.prepare.outputs.head_sha }}', BASE: '${{ needs.prepare.outputs.base_sha }}', SOURCE_SHA: '${{ needs.validate-source.outputs.source_sha }}', PRODUCER_RUN_ID: '${{ github.run_id }}', PRODUCER_RUN_ATTEMPT: '${{ github.run_attempt }}'}
         with:
           script: |
-            const fs=require('fs'),p=require('./.github/scripts/agent-pipeline.cjs'),result=JSON.parse(fs.readFileSync(`${process.env.RUNNER_TEMP}/review.json`));
+            const fs=require('fs'),p=require('./.github/scripts/agent-pipeline.cjs'),a=require('./.github/scripts/agent-autonomy.cjs'),c=require('./.github/agent-pipeline.json'),result=JSON.parse(fs.readFileSync(`${process.env.RUNNER_TEMP}/review.json`)),evidence=JSON.parse(fs.readFileSync(`${process.env.RUNNER_TEMP}/evidence-access.json`)),scope=JSON.parse(fs.readFileSync(`${process.env.RUNNER_TEMP}/authorized-scope.json`));
             const prNumber=Number(process.env.PR),issueNumber=Number(process.env.ISSUE);
+            const {data:repo}=await github.rest.repos.get(context.repo),{data:branch}=await github.rest.repos.getBranch({...context.repo,branch:repo.default_branch}),{data:producer}=await github.rest.actions.getWorkflowRun({...context.repo,run_id:Number(process.env.PRODUCER_RUN_ID)});
             const {data:pr}=await github.rest.pulls.get({...context.repo,pull_number:prNumber});
             const {data:issue}=await github.rest.issues.get({...context.repo,issue_number:issueNumber});
             const prComments=await github.paginate(github.rest.issues.listComments,{...context.repo,issue_number:prNumber,per_page:100});
             const issueComments=await github.paginate(github.rest.issues.listComments,{...context.repo,issue_number:issueNumber,per_page:100});
-            if(pr.head.sha!==process.env.SHA||result.reviewed_sha!==process.env.SHA||!p.lifecycleAtAgentPr(pr.labels,issue.labels).ok||!p.fullLinkageDecision({prBody:pr.body,prComments,issueComments,...context.repo,issueNumber,prNumber}).ok) return core.setFailed('NO_WRITE: stale lifecycle/linkage');
+            const auth=a.authorizationDecision({comments:issueComments,repo:repo.full_name,issueNumber,title:issue.title,body:issue.body||'',labels:issue.labels,state:issue.state});
+            const binding=x=>x.name==='CI'&&x.path===evidence.ci.path&&x.workflow_id===evidence.ci.workflowId&&x.head_sha===evidence.headSha&&x.event==='pull_request'&&x.pull_requests?.length===1&&x.pull_requests[0].number===prNumber&&x.repository?.full_name===repo.full_name&&x.head_repository?.full_name===repo.full_name;
+            const runs=await github.paginate(github.rest.actions.listWorkflowRunsForRepo,{...context.repo,head_sha:evidence.headSha,event:'pull_request',per_page:100}),ci=runs.filter(binding).sort((x,y)=>y.id-x.id)[0];
+            const jobs=ci?await github.paginate(github.rest.actions.listJobsForWorkflowRun,{...context.repo,run_id:ci.id,filter:'all',per_page:100}):null,latest=new Map();for(const job of jobs||[]){const old=latest.get(job.name);if(!old||job.run_attempt>=old.run_attempt)latest.set(job.name,job);}
+            const jobsSame=Array.isArray(jobs)&&evidence.ci.jobs.length===c.requiredCiJobs.length&&evidence.ci.jobs.every(old=>{const job=latest.get(old.name);return c.requiredCiJobs.includes(old.name)&&job?.id===old.id&&job.run_attempt===old.runAttempt&&job.conclusion===old.conclusion;});
+            const sourceCurrent=branch.commit?.sha===process.env.SOURCE_SHA&&producer.run_attempt===Number(process.env.PRODUCER_RUN_ATTEMPT)&&producer.head_sha===process.env.SOURCE_SHA&&producer.head_branch===repo.default_branch&&producer.path==='.github/workflows/agent-codex-review.yml';
+            const immutable=evidence.version===3&&evidence.repository===repo.full_name&&evidence.prNumber===prNumber&&evidence.issueNumber===issueNumber&&evidence.headSha===process.env.SHA&&evidence.baseSha===process.env.BASE&&evidence.specHash===scope.specHash&&JSON.stringify(evidence.authorization)===JSON.stringify(scope.authorization);
+            if(!sourceCurrent||!immutable||!auth.ok||auth.specHash!==scope.specHash||auth.actor!==scope.authorization.actor||auth.runId!==scope.authorization.runId||auth.commentId!==scope.authorization.commentId||!ci||ci.id!==evidence.ci.id||ci.run_attempt!==evidence.ci.runAttempt||ci.status!=='completed'||ci.conclusion!=='success'||!jobsSame||pr.head.sha!==process.env.SHA||pr.base.sha!==process.env.BASE||result.reviewed_sha!==process.env.SHA||!p.lifecycleAtAgentPr(pr.labels,issue.labels).ok||!p.fullLinkageDecision({prBody:pr.body,prComments,issueComments,...context.repo,issueNumber,prNumber}).ok) return core.setFailed('NO_WRITE: stale source/scope/authorization/CI/lifecycle/linkage');
             if(p.parseTrustedMarker(prComments,'agent-codex-review',process.env.SHA)) return core.notice('Idempotent NO_WRITE');
             const safeSummary=p.redactDiagnostic(result.summary,4096).replaceAll("<!--","&lt;!--").replaceAll("-->","--&gt;");
             await github.rest.issues.createComment({...context.repo,issue_number:prNumber,body:`Independent Codex review: **${result.result}** for exact SHA \`${process.env.SHA}\`.\n\n${safeSummary}\n\n<!-- agent-codex-review:v2 sha=${process.env.SHA} result=${result.result} -->`});
