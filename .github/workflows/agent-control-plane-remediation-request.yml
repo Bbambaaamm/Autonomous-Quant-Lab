@@ -20,6 +20,11 @@ on:
         description: Human maintenance authorization reason
         required: true
         type: string
+      canary_only:
+        description: Collect an isolated read-only canary snapshot; never run production remediation
+        required: true
+        type: boolean
+        default: false
 
 permissions: {contents: read}
 
@@ -38,7 +43,7 @@ jobs:
       pull-requests: read
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with: {ref: '${{ github.event.repository.default_branch }}', persist-credentials: false}
+        with: {ref: '${{ github.sha }}', persist-credentials: false}
       - id: request
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
         env:
@@ -46,17 +51,26 @@ jobs:
           PR: '${{ inputs.pr_number }}'
           HEAD: '${{ inputs.head_sha }}'
           REASON: '${{ inputs.reason }}'
+          TRIGGERING_ACTOR: '${{ github.triggering_actor }}'
+          CANARY_ONLY_JSON: '${{ toJSON(inputs.canary_only) }}'
         with:
           script: |
             const fs=require('fs'),p=require('./.github/scripts/agent-pipeline.cjs'),a=require('./.github/scripts/agent-autonomy.cjs'),c=require('./.github/agent-pipeline.json');
             const issueNumber=Number(process.env.ISSUE),prNumber=Number(process.env.PR),headSha=process.env.HEAD,reason=process.env.REASON.trim(),repo=`${context.repo.owner}/${context.repo.repo}`;
+            // The typed inputs context preserves booleans; github.event.inputs does not.
+            let canaryOnly;
+            try { canaryOnly=JSON.parse(process.env.CANARY_ONLY_JSON); }
+            catch { return core.setFailed('REQUEST_MODE_INVALID'); }
+            if(typeof canaryOnly!=='boolean') return core.setFailed('REQUEST_MODE_INVALID');
+            const mode=canaryOnly?'canary_only':'production';
             if(context.ref!==`refs/heads/${context.payload.repository.default_branch}`) return core.setFailed('REQUEST_MUST_RUN_FROM_DEFAULT_BRANCH');
+            if(process.env.TRIGGERING_ACTOR!==context.actor) return core.setFailed('REQUEST_ATTEMPT_ACTOR_MISMATCH');
             if(!Number.isSafeInteger(issueNumber)||issueNumber<1||!Number.isSafeInteger(prNumber)||prNumber<1||!/^[0-9a-f]{40}$/.test(headSha)||!reason) return core.setFailed('INVALID_MAINTENANCE_BINDING');
             const {data:permission}=await github.rest.repos.getCollaboratorPermissionLevel({...context.repo,username:context.actor});
             if(!['admin','maintain','write'].includes(permission.permission)) return core.setFailed('MAINTAINER_PERMISSION_REQUIRED');
             const {data:pr}=await github.rest.pulls.get({...context.repo,pull_number:prNumber});
             const {data:issue}=await github.rest.issues.get({...context.repo,issue_number:issueNumber});
-            if(pr.state!=='open'||pr.draft||pr.base.ref!==context.payload.repository.default_branch||pr.head.sha!==headSha||p.parseAgentIssue(pr.body)!==issueNumber||issue.state!=='open'||!p.isImplementation(issue.labels)) return core.setFailed('MAINTENANCE_SCOPE_REJECTED');
+            if(pr.state!=='open'||pr.draft||pr.auto_merge!==null||pr.base.ref!==context.payload.repository.default_branch||pr.head.sha!==headSha||p.parseAgentIssue(pr.body)!==issueNumber||issue.state!=='open'||!p.isImplementation(issue.labels)) return core.setFailed('MAINTENANCE_SCOPE_REJECTED');
             const issueComments=await github.paginate(github.rest.issues.listComments,{...context.repo,issue_number:issueNumber,per_page:100});
             const prComments=await github.paginate(github.rest.issues.listComments,{...context.repo,issue_number:prNumber,per_page:100});
             const auth=a.authorizationDecision({comments:issueComments,repo,issueNumber,title:issue.title,body:issue.body||'',labels:issue.labels,state:issue.state});
@@ -65,7 +79,9 @@ jobs:
             if(!issueLink.ok||!prLink.ok||(issueLink.prNumber!==null&&issueLink.prNumber!==prNumber)||(prLink.issueNumber!==null&&prLink.issueNumber!==issueNumber)) return core.setFailed('MAINTENANCE_LINK_CONFLICT');
             const issueRecovery=p.stateMutationPlan(issue.labels,'agent:needs-human','agent:pr');
             const prRecovery=p.stateMutationPlan(pr.labels,'agent:needs-human','agent:pr');
-            const entryState=p.lifecycleAtAgentPr(pr.labels,issue.labels).ok?'agent:pr':(issueRecovery.ok&&prRecovery.ok?'agent:needs-human':null);
+            const unmanagedPr=Array.isArray(pr.labels)&&a.labelNames(pr.labels).every(name=>typeof name==='string'&&!name.startsWith('agent:'));
+            const explicitUnmanagedRecovery=a.exactAgentState(issue.labels,'agent:needs-human')&&unmanagedPr;
+            const entryState=a.verificationLifecyclePlan(pr.labels,issue.labels).ok?'agent:pr':((issueRecovery.ok&&prRecovery.ok)||explicitUnmanagedRecovery?'agent:needs-human':null);
             if(!entryState) return core.setFailed('MAINTENANCE_LIFECYCLE_REJECTED');
             const allowed=path=>/^\.github\/workflows\/agent-[^/]+\.yml$/.test(path)||/^\.github\/scripts\/agent-[^/]+\.cjs$/.test(path)||path==='.github/agent-pipeline.json'||path==='docs/autonomous-development-pipeline.md'||path==='docs/adr/0003-autonomous-development-pipeline-v2.md'||path==='docs/adr/0006-conditional-autonomous-merge.md'||path==='docs/adr/0007-control-plane-remediation.md';
             const changed=await github.paginate(github.rest.pulls.listFiles,{...context.repo,pull_number:prNumber,per_page:100});
@@ -79,6 +95,6 @@ jobs:
             const ciRun=runs.filter(run=>run.name==='CI'&&run.event==='pull_request'&&run.head_sha===headSha&&run.pull_requests?.length===1&&run.pull_requests[0].number===prNumber).sort((x,y)=>y.id-x.id)[0]||null;
             const jobs=ciRun?.status==='completed'?await github.paginate(github.rest.actions.listJobsForWorkflowRun,{...context.repo,run_id:ciRun.id,filter:'all',per_page:100}):null;
             if(!ciRun||ciRun.status!=='completed'||ciRun.conclusion!=='success'||!p.successfulRequiredJobs(jobs,c.requiredCiJobs,headSha)) return core.setFailed('NEWEST_REQUIRED_CI_NOT_GREEN');
-            fs.writeFileSync(`${process.env.RUNNER_TEMP}/request.json`,JSON.stringify({repo,issueNumber,prNumber,headSha,specHash:auth.specHash,reason:p.redactDiagnostic(reason,1024),actor:context.actor,requestRunId:context.runId,entryState}));
+            fs.writeFileSync(`${process.env.RUNNER_TEMP}/request.json`,JSON.stringify({repo,issueNumber,prNumber,headSha,specHash:auth.specHash,authorization:{commentId:auth.commentId,actor:auth.actor,runId:auth.runId,specHash:auth.specHash},reason:p.redactDiagnostic(reason,1024),actor:context.actor,requestRunId:context.runId,requestRunAttempt:Number(process.env.GITHUB_RUN_ATTEMPT),entryState,mode,canary_only:canaryOnly}));
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with: {name: 'control-plane-request-${{ github.run_id }}', path: '${{ runner.temp }}/request.json', if-no-files-found: error, retention-days: 1}
+        with: {name: 'control-plane-request-${{ github.run_id }}-${{ github.run_attempt }}', path: '${{ runner.temp }}/request.json', if-no-files-found: error, retention-days: 1}
