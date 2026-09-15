@@ -348,6 +348,43 @@ of this integration job can observe real reads and identity denials before
 merge, but cannot certify production recovery, the isolated privileged ruleset
 collector, or end-to-end adoption. Those acceptance requirements remain.
 
+### Immutable recovery receipt across follower jobs
+
+Recovery now produces `recovery-receipt.json` only after both lifecycle
+postconditions and all four recovery-audit comments have been re-read. The
+receipt binds the started and completed comment IDs and SHA-256 body hashes for
+both the Issue and PR, both durable-link identities, repository and Issue/PR,
+exact head and base, complete authorization and requester identity, the original
+evidence-bundle digest, and the trusted follower workflow/source/run/attempt.
+The recover job uploads that bounded file once as the immutable
+`maintenance-recovery-receipt-<run>-<attempt>` artifact. Gate and merge download
+that same-run artifact; neither job republishes or overwrites it.
+
+Each gate or merge runtime validates the exact receipt schema, binding and
+digest before its first write, seeds its audit baseline from the receipt, and
+then compares fresh API comment IDs and body hashes to that baseline. Missing,
+edited, duplicated, deleted, or verbatim-recreated started or completed comments
+therefore fail closed. Wrong source, producer run/attempt, authorization,
+evidence digest, linkage, target, or malformed receipts also fail closed. A
+same-attempt continuation consumes the original receipt. A new attempt must
+perform a freshly authorized recovery and create a new receipt; it cannot reuse
+the prior attempt's artifact.
+
+The regressions construct separate recover, gate, and merge runtime instances.
+At both recover-to-gate and gate-to-merge boundaries, they exercise deletion,
+verbatim recreation with a new ID, editing, and duplication of every started
+and completed comment on both objects. They also cover legitimate continuation,
+partial/lost-response recovery already exercised by the recovery suite,
+same-attempt provenance, and rejection of wrong run, attempt, source,
+authorization, bundle, hash, or missing receipts. The workflow regression proves
+there is exactly one producer upload and that both consumers download its
+run/attempt-bound name.
+
+These are local mocked behavioral proofs of the producer/consumer contract, not
+normal-reviewer evidence on `main` and not completed operational acceptance.
+The limited premerge live reads remain untrusted candidate integration evidence;
+they do not establish trusted production-controller receipt provenance.
+
 No additional workflow filename or main/protection exception is introduced.
 The original authoritative CI command loads the new local regressions through
 its existing entrypoint. The supplemental live-read job is not a replacement

@@ -150,7 +150,7 @@ const currentState = item => {
   return values[0] || 'none';
 };
 
-function runtime({github, context, expected, readRuleset, bundle = null, review = null, mergePull = null, readOnlyCanary = false}) {
+function runtime({github, context, expected, readRuleset, bundle = null, review = null, mergePull = null, readOnlyCanary = false, recoveryReceipt = null}) {
   ensure(typeof readRuleset === "function", "FRESH_RULESET_READER_REQUIRED");
   ensure(readOnlyCanary
     ? expected.mode === "canary_only" && expected.canaryOnly === true
@@ -170,7 +170,7 @@ function runtime({github, context, expected, readRuleset, bundle = null, review 
     for (const side of ["pr", "issue"]) if (a.exactAgentState(s[side].labels, "agent:pr") ||
       a.exactAgentState(s[side].labels, "agent:verified")) recovered.add(side);
   };
-  const observedLinks = structuredClone(bundle?.evidence?.linkage || {issue: null, pr: null});
+  let observedLinks = structuredClone(bundle?.evidence?.linkage || {issue: null, pr: null});
   const observeLinks = s => {
     const now = linkEvidence(s, expected);
     for (const side of ['issue', 'pr']) {
@@ -208,6 +208,33 @@ function runtime({github, context, expected, readRuleset, bundle = null, review 
     for (const side of ['issue', 'pr']) for (const phase of ['started', 'completed'])
       ensure(findAudit(s, side, phase), 'RECOVERY_AUDIT_MISSING');
   };
+  const recoveryReceiptBinding = (audits, linkage = observedLinks) => ({version: 1, repository: expected.repo,
+    issueNumber: expected.issueNumber, prNumber: expected.prNumber, headSha: expected.headSha,
+    baseSha: expected.baseSha, authorization: expected.authorization, requester: expected.requester,
+    requestRunId: expected.requestRunId, requestRunAttempt: expected.requestRunAttempt,
+    evidenceBundleDigest: bundle?.digest, linkage: structuredClone(linkage),
+    producer: {...producer(context), job: 'recover'}, audits});
+  const validateRecoveryReceipt = receipt => {
+    ensure(receipt && receipt.version === 1 && receipt.digest &&
+      receipt.digest === digest(recoveryReceiptBinding(receipt.audits, receipt.linkage)), 'RECOVERY_RECEIPT_HASH_INVALID');
+    ensure(canonical(receipt) === canonical({...recoveryReceiptBinding(receipt.audits, receipt.linkage), digest: receipt.digest}),
+      'RECOVERY_RECEIPT_PROVENANCE_INVALID');
+    ensure(['issue', 'pr'].every(side => receipt.linkage?.[side] && validLinkIdentity(receipt.linkage[side])),
+      'RECOVERY_RECEIPT_LINKAGE_INVALID');
+    ensure(receipt.audits && Object.keys(receipt.audits).sort().join(',') === 'issue,pr', 'RECOVERY_RECEIPT_INVALID');
+    for (const side of ['issue', 'pr']) {
+      ensure(Object.keys(receipt.audits[side] || {}).sort().join(',') === 'completed,started', 'RECOVERY_RECEIPT_INVALID');
+      for (const phase of ['started', 'completed']) {
+        const identity = receipt.audits[side][phase];
+        ensure(identity && positive(identity.id) && /^[0-9a-f]{64}$/.test(identity.bodyHash || '') &&
+          Object.keys(identity).sort().join(',') === 'bodyHash,id', 'RECOVERY_RECEIPT_INVALID');
+        observedAudits.set(auditMarker(side, phase), structuredClone(identity));
+      }
+    }
+    observedLinks = structuredClone(receipt.linkage);
+    return receipt;
+  };
+  if (recoveryReceipt !== null) validateRecoveryReceipt(recoveryReceipt);
   const snapshot = async (states = requestStates, partial = false) => {
     const s = await collectSnapshot({github, context, expected, pipeline: p, autonomy: a,
       rulesetAudit: {repo: expected.repo, requestRunId: expected.requestRunId, requestRunAttempt: expected.requestRunAttempt,
@@ -299,8 +326,16 @@ function runtime({github, context, expected, readRuleset, bundle = null, review 
     await snapshot(completeStates);
     await audit('completed', completeStates);
     assertAudit(await snapshot(completeStates));
+    const audits = Object.fromEntries(['issue', 'pr'].map(side => [side,
+      Object.fromEntries(['started', 'completed'].map(phase => [phase, structuredClone(observedAudits.get(auditMarker(side, phase)))]))]));
+    const receipt = recoveryReceiptBinding(audits);
+    receipt.digest = digest(receipt);
+    recoveryReceipt = validateRecoveryReceipt(receipt);
+    return recoveryReceipt;
   };
   const gate = async () => {
+    ensure(recoveryReceipt !== null, 'RECOVERY_RECEIPT_REQUIRED');
+    validateRecoveryReceipt(recoveryReceipt);
     requireCompletedAudit = true;
     const states = ["agent:pr", "agent:verified"];
     for (const side of ["issue", "pr"]) await checkedWrite(states, false, s => setState(side === "issue" ? expected.issueNumber : expected.prNumber, s[side].labels, "agent:verified"));
@@ -316,6 +351,8 @@ function runtime({github, context, expected, readRuleset, bundle = null, review 
     await snapshot(["agent:verified"]);
   };
   const merge = async () => {
+    ensure(recoveryReceipt !== null, 'RECOVERY_RECEIPT_REQUIRED');
+    validateRecoveryReceipt(recoveryReceipt);
     requireCompletedAudit = true;
     ensure(typeof mergePull === "function", "ISOLATED_MERGE_CLIENT_REQUIRED");
     requireReview();
@@ -332,11 +369,11 @@ function runtime({github, context, expected, readRuleset, bundle = null, review 
     ensure(post.state === "closed" && post.merged === true && post.head.sha === expected.headSha && post.merge_commit_sha === result.sha, "MERGE_POSTCONDITION_FAILED");
     return result.sha;
   };
-  return {snapshot, link, recover, gate, merge};
+  return {snapshot, link, recover, gate, merge, validateRecoveryReceipt};
 }
 
 async function executePhase(r, phase, core = {setOutput() {}}) {
-  if (phase === "recover") { await r.link(); await r.recover(); }
+  if (phase === "recover") { await r.link(); return r.recover(); }
   if (phase === "gate") await r.gate();
   if (phase === "merge") core.setOutput("merge_sha", await r.merge());
 }
@@ -413,7 +450,12 @@ async function run({phase, github, context, core, auditToken, mergeToken, direct
     });
     ensure(response.ok, "MERGE_HTTP_FAILED"); return response.json();
   } : null;
-  const r = runtime({github, context, expected, readRuleset, bundle, review, mergePull});
-  await executePhase(r, phase, core);
+  const recoveryReceipt = phase === 'recover' ? null : JSON.parse(fs.readFileSync(`${directory}/recovery-receipt.json`, 'utf8'));
+  const r = runtime({github, context, expected, readRuleset, bundle, review, mergePull, recoveryReceipt});
+  const result = await executePhase(r, phase, core);
+  if (phase === 'recover') {
+    const text = JSON.stringify(result); ensure(Buffer.byteLength(text) <= 32768, 'RECOVERY_RECEIPT_OVERSIZE');
+    fs.writeFileSync(`${directory}/recovery-receipt.json`, text);
+  }
 }
 module.exports = {REQUIRED_CHECKS, protection, originValid, expectedFrom, producer, validateBundle, rulesetReader, runtime, executePhase, readOnlyGithub, run, digest, linkEvidence, currentState};

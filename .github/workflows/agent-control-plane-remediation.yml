@@ -218,6 +218,13 @@ jobs:
             const ctx={repo:context.repo,payload:context.payload,eventName:context.eventName,sha:process.env.TRUSTED_SHA,runId:context.runId,runAttempt:Number(process.env.GITHUB_RUN_ATTEMPT)};
             const runtime=require("./.github/scripts/agent-maintenance-runtime.cjs");
             await runtime.run({phase:"recover",github,context:ctx,core,auditToken:process.env.RULESET_AUDIT_TOKEN,mergeToken:process.env.MERGE_TOKEN,directory:process.env.DIRECTORY});
+      - name: Publish immutable recovery receipt
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: maintenance-recovery-receipt-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/maintenance/recovery-receipt.json
+          if-no-files-found: error
+          retention-days: 7
 
   gate:
     needs: [route, prepare, recover]
@@ -238,6 +245,11 @@ jobs:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: maintenance-review-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/maintenance
+      - name: Consume original recovery receipt
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: maintenance-recovery-receipt-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/maintenance
       - name: Trusted gate with fresh pre-write guards
         id: collect
@@ -271,6 +283,11 @@ jobs:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: maintenance-review-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/maintenance
+      - name: Consume original recovery receipt
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: maintenance-recovery-receipt-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/maintenance
       - name: Trusted merge with fresh pre-write guards
         id: collect

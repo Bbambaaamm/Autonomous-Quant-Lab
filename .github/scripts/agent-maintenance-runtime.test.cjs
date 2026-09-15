@@ -133,7 +133,7 @@ for(const phase of ["link","recover","gate","merge"])test(`production ${phase} n
  const f=fixture();const r=await f.seal();f.review.result="BLOCK";await assert.rejects(r[phase]());assert.equal(f.writes.length,0);
 });
 for(const phase of ["link","recover","gate"])test(`production ${phase} denies forged producer artifact`,async()=>{
- const f=fixture();const r=await f.seal();f.deps.bundle.producer.sourceSha="d".repeat(40);await assert.rejects(r[phase](),/PROVENANCE/);assert.equal(f.writes.length,0);
+ const f=fixture();const r=await f.seal();f.deps.bundle.producer.sourceSha="d".repeat(40);await assert.rejects(r[phase](),/PROVENANCE|RECOVERY_RECEIPT/);assert.equal(f.writes.length,0);
 });
 test("gate refuses new needs-human after review",async()=>{
  const f=fixture();f.addLinks();const r=await f.seal();await r.recover();const count=f.writes.length;f.d.pr.labels=["agent:needs-human"];
@@ -568,7 +568,7 @@ test('diagnostic partial failure never records recovery completed',async()=>{
 });
 test('diagnostic gate refuses missing recovery completion audit',async()=>{
  const f=fixture();f.addLinks();f.d.pr.labels=['agent:pr'];f.d.issue.labels=['type:implementation','agent:pr'];
- const r=await f.seal();await assert.rejects(r.gate(),/RECOVERY_AUDIT/);assert.equal(f.writes.length,0);
+ const r=await f.seal();await assert.rejects(r.gate(),/RECOVERY_AUDIT|RECOVERY_RECEIPT/);assert.equal(f.writes.length,0);
 });
 for(const change of ['delete','replace'])test(`diagnostic completed recovery never re-creates ${change}d intention evidence`,async()=>{
  const f=fixture();f.addLinks();const r=await f.seal();await r.recover();const count=f.writes.length;
@@ -577,9 +577,9 @@ for(const change of ['delete','replace'])test(`diagnostic completed recovery nev
  await assert.rejects(m.runtime(f.deps).recover(),/RECOVERY_AUDIT/);assert.equal(f.writes.length,count);
 });
 for(const side of ['issue','pr'])test(`diagnostic new gate runtime refuses substituted ${side} link after recovery`,async()=>{
- const f=fixture();const r=await f.seal();await executeRecover(r);const count=f.writes.length;
+ const f=fixture();const r=await f.seal();f.deps.recoveryReceipt=await executeRecover(r);const count=f.writes.length;
  linkageComments(f,side)[0].id+=1000;
- await assert.rejects(m.runtime(f.deps).gate(),/RECOVERY_AUDIT|LINKAGE/);assert.equal(f.writes.length,count);
+ await assert.rejects(async()=>m.runtime(f.deps).gate(),/RECOVERY_AUDIT|LINKAGE/);assert.equal(f.writes.length,count);
 });
 for(const timing of ['after-first-intent','between-labels']) test(`diagnostic deleted recovery intent ${timing} stops next write`,async()=>{
  const f=fixture();f.addLinks();const r=await f.seal();let deleted=false,atCount=0;
@@ -591,4 +591,60 @@ for(const timing of ['after-first-intent','between-labels']) test(`diagnostic de
  };
  await assert.rejects(r.recover(),/RECOVERY_AUDIT/);assert.equal(deleted,true);
  assert.equal(f.writes.length,atCount);assert.ok(!f.writes.some(x=>x.name==='status'||x.name==='merge'));
+});
+
+// Review 5206960781: immutable cross-job recovery provenance.
+const auditComment = (f, side, phase) => f.d[`${side}Comments`].find(x =>
+  String(x.body).includes('agent-maintenance-recovery:v1') && String(x.body).includes(`phase=${phase}`));
+const mutateAudit = (f, side, phase, change) => {
+  const rows = f.d[`${side}Comments`], item = auditComment(f, side, phase);
+  assert.ok(item);
+  if (change === 'delete') rows.splice(rows.indexOf(item), 1);
+  if (change === 'recreate') { rows.splice(rows.indexOf(item), 1); rows.push({...clone(item), id: item.id + 5000}); }
+  if (change === 'edit') item.body += '\nsubstituted';
+  if (change === 'duplicate') rows.push({...clone(item), id: item.id + 5000});
+};
+for (const boundary of ['recover-gate', 'gate-merge']) for (const side of ['issue', 'pr'])
+ for (const phase of ['started', 'completed']) for (const change of ['delete', 'recreate', 'edit', 'duplicate'])
+test(`receipt rejects ${change}d ${side} ${phase} audit at ${boundary}`, async () => {
+  const f = fixture(); f.addLinks(); const recovering = await f.seal();
+  const receipt = await recovering.recover(); f.deps.recoveryReceipt = receipt;
+  if (boundary === 'gate-merge') await m.runtime(f.deps).gate();
+  const before = f.writes.length; mutateAudit(f, side, phase, change);
+  const consumer = m.runtime(f.deps);
+  await assert.rejects(boundary === 'recover-gate' ? consumer.gate() : consumer.merge(), /RECOVERY_AUDIT/);
+  assert.equal(f.writes.length, before);
+});
+
+test('receipt permits legitimate separate recover, gate and merge runtimes', async () => {
+  const f = fixture(); f.addLinks(); const recovering = await f.seal();
+  const receipt = await recovering.recover(); f.deps.recoveryReceipt = clone(receipt);
+  await m.runtime(f.deps).gate();
+  assert.equal(await m.runtime(f.deps).merge(), 'f'.repeat(40));
+});
+
+for (const change of ['missing', 'hash', 'run', 'attempt', 'source', 'authorization', 'bundle'])
+test(`receipt rejects ${change} provenance before a gate write`, async () => {
+  const f = fixture(); f.addLinks(); const recovering = await f.seal();
+  const receipt = await recovering.recover();
+  if (change === 'missing') f.deps.recoveryReceipt = null;
+  else {
+    f.deps.recoveryReceipt = clone(receipt);
+    if (change === 'hash') f.deps.recoveryReceipt.digest = '0'.repeat(64);
+    if (change === 'run') f.deps.recoveryReceipt.producer.runId++;
+    if (change === 'attempt') f.deps.recoveryReceipt.producer.runAttempt++;
+    if (change === 'source') f.deps.recoveryReceipt.producer.sourceSha = 'c'.repeat(40);
+    if (change === 'authorization') f.deps.recoveryReceipt.authorization.commentId++;
+    if (change === 'bundle') f.deps.recoveryReceipt.evidenceBundleDigest = '0'.repeat(64);
+  }
+  const before = f.writes.length;
+  await assert.rejects(async () => m.runtime(f.deps).gate(), /RECOVERY_RECEIPT/);
+  assert.equal(f.writes.length, before);
+});
+
+test('follower transports one immutable recover receipt to both consumers', () => {
+  const workflow = fs.readFileSync(path.join(__dirname, '../workflows/agent-control-plane-remediation.yml'), 'utf8');
+  assert.equal((workflow.match(/name: maintenance-recovery-receipt-\$\{\{ github\.run_id \}\}-\$\{\{ github\.run_attempt \}\}/g) || []).length, 3);
+  assert.equal((workflow.match(/uses: actions\/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02\n\s+with:\n\s+name: maintenance-recovery-receipt/g) || []).length, 1);
+  for (const job of ['gate', 'merge']) assert.match(followerJob(job), /Consume original recovery receipt[\s\S]*maintenance-recovery-receipt/);
 });
