@@ -811,7 +811,7 @@ test("Issue #96 Reviewer metadata writers have compatible least-privilege grants
     assert.doesNotMatch(section,/contents: write|OPENAI_API_KEY/,name);
   }
   const model=job(reviewer,"independent-review");
-  assert.match(model,/permissions: \{contents: read\}/);
+  assertIssue123ReadonlyReviewer(reviewer);
   assert.doesNotMatch(model,/issues: write|pull-requests: write|contents: write/);
   assert.match(model,/OPENAI_API_KEY/);
   assert.match(job(reviewer,"trusted-record"),/result\.reviewed_sha!==process\.env\.SHA[\s\S]*createComment[\s\S]*agent-codex-review:v2 sha=\$\{process\.env\.SHA\}/);
@@ -888,4 +888,204 @@ test("v2 classify job guard admits reusable review-block despite inherited calle
   assert.match(fixer,/buildBoundedSourceContext\(\{files:\[\.\.\.filesByPath\.values\(\)\],fixScopePaths:process\.env\.FIX_SCOPE,diagnostic:process\.env\.DIAGNOSTIC,sourceBudgetBytes:SOURCE_CONTEXT_MAX_BYTES\}\)/);
   assert.match(fixer,/SOURCE_CONTEXT_MAX_BYTES=917504/);
   assert.match(fixer,/test "\$\(stat -c%s \.codex-input\/prompt\.md\)" -lt 1048576/);
+});
+
+// Issue #123: source-wiring regression, not a replacement for sandbox/API acceptance.
+// Fail closed when the deliberately bounded inline YAML contract changes.
+function assertIssue123ReadonlyReviewer(workflow) {
+  const jobs = [...workflow.matchAll(/^  independent-review:\n([\s\S]*?)(?=^  [A-Za-z0-9_-]+:\n|(?![\s\S]))/gm)];
+  assert.equal(jobs.length, 1, "exactly one independent-review job is required");
+  const model = jobs[0][0];
+  const maps = [...model.matchAll(/^    permissions: \{([^}\n]+)\}\s*$/gm)];
+  assert.equal(maps.length, 1, "one explicit model job permission map is required");
+  const expected = ["actions", "checks", "contents", "issues", "pull-requests"];
+  const entries = maps[0][1].split(",").map((entry) => entry.trim().split(/:\s*/));
+  assert.equal(entries.length, expected.length, "no additional or duplicate permissions");
+  assert.deepEqual(entries.map(([key]) => key).sort(), expected);
+  for (const [key, value, extra] of entries) {
+    assert.equal(value, "read", `${key} must be read-only`);
+    assert.equal(extra, undefined, "malformed permission entry");
+  }
+  const steps = [...model.matchAll(/^      - name: Independent bounded review\n([\s\S]*?)(?=^      - |(?![\s\S]))/gm)];
+  assert.equal(steps.length, 1, "exactly one model review step is required");
+  const reviewStep = steps[0][0];
+  assert.match(reviewStep, /^        env:\n          GH_TOKEN: '\$\{\{ github\.token \}\}'$/m);
+  const expression = /\$\{\{[\s\S]*?\}\}/g;
+  const tokenAccess = /\b(?:github\s*(?:\.\s*token|\[\s*['"]token['"]\s*\])|secrets\s*(?:\.\s*GITHUB_TOKEN|\[\s*['"]GITHUB_TOKEN['"]\s*\]))/gi;
+  const wholeCredentialContext = /(?:toJSON\s*\(\s*(?:github|secrets)\s*\)|\$\{\{\s*(?:github|secrets)\s*\}\})/i;
+  assert.doesNotMatch(model, wholeCredentialContext, "whole credential-bearing contexts must not be exposed");
+  const jobTokenReferences = [...model.matchAll(expression)].flatMap((item) =>
+    [...item[0].matchAll(tokenAccess)].map((access) => ({ expression: item[0], access: access[0] })));
+  assert.equal(jobTokenReferences.length, 1,
+    "the job credential must have exactly one expression in the model job");
+  assert.equal(jobTokenReferences[0].expression, "${{ github.token }}",
+    "the sole job credential expression must use the GitHub job token, never a secret or alias");
+  assert.equal(jobTokenReferences[0].access, "github.token");
+  assert.equal([...reviewStep.matchAll(expression)].flatMap((item) => [...item[0].matchAll(tokenAccess)]).length, 1,
+    "the sole job credential expression must be confined to the model-review step");
+  assert.match(reviewStep, /^        uses: openai\/codex-action@[0-9a-f]{40}(?:\s+#.*)?$/m);
+  assert.match(reviewStep, /^          permission-profile: ':read-only'$/m);
+  const checkouts = model.split(/(?=^      - )/m).filter((step) =>
+    /^        uses: actions\/checkout@/m.test(step) || /^      - uses: actions\/checkout@/m.test(step));
+  assert.ok(checkouts.length >= 1, "model job must have a checkout");
+  for (const checkout of checkouts) {
+    assert.match(checkout, /persist-credentials:\s*false(?:[,}\n]|$)/,
+      "every model-job checkout must explicitly disable credential persistence");
+    assert.doesNotMatch(checkout, /persist-credentials:\s*(?:true|null)(?:[,}\n]|$)/);
+  }
+  assert.match(model, /Do not run repository code\./);
+  assert.match(model, /name: Trusted exact evidence-access preflight[\s\S]*pulls\.get[\s\S]*repos\.getCommit[\s\S]*checks\.listForRef[\s\S]*actions\.listWorkflowRunsForRepo/);
+  assert.match(model, /evidence-access\.json[\s\S]*review-prompt\.md/);
+  const preflight = model.slice(model.indexOf("- name: Trusted exact evidence-access preflight"), model.indexOf("- name: Build deterministic bounded review prompt"));
+  for (const failure of ["EVIDENCE_BINDING_INVALID", "EVIDENCE_REPOSITORY_MISMATCH", "EVIDENCE_PR_MISMATCH", "EVIDENCE_ISSUE_MISMATCH", "EVIDENCE_COMMIT_MISMATCH", "EVIDENCE_CHECKS_MISSING", "EVIDENCE_RUNS_MISSING", "EVIDENCE_AUTHORITATIVE_CI_MISSING"])
+    assert.match(preflight, new RegExp(`throw new Error\\('${failure}'\\)`), `${failure} must fail the preflight step`);
+  assert.doesNotMatch(preflight, /continue-on-error/);
+  assert.ok(model.indexOf("Trusted exact evidence-access preflight") < model.indexOf("Independent bounded review"));
+  assert.ok(model.indexOf("Validate and seal exact bounded model evidence") < model.indexOf("Retain immutable exact model evidence"));
+  assert.ok(model.indexOf("Retain immutable exact model evidence") < model.indexOf("Independent bounded review"));
+  assert.match(model, /name: 'codex-review-evidence-\$\{\{ github\.workflow_sha \}\}-\$\{\{ needs\.prepare\.outputs\.head_sha \}\}-\$\{\{ github\.run_id \}\}-\$\{\{ github\.run_attempt \}\}'/);
+  assert.match(model, /include-hidden-files: true[\s\S]*overwrite: false/);
+  assert.match(model, /boundedPaths:paths,integrity/);
+  assert.match(model, /jq -e[\s\S]*evidence-access\.json[\s\S]*test -s "\$RUNNER_TEMP\/review\.json"/,
+    "trusted evidence binding must gate acceptance of model output");
+  assert.doesNotMatch(model, /AGENT_PUBLISH_TOKEN|GITHUB_ENV|persist-credentials: true|danger-full-access|safety-strategy:\s*['"]?unsafe/);
+  assert.doesNotMatch(model, /\b[\w-]+:\s*write\b|permissions:\s*write-all/);
+  // OPENAI_API_KEY is passed to the pinned action/proxy, not supplied as GH_TOKEN.
+  for (const secret of model.matchAll(/\$\{\{\s*secrets\s*(?:\.\s*([A-Za-z0-9_]+)|\[\s*['"]([^'"]+)['"]\s*\])\s*\}\}/g)) {
+    assert.equal(secret[1] || secret[2], "OPENAI_API_KEY", "no repository mutation secret in model job");
+  }
+}
+
+test("Issue #123 Reviewer evidence uses exactly bounded read permissions and step-scoped token", () => {
+  assertIssue123ReadonlyReviewer(fs.readFileSync(".github/workflows/agent-codex-review.yml", "utf8"));
+});
+
+const issue123Mutations = [
+  ...["actions", "checks", "contents", "issues", "pull-requests"].map((name) => [
+    `${name} write escalation`,
+    (text) => text.replace(`${name}: read`, `${name}: write`),
+  ]),
+  ["additional read scope", (text) => text.replace("actions: read,", "packages: read, actions: read,")],
+  ["missing required scope", (text) => text.replace("checks: read, ", "")],
+  ["duplicate scope", (text) => text.replace("checks: read,", "actions: read,")],
+  ["inherited job permissions", (text) => text.replace(/^    permissions:.*\n/m, "")],
+  ["missing metadata token", (text) => text.replace(/^          GH_TOKEN:.*\n/m, "")],
+  ["publish token instead of job token", (text) => text.replace("GH_TOKEN: '${{ github.token }}'", "GH_TOKEN: '${{ secrets.AGENT_PUBLISH_TOKEN }}'")],
+  ["token at job scope", (text) => text.replace("    steps:\n", "    env:\n      GH_TOKEN: '${{ github.token }}'\n    steps:\n")],
+  ["JOB_TOKEN alias in another step", (text) => text.replace("    steps:\n", "    steps:\n      - run: true\n        env: {JOB_TOKEN: '${{ github.token }}'}\n")],
+  ["same-step job token alias", (text) => text.replace("          GH_TOKEN: '${{ github.token }}'", "          GH_TOKEN: '${{ github.token }}'\n          JOB_TOKEN: '${{ github.token }}'")],
+  ["bracket job token alias", (text) => text.replace("    steps:\n", "    steps:\n      - run: true\n        env: {JOB_TOKEN: '${{ github[\"token\"] }}'}\n")],
+  ["GITHUB_TOKEN secret alias", (text) => text.replace("    steps:\n", "    steps:\n      - run: true\n        env: {JOB_TOKEN: '${{ secrets.GITHUB_TOKEN }}'}\n")],
+  ["compound same-step token alias", (text) => text.replace("${{ github.token }}", "${{ github.token || github['token'] }}")],
+  ["whole GitHub context alias", (text) => text.replace("    steps:\n", "    steps:\n      - run: true\n        env: {JOB_CONTEXT: '${{ toJSON(github) }}'}\n")],
+  ["whole secrets context alias", (text) => text.replace("    steps:\n", "    steps:\n      - run: true\n        env: {SECRET_CONTEXT: '${{ secrets }}'}\n")],
+  ["workspace write profile", (text) => text.replace("permission-profile: ':read-only'", "permission-profile: ':workspace'")],
+  ["floating action version", (text) => text.replace(/openai\/codex-action@[0-9a-f]{40}/, "openai/codex-action@main")],
+  ["persistent checkout credential", (text) => text.replace("persist-credentials: false", "persist-credentials: true")],
+  ["checkout with omitted credential policy", (text) => text.replace("persist-credentials: false", "fetch-depth: 1")],
+  ["second checkout without credential policy", (text) => text.replace("    steps:\n", "    steps:\n      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262\n")],
+  ["reordered second checkout without credential policy", (text) => text.replace("    steps:\n", "    steps:\n      - name: second checkout\n        id: second\n        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262\n")],
+  ["additional model secret", (text) => text.replace("        env:\n", "        env:\n          OTHER: '${{ secrets.WRITE_TOKEN }}'\n")],
+  ["additional bracket model secret", (text) => text.replace("        env:\n", "        env:\n          OTHER: \"${{ secrets['WRITE_TOKEN'] }}\"\n")],
+  ["token persisted between steps", (text) => text.replace("    steps:\n", '    steps:\n      - run: echo "GH_TOKEN=x" >> "$GITHUB_ENV"\n')],
+  ["duplicate model review job", (text) => text + "\n" + text],
+];
+for (const [name, mutate] of issue123Mutations) {
+  test(`Issue #123 read-only boundary rejects ${name}`, () => {
+    const workflow = fs.readFileSync(".github/workflows/agent-codex-review.yml", "utf8");
+    const model = workflow.match(/^  independent-review:\n([\s\S]*?)(?=^  [A-Za-z0-9_-]+:\n|(?![\s\S]))/m);
+    assert.ok(model, "model job fixture exists");
+    const altered = mutate(model[0]);
+    assert.notEqual(altered, model[0], "mutation must actually change the model fixture");
+    assert.throws(() => assertIssue123ReadonlyReviewer(altered), assert.AssertionError);
+  });
+}
+
+// Execute the actual trusted inline preflight with mocked GitHub responses.
+function issue123PreflightFixture() {
+  const vm = require('node:vm');
+  const workflow = fs.readFileSync('.github/workflows/agent-codex-review.yml','utf8');
+  const block = workflow.split('      - name: Trusted exact evidence-access preflight\n')[1].split('      - name: Build deterministic bounded review prompt')[0];
+  const source = block.split('          script: |\n')[1].split('\n').filter(Boolean).map(line=>line.slice(12)).join('\n');
+  const fn = vm.runInNewContext(`(async function(require,github,context,process){${source}\n})`);
+  const repository='owner/repo',sha='a'.repeat(40),base='b'.repeat(40),calls=[],written=[];
+  const run={id:10,workflow_id:1,path:'.github/workflows/ci.yml',name:'CI',event:'pull_request',head_sha:sha,run_attempt:1,status:'completed',conclusion:'success',pull_requests:[{number:125}],head_repository:{full_name:repository},repository:{full_name:repository}};
+  const data={runs:[run],jobs:agentConfig.requiredCiJobs.map((name,i)=>({id:i+1,name,conclusion:'success',run_attempt:1})),workflow:{id:1,path:run.path,state:'active'},readCount:0,afterJobs:null,deny:false};
+  const context={repo:{owner:'owner',repo:'repo'},payload:{repository:{default_branch:'main'}}};
+  const get=(name,body)=>async(args)=>{calls.push({name,args});if(data.deny)throw new Error('HTTP_403');return {data:structuredClone(typeof body==='function'?body():body)};};
+  const github={rest:{repos:{get:get('repo',{full_name:repository,default_branch:'main'}),getCommit:get('commit',{sha})},
+    pulls:{get:get('pr',{number:125,state:'open',head:{sha},base:{sha:base,ref:'main',repo:{full_name:repository}}})},issues:{get:get('issue',{number:123,state:'open'})},
+    checks:{listForRef:get('checks',{check_runs:[{id:1,name:'quality',head_sha:sha,status:'completed',conclusion:'success'}]})},
+    actions:{getWorkflow:get('workflow',()=>data.workflow),listWorkflowRunsForRepo:'runs',listJobsForWorkflowRun:'jobs',getWorkflowRun:get('fresh',()=>data.runs.find(x=>x.id===10))}},
+    paginate:async(method,args)=>{calls.push({name:method,args});if(data.deny)throw new Error('HTTP_403');if(method==='runs'){assert.equal(args.status,undefined);data.readCount++;return structuredClone(data.runs);}assert.equal(args.filter,'all');const result=structuredClone(data.jobs);if(data.afterJobs)data.afterJobs(data);return result;}};
+  const requireMock=(name)=>{assert.equal(name,'fs');return {readFileSync:()=>JSON.stringify({'.github/agent-pipeline.json':JSON.stringify(agentConfig)}),writeFileSync:(path,body)=>written.push(JSON.parse(body))};};
+  const env={EXPECTED_REPOSITORY:repository,EXPECTED_PR:'125',EXPECTED_ISSUE:'123',EXPECTED_HEAD:sha,EXPECTED_BASE:base,EXPECTED_SOURCE_SHA:'c'.repeat(40),PRODUCER_RUN_ID:'700',PRODUCER_RUN_ATTEMPT:'2'};
+  const execute=()=>fn(requireMock,github,context,{env});
+  return {execute,data,calls,written,run,source,env};
+}
+
+test('Issue #123 inline required-job predicate exactly matches trusted canonical helper',()=>{
+ const {source}=issue123PreflightFixture();
+ const helper=source.slice(source.indexOf('function successfulRequiredJobs('),source.indexOf('\nconst governance='));
+ assert.equal(helper.replace(/\s+/g,''),pipeline.successfulRequiredJobs.toString().replace(/\s+/g,''));
+});
+test('Issue #123 actual preflight binds workflow and all nine jobs before evidence publication',async()=>{
+ const f=issue123PreflightFixture();await f.execute();assert.equal(f.written.length,1);assert.equal(f.written[0].ci.jobs.length,9);assert.equal(f.data.readCount,2);assert.equal(f.written[0].ci.path,'.github/workflows/ci.yml');assert.deepEqual(f.written[0].producer,{workflowPath:'.github/workflows/agent-codex-review.yml',sourceSha:f.env.EXPECTED_SOURCE_SHA,runId:700,runAttempt:2});
+});
+for(const [field,value] of [['EXPECTED_SOURCE_SHA','bad'],['PRODUCER_RUN_ID','0'],['PRODUCER_RUN_ATTEMPT','NaN']])test(`Issue #123 preflight rejects malformed ${field}`,async()=>{
+ const f=issue123PreflightFixture();f.env[field]=value;await assert.rejects(f.execute(),/EVIDENCE_BINDING_INVALID/);assert.equal(f.written.length,0);
+});
+for(const status of ['queued','in_progress','pending','waiting'])test(`Issue #123 preflight rejects newest ${status} CI rather than older green`,async()=>{
+ const f=issue123PreflightFixture();f.data.runs.push({...f.run,id:11,status,conclusion:null});await assert.rejects(f.execute(),/EVIDENCE_AUTHORITATIVE_CI_MISSING/);assert.equal(f.written.length,0);
+});
+for(const state of ['failure','cancelled','skipped'])test(`Issue #123 preflight rejects a required job with ${state}`,async()=>{
+ const f=issue123PreflightFixture();f.data.jobs[0].conclusion=state;await assert.rejects(f.execute(),/EVIDENCE_REQUIRED_JOBS_FAILED/);assert.equal(f.written.length,0);
+});
+test('Issue #123 preflight rejects missing required job',async()=>{
+ const f=issue123PreflightFixture();f.data.jobs.pop();await assert.rejects(f.execute(),/EVIDENCE_REQUIRED_JOBS_FAILED/);assert.equal(f.written.length,0);
+});
+test('Issue #123 preflight composes latest failed-job retry attempts using canonical semantics',async()=>{
+ const f=issue123PreflightFixture();f.data.jobs[0].conclusion='failure';f.data.jobs.push({...f.data.jobs[0],id:99,run_attempt:2,conclusion:'success'});await f.execute();assert.equal(f.written[0].ci.jobs[0].runAttempt,2);
+});
+for(const field of ['path','workflow_id'])test(`Issue #123 preflight rejects a CI impersonator with wrong ${field}`,async()=>{
+ const f=issue123PreflightFixture();f.data.runs[0][field]=field==='path'?'.github/workflows/fake.yml':2;await assert.rejects(f.execute(),/EVIDENCE_AUTHORITATIVE_CI_MISSING/);assert.equal(f.written.length,0);
+});
+test('Issue #123 preflight stops when a new run arrives while fetching jobs',async()=>{
+ const f=issue123PreflightFixture();f.data.afterJobs=d=>d.runs.push({...f.run,id:11});await assert.rejects(f.execute(),/EVIDENCE_CI_CHANGED/);assert.equal(f.written.length,0);
+});
+test('Issue #123 preflight stops when the chosen run is retried while fetching jobs',async()=>{
+ const f=issue123PreflightFixture();f.data.afterJobs=d=>{d.runs[0].run_attempt=2;d.runs[0].status='in_progress';};await assert.rejects(f.execute(),/EVIDENCE_CI_CHANGED/);assert.equal(f.written.length,0);
+});
+test('Issue #123 API 403 cannot produce an evidence bundle',async()=>{
+ const f=issue123PreflightFixture();f.data.deny=true;await assert.rejects(f.execute(),/HTTP_403/);assert.equal(f.written.length,0);
+});
+
+// Execute the actual inline evidence contract/sealing program in an isolated directory.
+function issue123SealFixture(mutate=()=>{}) {
+  const os=require('node:os'),path=require('node:path'),{spawnSync}=require('node:child_process');
+  const workflow=fs.readFileSync('.github/workflows/agent-codex-review.yml','utf8');
+  const block=workflow.split('      - name: Validate and seal exact bounded model evidence\n')[1].split('      - name: Retain immutable exact model evidence')[0];
+  const script=block.split("          node <<'NODE'\n")[1].split('\n          NODE')[0].split('\n').map(line=>line.slice(10)).join('\n');
+  const cwd=fs.mkdtempSync(path.join(os.tmpdir(),'issue123-evidence-'));fs.mkdirSync(path.join(cwd,'.codex-input'));
+  const env={EXPECTED_REPOSITORY:'owner/repo',EXPECTED_PR:'125',EXPECTED_ISSUE:'123',EXPECTED_HEAD:'a'.repeat(40),EXPECTED_BASE:'b'.repeat(40),EXPECTED_SOURCE_SHA:'c'.repeat(40),PRODUCER_RUN_ID:'700',PRODUCER_RUN_ATTEMPT:'2'};
+  const evidence={version:2,repository:env.EXPECTED_REPOSITORY,prNumber:125,issueNumber:123,headSha:env.EXPECTED_HEAD,baseSha:env.EXPECTED_BASE,producer:{workflowPath:'.github/workflows/agent-codex-review.yml',sourceSha:env.EXPECTED_SOURCE_SHA,runId:700,runAttempt:2},ci:{id:10,workflowId:1,path:'.github/workflows/ci.yml',runAttempt:1,status:'completed',conclusion:'success',jobs:[{name:'quality',id:1,runAttempt:1,conclusion:'success'}]}};
+  const files={'.codex-input/authorized-scope.json':'{"scope":true}','.codex-input/trusted-governance.json':'{"governance":true}','.codex-input/evidence-access.json':JSON.stringify(evidence)};
+  files['.codex-input/review-prompt.md']=Object.values(files).join('\n');
+  const fixture={cwd,env,evidence,files};mutate(fixture);
+  for(const [name,body] of Object.entries(files))fs.writeFileSync(path.join(cwd,name),body);
+  const result=spawnSync(process.execPath,['-e',script],{cwd,env:{...process.env,...env},encoding:'utf8'});
+  return {result,cwd,manifest:()=>JSON.parse(fs.readFileSync(path.join(cwd,'.codex-input/evidence-manifest.json'),'utf8'))};
+}
+test('Issue #123 actual sealing contract records separate provenance, bounded paths, and integrity',()=>{
+ const f=issue123SealFixture();assert.equal(f.result.status,0,f.result.stderr);const manifest=f.manifest();assert.equal(manifest.provenance.runId,700);assert.equal(manifest.boundedPaths.length,4);assert.deepEqual(Object.keys(manifest.integrity),manifest.boundedPaths);for(const digest of Object.values(manifest.integrity))assert.match(digest,/^[0-9a-f]{64}$/);
+});
+for(const [name,mutate,error] of [
+ ['producer run',f=>{f.evidence.producer.runId=701;f.files['.codex-input/evidence-access.json']=JSON.stringify(f.evidence);},'EVIDENCE_PRODUCER_INVALID'],
+ ['source revision',f=>{f.evidence.producer.sourceSha='d'.repeat(40);f.files['.codex-input/evidence-access.json']=JSON.stringify(f.evidence);},'EVIDENCE_PRODUCER_INVALID'],
+ ['CI attempt',f=>{f.evidence.ci.runAttempt=0;f.files['.codex-input/evidence-access.json']=JSON.stringify(f.evidence);},'EVIDENCE_CI_CONTRACT_INVALID'],
+ ['required job data',f=>{f.evidence.ci.jobs=[];f.files['.codex-input/evidence-access.json']=JSON.stringify(f.evidence);},'EVIDENCE_CI_CONTRACT_INVALID'],
+ ['prompt evidence',f=>{f.files['.codex-input/review-prompt.md']='incomplete';},'EVIDENCE_PROMPT_CONTENT_INVALID'],
+ ['required file',f=>{delete f.files['.codex-input/trusted-governance.json'];},'EVIDENCE_FILE_MISSING'],
+])test(`Issue #123 actual sealing contract rejects invalid ${name} before model execution`,()=>{
+ const f=issue123SealFixture(mutate);assert.notEqual(f.result.status,0);assert.match(f.result.stderr,new RegExp(error));assert.equal(fs.existsSync(`${f.cwd}/.codex-input/evidence-manifest.json`),false);
 });
