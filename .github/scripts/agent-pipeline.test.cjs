@@ -1114,10 +1114,10 @@ function issue128PostModelFixture(){
  const files={'.codex-input/evidence-access.json':JSON.stringify(evidence),'.codex-input/authorized-scope.json':JSON.stringify(scope),'/tmp/review.json':JSON.stringify(result)},copies=[];
  const fsMock={readFileSync:p=>files[p],copyFileSync:(a,b)=>copies.push([a,b])};
  const run={id:10,name:'CI',path:ci.path,workflow_id:1,head_sha:head,event:'pull_request',pull_requests:[{number:125}],repository:{full_name:repository},head_repository:{full_name:repository},run_attempt:1,status:'completed',conclusion:'success'};
- const data={runs:[run],jobs:ci.jobs.map(x=>({id:x.id,name:x.name,run_attempt:x.runAttempt,conclusion:x.conclusion})),deny:false};
- const api=value=>async()=>{if(data.deny)throw new Error('HTTP_403');return {data:structuredClone(value)};};
+ const data={runs:[run],jobs:ci.jobs.map(x=>({id:x.id,name:x.name,run_attempt:x.runAttempt,conclusion:x.conclusion})),deny:false,afterJobs:null,denyClosing:false,closing:false};
+ const api=value=>async args=>{if(data.deny||(data.closing&&data.denyClosing))throw new Error('HTTP_403');const resolved=typeof value==='function'?value(args):value;return {data:structuredClone(resolved)};};
  const comments=[{id:55,user:{login:'github-actions[bot]'},body:`<!-- agent-merge-authorization:v2 repo=${repository} issue=123 spec=${specHash} actor=maintainer run=34948193882 -->`}];
- const github={rest:{repos:{get:api({full_name:repository,default_branch:'main'}),getBranch:api({commit:{sha:sourceSha}})},actions:{getWorkflowRun:api({run_attempt:2,head_sha:sourceSha,head_branch:'main',path:evidence.producer.workflowPath,event:'workflow_dispatch'}),listWorkflowRunsForRepo:'runs',listJobsForWorkflowRun:'jobs'},pulls:{get:api({head:{sha:head},base:{sha:base,ref:'main'}})},issues:{get:api({state:'open',title,body,labels}),listComments:'comments'}},paginate:async method=>{if(data.deny)throw new Error('HTTP_403');return structuredClone(method==='runs'?data.runs:method==='jobs'?data.jobs:comments);}};
+ const github={rest:{repos:{get:api({full_name:repository,default_branch:'main'}),getBranch:api({commit:{sha:sourceSha}})},actions:{getWorkflowRun:api(args=>args.run_id===700?{id:700,run_attempt:2,head_sha:sourceSha,head_branch:'main',path:evidence.producer.workflowPath,event:'workflow_dispatch'}:data.runs.find(x=>x.id===args.run_id)),listWorkflowRunsForRepo:'runs',listJobsForWorkflowRun:'jobs'},pulls:{get:api({head:{sha:head},base:{sha:base,ref:'main'}})},issues:{get:api({state:'open',title,body,labels}),listComments:'comments'}},paginate:async method=>{if(data.deny||(data.closing&&data.denyClosing))throw new Error('HTTP_403');if(method==='jobs'){const answer=structuredClone(data.jobs);if(data.afterJobs)data.afterJobs(data);data.closing=true;return answer;}return structuredClone(method==='runs'?data.runs:comments);}};
  const requireMock=name=>name==='fs'?fsMock:name==='crypto'?require('crypto'):require(name),context={repo:{owner:'owner',repo:'repo'}},env={RUNNER_TEMP:'/tmp',EXPECTED_SOURCE_SHA:sourceSha,PRODUCER_RUN_ID:'700',PRODUCER_RUN_ATTEMPT:'2'};
  const fn=vm.runInNewContext(`(async function(require,github,context,process){${source}\n})`);
  return {execute:()=>fn(requireMock,github,context,{env}),data,run,copies};
@@ -1125,10 +1125,68 @@ function issue128PostModelFixture(){
 test('Issue #128 actual post-model program preserves unchanged PASS and seals handoff inputs',async()=>{
  const f=issue128PostModelFixture();await f.execute();assert.equal(f.copies.length,2);
 });
-test('Issue #128 actual post-model program rejects newer runs, changed jobs, and partial API failure with zero handoff',async()=>{
+test('Issue #128 actual post-model program rejects early drift and partial API failure with zero handoff',async()=>{
  const newer=issue128PostModelFixture();newer.data.runs.push({...newer.run,id:11,status:'queued',conclusion:null});await assert.rejects(newer.execute(),/POST_MODEL_CI_CHANGED/);assert.equal(newer.copies.length,0);
  const edited=issue128PostModelFixture();edited.data.jobs[0].conclusion='failure';await assert.rejects(edited.execute(),/POST_MODEL_JOBS_CHANGED/);assert.equal(edited.copies.length,0);
  const denied=issue128PostModelFixture();denied.data.deny=true;await assert.rejects(denied.execute(),/HTTP_403/);assert.equal(denied.copies.length,0);
+});
+
+
+for(const [name,mutate] of [
+ ['new queued run',d=>d.runs.push({...d.runs[0],id:11,status:'queued',conclusion:null})],
+ ['new in-progress run',d=>d.runs.push({...d.runs[0],id:11,status:'in_progress',conclusion:null})],
+ ['new failed run',d=>d.runs.push({...d.runs[0],id:11,status:'completed',conclusion:'failure'})],
+ ['new cancelled run',d=>d.runs.push({...d.runs[0],id:11,status:'completed',conclusion:'cancelled'})],
+ ['new successful run',d=>d.runs.push({...d.runs[0],id:11,status:'completed',conclusion:'success'})],
+ ['retried chosen run',d=>Object.assign(d.runs[0],{run_attempt:2,status:'in_progress',conclusion:null})],
+])test(`Issue #128 actual post-model closing read rejects ${name} arriving during job retrieval`,async()=>{
+ const f=issue128PostModelFixture();f.data.afterJobs=mutate;await assert.rejects(f.execute(),/POST_MODEL_CI_CHANGED_DURING_JOBS/);assert.equal(f.copies.length,0);
+});
+test('Issue #128 actual post-model closing-read HTTP 403 produces zero handoff',async()=>{
+ const f=issue128PostModelFixture();f.data.denyClosing=true;await assert.rejects(f.execute(),/HTTP_403/);assert.equal(f.copies.length,0);
+});
+
+function issue128TrustedRecordFixture({resultKind='PASS'}={}){
+ const vm=require('node:vm'),workflow=fs.readFileSync('.github/workflows/agent-codex-review.yml','utf8');
+ const block=workflow.split('      - id: record\n')[1].split('\n\n  verify-after-pass:')[0];
+ const source=block.split('          script: |\n')[1].split('\n').filter(Boolean).map(line=>line.slice(12)).join('\n');
+ const repository='owner/repo',head='a'.repeat(40),base='b'.repeat(40),sourceSha='c'.repeat(40),title='Issue',body='Exact body',labels=[{name:'type:implementation'},{name:'agent:pr'}],prLabels=[{name:'agent:pr'}];
+ const specHash=require('./agent-autonomy.cjs').issueSpecHash({title,body,labels}),authorization={actor:'maintainer',runId:34948193882,commentId:55};
+ const ci={id:10,workflowId:1,path:'.github/workflows/ci.yml',runAttempt:1,status:'completed',conclusion:'success',jobs:agentConfig.requiredCiJobs.map((name,i)=>({name,id:i+1,runAttempt:1,conclusion:'success'}))};
+ const evidence={version:3,repository,prNumber:125,issueNumber:123,headSha:head,baseSha:base,specHash,authorization,ci};
+ const scope={specHash,authorization},result={reviewed_sha:head,result:resultKind,summary:'bounded result'};
+ const files={'/tmp/review.json':JSON.stringify(result),'/tmp/evidence-access.json':JSON.stringify(evidence),'/tmp/authorized-scope.json':JSON.stringify(scope)};
+ const run={id:10,name:'CI',path:ci.path,workflow_id:1,head_sha:head,event:'pull_request',pull_requests:[{number:125}],repository:{full_name:repository},head_repository:{full_name:repository},run_attempt:1,status:'completed',conclusion:'success'};
+ const link={user:{login:'github-actions[bot]'},body:'<!-- agent-link:v1 repo=owner/repo issue=123 pr=125 -->'};
+ const auth={id:55,user:{login:'github-actions[bot]'},body:`<!-- agent-merge-authorization:v2 repo=${repository} issue=123 spec=${specHash} actor=maintainer run=34948193882 -->`};
+ const data={runs:[run],jobs:ci.jobs.map(x=>({id:x.id,name:x.name,run_attempt:x.runAttempt,conclusion:x.conclusion})),afterJobs:null,denyClosing:false,closing:false};
+ const writes=[],outputs={},failures=[];
+ const api=value=>async args=>{if(data.closing&&data.denyClosing)throw new Error('HTTP_403');const resolved=typeof value==='function'?value(args):value;return {data:structuredClone(resolved)};};
+ const github={rest:{repos:{get:api({full_name:repository,default_branch:'main'}),getBranch:api({commit:{sha:sourceSha}})},actions:{getWorkflowRun:api(args=>args.run_id===700?{run_attempt:2,head_sha:sourceSha,head_branch:'main',path:'.github/workflows/agent-codex-review.yml'}:data.runs.find(x=>x.id===args.run_id)),listWorkflowRunsForRepo:'runs',listJobsForWorkflowRun:'jobs'},pulls:{get:api({head:{sha:head},base:{sha:base},body:'Agent-Issue: #123',labels:prLabels})},issues:{get:api({state:'open',title,body,labels}),listComments:'comments',createComment:async args=>writes.push(args)}} ,paginate:async(method,args)=>{if(data.closing&&data.denyClosing)throw new Error('HTTP_403');if(method==='jobs'){const answer=structuredClone(data.jobs);if(data.afterJobs)data.afterJobs(data);data.closing=true;return answer;}if(method==='runs')return structuredClone(data.runs);return structuredClone(args.issue_number===123?[link,auth]:[link]);}};
+ const core={setFailed:x=>failures.push(x),notice:()=>{},setOutput:(k,v)=>outputs[k]=v};
+ const requireMock=name=>name==='fs'?{readFileSync:p=>files[p]}:name==='./.github/scripts/agent-pipeline.cjs'?pipeline:name==='./.github/scripts/agent-autonomy.cjs'?require('./agent-autonomy.cjs'):name==='./.github/agent-pipeline.json'?agentConfig:require(name);
+ const context={repo:{owner:'owner',repo:'repo'}},env={RUNNER_TEMP:'/tmp',PR:'125',ISSUE:'123',SHA:head,BASE:base,SOURCE_SHA:sourceSha,PRODUCER_RUN_ID:'700',PRODUCER_RUN_ATTEMPT:'2'};
+ const fn=vm.runInNewContext(`(async function(require,github,context,process,core){${source}\n})`);
+ return {execute:()=>fn(requireMock,github,context,{env},core),data,run,writes,outputs,failures,source};
+}
+
+test('Issue #128 actual trusted-record final writer preserves unchanged PASS and BLOCK controls',async()=>{
+ const pass=issue128TrustedRecordFixture();await pass.execute();assert.equal(pass.writes.length,1);assert.equal(pass.outputs.pass,'true');assert.equal(pass.failures.length,0);
+ const early=issue128TrustedRecordFixture();early.data.runs.push({...early.run,id:11,status:'queued',conclusion:null});await early.execute();assert.equal(early.failures.length,1);assert.equal(early.writes.length,0);assert.deepEqual(early.outputs,{});
+ const block=issue128TrustedRecordFixture({resultKind:'BLOCK'});await block.execute();assert.equal(block.writes.length,1);assert.equal(block.outputs.blocked,'true');assert.equal(block.outputs.pass,undefined);assert.equal(block.failures.length,0);
+});
+for(const [name,mutate] of [
+ ['new queued run',d=>d.runs.push({...d.runs[0],id:11,status:'queued',conclusion:null})],
+ ['new in-progress run',d=>d.runs.push({...d.runs[0],id:11,status:'in_progress',conclusion:null})],
+ ['new failed run',d=>d.runs.push({...d.runs[0],id:11,status:'completed',conclusion:'failure'})],
+ ['new cancelled run',d=>d.runs.push({...d.runs[0],id:11,status:'completed',conclusion:'cancelled'})],
+ ['new successful run',d=>d.runs.push({...d.runs[0],id:11,status:'completed',conclusion:'success'})],
+ ['retried chosen run',d=>Object.assign(d.runs[0],{run_attempt:2,status:'in_progress',conclusion:null})],
+])test(`Issue #128 actual trusted-record closing read rejects ${name} arriving during job pagination`,async()=>{
+ const f=issue128TrustedRecordFixture();f.data.afterJobs=mutate;await f.execute();assert.equal(f.failures.length,1);assert.equal(f.writes.length,0);assert.deepEqual(f.outputs,{});
+});
+test('Issue #128 actual trusted-record closing-read HTTP 403 produces zero writes and outputs',async()=>{
+ const f=issue128TrustedRecordFixture();f.data.denyClosing=true;await assert.rejects(f.execute(),/HTTP_403/);assert.equal(f.writes.length,0);assert.deepEqual(f.outputs,{});
 });
 
 // Execute the actual inline evidence contract/sealing program in an isolated directory.
