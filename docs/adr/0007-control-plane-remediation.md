@@ -307,3 +307,50 @@ independent review, trusted-main adoption, actual live collection/denial-path
 results and operational acceptance must be recorded separately for the final
 revision. No live request, gate, merge, deployment or real label mutation is
 performed as part of this scope correction.
+
+## Diagnostic 34869646359: linkage, recovery audit and pre-merge observations
+
+This follow-up is an implementation candidate, not a published result or merge
+authorization. Existing adoption restrictions and required evidence still apply.
+
+Prepare now seals the ID and body hash of each existing durable linkage comment
+and the initial lifecycle states. Every following snapshot carries those link
+identities monotonically; removing, editing, replacing or retiring a previously
+observed link stops the next write. A successful link-create receipt is tracked
+before the next snapshot. An initially absent link remains a legitimate case,
+but it cannot be confused with one removed during the operation. Existing
+linkage/authorization conflict checks are retained.
+
+Recovery writes a bound INTENT record on both objects before state changes and
+COMPLETED records only after both states pass validation. Records bind requester,
+reason, authorization, source, request/producer run and attempt, head/base,
+original and target state, bundle and current linkage identities. Completion
+also binds the intention comment IDs. Repeated operations are idempotent; missing,
+changed or replaced observed audit records stop subsequent writes. Interrupted
+operations must not claim completion. Gate/merge require the matching audit;
+these comments themselves are not review PASS or gate authority. GitHub still
+provides no cross-resource atomic transaction.
+
+The existing optional unprivileged `agent-maintenance-guard-tests.yml` also adds
+a pull-request-triggered API integration canary. It uses only a read-only
+repository job token, no repository secrets, no production dispatcher and no
+model/publisher credentials. It reads an exact target, current authorization,
+CI metadata and available protection fields, then re-reads the live PR with
+intentionally mismatched expected head/base values to prove identity denials.
+This is a candidate API integration test, NOT the trusted production collector.
+
+Its report states `productionEvidence: false` and `operationalAcceptance: PENDING`.
+It never synthesizes bypass authority when GitHub omits `bypass_actors`; the
+visibility is UNKNOWN. It truthfully reports in-progress CI rather than calling
+it green. It cannot issue a status, gate, merge, label change or workflow dispatch.
+Local tests replace network callbacks and are expressly simulated. A hosted run
+of this integration job can observe real reads and identity denials before
+merge, but cannot certify production recovery, the isolated privileged ruleset
+collector, or end-to-end adoption. Those acceptance requirements remain.
+
+No additional workflow filename or main/protection exception is introduced.
+The original authoritative CI command loads the new local regressions through
+its existing entrypoint. The supplemental live-read job is not a replacement
+for any of the nine mandatory jobs or independent review. The CI artifact must
+be checked for exact target/producer identity and limitations before using it
+as supporting evidence; candidate-authored report text alone is not authority.

@@ -17,3 +17,41 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with: {node-version: '24'}
       - run: node --test .github/scripts/agent-maintenance-guards.test.cjs .github/scripts/agent-maintenance-controller.test.cjs .github/scripts/agent-maintenance-runtime.test.cjs
+
+  premerge-api-canary:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions: {actions: read, contents: read, issues: read, pull-requests: read}
+    steps:
+      # Candidate integration tests receive a READ-only job token, never repo secrets.
+      # Their report is not a trusted production bundle and cannot issue a gate.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with: {ref: '${{ github.event.pull_request.head.sha }}', persist-credentials: false}
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with: {node-version: '24'}
+      - name: Bounded pre-merge API observation, no production mutations
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b
+        env:
+          TARGET_PR: '${{ github.event.pull_request.number }}'
+          TARGET_HEAD: '${{ github.event.pull_request.head.sha }}'
+          TARGET_BASE: '${{ github.event.pull_request.base.sha }}'
+        with:
+          script: |
+            const repository=`${context.repo.owner}/${context.repo.repo}`;
+            const get=async path=>{
+              if(!(path===`/repos/${repository}`||path.startsWith(`/repos/${repository}/`))||path.includes('://')||path.includes('..')) throw new Error('PREMERGE_GET_SCOPE');
+              try { return (await github.request(`GET ${path}`)).data; }
+              catch(error) { throw new Error(`PREMERGE_GET_FAILED:${Number.isInteger(error.status)?error.status:'UNKNOWN'}`); }
+            };
+            const runner=require('./.github/scripts/agent-maintenance-premerge.cjs');
+            const report=await runner.canary({get,repository,prNumber:Number(process.env.TARGET_PR),headSha:process.env.TARGET_HEAD,baseSha:process.env.TARGET_BASE});
+            report.producer={kind:'unprivileged-pull-request-test',runId:context.runId,runAttempt:Number(process.env.GITHUB_RUN_ATTEMPT),headSha:process.env.TARGET_HEAD};
+            const text=JSON.stringify(report);if(Buffer.byteLength(text)>262144)throw new Error('PREMERGE_REPORT_TOO_LARGE');
+            require('node:fs').writeFileSync(`${process.env.RUNNER_TEMP}/premerge-api-observation.json`,text);
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: premerge-api-observation-${{ github.event.pull_request.head.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/premerge-api-observation.json
+          if-no-files-found: error
+          retention-days: 7

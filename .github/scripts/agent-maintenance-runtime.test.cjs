@@ -41,7 +41,7 @@ function fixture() {
   const github = {rest: {pulls: {get: async()=>read(d.pr), listFiles: "files"},
     issues: {get: async()=>read(d.issue), listComments: "comments",
       createComment: async args => { const out = {id: 200+writes.length, user: {login: "github-actions[bot]"}, body: args.body};
-        (args.issue_number === 126 ? d.issueComments : d.prComments).push(out); record("comment", args); return {data: out}; },
+        (args.issue_number === 126 ? d.issueComments : d.prComments).push(out); const response=clone(out); record("comment", args); return {data: response}; },
       setLabels: async args => { (args.issue_number === 126 ? d.issue : d.pr).labels = clone(args.labels); record("labels", args); return {data: args.labels}; }},
     repos: {getCollaboratorPermissionLevel: async()=>read({permission: d.permission}), getBranch: async()=>read({commit: {sha: d.main}}),
       compareCommits: async()=>read({behind_by: d.main === base ? 0 : 1}), listCommitStatusesForRef: "statuses",
@@ -57,7 +57,8 @@ function fixture() {
   const deps={github,context,expected,readRuleset,review,mergePull};
   const seal=async()=>{const s=await m.runtime({...deps,review:null}).snapshot(undefined,true);
     const evidence={repository:repo,headSha:head,baseSha:base,ci:s.ci,filesHash:s.filesHash,protectionHash:m.digest(s.protection),protection:s.protection,
-      authorization: clone(expected.authorization),recoveryProgress:Object.fromEntries(["pr","issue"].map(side=>[side,
+      authorization: clone(expected.authorization),linkage: m.linkEvidence(s,expected),
+      initialStates: {pr: m.currentState(s.pr),issue: m.currentState(s.issue)},recoveryProgress:Object.fromEntries(["pr","issue"].map(side=>[side,
         a.exactAgentState(s[side].labels,"agent:pr")||a.exactAgentState(s[side].labels,"agent:verified")]))};
     const bundle={version:2,producer:m.producer(context),request,expected,evidence};
     bundle.digest=m.digest({producer:bundle.producer,expected,evidence});deps.bundle=bundle;return m.runtime(deps);};
@@ -114,7 +115,8 @@ const drift=[
 for(const [name,change] of drift) for(const phase of ["link","recover","gate"])
  test(`production ${phase} stops before second write after ${name}`,async()=>{
   const f=fixture();if(phase!=="link")f.addLinks();if(phase==="gate"){f.d.pr.labels=["agent:pr"];f.d.issue.labels=["type:implementation","agent:pr"];}
-  const r=await f.seal();f.d.afterWrite=(d,w)=>{if(w.length===1)change(d);};
+  const r=await f.seal();if(phase==='gate'){await r.recover();f.writes.length=0;}
+  f.d.afterWrite=(d,w)=>{if(w.length===1)change(d);};
   await assert.rejects(r[phase]());assert.equal(f.writes.length,1);
  });
 for(const side of ["pr","issue"])test(`production recovers partial ${side} and is idempotent`,async()=>{
@@ -140,7 +142,7 @@ test("gate refuses new needs-human after review",async()=>{
 for (const reverted of ["pr", "issue"]) test(`recovery stops the next write when recovered ${reverted} is escalated`, async()=>{
  const f=fixture();f.addLinks();
  if(reverted==="issue") f.d.issue.labels=f.d.issue.labels.map(x=>x==="agent:needs-human"?"agent:pr":x);
- const r=await f.seal();f.d.afterWrite=(d,w)=>{if(w.length===1)d[reverted].labels=d[reverted].labels.filter(x=>!x.startsWith("agent:")).concat("agent:needs-human");};
+ const r=await f.seal();f.d.afterWrite=(d,w)=>{if(w.at(-1).name==='labels'&&w.filter(x=>x.name==='labels').length===1)d[reverted].labels=d[reverted].labels.filter(x=>!x.startsWith("agent:")).concat("agent:needs-human");};
  await assert.rejects(r.recover(),/RECOVERY_PROGRESS_REVOKED/);
  assert.equal(f.writes.filter(x=>x.name==="labels").length,1,"escalation stops the following label mutation");
  assert.ok(f.d[reverted].labels.includes("agent:needs-human"));
@@ -524,4 +526,69 @@ test('scoped collector retains source, request-artifact and credential boundarie
   assert.match(job,/phase:'canary'/);assert.match(job,/payload:context\.payload/);
   assert.doesNotMatch(job,/contents: write|issues: write|pull-requests: write|statuses: write|MERGE_TOKEN|OPENAI_API_KEY|codex-action|phase:'(?:recover|gate|merge)'/);
   assert.match(job,/maintenance-read-only-canary-\$\{\{ github\.run_id \}\}-\$\{\{ github\.run_attempt \}\}/);
+});
+
+// Diagnostic 34869646359: complete-operation linkage identity and audit.
+const linkageComments=(f,side)=>f.d[`${side}Comments`].filter(x=>String(x.body).includes('<!-- agent-link:v1'));
+for(const side of ['issue','pr']) for(const change of ['remove','replace','edit','retire']) {
+ test(`diagnostic linkage ${side} ${change} after prepare blocks the first write`,async()=>{
+  const f=fixture();f.addLinks();const r=await f.seal();
+  const arr=f.d[`${side}Comments`],item=linkageComments(f,side)[0];
+  if(change==='remove')arr.splice(arr.indexOf(item),1);
+  if(change==='replace')item.id+=1000;
+  if(change==='edit')item.body+='\nchanged audit';
+  if(change==='retire')arr.push({id:900,user:{login:'github-actions[bot]'},body:'<!-- agent-link-retired:v1 repo=owner/repo issue=126 pr=127 -->'});
+  await assert.rejects(executeRecover(r),/LINKAGE/);assert.equal(f.writes.length,0);
+ });
+}
+for(const change of ['remove','replace','edit'])test(`diagnostic first created link ${change} blocks the next link write`,async()=>{
+ const f=fixture();const r=await f.seal();f.d.afterWrite=(d,w)=>{
+  if(w.length===1){const x=linkageComments(f,'issue')[0];if(change==='remove')d.issueComments.splice(d.issueComments.indexOf(x),1);
+   if(change==='replace')x.id+=1000;if(change==='edit')x.body+='edited';}
+ };
+ await assert.rejects(executeRecover(r),/LINKAGE/);assert.equal(f.writes.length,1);
+ assert.equal(f.writes[0].name,'comment');assert.equal(f.writes.filter(x=>x.name==='labels').length,0);
+});
+test('diagnostic recovery writes bound intention and completion audits once on both objects',async()=>{
+ const f=fixture();f.addLinks();const r=await f.seal();await r.recover();
+ const audit=f.writes.filter(x=>x.name==='comment'&&x.args.body.includes('agent-maintenance-recovery:v1'));
+ assert.equal(audit.length,4);
+ for(const side of [126,127])for(const phase of ['started','completed']) {
+  const item=audit.find(x=>x.args.issue_number===side&&x.args.body.includes(`phase=${phase}`));assert.ok(item);
+  for(const value of ['alice','88','900',f.expected.headSha,f.expected.specHash,f.request.reason])assert.ok(item.args.body.includes(value));
+ }
+ const before=f.writes.length;await r.recover();assert.equal(f.writes.length,before);
+});
+test('diagnostic partial failure never records recovery completed',async()=>{
+ const f=fixture();f.addLinks();const r=await f.seal();const orig=f.github.rest.issues.setLabels;
+ f.github.rest.issues.setLabels=async args=>{if(args.issue_number===126)throw Error('interrupted');return orig(args);};
+ await assert.rejects(r.recover(),/interrupted/);
+ assert.ok(!f.writes.some(x=>x.name==='comment'&&x.args.body.includes('phase=completed')));
+ assert.ok(f.writes.some(x=>x.name==='comment'&&x.args.body.includes('phase=started')));
+});
+test('diagnostic gate refuses missing recovery completion audit',async()=>{
+ const f=fixture();f.addLinks();f.d.pr.labels=['agent:pr'];f.d.issue.labels=['type:implementation','agent:pr'];
+ const r=await f.seal();await assert.rejects(r.gate(),/RECOVERY_AUDIT/);assert.equal(f.writes.length,0);
+});
+for(const change of ['delete','replace'])test(`diagnostic completed recovery never re-creates ${change}d intention evidence`,async()=>{
+ const f=fixture();f.addLinks();const r=await f.seal();await r.recover();const count=f.writes.length;
+ const start=f.d.issueComments.find(x=>x.body.includes('agent-maintenance-recovery:v1')&&x.body.includes('phase=started'));
+ if(change==='delete')f.d.issueComments.splice(f.d.issueComments.indexOf(start),1);else start.id+=1000;
+ await assert.rejects(m.runtime(f.deps).recover(),/RECOVERY_AUDIT/);assert.equal(f.writes.length,count);
+});
+for(const side of ['issue','pr'])test(`diagnostic new gate runtime refuses substituted ${side} link after recovery`,async()=>{
+ const f=fixture();const r=await f.seal();await executeRecover(r);const count=f.writes.length;
+ linkageComments(f,side)[0].id+=1000;
+ await assert.rejects(m.runtime(f.deps).gate(),/RECOVERY_AUDIT|LINKAGE/);assert.equal(f.writes.length,count);
+});
+for(const timing of ['after-first-intent','between-labels']) test(`diagnostic deleted recovery intent ${timing} stops next write`,async()=>{
+ const f=fixture();f.addLinks();const r=await f.seal();let deleted=false,atCount=0;
+ f.d.afterWrite=(d,w)=>{
+  if(!deleted && (timing==='after-first-intent' ? w.length===1 : w.at(-1).name==='labels')) {
+   const index=d.issueComments.findIndex(x=>x.body.includes('agent-maintenance-recovery:v1')&&x.body.includes('phase=started'));
+   if(index>=0){d.issueComments.splice(index,1);deleted=true;atCount=w.length;}
+  }
+ };
+ await assert.rejects(r.recover(),/RECOVERY_AUDIT/);assert.equal(deleted,true);
+ assert.equal(f.writes.length,atCount);assert.ok(!f.writes.some(x=>x.name==='status'||x.name==='merge'));
 });

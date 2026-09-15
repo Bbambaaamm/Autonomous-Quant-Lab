@@ -80,7 +80,9 @@ function validateBundle(bundle, context) {
   ensure(bundle.evidence?.headSha === expected.headSha && bundle.evidence.baseSha === expected.baseSha &&
     bundle.evidence.repository === expected.repo && positive(bundle.evidence.ci?.runId) && positive(bundle.evidence.ci.runAttempt) &&
     canonical(bundle.evidence.authorization) === canonical(expected.authorization) &&
-    ["pr", "issue"].every(side => typeof bundle.evidence.recoveryProgress?.[side] === "boolean"), "BUNDLE_EVIDENCE_INVALID");
+    ["pr", "issue"].every(side => typeof bundle.evidence.recoveryProgress?.[side] === "boolean" &&
+      Object.hasOwn(bundle.evidence.linkage || {}, side) && validLinkIdentity(bundle.evidence.linkage[side]) &&
+      ['none','agent:needs-human','agent:pr','agent:verified'].includes(bundle.evidence.initialStates?.[side])), "BUNDLE_EVIDENCE_INVALID");
   ensure(bundle.digest === digest({producer: bundle.producer, expected, evidence: bundle.evidence}), "BUNDLE_DIGEST_INVALID");
   return expected;
 }
@@ -115,6 +117,39 @@ function rulesetReader(repo, token, fetcher = fetch) {
   };
 }
 
+// Preserve the identities of already observed links, not only their target pair.
+// The existing linkage helpers remain the authority for conflict/retirement rules.
+function linkEvidence(snapshot, expected) {
+  const {owner, repo} = {owner: expected.repo.split('/')[0], repo: expected.repo.split('/')[1]};
+  const marker = `<!-- agent-link:v1 repo=${expected.repo} issue=${expected.issueNumber} pr=${expected.prNumber} -->`;
+  const retired = `<!-- agent-link-retired:v1 repo=${expected.repo} issue=${expected.issueNumber} pr=${expected.prNumber} -->`;
+  const result = {};
+  for (const side of ['issue', 'pr']) {
+    const comments = snapshot[`${side}Comments`];
+    ensure(Array.isArray(comments), 'LINKAGE_EVIDENCE_MISSING');
+    const trusted = comments.filter(x => x.user?.login === 'github-actions[bot]');
+    ensure(!trusted.some(x => String(x.body || '').split('\n').includes(retired)), 'LINKAGE_RETIRED');
+    const decision = side === 'issue'
+      ? p.durablePrLinkDecision(comments, {owner, repo, issueNumber: expected.issueNumber})
+      : p.durableIssueLinkDecision(comments, {owner, repo, prNumber: expected.prNumber});
+    ensure(decision.ok, 'LINKAGE_CONFLICT');
+    const matches = trusted.filter(x => String(x.body || '').split('\n').includes(marker));
+    ensure(matches.length <= 1, 'LINKAGE_IDENTITY_AMBIGUOUS');
+    if (matches.length) {
+      ensure(positive(matches[0].id), 'LINKAGE_IDENTITY_INVALID');
+      result[side] = {id: matches[0].id, bodyHash: digest(matches[0].body)};
+    } else result[side] = null;
+  }
+  return result;
+}
+const validLinkIdentity = value => value === null || (value && positive(value.id) &&
+  /^[0-9a-f]{64}$/.test(value.bodyHash || '') && Object.keys(value).sort().join(',') === 'bodyHash,id');
+const currentState = item => {
+  const values = a.labelNames(item.labels).filter(x => x.startsWith('agent:'));
+  ensure(values.length <= 1, 'RECOVERY_STATE_AMBIGUOUS');
+  return values[0] || 'none';
+};
+
 function runtime({github, context, expected, readRuleset, bundle = null, review = null, mergePull = null, readOnlyCanary = false}) {
   ensure(typeof readRuleset === "function", "FRESH_RULESET_READER_REQUIRED");
   ensure(readOnlyCanary
@@ -134,6 +169,44 @@ function runtime({github, context, expected, readRuleset, bundle = null, review 
       a.exactAgentState(s[completed].labels, "agent:verified"), "RECOVERY_PROGRESS_REVOKED");
     for (const side of ["pr", "issue"]) if (a.exactAgentState(s[side].labels, "agent:pr") ||
       a.exactAgentState(s[side].labels, "agent:verified")) recovered.add(side);
+  };
+  const observedLinks = structuredClone(bundle?.evidence?.linkage || {issue: null, pr: null});
+  const observeLinks = s => {
+    const now = linkEvidence(s, expected);
+    for (const side of ['issue', 'pr']) {
+      ensure(observedLinks[side] === null || canonical(now[side]) === canonical(observedLinks[side]), 'LINKAGE_PROGRESS_REVOKED');
+      if (now[side] !== null) observedLinks[side] = now[side];
+    }
+    s.linkage = now;
+  };
+  let requireCompletedAudit = false;
+  const observedAudits = new Map();
+  const auditMarker = (side, phase) => `<!-- agent-maintenance-recovery:v1 producer=${context.runId}/${context.runAttempt} request=${expected.requestRunId}/${expected.requestRunAttempt} bundle=${bundle?.digest} object=${side} phase=${phase} -->`;
+  const auditBody = (s, side, phase) => {
+    const record = {version: 1, phase, repository: expected.repo, issue: expected.issueNumber, pr: expected.prNumber,
+      object: side, requester: expected.requester, requestRunId: expected.requestRunId, requestRunAttempt: expected.requestRunAttempt,
+      producer: producer(context), authorization: expected.authorization, headSha: expected.headSha, baseSha: expected.baseSha,
+      from: bundle.evidence.initialStates[side], to: bundle.evidence.initialStates[side] === 'agent:verified' ? 'agent:verified' : 'agent:pr',
+      reason: p.redactDiagnostic(bundle.request.reason, 1024), linkage: s.linkage};
+    if (phase === 'completed') record.startedAuditIds = Object.fromEntries(['issue','pr'].map(object => {
+      const start = findAudit(s, object, 'started'); ensure(start, 'RECOVERY_AUDIT_REVOKED'); return [object, start.id];
+    }));
+    const text = canonical(record).replaceAll('<', '\\u003c').replaceAll('>', '\\u003e');
+    return `Maintenance recovery ${phase === 'started' ? 'INTENT (not completion)' : 'COMPLETED; no gate or merge approval'}.\n\n    ${text}\n\n${auditMarker(side, phase)}`;
+  };
+  const findAudit = (s, side, phase) => {
+    const marker = auditMarker(side, phase);
+    const rows = s[`${side}Comments`].filter(x => x.user?.login === 'github-actions[bot]' && String(x.body || '').split('\n').includes(marker));
+    ensure(rows.length <= 1, 'RECOVERY_AUDIT_AMBIGUOUS');
+    if (rows.length) ensure(positive(rows[0].id) && rows[0].body === auditBody(s, side, phase), 'RECOVERY_AUDIT_CHANGED');
+    const identity = rows.length ? {id: rows[0].id, bodyHash: digest(rows[0].body)} : null;
+    if (observedAudits.has(marker)) ensure(canonical(identity) === canonical(observedAudits.get(marker)), 'RECOVERY_AUDIT_REVOKED');
+    if (identity) observedAudits.set(marker, identity);
+    return rows[0] || null;
+  };
+  const assertAudit = s => {
+    for (const side of ['issue', 'pr']) for (const phase of ['started', 'completed'])
+      ensure(findAudit(s, side, phase), 'RECOVERY_AUDIT_MISSING');
   };
   const snapshot = async (states = requestStates, partial = false) => {
     const s = await collectSnapshot({github, context, expected, pipeline: p, autonomy: a,
@@ -163,7 +236,10 @@ function runtime({github, context, expected, readRuleset, bundle = null, review 
     }
     const decisions = s.prComments.filter(x => x.user?.login === "github-actions[bot]" && String(x.body || "").split("\n").includes(reviewMarker));
     ensure(decisions.length <= 1, "REVIEW_EVIDENCE_AMBIGUOUS"); s.reviewRecorded = decisions.length === 1;
+    observeLinks(s);
+    if (bundle) for (const side of ['issue','pr']) for (const phase of ['started','completed']) findAudit(s, side, phase);
     if (partial) observeRecovery(s);
+    if (requireCompletedAudit) assertAudit(s);
     return s;
   };
   const requireReview = () => {
@@ -183,12 +259,35 @@ function runtime({github, context, expected, readRuleset, bundle = null, review 
     for (const side of ["issue", "pr"]) await checkedWrite(requestStates, true, async s => {
       const missing = side === "issue" ? p.durablePrLinkDecision(s.issueComments, {...repoArgs, issueNumber: expected.issueNumber}).prNumber === null
         : p.durableIssueLinkDecision(s.prComments, {...repoArgs, prNumber: expected.prNumber}).issueNumber === null;
-      if (missing) await github.rest.issues.createComment({...repoArgs, issue_number: side === "issue" ? expected.issueNumber : expected.prNumber,
-        body: `Authorized maintenance linkage.\n\n${linkMarker}`});
+      if (missing) {
+        const body = `Authorized maintenance linkage.\n\n${linkMarker}`;
+        const {data: created} = await github.rest.issues.createComment({...repoArgs,
+          issue_number: side === "issue" ? expected.issueNumber : expected.prNumber, body});
+        ensure(positive(created?.id) && created.user?.login === 'github-actions[bot]' && created.body === body, 'LINKAGE_WRITE_RECEIPT_INVALID');
+        observedLinks[side] = {id: created.id, bodyHash: digest(created.body)};
+      }
     });
     await snapshot(requestStates, true);
   };
   const recover = async () => {
+    const audit = async (phase, states) => {
+      for (const side of ['issue','pr']) await checkedWrite(states, true, async s => {
+        ensure(s.fullLinkageValid, 'LINKAGE_INCOMPLETE');
+        for (const object of ['issue','pr']) findAudit(s, object, 'completed');
+        if (phase === 'completed') for (const object of ['issue','pr'])
+          ensure(findAudit(s, object, 'started'), 'RECOVERY_AUDIT_MISSING');
+        if (!findAudit(s, side, phase)) {
+          const body = auditBody(s, side, phase);
+          const {data: created} = await github.rest.issues.createComment({...repoArgs,
+            issue_number: side === 'issue' ? expected.issueNumber : expected.prNumber, body});
+          ensure(positive(created?.id) && created.user?.login === 'github-actions[bot]' && created.body === body, 'RECOVERY_AUDIT_RECEIPT_INVALID');
+          observedAudits.set(auditMarker(side, phase), {id: created.id, bodyHash: digest(created.body)});
+        }
+      });
+    };
+    // Durable intent precedes labels; completion follows validation of BOTH objects.
+    // Interrupted attempts are never reported as completed.
+    await audit('started', requestStates);
     // Keep needs-human on the Issue until the previously unmanaged PR has a
     // resumable state. A fresh request can then recover a lost first response.
     for (const side of ["pr", "issue"]) await checkedWrite(requestStates, true, async s => {
@@ -196,9 +295,13 @@ function runtime({github, context, expected, readRuleset, bundle = null, review 
       if (!a.exactAgentState(s[side].labels, "agent:verified")) await setState(side === "issue" ? expected.issueNumber : expected.prNumber, s[side].labels, "agent:pr");
       recovered.add(side);
     });
-    await snapshot(expected.entryState === "agent:needs-human" ? ["agent:pr"] : ["agent:pr", "agent:verified"]);
+    const completeStates = expected.entryState === "agent:needs-human" ? ["agent:pr"] : ["agent:pr", "agent:verified"];
+    await snapshot(completeStates);
+    await audit('completed', completeStates);
+    assertAudit(await snapshot(completeStates));
   };
   const gate = async () => {
+    requireCompletedAudit = true;
     const states = ["agent:pr", "agent:verified"];
     for (const side of ["issue", "pr"]) await checkedWrite(states, false, s => setState(side === "issue" ? expected.issueNumber : expected.prNumber, s[side].labels, "agent:verified"));
     await checkedWrite(["agent:verified"], false, async s => {
@@ -213,6 +316,7 @@ function runtime({github, context, expected, readRuleset, bundle = null, review 
     await snapshot(["agent:verified"]);
   };
   const merge = async () => {
+    requireCompletedAudit = true;
     ensure(typeof mergePull === "function", "ISOLATED_MERGE_CLIENT_REQUIRED");
     requireReview();
     const statuses = await github.paginate(github.rest.repos.listCommitStatusesForRef, {...repoArgs, ref: expected.headSha, per_page: 100});
@@ -274,6 +378,7 @@ async function run({phase, github, context, core, auditToken, mergeToken, direct
       files: s.files.map(x => ({filename: x.filename, status: x.status, previous_filename: x.previous_filename || null})),
       authorization: {commentId: s.authorization.commentId, specHash: s.authorization.specHash,
         actor: s.authorization.actor, runId: s.authorization.runId},
+      linkage: s.linkage, initialStates: {pr: currentState(s.pr), issue: currentState(s.issue)},
       recoveryProgress: Object.fromEntries(["pr", "issue"].map(side => [side,
         a.exactAgentState(s[side].labels, "agent:pr") || a.exactAgentState(s[side].labels, "agent:verified")])),
       title: p.redactDiagnostic(s.issue.title, 256), body: p.redactDiagnostic(s.issue.body || "", 16384)};
@@ -311,4 +416,4 @@ async function run({phase, github, context, core, auditToken, mergeToken, direct
   const r = runtime({github, context, expected, readRuleset, bundle, review, mergePull});
   await executePhase(r, phase, core);
 }
-module.exports = {REQUIRED_CHECKS, protection, originValid, expectedFrom, producer, validateBundle, rulesetReader, runtime, executePhase, readOnlyGithub, run, digest};
+module.exports = {REQUIRED_CHECKS, protection, originValid, expectedFrom, producer, validateBundle, rulesetReader, runtime, executePhase, readOnlyGithub, run, digest, linkEvidence, currentState};
