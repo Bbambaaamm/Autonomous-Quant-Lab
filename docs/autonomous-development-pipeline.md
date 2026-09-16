@@ -289,7 +289,7 @@ event), and the isolated Draft-to-Ready GraphQL mutation. All read-only `gh api`
 Issue/PR linkage, label, lifecycle, CI-routing and audit metadata use the job-scoped `GITHUB_TOKEN`.
 Model/generate/validate/seal jobs never receive the publish token. Immediately before Draft-to-Ready,
 the publisher freshly revalidates the exact head, current Issue authorization, two-sided durable
-linkage and exact `agent:pr` lifecycle, then verifies a fresh non-draft postcondition after mutation. Governance escalation uses targeted lifecycle-label additions and removals rather than replacing the complete label set, so unrelated labels added concurrently remain intact; it revalidates the linked pair between those privileged writes.
+linkage and exact `agent:pr` lifecycle, then verifies a fresh non-draft postcondition after mutation. Governance escalation uses targeted lifecycle-label additions and removals rather than replacing the complete label set, so unrelated labels added concurrently remain intact. Its removal guard accepts only the expected temporary old-plus-`agent:needs-human` pair on the object being changed; a fresh pair read must show exactly one intended lifecycle label per object after each completed mutation.
 
 ### Trusted policy, classification, and fix scope
 

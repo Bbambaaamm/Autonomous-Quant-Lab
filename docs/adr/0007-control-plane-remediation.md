@@ -52,7 +52,7 @@ The request may bind either an existing `agent:pr` pair or an `agent:needs-human
 
 Lifecycle writes use a single `setLabels` call per object after re-reading that object's latest labels and performing a fresh state-plan check, preserving concurrently added non-agent labels and writing exactly one target `agent:*` state. Pair-level partial completion remains retryable because subsequent evaluations accept only the explicitly allowed previous/next transition and re-fetch before continuing.
 
-The Codex governance-escalation path does not replace the complete label set: it adds `agent:needs-human` and removes only the prior `agent:*` lifecycle label with targeted API operations. It revalidates the complete authorization, linkage, exact-head, base, and pair lifecycle guard between those writes, and therefore cannot discard a non-agent label added after its last read.
+The Codex governance-escalation path does not replace the complete label set: it adds `agent:needs-human` and removes only the prior `agent:*` lifecycle label with targeted API operations. Its removal guard permits only the expected temporary pair of `agent:needs-human` and the known prior lifecycle label on the object being changed; the other object must still have exactly one permitted lifecycle label. It then re-reads both objects and requires the final single-label state before continuing, while preserving non-agent labels added at any point.
 
 A separate read-only Codex job receives the candidate as untrusted data and the default-branch governance as its trusted baseline. It must return `PASS`, zero findings, scope consistency, no test/governance weakening, and unchanged paper-only/live-trading safety. The model job receives no GitHub write credential.
 

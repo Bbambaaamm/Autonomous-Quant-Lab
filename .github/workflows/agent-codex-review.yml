@@ -86,7 +86,7 @@ jobs:
         with:
           script: |
             const p=require('./.github/scripts/agent-pipeline.cjs'),a=require('./.github/scripts/agent-autonomy.cjs'),prNumber=Number(process.env.PR),issueNumber=Number(process.env.ISSUE),repo=`${context.repo.owner}/${context.repo.repo}`;
-            const readValidatedPair=async()=>{
+            const readValidatedPair=async(transition)=>{
               // Pagination is unbounded in time.  Read every mutable authority only after it
               // completes so the returned snapshot is the one used at the write boundary.
               const prComments=await github.paginate(github.rest.issues.listComments,{...context.repo,issue_number:prNumber,per_page:100}),issueComments=await github.paginate(github.rest.issues.listComments,{...context.repo,issue_number:issueNumber,per_page:100});
@@ -95,10 +95,13 @@ jobs:
               const {data:pr}=await github.rest.pulls.get({...context.repo,pull_number:prNumber}),{data:issue}=await github.rest.issues.get({...context.repo,issue_number:issueNumber});
               const auth=a.authorizationDecision({comments:issueComments,repo,issueNumber,title:issue.title,body:issue.body||'',labels:issue.labels,state:issue.state});
               const linkage=p.fullLinkageDecision({prBody:pr.body,prComments,issueComments,...context.repo,issueNumber,prNumber});
-              const ok=repository.full_name===repo&&def===context.payload.repository.default_branch&&main.commit.sha===process.env.BASE&&pr.state==='open'&&!pr.draft&&pr.base.ref===def&&pr.base.sha===process.env.BASE&&pr.head.sha===process.env.SHA&&pr.head.repo?.full_name===repo&&p.parseAgentIssue(pr.body)===issueNumber&&issue.state==='open'&&p.isImplementation(issue.labels)&&auth.ok&&auth.specHash===process.env.SPEC&&p.reviewerBlockPairPlan(pr.labels,issue.labels).ok&&linkage.ok;
+              const lifecycleOk=transition
+                ? (()=>{const target=transition.number===prNumber?pr.labels:issue.labels,other=transition.number===prNumber?issue.labels:pr.labels,targetStates=p.labelNames(target).filter(label=>p.STATES.includes(label)),otherStates=p.labelNames(other).filter(label=>p.STATES.includes(label));return targetStates.length===2&&targetStates.includes('agent:needs-human')&&targetStates.includes(transition.previous)&&otherStates.length===1&&(otherStates[0]==='agent:pr'||otherStates[0]==='agent:needs-human');})()
+                : p.reviewerBlockPairPlan(pr.labels,issue.labels).ok;
+              const ok=repository.full_name===repo&&def===context.payload.repository.default_branch&&main.commit.sha===process.env.BASE&&pr.state==='open'&&!pr.draft&&pr.base.ref===def&&pr.base.sha===process.env.BASE&&pr.head.sha===process.env.SHA&&pr.head.repo?.full_name===repo&&p.parseAgentIssue(pr.body)===issueNumber&&issue.state==='open'&&p.isImplementation(issue.labels)&&auth.ok&&auth.specHash===process.env.SPEC&&lifecycleOk&&linkage.ok;
               return {ok,pr,issue};
             };
-            const escalate=async(number,pair)=>{const labels=number===prNumber?pair.pr.labels:pair.issue.labels;let plan=p.escalationMutationPlan(labels);if(!plan.ok)throw new Error(plan.reason);if(plan.add.length)await github.rest.issues.addLabels({...context.repo,issue_number:number,labels:plan.add});for(const label of plan.remove){pair=await readValidatedPair();if(!pair.ok)return false;const current=number===prNumber?pair.pr.labels:pair.issue.labels;plan=p.escalationMutationPlan(current);if(!plan.ok)throw new Error(plan.reason);if(plan.remove.includes(label))await github.rest.issues.removeLabel({...context.repo,issue_number:number,name:label});}return true;};
+            const escalate=async(number,pair)=>{const labels=number===prNumber?pair.pr.labels:pair.issue.labels;let plan=p.escalationMutationPlan(labels);if(!plan.ok)throw new Error(plan.reason);if(plan.add.length)await github.rest.issues.addLabels({...context.repo,issue_number:number,labels:plan.add});for(const label of plan.remove){pair=await readValidatedPair({number,previous:label});if(!pair.ok)return false;const current=number===prNumber?pair.pr.labels:pair.issue.labels;plan=p.escalationMutationPlan(current);if(!plan.ok)throw new Error(plan.reason);if(plan.remove.includes(label))await github.rest.issues.removeLabel({...context.repo,issue_number:number,name:label});}return true;};
             let pair=await readValidatedPair(); if(!pair.ok)return core.notice('STALE_GOVERNANCE_NO_WRITE');
             if(!await escalate(prNumber,pair))return core.notice('STALE_GOVERNANCE_STOP_DURING_FIRST_WRITE');
             pair=await readValidatedPair(); if(!pair.ok)return core.notice('STALE_GOVERNANCE_STOP_AFTER_FIRST_WRITE');
