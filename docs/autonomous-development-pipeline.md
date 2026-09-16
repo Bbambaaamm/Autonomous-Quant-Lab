@@ -32,7 +32,9 @@ any stale/ambiguous/conflicting condition → agent:needs-human
       handles bounded eligible fixes/transient infrastructure retries, and
       regenerates all SHA-bound evidence after every head change.
 - [ ] The newest authoritative exact-SHA CI run must have all nine required jobs
-      green and the independent Codex Reviewer must PASS the same SHA.
+      green and the independent Codex Reviewer must PASS the same SHA. Immediately before
+      persisting that PASS marker, the trusted recorder performs one last unfiltered
+      newest-run/attempt read so a newly started rerun fails closed.
 - [ ] `agent-verified-gate` then revalidates current authorization, linkage,
       current-main ancestry, CI, review and verification evidence. The trusted
       merge controller performs a final fresh TOCTOU evaluation and merges only
