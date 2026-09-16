@@ -815,7 +815,10 @@ test("Issue #96 Reviewer metadata writers have compatible least-privilege grants
   assert.doesNotMatch(model,/issues: write|pull-requests: write|contents: write/);
   assert.match(model,/OPENAI_API_KEY/);
   assert.match(job(reviewer,"trusted-record"),/result\.reviewed_sha!==process\.env\.SHA[\s\S]*createComment[\s\S]*agent-codex-review:v2 sha=\$\{process\.env\.SHA\}/);
-  assert.match(job(reviewer,"governance-escalation"),/fullLinkageDecision[\s\S]*lifecycleAtAgentPr[\s\S]*(?:addLabels|removeLabel)[\s\S]*createComment/);
+  const governance=job(reviewer,"governance-escalation");
+  assert.match(governance,/fullLinkageDecision[\s\S]*reviewerBlockPairPlan[\s\S]*setLabels/);
+  assert.equal((governance.match(/pair=await readValidatedPair\(\)/g)||[]).length,3);
+  assert.match(governance,/escalate\(prNumber[\s\S]*readValidatedPair\(\)[\s\S]*escalate\(issueNumber[\s\S]*readValidatedPair\(\)[\s\S]*createComment/);
   for(const name of ["route-block","fail-closed-finalizer"])
     assert.match(job(reviewer,name),/uses: \.\/\.github\/workflows\/agent-review-block-escalation\.yml/);
   const escalate=job(block,"escalate");
@@ -888,4 +891,51 @@ test("v2 classify job guard admits reusable review-block despite inherited calle
   assert.match(fixer,/buildBoundedSourceContext\(\{files:\[\.\.\.filesByPath\.values\(\)\],fixScopePaths:process\.env\.FIX_SCOPE,diagnostic:process\.env\.DIAGNOSTIC,sourceBudgetBytes:SOURCE_CONTEXT_MAX_BYTES\}\)/);
   assert.match(fixer,/SOURCE_CONTEXT_MAX_BYTES=917504/);
   assert.match(fixer,/test "\$\(stat -c%s \.codex-input\/prompt\.md\)" -lt 1048576/);
+});
+
+
+test("Issue #130 recorder rejects guard drift injected while CI jobs are collected", async () => {
+  const expected={head:"h",auth:"a",lifecycle:"agent:pr",link:"linked",main:"m"};
+  const record=async(state,inject)=>{const writes=[];await inject(state);const fresh={...state};const valid=Object.keys(expected).every(k=>fresh[k]===expected[k]);if(valid)writes.push("trusted-review-marker");return writes;};
+  for(const key of ["head","auth","lifecycle","link","main"]){
+    const state={...expected};
+    assert.deepEqual(await record(state,async current=>{current[key]=`drift-${key}`;}),[],`drift in ${key} must produce zero trusted writes`);
+  }
+});
+
+test("Issue #130 governance escalation stops before the second object mutation on guard drift", async () => {
+  const expected={head:"h",auth:"a",lifecycle:"valid-partial",link:"linked",source:"o/r"};
+  for(const key of Object.keys(expected)){
+    const writes=[];const state={...expected};
+    const valid=()=>Object.keys(expected).every(k=>state[k]===expected[k]);
+    if(valid())writes.push("pr-labels");
+    state[key]=`drift-${key}`;
+    if(valid())writes.push("issue-labels");
+    assert.deepEqual(writes,["pr-labels"],`drift in ${key} must prevent the paired write`);
+  }
+});
+
+test("Issue #130 evidence collection is isolated, bounded, complete, and fail closed before the model", () => {
+  const workflow=fs.readFileSync(".github/workflows/agent-control-plane-remediation.yml","utf8");
+  const collect=workflow.slice(workflow.indexOf("  collect-acceptance-evidence:"),workflow.indexOf("  independent-review:"));
+  const model=workflow.slice(workflow.indexOf("  independent-review:"),workflow.indexOf("  recover:"));
+  assert.match(collect,/github-token: \$\{\{ secrets\.AGENT_PUBLISH_TOKEN \}\}/);
+  assert.doesNotMatch(collect,/actions\/checkout|OPENAI_API_KEY|permission-profile/);
+  assert.match(collect,/required=\['agent-pipeline','quality','unit-research','api','integration-postgres','frontend','security','container-build','production-smoke'\]/);
+  for(const proof of [/run_attempt/,/bypass_actors/,/strict_required_status_checks_policy/,/agent-verified-gate/,/typed\('deletion'\)/,/typed\('non_fast_forward'\)/,/typed\('pull_request'\)/]) assert.match(collect,proof);
+  assert.match(collect,/EVIDENCE_RULESET_AMBIGUOUS[\s\S]*EVIDENCE_RULESET_INVALID[\s\S]*EVIDENCE_TOO_LARGE/);
+  assert.doesNotMatch(model,/AGENT_PUBLISH_TOKEN|issues: write|pull-requests: write/);
+  assert.match(model,/needs: \[prepare, collect-acceptance-evidence\][\s\S]*needs\.collect-acceptance-evidence\.result == 'success'/);
+  assert.match(model,/acceptance-evidence\.json[\s\S]*BEGIN WORKFLOW-OWNED ACCEPTANCE EVIDENCE/);
+});
+
+test("Issue #130 trusted recorder re-fetches CI and all mutable guards before its only write", () => {
+  const workflow=fs.readFileSync(".github/workflows/agent-codex-review.yml","utf8");
+  const record=workflow.slice(workflow.indexOf("  trusted-record:"),workflow.indexOf("  verify-after-pass:"));
+  const finalReads=record.indexOf("These are the final reads before the sole write boundary");
+  const write=record.indexOf("issues.createComment",finalReads);
+  assert.ok(finalReads>record.indexOf("listJobsForWorkflowRun"));
+  for(const guard of ["repos.get(context.repo)","repos.getBranch","pulls.get","issues.get","authorizationDecision","lifecycleAtAgentPr","fullLinkageDecision","successfulRequiredJobs"])
+    assert.ok(record.indexOf(guard,finalReads)>finalReads&&record.indexOf(guard,finalReads)<write,`${guard} must be checked in the final snapshot`);
+  assert.equal(record.indexOf("issues.createComment"),write,"the trusted marker is the first write");
 });
