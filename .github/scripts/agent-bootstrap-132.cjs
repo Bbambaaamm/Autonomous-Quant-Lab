@@ -1,0 +1,73 @@
+"use strict";
+
+// Deliberately immutable bindings. This module is migration infrastructure for Issue #132,
+// not a general control-plane entry point.
+const BINDING = Object.freeze({
+  repository: "Bbambaaamm/Autonomous-Quant-Lab",
+  defaultBranch: "main",
+  trustedBaseSha: "94611601bcd3fd683bc54f9f5d6023e4abc5951c",
+  issueNumber: 130,
+  prNumber: 131,
+  headSha: "76694eef519c0057750b170c55fe94673e7960e0",
+  specHash: "7b2b5c30a3d55643512159bda237a97259e800ec200cebf92799f98633a88d81",
+  rulesetName: "Protect main",
+  gateContext: "agent-verified-gate",
+  gateIntegrationId: 15368,
+});
+
+const BOOTSTRAP_PATHS = new Set([
+  ".github/scripts/agent-bootstrap-132.cjs",
+  ".github/scripts/agent-bootstrap-132.test.cjs",
+  ".github/workflows/agent-bootstrap-132.yml",
+  ".github/workflows/ci.yml",
+  "docs/adr/0008-one-time-control-plane-bootstrap.md",
+]);
+
+function fail(reason) { return { ok: false, reason }; }
+
+function rulesetDecision(ruleset) {
+  if (!ruleset || ruleset.name !== BINDING.rulesetName || ruleset.target !== "branch" || ruleset.enforcement !== "active") return fail("RULESET_IDENTITY_CHANGED");
+  if ((ruleset.bypass_actors || []).length !== 0) return fail("RULESET_BYPASS_PRESENT");
+  const refs = ruleset.conditions?.ref_name;
+  if (JSON.stringify(refs?.include) !== JSON.stringify(["refs/heads/main"]) || (refs?.exclude || []).length) return fail("RULESET_TARGET_CHANGED");
+  for (const type of ["deletion", "non_fast_forward", "pull_request", "required_status_checks"]) {
+    if ((ruleset.rules || []).filter((rule) => rule.type === type).length !== 1) return fail(`RULESET_${type.toUpperCase()}_CHANGED`);
+  }
+  const status = ruleset.rules.find((rule) => rule.type === "required_status_checks")?.parameters;
+  if (status?.strict_required_status_checks_policy !== true) return fail("RULESET_NOT_STRICT");
+  const gate = (status.required_status_checks || []).filter((check) => check.context === BINDING.gateContext && check.integration_id === BINDING.gateIntegrationId);
+  return gate.length === 1 ? { ok: true } : fail("RULESET_GATE_CHANGED");
+}
+
+function ciDecision(run, jobs, requiredJobs) {
+  if (!run || run.name !== "CI" || run.event !== "pull_request" || run.status !== "completed" || run.conclusion !== "success" || run.head_sha !== BINDING.headSha || run.pull_requests?.length !== 1 || run.pull_requests[0].number !== BINDING.prNumber) return fail("CI_IDENTITY_CHANGED");
+  if (!Number.isSafeInteger(run.run_attempt) || run.run_attempt < 1) return fail("CI_ATTEMPT_INVALID");
+  const latest = new Map();
+  for (const job of jobs || []) {
+    const old = latest.get(job.name);
+    if (!old || job.run_attempt > old.run_attempt) latest.set(job.name, job);
+  }
+  const valid = requiredJobs.every((name) => latest.get(name)?.conclusion === "success" && latest.get(name)?.run_attempt === run.run_attempt);
+  return valid ? { ok: true } : fail("CI_JOBS_CHANGED");
+}
+
+function bindingDecision(input) {
+  if (input.repository !== BINDING.repository || input.defaultBranch !== BINDING.defaultBranch) return fail("REPOSITORY_BINDING_CHANGED");
+  if (input.trustedBaseSha !== BINDING.trustedBaseSha || input.mainContainsTrustedBase !== true || input.mainBootstrapPathsOnly !== true) return fail("MAIN_BINDING_CHANGED");
+  const { issue, pr } = input;
+  if (!issue || issue.number !== BINDING.issueNumber || issue.state !== "open" || input.issueIsImplementation !== true || input.authorizationOk !== true || input.specHash !== BINDING.specHash) return fail("ISSUE_BINDING_CHANGED");
+  if (!pr || pr.number !== BINDING.prNumber || pr.state !== "open" || pr.draft || pr.base?.ref !== BINDING.defaultBranch || pr.head?.sha !== BINDING.headSha || input.prIssueNumber !== BINDING.issueNumber) return fail("PR_BINDING_CHANGED");
+  if (input.linkageOk !== true) return fail("LINKAGE_CHANGED");
+  if (!input.lifecycle || !["needs-human", "pr"].includes(input.lifecycle)) return fail("LIFECYCLE_CHANGED");
+  if (input.changedFilesComplete !== true || input.scopeAllowed !== true) return fail("CANDIDATE_SCOPE_CHANGED");
+  if (input.currentMainAncestor !== true) return fail("MAIN_ANCESTRY_CHANGED");
+  return { ok: true };
+}
+
+function pairedWriteDecision(before, expectedStage) {
+  if (!before?.guardsCurrent) return fail("MUTABLE_GUARD_DRIFT");
+  if (before.stage !== expectedStage) return fail("PAIRED_WRITE_STAGE_CHANGED");
+  return { ok: true, nextStage: expectedStage + 1 };
+}
+
+module.exports = { BINDING, BOOTSTRAP_PATHS, bindingDecision, ciDecision, pairedWriteDecision, rulesetDecision };
