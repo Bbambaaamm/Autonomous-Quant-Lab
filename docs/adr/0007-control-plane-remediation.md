@@ -54,11 +54,13 @@ Lifecycle writes use a single `setLabels` call per object after a fresh state-pl
 
 A separate read-only Codex job receives the candidate as untrusted data and the default-branch governance as its trusted baseline. It must return `PASS`, zero findings, scope consistency, no test/governance weakening, and unchanged paper-only/live-trading safety. The model job receives no GitHub write credential.
 
+Acceptance evidence is collected without checking out candidate code by a secret-bearing job that uses `AGENT_PUBLISH_TOKEN`. Its digest binds the independent review and later jobs to the exact repository, Issue, PR, head/base SHAs, CI jobs, and then-current ruleset contract. The artifact is workflow-owned audit and binding evidence, not proof that mutable repository policy is still current: its age is never used as a substitute for a live ruleset read. Candidate code is never executed with the maintenance credential.
+
 ### Serialization, gate and merge
 
 The request workflow is serialized by exact PR/SHA. Its trusted follower uses the request run title, which is deterministically bound to that same PR/SHA, as a workflow-level concurrency key with `cancel-in-progress: false`. Duplicate valid requests therefore serialize rather than racing lifecycle or evidence publication.
 
-After PASS and any explicitly authorized recovery, a separate trusted gate job repeatedly re-fetches mutable GitHub state. It permits only crash-recoverable `agent:pr → agent:verified` progress, rejects `agent:needs-human`, requires an exact `agent:verified` pair before publishing evidence, and requires exactly one bot-authored exact-SHA maintenance review marker after publication.
+After PASS and any explicitly authorized recovery, a separate trusted gate job repeatedly re-fetches mutable GitHub state. Immediately before every linkage comment, lifecycle label write, review-evidence comment, and gate status publication, it (and the recovery job) reads the live `Protect main` ruleset and requires the complete contract: active enforcement, the exact default-branch target, no bypass actors, deletion/non-fast-forward/pull-request protections, strict required checks, every configured required context, and Actions integration ID `15368` for `agent-verified-gate`. It permits only crash-recoverable `agent:pr → agent:verified` progress, rejects `agent:needs-human`, requires an exact `agent:verified` pair before publishing evidence, and requires exactly one bot-authored exact-SHA maintenance review marker after publication.
 
 The gate publishes the same required status context used by the normal path:
 
@@ -66,7 +68,7 @@ The gate publishes the same required status context used by the normal path:
 
 The ruleset therefore remains unchanged and permanently enabled.
 
-A final merge job uses `AGENT_PUBLISH_TOKEN` only after the trusted gate succeeds. It revalidates the exact head, current authorization, two-sided durable linkage, complete allowlisted file enumeration including rename sources, newest authoritative CI, current-main ancestry, verified lifecycle, exactly one bot-authored maintenance evidence marker, and bot-authored successful `agent-verified-gate`. It then performs the complete evaluation a second time immediately before the exact-head merge request. Any stale, active, ambiguous, incomplete, or halted condition fails closed.
+A final merge job uses `AGENT_PUBLISH_TOKEN` only after the trusted gate succeeds; its job-scoped `GITHUB_TOKEN` remains read-only and is not the merge authority. It revalidates the exact head, current authorization, two-sided durable linkage, complete allowlisted file enumeration including rename sources, newest authoritative CI, current-main ancestry, verified lifecycle, exactly one bot-authored maintenance evidence marker, and bot-authored successful `agent-verified-gate`. It then performs the complete evaluation a second time and performs another live ruleset-contract read immediately before the exact-head merge request. Successful merges are recorded on the authorized Issue with the exact PR head and merge SHA, after one more live ruleset-contract read. Any drift, stale CI, active run, ambiguity, incomplete state, or halted condition fails closed. Successful required jobs may come from different run attempts after GitHub's rerun-failed-jobs operation; the guard binds each required context to its latest job by name and identity rather than incorrectly requiring every job to share the workflow run's latest attempt.
 
 ## Consequences
 

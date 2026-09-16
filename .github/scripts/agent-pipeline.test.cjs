@@ -904,9 +904,13 @@ test("Issue #130 production guards re-read CI attempts and mutable authorities a
     const section=control.slice(control.indexOf(`  ${name}:`),name==="recover"?control.indexOf("  gate:"):name==="gate"?control.indexOf("  merge:"):control.length);
     assert.match(section,/rulesEvidenceOk[\s\S]*freshGuard=async[\s\S]*listJobsForWorkflowRun[\s\S]*getWorkflowRun[\s\S]*finalRuns/);
     assert.match(section,/finalMain\.commit\.sha===process\.env\.BASE[\s\S]*finalAuth\.specHash===spec[\s\S]*linkageOk[\s\S]*run_attempt[\s\S]*jobsBound/);
-    assert.doesNotMatch(section,/\/rulesets|AGENT_PUBLISH_TOKEN|freshRuleset/);
+    assert.match(section,/liveRulesetValid[\s\S]*GET \/repos\/\{owner\}\/\{repo\}\/rulesets[\s\S]*rulesetValid\(live\)[\s\S]*freshGuard=async[\s\S]*await liveRulesetValid/);
+    if(name!=="merge") assert.doesNotMatch(section,/AGENT_PUBLISH_TOKEN/);
   }
   const gate=control.slice(control.indexOf("  gate:"),control.indexOf("  merge:"));
+  const merge=control.slice(control.indexOf("  merge:"));
+  assert.match(merge,/github-token: \$\{\{ secrets\.AGENT_PUBLISH_TOKEN \}\}/);
+  assert.match(merge,/agent-control-plane-merged:v1[\s\S]*merge=\$\{merged\.sha\}/);
   assert.match(gate,/setState\(issueNumber[\s\S]*freshGuard\(partial\)[\s\S]*setState\(prNumber/);
 });
 
@@ -953,18 +957,37 @@ function productionFreshGuardSource(){
   return line.trim();
 }
 
-async function executeProductionFreshGuard({newestRunChanges=false,prCloses=false,issueCloses=false,authorizationDrifts=false,linkageDrifts=false,lifecycleDrifts=false}={}){
+async function executeProductionFreshGuard({newestRunChanges=false,prCloses=false,issueCloses=false,authorizationDrifts=false,linkageDrifts=false,lifecycleDrifts=false,rulesetDrifts=false,mixedAttempts=false}={}){
   const head="a".repeat(40),base="b".repeat(40),required=["agent-pipeline","quality","unit-research","api","integration-postgres","frontend","security","container-build","production-smoke"];
   const oldRun={id:10,run_attempt:1,name:"CI",event:"pull_request",head_sha:head,pull_requests:[{number:131}],status:"completed",conclusion:"success"};
   const newer={...oldRun,id:11,run_attempt:2,status:"in_progress",conclusion:null};let runReads=0;
-  const api={runs(){runReads++;return newestRunChanges&&runReads>1?[newer,oldRun]:[oldRun]},jobs(){return required.map((name,id)=>({id,name,status:"completed",conclusion:"success",run_attempt:1}))}};
+  const api={runs(){runReads++;return newestRunChanges&&runReads>1?[newer,oldRun]:[oldRun]},jobs(){return required.map((name,id)=>({id,name,status:"completed",conclusion:"success",run_attempt:mixedAttempts&&id%2===0?2:1}))}};
   const github={rest:{actions:{listWorkflowRunsForRepo(){},listJobsForWorkflowRun(){},getWorkflowRun:async()=>({data:oldRun})},issues:{listComments(){}},repos:{get:async()=>({data:{full_name:"o/r",default_branch:"main"}}),getBranch:async()=>({data:{commit:{sha:base}}})},pulls:{get:async()=>({data:{number:131,state:prCloses?"closed":"open",draft:false,head:{sha:head,repo:{full_name:"o/r"}},base:{ref:"main",sha:base},body:"Agent-Issue: #130",labels:[]}})}},paginate:async(fn)=>fn===github.rest.actions.listWorkflowRunsForRepo?api.runs():fn===github.rest.actions.listJobsForWorkflowRun?api.jobs():[]};
   github.rest.issues.get=async({issue_number})=>({data:{number:issue_number,state:issueCloses?"closed":"open",title:"t",body:"b",labels:[]}});
   const p={parseAgentIssue:()=>130,isImplementation:()=>true,fullLinkageDecision:()=>({ok:!linkageDrifts}),durablePrLinkDecision:()=>({ok:true,prNumber:131}),durableIssueLinkDecision:()=>({ok:true,issueNumber:130}),successfulRequiredJobs:()=>true};
   const a={authorizationDecision:()=>({ok:!authorizationDrifts,specHash:"spec"})},c={requiredCiJobs:required},evidence={ci:{runId:10,runAttempt:1,headSha:head,jobs:api.jobs().map(x=>({...x,runAttempt:x.run_attempt}))}},context={repo:{owner:"o",repo:"r"}},processMock={env:{BASE:base}};
-  return new AsyncFunction("github","context","p","a","c","evidence","headSha","prNumber","issueNumber","repo","def","spec","rulesEvidenceOk","process","lifecycle",`${productionFreshGuardSource()}\nreturn freshGuard(lifecycle);`)(github,context,p,a,c,evidence,head,131,130,"o/r","main","spec",()=>true,processMock,()=>!lifecycleDrifts);
+  return new AsyncFunction("github","context","p","a","c","evidence","headSha","prNumber","issueNumber","repo","def","spec","rulesEvidenceOk","liveRulesetValid","process","lifecycle",`${productionFreshGuardSource()}\nreturn freshGuard(lifecycle);`)(github,context,p,a,c,evidence,head,131,130,"o/r","main","spec",()=>true,async()=>!rulesetDrifts,processMock,()=>!lifecycleDrifts);
 }
 
+
+
+test("Issue #130 live ruleset drift fails closed at every privileged boundary",async()=>{
+  assert.equal((await executeProductionFreshGuard({rulesetDrifts:true})).ok,false);
+  const workflow=controlWorkflow();
+  const recover=workflow.slice(workflow.indexOf("  recover:"),workflow.indexOf("  gate:"));
+  const gate=workflow.slice(workflow.indexOf("  gate:"),workflow.indexOf("  merge:"));
+  const merge=workflow.slice(workflow.indexOf("  merge:"));
+  for(const [section,writes] of [[recover,["issues.createComment","setState"]],[gate,["setState","issues.createComment","createCommitStatus"]]]){
+    for(const write of writes) assert.match(section,new RegExp(`freshGuard\\([^\\n]+\\)[\\s\\S]{0,3000}${write.replace(".","\\.")}`),`${write} must retain live-ruleset guard`);
+  }
+  assert.match(merge,/freshGuard\(verified\)[\s\S]*liveRulesetValid\(\)[\s\S]*pulls\.merge/);
+  assert.match(merge,/pulls\.merge[\s\S]*liveRulesetValid\(\)[\s\S]*issues\.createComment/);
+  assert.doesNotMatch(workflow,/Date\.now\(\)-Date\.parse\(evidence\.collectedAt\)|age<=3600000/);
+});
+
+test("Issue #130 evidence binding accepts latest successful jobs across rerun attempts",async()=>{
+  assert.equal((await executeProductionFreshGuard({mixedAttempts:true})).ok,true);
+});
 test("Issue #130 real freshGuard rejects a newer rerun appearing after paginated job collection",async()=>{
   assert.equal((await executeProductionFreshGuard()).ok,true);
   assert.equal((await executeProductionFreshGuard({newestRunChanges:true})).ok,false);
