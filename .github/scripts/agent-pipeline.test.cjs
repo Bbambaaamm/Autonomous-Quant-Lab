@@ -754,7 +754,7 @@ test("v2 fifth-audit wiring pins validation toolchain, seals last, and finalizes
   assert.match(seal,/runs-on: ubuntu-latest[\s\S]*generated-patch-[\s\S]*Independently seal generated patch on fresh runner/);
   assert.match(seal,/validatePatchPaths[\s\S]*fixScopeDecision[\s\S]*validatePatchModes[\s\S]*validated-checksum/);
   assert.match(fixer,/BEGIN TRUSTED GOVERNANCE[\s\S]*trusted-AGENTS\.md/);
-  assert.match(reviewer,/exact authoritative green CI missing or ambiguous/);
+  assert.match(reviewer,/newest exact authoritative CI is not green/);
   assert.match(reviewer,/Fail closed when reviewer credential is absent/);
   assert.match(reviewer,/fail-closed-finalizer:[\s\S]*uses: \.\/\.github\/workflows\/agent-review-block-escalation\.yml[\s\S]*no PASS was synthesized/);
 });
@@ -807,7 +807,7 @@ test("Issue #96 Reviewer metadata writers have compatible least-privilege grants
   };
   for(const name of ["governance-escalation","trusted-record","route-block","fail-closed-finalizer"]){
     const section=job(reviewer,name);
-    assert.match(section,/permissions: \{contents: read, issues: write, pull-requests: write\}/,name);
+    assert.match(section,name==="trusted-record"?/permissions: \{actions: read, contents: read, issues: write, pull-requests: write\}/:/permissions: \{contents: read, issues: write, pull-requests: write\}/,name);
     assert.doesNotMatch(section,/contents: write|OPENAI_API_KEY/,name);
   }
   const model=job(reviewer,"independent-review");
@@ -894,25 +894,26 @@ test("v2 classify job guard admits reusable review-block despite inherited calle
 });
 
 
-test("Issue #130 recorder rejects guard drift injected while CI jobs are collected", async () => {
-  const expected={head:"h",auth:"a",lifecycle:"agent:pr",link:"linked",main:"m"};
-  const record=async(state,inject)=>{const writes=[];await inject(state);const fresh={...state};const valid=Object.keys(expected).every(k=>fresh[k]===expected[k]);if(valid)writes.push("trusted-review-marker");return writes;};
-  for(const key of ["head","auth","lifecycle","link","main"]){
-    const state={...expected};
-    assert.deepEqual(await record(state,async current=>{current[key]=`drift-${key}`;}),[],`drift in ${key} must produce zero trusted writes`);
+test("Issue #130 production guards re-read CI attempts and mutable authorities at write boundaries", () => {
+  const reviewer=fs.readFileSync(".github/workflows/agent-codex-review.yml","utf8");
+  const control=fs.readFileSync(".github/workflows/agent-control-plane-remediation.yml","utf8");
+  const record=reviewer.slice(reviewer.indexOf("  trusted-record:"),reviewer.indexOf("  verify-after-pass:"));
+  assert.match(record,/finalRuns[\s\S]*freshRun\.run_attempt===ciRun\.run_attempt[\s\S]*freshRun\.run_attempt===finalCi\.run_attempt/);
+  assert.doesNotMatch(record,/filter\(run=>[^\n]*status==='completed'/);
+  for(const name of ["recover","gate","merge"]){
+    const section=control.slice(control.indexOf(`  ${name}:`),name==="recover"?control.indexOf("  gate:"):name==="gate"?control.indexOf("  merge:"):control.length);
+    assert.match(section,/freshGuard=async[\s\S]*listJobsForWorkflowRun[\s\S]*getWorkflowRun[\s\S]*finalRuns[\s\S]*freshRuleset/);
+    assert.match(section,/finalMain\.commit\.sha===process\.env\.BASE[\s\S]*finalAuth\.specHash===spec[\s\S]*linkageOk[\s\S]*run_attempt[\s\S]*rulesOk/);
   }
+  const gate=control.slice(control.indexOf("  gate:"),control.indexOf("  merge:"));
+  assert.match(gate,/setState\(issueNumber[\s\S]*freshGuard\(partial\)[\s\S]*setState\(prNumber/);
 });
 
-test("Issue #130 governance escalation stops before the second object mutation on guard drift", async () => {
-  const expected={head:"h",auth:"a",lifecycle:"valid-partial",link:"linked",source:"o/r"};
-  for(const key of Object.keys(expected)){
-    const writes=[];const state={...expected};
-    const valid=()=>Object.keys(expected).every(k=>state[k]===expected[k]);
-    if(valid())writes.push("pr-labels");
-    state[key]=`drift-${key}`;
-    if(valid())writes.push("issue-labels");
-    assert.deepEqual(writes,["pr-labels"],`drift in ${key} must prevent the paired write`);
-  }
+test("Issue #130 production ruleset guard enforces the complete immutable contract", () => {
+  const control=fs.readFileSync(".github/workflows/agent-control-plane-remediation.yml","utf8");
+  for(const token of ["'Protect main'","target==='branch'","enforcement==='active'","bypass_actors.length===0","strict_required_status_checks_policy===true","gate?.integration_id===actionsIntegrationId","typed('deletion').length===1","typed('non_fast_forward').length===1","typed('pull_request').length===1"]) assert.ok(control.includes(token),token);
+  assert.match(control,/requiredContexts=\[\.\.\.required,'agent-verified-gate'\]\.sort\(\)/);
+  assert.match(control,/JSON\.stringify\(configured\)===JSON\.stringify\(requiredContexts\)/);
 });
 
 test("Issue #130 evidence collection is isolated, bounded, complete, and fail closed before the model", () => {

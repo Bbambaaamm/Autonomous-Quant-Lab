@@ -47,9 +47,9 @@ jobs:
             let ciRun;
             if(context.eventName==="workflow_run") ciRun=context.payload.workflow_run;
             else {
-              const runs=await github.paginate(github.rest.actions.listWorkflowRuns,{...context.repo,workflow_id:"ci.yml",event:"pull_request",status:"completed",per_page:100});
-              const matches=runs.filter(run=>p.authoritativeCiIdentity(run,{prNumber,headSha:sha,conclusion:"success"}));
-              if(matches.length!==1) return core.notice('NO_WRITE: exact authoritative green CI missing or ambiguous');
+              const runs=await github.paginate(github.rest.actions.listWorkflowRuns,{...context.repo,workflow_id:"ci.yml",event:"pull_request",per_page:100});
+              const matches=runs.filter(run=>run.name==='CI'&&run.event==='pull_request'&&run.head_sha===sha&&run.pull_requests?.length===1&&run.pull_requests[0].number===prNumber).sort((x,y)=>y.id-x.id);
+              if(!matches.length||!p.authoritativeCiIdentity(matches[0],{prNumber,headSha:sha,conclusion:"success"})) return core.notice('NO_WRITE: newest exact authoritative CI is not green');
               ciRun=matches[0];
             }
             if(!p.authoritativeCiIdentity(ciRun,{prNumber,headSha:sha,conclusion:"success"})) return core.notice('NO_WRITE: non-authoritative CI identity');
@@ -82,7 +82,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with: {ref: '${{ github.event.repository.default_branch }}', persist-credentials: false}
       - uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
-        env: {PR: '${{ needs.prepare.outputs.pr_number }}', ISSUE: '${{ needs.prepare.outputs.issue_number }}', SHA: '${{ needs.prepare.outputs.head_sha }}', SPEC: '${{ needs.prepare.outputs.spec_hash }}'}
+        env: {PR: '${{ needs.prepare.outputs.pr_number }}', ISSUE: '${{ needs.prepare.outputs.issue_number }}', SHA: '${{ needs.prepare.outputs.head_sha }}', BASE: '${{ needs.prepare.outputs.base_sha }}', SPEC: '${{ needs.prepare.outputs.spec_hash }}'}
         with:
           script: |
             const p=require('./.github/scripts/agent-pipeline.cjs'),a=require('./.github/scripts/agent-autonomy.cjs'),prNumber=Number(process.env.PR),issueNumber=Number(process.env.ISSUE),repo=`${context.repo.owner}/${context.repo.repo}`;
@@ -93,7 +93,7 @@ jobs:
               const prComments=await github.paginate(github.rest.issues.listComments,{...context.repo,issue_number:prNumber,per_page:100}),issueComments=await github.paginate(github.rest.issues.listComments,{...context.repo,issue_number:issueNumber,per_page:100});
               const auth=a.authorizationDecision({comments:issueComments,repo,issueNumber,title:issue.title,body:issue.body||'',labels:issue.labels,state:issue.state});
               const linkage=p.fullLinkageDecision({prBody:pr.body,prComments,issueComments,...context.repo,issueNumber,prNumber});
-              const ok=repository.full_name===repo&&def===context.payload.repository.default_branch&&/^[0-9a-f]{40}$/.test(main.commit.sha)&&pr.state==='open'&&!pr.draft&&pr.base.ref===def&&pr.head.sha===process.env.SHA&&pr.head.repo?.full_name===repo&&p.parseAgentIssue(pr.body)===issueNumber&&issue.state==='open'&&p.isImplementation(issue.labels)&&auth.ok&&auth.specHash===process.env.SPEC&&p.reviewerBlockPairPlan(pr.labels,issue.labels).ok&&linkage.ok;
+              const ok=repository.full_name===repo&&def===context.payload.repository.default_branch&&main.commit.sha===process.env.BASE&&pr.state==='open'&&!pr.draft&&pr.base.ref===def&&pr.base.sha===process.env.BASE&&pr.head.sha===process.env.SHA&&pr.head.repo?.full_name===repo&&p.parseAgentIssue(pr.body)===issueNumber&&issue.state==='open'&&p.isImplementation(issue.labels)&&auth.ok&&auth.specHash===process.env.SPEC&&p.reviewerBlockPairPlan(pr.labels,issue.labels).ok&&linkage.ok;
               return {ok,pr,issue};
             };
             const escalate=async(number,labels)=>{const plan=p.escalationMutationPlan(labels);if(!plan.ok)throw new Error(plan.reason);const foreign=a.labelNames(labels).filter(x=>!x.startsWith('agent:'));await github.rest.issues.setLabels({...context.repo,issue_number:number,labels:[...foreign,'agent:needs-human']});};
@@ -153,7 +153,7 @@ jobs:
   trusted-record:
     needs: [prepare, independent-review]
     runs-on: ubuntu-latest
-    permissions: {contents: read, issues: write, pull-requests: write}
+    permissions: {actions: read, contents: read, issues: write, pull-requests: write}
     outputs:
       pass: ${{ steps.record.outputs.pass }}
       blocked: ${{ steps.record.outputs.blocked }}
@@ -172,19 +172,21 @@ jobs:
             const prNumber=Number(process.env.PR),issueNumber=Number(process.env.ISSUE),repo=`${context.repo.owner}/${context.repo.repo}`;
             // Collect potentially paginated CI first; every mutable authority is fetched again afterwards.
             const runs=await github.paginate(github.rest.actions.listWorkflowRunsForRepo,{...context.repo,event:'pull_request',head_sha:process.env.SHA,per_page:100});
-            const matches=runs.filter(run=>run.name==='CI'&&run.event==='pull_request'&&run.status==='completed'&&run.head_sha===process.env.SHA&&run.pull_requests?.length===1&&run.pull_requests[0].number===prNumber).sort((x,y)=>y.id-x.id);
+            const matches=runs.filter(run=>run.name==='CI'&&run.event==='pull_request'&&run.head_sha===process.env.SHA&&run.pull_requests?.length===1&&run.pull_requests[0].number===prNumber).sort((x,y)=>y.id-x.id);
             if(matches.length<1)return core.setFailed('NO_WRITE: authoritative CI missing'); const ciRun=matches[0];
             await github.paginate(github.rest.actions.listJobsForWorkflowRun,{...context.repo,run_id:ciRun.id,filter:'all',per_page:100});
             const {data:freshRun}=await github.rest.actions.getWorkflowRun({...context.repo,run_id:ciRun.id});
             const freshJobs=await github.paginate(github.rest.actions.listJobsForWorkflowRun,{...context.repo,run_id:ciRun.id,filter:'all',per_page:100});
+            const finalRuns=await github.paginate(github.rest.actions.listWorkflowRunsForRepo,{...context.repo,event:'pull_request',head_sha:process.env.SHA,per_page:100});
+            const finalCi=finalRuns.filter(run=>run.name==='CI'&&run.event==='pull_request'&&run.head_sha===process.env.SHA&&run.pull_requests?.length===1&&run.pull_requests[0].number===prNumber).sort((x,y)=>y.id-x.id)[0];
             // These are the final reads before the sole write boundary.
+            const prComments=await github.paginate(github.rest.issues.listComments,{...context.repo,issue_number:prNumber,per_page:100}),issueComments=await github.paginate(github.rest.issues.listComments,{...context.repo,issue_number:issueNumber,per_page:100});
             const {data:repository}=await github.rest.repos.get(context.repo),def=repository.default_branch;
             const {data:main}=await github.rest.repos.getBranch({...context.repo,branch:def});
             const {data:pr}=await github.rest.pulls.get({...context.repo,pull_number:prNumber}),{data:issue}=await github.rest.issues.get({...context.repo,issue_number:issueNumber});
-            const prComments=await github.paginate(github.rest.issues.listComments,{...context.repo,issue_number:prNumber,per_page:100}),issueComments=await github.paginate(github.rest.issues.listComments,{...context.repo,issue_number:issueNumber,per_page:100});
             const auth=a.authorizationDecision({comments:issueComments,repo,issueNumber,title:issue.title,body:issue.body||'',labels:issue.labels,state:issue.state});
             const guardsOk=repository.full_name===repo&&def===context.payload.repository.default_branch&&main.commit.sha===process.env.BASE&&pr.state==='open'&&!pr.draft&&pr.base.ref===def&&pr.base.sha===process.env.BASE&&pr.head.sha===process.env.SHA&&pr.head.repo?.full_name===repo&&p.parseAgentIssue(pr.body)===issueNumber&&issue.state==='open'&&p.isImplementation(issue.labels)&&auth.ok&&auth.specHash===process.env.SPEC&&p.lifecycleAtAgentPr(pr.labels,issue.labels).ok&&p.fullLinkageDecision({prBody:pr.body,prComments,issueComments,...context.repo,issueNumber,prNumber}).ok;
-            const ciOk=p.authoritativeCiIdentity(freshRun,{prNumber,headSha:process.env.SHA,conclusion:'success'})&&freshRun.id===ciRun.id&&freshRun.run_attempt===ciRun.run_attempt&&p.successfulRequiredJobs(freshJobs,c.requiredCiJobs,process.env.SHA);
+            const ciOk=!!finalCi&&p.authoritativeCiIdentity(freshRun,{prNumber,headSha:process.env.SHA,conclusion:'success'})&&freshRun.id===ciRun.id&&freshRun.id===finalCi.id&&freshRun.run_attempt===ciRun.run_attempt&&freshRun.run_attempt===finalCi.run_attempt&&p.successfulRequiredJobs(freshJobs,c.requiredCiJobs,process.env.SHA);
             if(result.reviewed_sha!==process.env.SHA||!guardsOk||!ciOk)return core.setFailed('NO_WRITE: final trusted snapshot changed');
             if(p.parseTrustedMarker(prComments,'agent-codex-review',process.env.SHA)) return core.notice('Idempotent NO_WRITE');
             const safeSummary=p.redactDiagnostic(result.summary,4096).replaceAll("<!--","&lt;!--").replaceAll("-->","--&gt;");
