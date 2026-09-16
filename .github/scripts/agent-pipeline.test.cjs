@@ -902,8 +902,9 @@ test("Issue #130 production guards re-read CI attempts and mutable authorities a
   assert.doesNotMatch(record,/filter\(run=>[^\n]*status==='completed'/);
   for(const name of ["recover","gate","merge"]){
     const section=control.slice(control.indexOf(`  ${name}:`),name==="recover"?control.indexOf("  gate:"):name==="gate"?control.indexOf("  merge:"):control.length);
-    assert.match(section,/freshGuard=async[\s\S]*listJobsForWorkflowRun[\s\S]*getWorkflowRun[\s\S]*finalRuns[\s\S]*freshRuleset/);
-    assert.match(section,/finalMain\.commit\.sha===process\.env\.BASE[\s\S]*finalAuth\.specHash===spec[\s\S]*linkageOk[\s\S]*run_attempt[\s\S]*rulesOk/);
+    assert.match(section,/rulesEvidenceOk[\s\S]*freshGuard=async[\s\S]*listJobsForWorkflowRun[\s\S]*getWorkflowRun[\s\S]*finalRuns/);
+    assert.match(section,/finalMain\.commit\.sha===process\.env\.BASE[\s\S]*finalAuth\.specHash===spec[\s\S]*linkageOk[\s\S]*run_attempt[\s\S]*jobsBound/);
+    assert.doesNotMatch(section,/\/rulesets|AGENT_PUBLISH_TOKEN|freshRuleset/);
   }
   const gate=control.slice(control.indexOf("  gate:"),control.indexOf("  merge:"));
   assert.match(gate,/setState\(issueNumber[\s\S]*freshGuard\(partial\)[\s\S]*setState\(prNumber/);
@@ -927,7 +928,7 @@ test("Issue #130 evidence collection is isolated, bounded, complete, and fail cl
   assert.match(collect,/EVIDENCE_RULESET_AMBIGUOUS[\s\S]*EVIDENCE_RULESET_INVALID[\s\S]*EVIDENCE_TOO_LARGE/);
   assert.doesNotMatch(model,/AGENT_PUBLISH_TOKEN|issues: write|pull-requests: write/);
   assert.match(model,/needs: \[prepare, collect-acceptance-evidence\][\s\S]*needs\.collect-acceptance-evidence\.result == 'success'/);
-  assert.match(model,/acceptance-evidence\.json[\s\S]*BEGIN WORKFLOW-OWNED ACCEPTANCE EVIDENCE/);
+  assert.match(model,/permissions: \{actions: read, contents: read\}[\s\S]*acceptance-evidence\.json[\s\S]*sha256sum[\s\S]*BEGIN WORKFLOW-OWNED ACCEPTANCE EVIDENCE/);
 });
 
 test("Issue #130 trusted recorder re-fetches CI and all mutable guards before its only write", () => {
@@ -939,4 +940,64 @@ test("Issue #130 trusted recorder re-fetches CI and all mutable guards before it
   for(const guard of ["repos.get(context.repo)","repos.getBranch","pulls.get","issues.get","authorizationDecision","lifecycleAtAgentPr","fullLinkageDecision","successfulRequiredJobs"])
     assert.ok(record.indexOf(guard,finalReads)>finalReads&&record.indexOf(guard,finalReads)<write,`${guard} must be checked in the final snapshot`);
   assert.equal(record.indexOf("issues.createComment"),write,"the trusted marker is the first write");
+});
+
+const AsyncFunction=Object.getPrototypeOf(async function(){}).constructor;
+const controlWorkflow=()=>fs.readFileSync(".github/workflows/agent-control-plane-remediation.yml","utf8");
+const reviewerWorkflow=()=>fs.readFileSync(".github/workflows/agent-codex-review.yml","utf8");
+
+function productionFreshGuardSource(){
+  const recover=controlWorkflow().slice(controlWorkflow().indexOf("  recover:"),controlWorkflow().indexOf("  gate:"));
+  const line=recover.split("\n").find(x=>x.includes("const freshGuard=async"));
+  assert.ok(line,"production freshGuard must exist");
+  return line.trim();
+}
+
+async function executeProductionFreshGuard({newestRunChanges=false,prCloses=false,issueCloses=false,authorizationDrifts=false,linkageDrifts=false,lifecycleDrifts=false}={}){
+  const head="a".repeat(40),base="b".repeat(40),required=["agent-pipeline","quality","unit-research","api","integration-postgres","frontend","security","container-build","production-smoke"];
+  const oldRun={id:10,run_attempt:1,name:"CI",event:"pull_request",head_sha:head,pull_requests:[{number:131}],status:"completed",conclusion:"success"};
+  const newer={...oldRun,id:11,run_attempt:2,status:"in_progress",conclusion:null};let runReads=0;
+  const api={runs(){runReads++;return newestRunChanges&&runReads>1?[newer,oldRun]:[oldRun]},jobs(){return required.map((name,id)=>({id,name,status:"completed",conclusion:"success",run_attempt:1}))}};
+  const github={rest:{actions:{listWorkflowRunsForRepo(){},listJobsForWorkflowRun(){},getWorkflowRun:async()=>({data:oldRun})},issues:{listComments(){}},repos:{get:async()=>({data:{full_name:"o/r",default_branch:"main"}}),getBranch:async()=>({data:{commit:{sha:base}}})},pulls:{get:async()=>({data:{number:131,state:prCloses?"closed":"open",draft:false,head:{sha:head,repo:{full_name:"o/r"}},base:{ref:"main",sha:base},body:"Agent-Issue: #130",labels:[]}})}},paginate:async(fn)=>fn===github.rest.actions.listWorkflowRunsForRepo?api.runs():fn===github.rest.actions.listJobsForWorkflowRun?api.jobs():[]};
+  github.rest.issues.get=async({issue_number})=>({data:{number:issue_number,state:issueCloses?"closed":"open",title:"t",body:"b",labels:[]}});
+  const p={parseAgentIssue:()=>130,isImplementation:()=>true,fullLinkageDecision:()=>({ok:!linkageDrifts}),durablePrLinkDecision:()=>({ok:true,prNumber:131}),durableIssueLinkDecision:()=>({ok:true,issueNumber:130}),successfulRequiredJobs:()=>true};
+  const a={authorizationDecision:()=>({ok:!authorizationDrifts,specHash:"spec"})},c={requiredCiJobs:required},evidence={ci:{runId:10,runAttempt:1,headSha:head,jobs:api.jobs().map(x=>({...x,runAttempt:x.run_attempt}))}},context={repo:{owner:"o",repo:"r"}},processMock={env:{BASE:base}};
+  return new AsyncFunction("github","context","p","a","c","evidence","headSha","prNumber","issueNumber","repo","def","spec","rulesEvidenceOk","process","lifecycle",`${productionFreshGuardSource()}\nreturn freshGuard(lifecycle);`)(github,context,p,a,c,evidence,head,131,130,"o/r","main","spec",()=>true,processMock,()=>!lifecycleDrifts);
+}
+
+test("Issue #130 real freshGuard rejects a newer rerun appearing after paginated job collection",async()=>{
+  assert.equal((await executeProductionFreshGuard()).ok,true);
+  assert.equal((await executeProductionFreshGuard({newestRunChanges:true})).ok,false);
+});
+
+test("Issue #130 real freshGuard rejects mutable PR drift after comment pagination",async()=>{
+  assert.equal((await executeProductionFreshGuard({prCloses:true})).ok,false);
+  assert.equal((await executeProductionFreshGuard({issueCloses:true})).ok,false);
+  assert.equal((await executeProductionFreshGuard({authorizationDrifts:true})).ok,false);
+  assert.equal((await executeProductionFreshGuard({linkageDrifts:true})).ok,false);
+  assert.equal((await executeProductionFreshGuard({lifecycleDrifts:true})).ok,false);
+});
+
+test("Issue #130 real governance controller stops the paired write when authority drifts",async()=>{
+  const workflow=reviewerWorkflow(),section=workflow.slice(workflow.indexOf("  governance-escalation:"),workflow.indexOf("  independent-review:"));
+  const script=section.slice(section.indexOf("          script: |")+20).split("\n").filter(x=>x.startsWith("            ")).map(x=>x.slice(12)).join("\n");
+  const base="b".repeat(40),head="a".repeat(40),writes=[];let issueReads=0;
+  const p={parseAgentIssue:()=>130,isImplementation:()=>true,reviewerBlockPairPlan:()=>({ok:true}),fullLinkageDecision:()=>({ok:true}),escalationMutationPlan:()=>({ok:true})},a={authorizationDecision:()=>({ok:true,specHash:"spec"}),labelNames:()=>[]};
+  const github={
+    rest:{
+      repos:{get:async()=>({data:{full_name:"o/r",default_branch:"main"}}),getBranch:async()=>({data:{commit:{sha:base}}})},
+      pulls:{get:async()=>({data:{state:"open",draft:false,base:{ref:"main",sha:base},head:{sha:head,repo:{full_name:"o/r"}},body:"Agent-Issue: #130",labels:[]}})},
+      issues:{listComments(){},get:async({issue_number})=>{if(issue_number===130)issueReads++;return {data:{state:issue_number===130&&issueReads>1?"closed":"open",title:"t",body:"b",labels:[]}}},setLabels:async x=>writes.push(x),createComment:async x=>writes.push(x)}
+    },
+    paginate:async()=>[]
+  };
+  const requireMock=x=>x.includes("pipeline")?p:a,core={notice(){}},context={repo:{owner:"o",repo:"r"},payload:{repository:{default_branch:"main"}}},processMock={env:{PR:"131",ISSUE:"130",SHA:head,BASE:base,SPEC:"spec"}};
+  await new AsyncFunction("require","github","context","core","process",script)(requireMock,github,context,core,processMock);
+  assert.equal(writes.length,1,"only the PR label write may occur before the injected drift");
+  assert.equal(writes[0].issue_number,131);
+});
+
+test("Issue #130 governance escalation propagates prepared base authority",()=>{
+  const prepare=reviewerWorkflow().slice(reviewerWorkflow().indexOf("  prepare:"),reviewerWorkflow().indexOf("  governance-escalation:"));
+  assert.match(prepare,/GOVERNANCE_CHANGE[\s\S]*base_sha:pr\.base\.sha/);
 });

@@ -62,7 +62,7 @@ jobs:
             const protectedGovernance=["AGENTS.md",".github/agent-pipeline.json","docs/autonomous-development-pipeline.md","docs/adr/0003-autonomous-development-pipeline-v2.md"];
             const changed=await github.paginate(github.rest.pulls.listFiles,{...context.repo,pull_number:prNumber,per_page:100});
             if(changed.some(file=>protectedGovernance.includes(file.filename))) {
-              for(const [k,v] of Object.entries({escalation:'true',reason:'GOVERNANCE_CHANGE',pr_number:prNumber,issue_number:issueNumber,head_sha:sha,spec_hash:auth.specHash})) core.setOutput(k,v);
+              for(const [k,v] of Object.entries({escalation:'true',reason:'GOVERNANCE_CHANGE',pr_number:prNumber,issue_number:issueNumber,head_sha:sha,base_sha:pr.base.sha,spec_hash:auth.specHash})) core.setOutput(k,v);
               return;
             }
             const governance={}; for(const file of protectedGovernance) governance[file]=fs.readFileSync(file,'utf8');
@@ -87,10 +87,12 @@ jobs:
           script: |
             const p=require('./.github/scripts/agent-pipeline.cjs'),a=require('./.github/scripts/agent-autonomy.cjs'),prNumber=Number(process.env.PR),issueNumber=Number(process.env.ISSUE),repo=`${context.repo.owner}/${context.repo.repo}`;
             const readValidatedPair=async()=>{
+              // Pagination is unbounded in time.  Read every mutable authority only after it
+              // completes so the returned snapshot is the one used at the write boundary.
+              const prComments=await github.paginate(github.rest.issues.listComments,{...context.repo,issue_number:prNumber,per_page:100}),issueComments=await github.paginate(github.rest.issues.listComments,{...context.repo,issue_number:issueNumber,per_page:100});
               const {data:repository}=await github.rest.repos.get(context.repo),def=repository.default_branch;
               const {data:main}=await github.rest.repos.getBranch({...context.repo,branch:def});
               const {data:pr}=await github.rest.pulls.get({...context.repo,pull_number:prNumber}),{data:issue}=await github.rest.issues.get({...context.repo,issue_number:issueNumber});
-              const prComments=await github.paginate(github.rest.issues.listComments,{...context.repo,issue_number:prNumber,per_page:100}),issueComments=await github.paginate(github.rest.issues.listComments,{...context.repo,issue_number:issueNumber,per_page:100});
               const auth=a.authorizationDecision({comments:issueComments,repo,issueNumber,title:issue.title,body:issue.body||'',labels:issue.labels,state:issue.state});
               const linkage=p.fullLinkageDecision({prBody:pr.body,prComments,issueComments,...context.repo,issueNumber,prNumber});
               const ok=repository.full_name===repo&&def===context.payload.repository.default_branch&&main.commit.sha===process.env.BASE&&pr.state==='open'&&!pr.draft&&pr.base.ref===def&&pr.base.sha===process.env.BASE&&pr.head.sha===process.env.SHA&&pr.head.repo?.full_name===repo&&p.parseAgentIssue(pr.body)===issueNumber&&issue.state==='open'&&p.isImplementation(issue.labels)&&auth.ok&&auth.specHash===process.env.SPEC&&p.reviewerBlockPairPlan(pr.labels,issue.labels).ok&&linkage.ok;
