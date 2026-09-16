@@ -957,6 +957,13 @@ function productionFreshGuardSource(){
   return line.trim();
 }
 
+function productionMergeCompletionSource(){
+  const merge=controlWorkflow().slice(controlWorkflow().indexOf("  merge:"));
+  const line=merge.split("\n").find(x=>x.includes("const {data:merged}=await github.rest.pulls.merge"));
+  assert.ok(line,"production merge completion path must exist");
+  return line.slice(line.indexOf("const {data:merged}"));
+}
+
 async function executeProductionFreshGuard({newestRunChanges=false,prCloses=false,issueCloses=false,authorizationDrifts=false,linkageDrifts=false,lifecycleDrifts=false,rulesetDrifts=false,mixedAttempts=false}={}){
   const head="a".repeat(40),base="b".repeat(40),required=["agent-pipeline","quality","unit-research","api","integration-postgres","frontend","security","container-build","production-smoke"];
   const oldRun={id:10,run_attempt:1,name:"CI",event:"pull_request",head_sha:head,pull_requests:[{number:131}],status:"completed",conclusion:"success"};
@@ -981,8 +988,20 @@ test("Issue #130 live ruleset drift fails closed at every privileged boundary",a
     for(const write of writes) assert.match(section,new RegExp(`freshGuard\\([^\\n]+\\)[\\s\\S]{0,3000}${write.replace(".","\\.")}`),`${write} must retain live-ruleset guard`);
   }
   assert.match(merge,/freshGuard\(verified\)[\s\S]*liveRulesetValid\(\)[\s\S]*pulls\.merge/);
-  assert.match(merge,/pulls\.merge[\s\S]*liveRulesetValid\(\)[\s\S]*issues\.createComment/);
+  assert.match(merge,/pulls\.merge[\s\S]*issues\.createComment[\s\S]*liveRulesetValid\(\)/);
   assert.doesNotMatch(workflow,/Date\.now\(\)-Date\.parse\(evidence\.collectedAt\)|age<=3600000/);
+});
+
+test("Issue #130 records a successful merge before separately reporting post-merge ruleset drift",async()=>{
+  const head="a".repeat(40),mergeSha="c".repeat(40),events=[];
+  const github={rest:{pulls:{merge:async()=>{events.push("merge");return {data:{merged:true,sha:mergeSha}}}},issues:{createComment:async args=>events.push({comment:args})}}};
+  const core={setFailed:message=>events.push({failure:message})},context={repo:{owner:"o",repo:"r"}};
+  await new AsyncFunction("github","context","core","prNumber","issueNumber","headSha","liveRulesetValid",productionMergeCompletionSource())(github,context,core,134,130,head,async()=>false);
+  assert.deepEqual(events.map(event=>typeof event==="string"?event:Object.keys(event)[0]),["merge","comment","failure"]);
+  assert.equal(events[1].comment.issue_number,130);
+  assert.ok(events[1].comment.body.includes(`head \`${head}\` as \`${mergeSha}\``));
+  assert.match(events[1].comment.body,new RegExp(`agent-control-plane-merged:v1 pr=134 head=${head} merge=${mergeSha}`));
+  assert.equal(events[2].failure,"CONTROL_PLANE_POST_MERGE_RULESET_CHANGED");
 });
 
 test("Issue #130 evidence binding accepts latest successful jobs across rerun attempts",async()=>{
