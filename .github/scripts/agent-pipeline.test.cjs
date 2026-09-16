@@ -754,7 +754,7 @@ test("v2 fifth-audit wiring pins validation toolchain, seals last, and finalizes
   assert.match(seal,/runs-on: ubuntu-latest[\s\S]*generated-patch-[\s\S]*Independently seal generated patch on fresh runner/);
   assert.match(seal,/validatePatchPaths[\s\S]*fixScopeDecision[\s\S]*validatePatchModes[\s\S]*validated-checksum/);
   assert.match(fixer,/BEGIN TRUSTED GOVERNANCE[\s\S]*trusted-AGENTS\.md/);
-  assert.match(reviewer,/exact authoritative green CI missing or ambiguous/);
+  assert.match(reviewer,/newest exact authoritative CI is not green/);
   assert.match(reviewer,/Fail closed when reviewer credential is absent/);
   assert.match(reviewer,/fail-closed-finalizer:[\s\S]*uses: \.\/\.github\/workflows\/agent-review-block-escalation\.yml[\s\S]*no PASS was synthesized/);
 });
@@ -807,7 +807,7 @@ test("Issue #96 Reviewer metadata writers have compatible least-privilege grants
   };
   for(const name of ["governance-escalation","trusted-record","route-block","fail-closed-finalizer"]){
     const section=job(reviewer,name);
-    assert.match(section,/permissions: \{contents: read, issues: write, pull-requests: write\}/,name);
+    assert.match(section,name==="trusted-record"?/permissions: \{actions: read, contents: read, issues: write, pull-requests: write\}/:/permissions: \{contents: read, issues: write, pull-requests: write\}/,name);
     assert.doesNotMatch(section,/contents: write|OPENAI_API_KEY/,name);
   }
   const model=job(reviewer,"independent-review");
@@ -815,7 +815,12 @@ test("Issue #96 Reviewer metadata writers have compatible least-privilege grants
   assert.doesNotMatch(model,/issues: write|pull-requests: write|contents: write/);
   assert.match(model,/OPENAI_API_KEY/);
   assert.match(job(reviewer,"trusted-record"),/result\.reviewed_sha!==process\.env\.SHA[\s\S]*createComment[\s\S]*agent-codex-review:v2 sha=\$\{process\.env\.SHA\}/);
-  assert.match(job(reviewer,"governance-escalation"),/fullLinkageDecision[\s\S]*lifecycleAtAgentPr[\s\S]*(?:addLabels|removeLabel)[\s\S]*createComment/);
+  const governance=job(reviewer,"governance-escalation");
+  assert.match(governance,/fullLinkageDecision[\s\S]*reviewerBlockPairPlan[\s\S]*issues\.addLabels[\s\S]*issues\.removeLabel/);
+  assert.doesNotMatch(governance,/issues\.setLabels/);
+  assert.equal((governance.match(/pair=await readValidatedPair\(/g)||[]).length,4);
+  assert.match(governance,/readValidatedPair\(\{number,previous:label\}\)/);
+  assert.match(governance,/escalate\(prNumber[\s\S]*readValidatedPair\(\)[\s\S]*escalate\(issueNumber[\s\S]*readValidatedPair\(\)[\s\S]*createComment/);
   for(const name of ["route-block","fail-closed-finalizer"])
     assert.match(job(reviewer,name),/uses: \.\/\.github\/workflows\/agent-review-block-escalation\.yml/);
   const escalate=job(block,"escalate");
@@ -888,4 +893,208 @@ test("v2 classify job guard admits reusable review-block despite inherited calle
   assert.match(fixer,/buildBoundedSourceContext\(\{files:\[\.\.\.filesByPath\.values\(\)\],fixScopePaths:process\.env\.FIX_SCOPE,diagnostic:process\.env\.DIAGNOSTIC,sourceBudgetBytes:SOURCE_CONTEXT_MAX_BYTES\}\)/);
   assert.match(fixer,/SOURCE_CONTEXT_MAX_BYTES=917504/);
   assert.match(fixer,/test "\$\(stat -c%s \.codex-input\/prompt\.md\)" -lt 1048576/);
+});
+
+
+test("Issue #130 production guards re-read CI attempts and mutable authorities at write boundaries", () => {
+  const reviewer=fs.readFileSync(".github/workflows/agent-codex-review.yml","utf8");
+  const control=fs.readFileSync(".github/workflows/agent-control-plane-remediation.yml","utf8");
+  const record=reviewer.slice(reviewer.indexOf("  trusted-record:"),reviewer.indexOf("  verify-after-pass:"));
+  assert.match(record,/finalRuns[\s\S]*freshRun\.run_attempt===ciRun\.run_attempt[\s\S]*freshRun\.run_attempt===finalCi\.run_attempt/);
+  assert.doesNotMatch(record,/filter\(run=>[^\n]*status==='completed'/);
+  for(const name of ["recover","gate","merge"]){
+    const section=control.slice(control.indexOf(`  ${name}:`),name==="recover"?control.indexOf("  gate:"):name==="gate"?control.indexOf("  merge:"):control.length);
+    assert.match(section,/rulesEvidenceOk[\s\S]*freshGuard=async[\s\S]*listJobsForWorkflowRun[\s\S]*getWorkflowRun[\s\S]*finalRuns/);
+    assert.match(section,/finalMain\.commit\.sha===process\.env\.BASE[\s\S]*finalAuth\.specHash===spec[\s\S]*linkageOk[\s\S]*run_attempt[\s\S]*jobsBound/);
+    assert.match(section,/RULESET_READ_TOKEN: '\$\{\{ secrets\.AGENT_PUBLISH_TOKEN \}\}'[\s\S]*rulesetGithub=require\('@actions\/github'\)\.getOctokit\(process\.env\.RULESET_READ_TOKEN\)/);
+    assert.match(section,/liveRulesetValid[\s\S]*rulesetGithub\.paginate\('GET \/repos\/\{owner\}\/\{repo\}\/rulesets'[\s\S]*enforcement==='active'[\s\S]*rulesetGithub\.request\('GET \/repos\/\{owner\}\/\{repo\}\/rulesets\/\{ruleset_id\}'[\s\S]*rulesetValid\(live\)[\s\S]*freshGuard=async[\s\S]*jobsBound&&await liveRulesetValid/);
+  }
+  const gate=control.slice(control.indexOf("  gate:"),control.indexOf("  merge:"));
+  const merge=control.slice(control.indexOf("  merge:"));
+  assert.match(merge,/github-token: \$\{\{ secrets\.AGENT_PUBLISH_TOKEN \}\}/);
+  assert.match(merge,/agent-control-plane-merged:v1[\s\S]*merge=\$\{merged\.sha\}/);
+  assert.match(gate,/setState\(issueNumber[\s\S]*freshGuard\(partial\)[\s\S]*setState\(prNumber/);
+});
+
+test("Issue #130 production ruleset guard enforces the complete immutable contract", () => {
+  const control=fs.readFileSync(".github/workflows/agent-control-plane-remediation.yml","utf8");
+  for(const token of ["'Protect main'","target==='branch'","enforcement==='active'","bypass_actors.length===0","strict_required_status_checks_policy===true","gate?.integration_id===actionsIntegrationId","typed('deletion').length===1","typed('non_fast_forward').length===1","typed('pull_request').length===1"]) assert.ok(control.includes(token),token);
+  assert.match(control,/requiredContexts=\[\.\.\.required,'agent-verified-gate'\]\.sort\(\)/);
+  assert.match(control,/JSON\.stringify\(configured\)===JSON\.stringify\(requiredContexts\)/);
+});
+
+test("Issue #130 evidence collection is isolated, bounded, complete, and fail closed before the model", () => {
+  const workflow=fs.readFileSync(".github/workflows/agent-control-plane-remediation.yml","utf8");
+  const collect=workflow.slice(workflow.indexOf("  collect-acceptance-evidence:"),workflow.indexOf("  independent-review:"));
+  const model=workflow.slice(workflow.indexOf("  independent-review:"),workflow.indexOf("  recover:"));
+  assert.match(collect,/github-token: \$\{\{ secrets\.AGENT_PUBLISH_TOKEN \}\}/);
+  assert.doesNotMatch(collect,/actions\/checkout|OPENAI_API_KEY|permission-profile/);
+  assert.match(collect,/required=\['agent-pipeline','quality','unit-research','api','integration-postgres','frontend','security','container-build','production-smoke'\]/);
+  for(const proof of [/run_attempt/,/bypass_actors/,/strict_required_status_checks_policy/,/agent-verified-gate/,/typed\('deletion'\)/,/typed\('non_fast_forward'\)/,/typed\('pull_request'\)/]) assert.match(collect,proof);
+  assert.match(collect,/EVIDENCE_RULESET_AMBIGUOUS[\s\S]*EVIDENCE_RULESET_INVALID[\s\S]*EVIDENCE_TOO_LARGE/);
+  assert.doesNotMatch(model,/AGENT_PUBLISH_TOKEN|issues: write|pull-requests: write/);
+  assert.match(model,/needs: \[prepare, collect-acceptance-evidence\][\s\S]*needs\.collect-acceptance-evidence\.result == 'success'/);
+  assert.match(model,/permissions: \{actions: read, contents: read\}[\s\S]*acceptance-evidence\.json[\s\S]*sha256sum[\s\S]*BEGIN WORKFLOW-OWNED ACCEPTANCE EVIDENCE/);
+});
+
+test("Issue #130 trusted recorder re-fetches CI and all mutable guards before its only write", () => {
+  const workflow=fs.readFileSync(".github/workflows/agent-codex-review.yml","utf8");
+  const record=workflow.slice(workflow.indexOf("  trusted-record:"),workflow.indexOf("  verify-after-pass:"));
+  const finalReads=record.indexOf("These are the final reads before the sole write boundary");
+  const write=record.indexOf("issues.createComment",finalReads);
+  assert.ok(finalReads>record.indexOf("listJobsForWorkflowRun"));
+  for(const guard of ["repos.get(context.repo)","repos.getBranch","pulls.get","issues.get","authorizationDecision","lifecycleAtAgentPr","fullLinkageDecision","successfulRequiredJobs"])
+    assert.ok(record.indexOf(guard,finalReads)>finalReads&&record.indexOf(guard,finalReads)<write,`${guard} must be checked in the final snapshot`);
+  assert.equal(record.indexOf("issues.createComment"),write,"the trusted marker is the first write");
+});
+
+const AsyncFunction=Object.getPrototypeOf(async function(){}).constructor;
+const controlWorkflow=()=>fs.readFileSync(".github/workflows/agent-control-plane-remediation.yml","utf8");
+const reviewerWorkflow=()=>fs.readFileSync(".github/workflows/agent-codex-review.yml","utf8");
+
+function productionFreshGuardSource(){
+  const recover=controlWorkflow().slice(controlWorkflow().indexOf("  recover:"),controlWorkflow().indexOf("  gate:"));
+  const line=recover.split("\n").find(x=>x.includes("const freshGuard=async"));
+  assert.ok(line,"production freshGuard must exist");
+  return line.trim();
+}
+
+function productionMergeCompletionSource(){
+  const merge=controlWorkflow().slice(controlWorkflow().indexOf("  merge:"));
+  const line=merge.split("\n").find(x=>x.includes("const {data:merged}=await github.rest.pulls.merge"));
+  assert.ok(line,"production merge completion path must exist");
+  return line.slice(line.indexOf("const {data:merged}"));
+}
+
+function productionLiveRulesetValidSource(jobName="recover"){
+  const workflow=controlWorkflow(),start=workflow.indexOf(`  ${jobName}:`),end=jobName==="recover"?workflow.indexOf("  gate:"):jobName==="gate"?workflow.indexOf("  merge:"):workflow.length;
+  const line=workflow.slice(start,end).split("\n").find(x=>x.includes("const liveRulesetValid=async"));
+  assert.ok(line,`production ${jobName} liveRulesetValid must exist`);
+  return line.trim();
+}
+
+async function executeProductionFreshGuard({newestRunChanges=false,prCloses=false,issueCloses=false,authorizationDrifts=false,linkageDrifts=false,lifecycleDrifts=false,rulesetDrifts=false,rulesetDriftsAfterMutableReads=false,mixedAttempts=false}={}){
+  const head="a".repeat(40),base="b".repeat(40),required=["agent-pipeline","quality","unit-research","api","integration-postgres","frontend","security","container-build","production-smoke"];
+  const oldRun={id:10,run_attempt:1,name:"CI",event:"pull_request",head_sha:head,pull_requests:[{number:131}],status:"completed",conclusion:"success"};
+  const newer={...oldRun,id:11,run_attempt:2,status:"in_progress",conclusion:null};let runReads=0;
+  const api={runs(){runReads++;return newestRunChanges&&runReads>1?[newer,oldRun]:[oldRun]},jobs(){return required.map((name,id)=>({id,name,status:"completed",conclusion:"success",run_attempt:mixedAttempts&&id%2===0?2:1}))}};
+  const github={rest:{actions:{listWorkflowRunsForRepo(){},listJobsForWorkflowRun(){},getWorkflowRun:async()=>({data:oldRun})},issues:{listComments(){}},repos:{get:async()=>({data:{full_name:"o/r",default_branch:"main"}}),getBranch:async()=>({data:{commit:{sha:base}}})},pulls:{get:async()=>({data:{number:131,state:prCloses?"closed":"open",draft:false,head:{sha:head,repo:{full_name:"o/r"}},base:{ref:"main",sha:base},body:"Agent-Issue: #130",labels:[]}})}},paginate:async(fn)=>fn===github.rest.actions.listWorkflowRunsForRepo?api.runs():fn===github.rest.actions.listJobsForWorkflowRun?api.jobs():[]};
+  let mutableReads=0;github.rest.issues.get=async({issue_number})=>{mutableReads++;return {data:{number:issue_number,state:issueCloses?"closed":"open",title:"t",body:"b",labels:[]}}};
+  const p={parseAgentIssue:()=>130,isImplementation:()=>true,fullLinkageDecision:()=>({ok:!linkageDrifts}),durablePrLinkDecision:()=>({ok:true,prNumber:131}),durableIssueLinkDecision:()=>({ok:true,issueNumber:130}),successfulRequiredJobs:()=>true};
+  const a={authorizationDecision:()=>({ok:!authorizationDrifts,specHash:"spec"})},c={requiredCiJobs:required},evidence={ci:{runId:10,runAttempt:1,headSha:head,jobs:api.jobs().map(x=>({...x,runAttempt:x.run_attempt}))}},context={repo:{owner:"o",repo:"r"}},processMock={env:{BASE:base}};
+  return new AsyncFunction("github","context","p","a","c","evidence","headSha","prNumber","issueNumber","repo","def","spec","rulesEvidenceOk","liveRulesetValid","process","lifecycle",`${productionFreshGuardSource()}\nreturn freshGuard(lifecycle);`)(github,context,p,a,c,evidence,head,131,130,"o/r","main","spec",()=>true,async()=>!rulesetDrifts&&!(rulesetDriftsAfterMutableReads&&mutableReads>0),processMock,()=>!lifecycleDrifts);
+}
+
+
+
+test("Issue #130 live ruleset drift fails closed at every privileged boundary",async()=>{
+  assert.equal((await executeProductionFreshGuard({rulesetDrifts:true})).ok,false);
+  assert.equal((await executeProductionFreshGuard({rulesetDriftsAfterMutableReads:true})).ok,false,"ruleset drift after mutable reads must be observed by the final guard");
+  const workflow=controlWorkflow();
+  const recover=workflow.slice(workflow.indexOf("  recover:"),workflow.indexOf("  gate:"));
+  const gate=workflow.slice(workflow.indexOf("  gate:"),workflow.indexOf("  merge:"));
+  const merge=workflow.slice(workflow.indexOf("  merge:"));
+  for(const [section,writes] of [[recover,["issues.createComment","setState"]],[gate,["setState","issues.createComment","createCommitStatus"]]]){
+    for(const write of writes) assert.match(section,new RegExp(`freshGuard\\([^\\n]+\\)[\\s\\S]{0,3000}${write.replace(".","\\.")}`),`${write} must retain live-ruleset guard`);
+  }
+  assert.match(merge,/freshGuard\(verified\)[\s\S]*liveRulesetValid\(\)[\s\S]*pulls\.merge/);
+  assert.match(merge,/pulls\.merge[\s\S]*issues\.createComment[\s\S]*liveRulesetValid\(\)/);
+  for(const section of [recover,gate]) assert.match(section,/const setState=async[^\n]*issues\.get[^\n]*liveRulesetValid\(\)[^\n]*issues\.setLabels/,"label reconciliation must finish before the final live ruleset guard and write");
+  assert.doesNotMatch(workflow,/Date\.now\(\)-Date\.parse\(evidence\.collectedAt\)|age<=3600000/);
+});
+
+test("Issue #130 live ruleset reads use the maintenance client and ignore inactive namesakes",async()=>{
+  for(const jobName of ["recover","gate","merge"]){
+    const calls=[],active={id:7,name:"Protect main",target:"branch",enforcement:"active"},inactive={id:8,name:"Protect main",target:"branch",enforcement:"evaluate"};
+    const rulesetGithub={paginate:async(route)=>{calls.push(["paginate",route]);return [inactive,active]},request:async(route,args)=>{calls.push(["request",route,args.ruleset_id]);return {data:active}}};
+    const result=await new AsyncFunction("rulesetGithub","context","rulesetValid",`${productionLiveRulesetValidSource(jobName)}\nreturn liveRulesetValid();`)(rulesetGithub,{repo:{owner:"o",repo:"r"}},ruleset=>ruleset===active);
+    assert.equal(result,true,`${jobName} accepts the sole active ruleset`);
+    assert.deepEqual(calls.map(x=>x[0]),["paginate","request"]);
+    assert.equal(calls[1][2],7);
+  }
+});
+
+test("Issue #130 records a successful merge before separately reporting post-merge ruleset drift",async()=>{
+  const head="a".repeat(40),mergeSha="c".repeat(40),events=[];
+  const github={rest:{pulls:{merge:async()=>{events.push("merge");return {data:{merged:true,sha:mergeSha}}}},issues:{createComment:async args=>events.push({comment:args})}}};
+  const core={setFailed:message=>events.push({failure:message})},context={repo:{owner:"o",repo:"r"}};
+  await new AsyncFunction("github","context","core","prNumber","issueNumber","headSha","liveRulesetValid",productionMergeCompletionSource())(github,context,core,134,130,head,async()=>false);
+  assert.deepEqual(events.map(event=>typeof event==="string"?event:Object.keys(event)[0]),["merge","comment","failure"]);
+  assert.equal(events[1].comment.issue_number,130);
+  assert.ok(events[1].comment.body.includes(`head \`${head}\` as \`${mergeSha}\``));
+  assert.match(events[1].comment.body,new RegExp(`agent-control-plane-merged:v1 pr=134 head=${head} merge=${mergeSha}`));
+  assert.equal(events[2].failure,"CONTROL_PLANE_POST_MERGE_RULESET_CHANGED");
+});
+
+test("Issue #130 evidence binding accepts latest successful jobs across rerun attempts",async()=>{
+  assert.equal((await executeProductionFreshGuard({mixedAttempts:true})).ok,true);
+});
+test("Issue #130 real freshGuard rejects a newer rerun appearing after paginated job collection",async()=>{
+  assert.equal((await executeProductionFreshGuard()).ok,true);
+  assert.equal((await executeProductionFreshGuard({newestRunChanges:true})).ok,false);
+});
+
+test("Issue #130 real freshGuard rejects mutable PR drift after comment pagination",async()=>{
+  assert.equal((await executeProductionFreshGuard({prCloses:true})).ok,false);
+  assert.equal((await executeProductionFreshGuard({issueCloses:true})).ok,false);
+  assert.equal((await executeProductionFreshGuard({authorizationDrifts:true})).ok,false);
+  assert.equal((await executeProductionFreshGuard({linkageDrifts:true})).ok,false);
+  assert.equal((await executeProductionFreshGuard({lifecycleDrifts:true})).ok,false);
+});
+
+test("Issue #130 durable review marker rejects a rerun started after every other mutable read",async()=>{
+  const workflow=reviewerWorkflow(),record=workflow.slice(workflow.indexOf("  trusted-record:"),workflow.indexOf("  verify-after-pass:"));
+  const lines=record.split("\n"),start=lines.findIndex(x=>x.includes("const writeRuns=await")),end=lines.findIndex((x,i)=>i>start&&x.includes("await github.rest.issues.createComment"));
+  assert.ok(start>=0&&end>start,"production final CI boundary must exist");
+  const source=lines.slice(start,end+1).map(x=>x.trim()).join("\n"),head="a".repeat(40),writes=[],failures=[];
+  const accepted={id:10,run_attempt:1,name:"CI",event:"pull_request",head_sha:head,pull_requests:[{number:134}],status:"completed",conclusion:"success"};
+  const rerun={...accepted,id:11,run_attempt:2,status:"in_progress",conclusion:null};
+  const github={rest:{actions:{listWorkflowRunsForRepo(){}},issues:{createComment:async args=>writes.push(args)}},paginate:async()=>[rerun,accepted]};
+  const core={setFailed:message=>failures.push(message)},context={repo:{owner:"o",repo:"r"}},processMock={env:{SHA:head}};
+  await new AsyncFunction("github","context","process","prNumber","freshRun","core","safeSummary","result",source)(github,context,processMock,134,accepted,core,"safe",{result:"PASS"});
+  assert.deepEqual(writes,[]);
+  assert.deepEqual(failures,["NO_WRITE: newest CI changed at review record boundary"]);
+  assert.doesNotMatch(source,/status:\s*['"]completed['"]/,"the final workflow-run request must be unfiltered");
+});
+
+test("Issue #130 real governance controller stops the paired write when authority drifts",async()=>{
+  const workflow=reviewerWorkflow(),section=workflow.slice(workflow.indexOf("  governance-escalation:"),workflow.indexOf("  independent-review:"));
+  const script=section.slice(section.indexOf("          script: |")+20).split("\n").filter(x=>x.startsWith("            ")).map(x=>x.slice(12)).join("\n");
+  const base="b".repeat(40),head="a".repeat(40),writes=[];let issueReads=0,prReads=0;
+  const p={STATES:["agent:pr","agent:needs-human"],labelNames:value=>value,parseAgentIssue:()=>130,isImplementation:()=>true,reviewerBlockPairPlan:()=>({ok:true}),fullLinkageDecision:()=>({ok:true}),escalationMutationPlan:()=>({ok:true,add:["agent:needs-human"],remove:["agent:pr"]})},a={authorizationDecision:()=>({ok:true,specHash:"spec"})};
+  const github={
+    rest:{
+      repos:{get:async()=>({data:{full_name:"o/r",default_branch:"main"}}),getBranch:async()=>({data:{commit:{sha:base}}})},
+      pulls:{get:async()=>({data:{state:"open",draft:false,base:{ref:"main",sha:base},head:{sha:head,repo:{full_name:"o/r"}},body:"Agent-Issue: #130",labels:++prReads>1?["agent:pr","agent:needs-human"]:["agent:pr"]}})},
+      issues:{listComments(){},get:async({issue_number})=>{if(issue_number===130)issueReads++;return {data:{state:issue_number===130&&issueReads>1?"closed":"open",title:"t",body:"b",labels:["agent:pr"]}}},addLabels:async x=>writes.push(x),removeLabel:async x=>writes.push(x),createComment:async x=>writes.push(x)}
+    },
+    paginate:async()=>[]
+  };
+  const requireMock=x=>x.includes("pipeline")?p:a,core={notice(){}},context={repo:{owner:"o",repo:"r"},payload:{repository:{default_branch:"main"}}},processMock={env:{PR:"131",ISSUE:"130",SHA:head,BASE:base,SPEC:"spec"}};
+  await new AsyncFunction("require","github","context","core","process",script)(requireMock,github,context,core,processMock);
+  assert.equal(writes.length,1,"only the PR label write may occur before the injected drift");
+  assert.equal(writes[0].issue_number,131);
+});
+
+test("Issue #130 governance escalation preserves a non-agent label added after the final read",async()=>{
+  const workflow=reviewerWorkflow(),section=workflow.slice(workflow.indexOf("  governance-escalation:"),workflow.indexOf("  independent-review:"));
+  const script=section.slice(section.indexOf("          script: |")+20).split("\n").filter(x=>x.startsWith("            ")).map(x=>x.slice(12)).join("\n");
+  const base="b".repeat(40),head="a".repeat(40),writes=[],states=new Map([[131,new Set(["agent:pr"])],[130,new Set(["type:implementation","agent:pr"])] ]);let injected=false;
+  const labels=number=>[...states.get(number)];
+  const p={...pipeline,parseAgentIssue:()=>130,fullLinkageDecision:()=>({ok:true})},a={authorizationDecision:()=>({ok:true,specHash:"spec"})};
+  const github={rest:{repos:{get:async()=>({data:{full_name:"o/r",default_branch:"main"}}),getBranch:async()=>({data:{commit:{sha:base}}})},pulls:{get:async()=>({data:{state:"open",draft:false,base:{ref:"main",sha:base},head:{sha:head,repo:{full_name:"o/r"}},body:"Agent-Issue: #130",labels:labels(131)}})},issues:{listComments(){},get:async({issue_number})=>({data:{state:"open",title:"t",body:"b",labels:labels(issue_number)}}),addLabels:async args=>{if(args.issue_number===131&&!injected){states.get(131).add("triage:concurrent");injected=true;}for(const label of args.labels)states.get(args.issue_number).add(label);writes.push(args);},removeLabel:async args=>{states.get(args.issue_number).delete(args.name);writes.push(args);},createComment:async()=>{}}},paginate:async()=>[]};
+  const requireMock=x=>x.includes("pipeline")?p:a,core={notice(){}},context={repo:{owner:"o",repo:"r"},payload:{repository:{default_branch:"main"}}},processMock={env:{PR:"131",ISSUE:"130",SHA:head,BASE:base,SPEC:"spec"}};
+  await new AsyncFunction("require","github","context","core","process",script)(requireMock,github,context,core,processMock);
+  assert.ok(states.get(131).has("triage:concurrent"));
+  assert.deepEqual(labels(131).filter(x=>x.startsWith("agent:")),["agent:needs-human"]);
+  assert.deepEqual(labels(130).filter(x=>x.startsWith("agent:")),["agent:needs-human"]);
+  assert.deepEqual(writes.slice(0,4).map(write=>[write.issue_number,write.labels?.[0]||write.name]),[
+    [131,"agent:needs-human"],[131,"agent:pr"],[130,"agent:needs-human"],[130,"agent:pr"],
+  ],"each object must pass through the targeted add/remove transition");
+  assert.ok(writes.every(write=>!("labels" in write)||write.labels.every(label=>label.startsWith("agent:"))),"writes target lifecycle labels only");
+});
+
+test("Issue #130 governance escalation propagates prepared base authority",()=>{
+  const prepare=reviewerWorkflow().slice(reviewerWorkflow().indexOf("  prepare:"),reviewerWorkflow().indexOf("  governance-escalation:"));
+  assert.match(prepare,/GOVERNANCE_CHANGE[\s\S]*base_sha:pr\.base\.sha/);
 });

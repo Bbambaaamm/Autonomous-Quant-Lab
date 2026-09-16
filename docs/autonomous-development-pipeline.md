@@ -32,7 +32,9 @@ any stale/ambiguous/conflicting condition → agent:needs-human
       handles bounded eligible fixes/transient infrastructure retries, and
       regenerates all SHA-bound evidence after every head change.
 - [ ] The newest authoritative exact-SHA CI run must have all nine required jobs
-      green and the independent Codex Reviewer must PASS the same SHA.
+      green and the independent Codex Reviewer must PASS the same SHA. Immediately before
+      persisting that PASS marker, the trusted recorder performs one last unfiltered
+      newest-run/attempt read so a newly started rerun fails closed.
 - [ ] `agent-verified-gate` then revalidates current authorization, linkage,
       current-main ancestry, CI, review and verification evidence. The trusted
       merge controller performs a final fresh TOCTOU evaluation and merges only
@@ -287,7 +289,7 @@ event), and the isolated Draft-to-Ready GraphQL mutation. All read-only `gh api`
 Issue/PR linkage, label, lifecycle, CI-routing and audit metadata use the job-scoped `GITHUB_TOKEN`.
 Model/generate/validate/seal jobs never receive the publish token. Immediately before Draft-to-Ready,
 the publisher freshly revalidates the exact head, current Issue authorization, two-sided durable
-linkage and exact `agent:pr` lifecycle, then verifies a fresh non-draft postcondition after mutation.
+linkage and exact `agent:pr` lifecycle, then verifies a fresh non-draft postcondition after mutation. Governance escalation uses targeted lifecycle-label additions and removals rather than replacing the complete label set, so unrelated labels added concurrently remain intact. Its removal guard accepts only the expected temporary old-plus-`agent:needs-human` pair on the object being changed; a fresh pair read must show exactly one intended lifecycle label per object after each completed mutation.
 
 ### Trusted policy, classification, and fix scope
 
