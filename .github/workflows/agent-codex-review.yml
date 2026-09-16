@@ -98,11 +98,11 @@ jobs:
               const ok=repository.full_name===repo&&def===context.payload.repository.default_branch&&main.commit.sha===process.env.BASE&&pr.state==='open'&&!pr.draft&&pr.base.ref===def&&pr.base.sha===process.env.BASE&&pr.head.sha===process.env.SHA&&pr.head.repo?.full_name===repo&&p.parseAgentIssue(pr.body)===issueNumber&&issue.state==='open'&&p.isImplementation(issue.labels)&&auth.ok&&auth.specHash===process.env.SPEC&&p.reviewerBlockPairPlan(pr.labels,issue.labels).ok&&linkage.ok;
               return {ok,pr,issue};
             };
-            const escalate=async(number,labels)=>{const {data:fresh}=await github.rest.issues.get({...context.repo,issue_number:number});const plan=p.escalationMutationPlan(fresh.labels);if(!plan.ok)throw new Error(plan.reason);const foreign=a.labelNames(fresh.labels).filter(x=>!x.startsWith('agent:'));await github.rest.issues.setLabels({...context.repo,issue_number:number,labels:[...foreign,'agent:needs-human']});};
+            const escalate=async(number,pair)=>{const labels=number===prNumber?pair.pr.labels:pair.issue.labels;let plan=p.escalationMutationPlan(labels);if(!plan.ok)throw new Error(plan.reason);if(plan.add.length)await github.rest.issues.addLabels({...context.repo,issue_number:number,labels:plan.add});for(const label of plan.remove){pair=await readValidatedPair();if(!pair.ok)return false;const current=number===prNumber?pair.pr.labels:pair.issue.labels;plan=p.escalationMutationPlan(current);if(!plan.ok)throw new Error(plan.reason);if(plan.remove.includes(label))await github.rest.issues.removeLabel({...context.repo,issue_number:number,name:label});}return true;};
             let pair=await readValidatedPair(); if(!pair.ok)return core.notice('STALE_GOVERNANCE_NO_WRITE');
-            await escalate(prNumber,pair.pr.labels);
+            if(!await escalate(prNumber,pair))return core.notice('STALE_GOVERNANCE_STOP_DURING_FIRST_WRITE');
             pair=await readValidatedPair(); if(!pair.ok)return core.notice('STALE_GOVERNANCE_STOP_AFTER_FIRST_WRITE');
-            await escalate(issueNumber,pair.issue.labels);
+            if(!await escalate(issueNumber,pair))return core.notice('STALE_GOVERNANCE_STOP_DURING_SECOND_WRITE');
             pair=await readValidatedPair(); if(!pair.ok)return core.notice('STALE_GOVERNANCE_NO_COMMENT');
             await github.rest.issues.createComment({...context.repo,issue_number:prNumber,body:`Trusted governance changed at exact SHA ${process.env.SHA}; independent automation stopped for human review.`});
 

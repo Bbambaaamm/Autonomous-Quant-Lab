@@ -816,8 +816,9 @@ test("Issue #96 Reviewer metadata writers have compatible least-privilege grants
   assert.match(model,/OPENAI_API_KEY/);
   assert.match(job(reviewer,"trusted-record"),/result\.reviewed_sha!==process\.env\.SHA[\s\S]*createComment[\s\S]*agent-codex-review:v2 sha=\$\{process\.env\.SHA\}/);
   const governance=job(reviewer,"governance-escalation");
-  assert.match(governance,/fullLinkageDecision[\s\S]*reviewerBlockPairPlan[\s\S]*setLabels/);
-  assert.equal((governance.match(/pair=await readValidatedPair\(\)/g)||[]).length,3);
+  assert.match(governance,/fullLinkageDecision[\s\S]*reviewerBlockPairPlan[\s\S]*issues\.addLabels[\s\S]*issues\.removeLabel/);
+  assert.doesNotMatch(governance,/issues\.setLabels/);
+  assert.equal((governance.match(/pair=await readValidatedPair\(\)/g)||[]).length,4);
   assert.match(governance,/escalate\(prNumber[\s\S]*readValidatedPair\(\)[\s\S]*escalate\(issueNumber[\s\S]*readValidatedPair\(\)[\s\S]*createComment/);
   for(const name of ["route-block","fail-closed-finalizer"])
     assert.match(job(reviewer,name),/uses: \.\/\.github\/workflows\/agent-review-block-escalation\.yml/);
@@ -1059,12 +1060,12 @@ test("Issue #130 real governance controller stops the paired write when authorit
   const workflow=reviewerWorkflow(),section=workflow.slice(workflow.indexOf("  governance-escalation:"),workflow.indexOf("  independent-review:"));
   const script=section.slice(section.indexOf("          script: |")+20).split("\n").filter(x=>x.startsWith("            ")).map(x=>x.slice(12)).join("\n");
   const base="b".repeat(40),head="a".repeat(40),writes=[];let issueReads=0;
-  const p={parseAgentIssue:()=>130,isImplementation:()=>true,reviewerBlockPairPlan:()=>({ok:true}),fullLinkageDecision:()=>({ok:true}),escalationMutationPlan:()=>({ok:true})},a={authorizationDecision:()=>({ok:true,specHash:"spec"}),labelNames:()=>[]};
+  const p={parseAgentIssue:()=>130,isImplementation:()=>true,reviewerBlockPairPlan:()=>({ok:true}),fullLinkageDecision:()=>({ok:true}),escalationMutationPlan:()=>({ok:true,add:["agent:needs-human"],remove:["agent:pr"]})},a={authorizationDecision:()=>({ok:true,specHash:"spec"}),labelNames:()=>[]};
   const github={
     rest:{
       repos:{get:async()=>({data:{full_name:"o/r",default_branch:"main"}}),getBranch:async()=>({data:{commit:{sha:base}}})},
       pulls:{get:async()=>({data:{state:"open",draft:false,base:{ref:"main",sha:base},head:{sha:head,repo:{full_name:"o/r"}},body:"Agent-Issue: #130",labels:[]}})},
-      issues:{listComments(){},get:async({issue_number})=>{if(issue_number===130)issueReads++;return {data:{state:issue_number===130&&issueReads>1?"closed":"open",title:"t",body:"b",labels:[]}}},setLabels:async x=>writes.push(x),createComment:async x=>writes.push(x)}
+      issues:{listComments(){},get:async({issue_number})=>{if(issue_number===130)issueReads++;return {data:{state:issue_number===130&&issueReads>1?"closed":"open",title:"t",body:"b",labels:[]}}},addLabels:async x=>writes.push(x),removeLabel:async x=>writes.push(x),createComment:async x=>writes.push(x)}
     },
     paginate:async()=>[]
   };
@@ -1074,17 +1075,18 @@ test("Issue #130 real governance controller stops the paired write when authorit
   assert.equal(writes[0].issue_number,131);
 });
 
-test("Issue #130 governance escalation preserves a non-agent label added between reads",async()=>{
+test("Issue #130 governance escalation preserves a non-agent label added after the final read",async()=>{
   const workflow=reviewerWorkflow(),section=workflow.slice(workflow.indexOf("  governance-escalation:"),workflow.indexOf("  independent-review:"));
   const script=section.slice(section.indexOf("          script: |")+20).split("\n").filter(x=>x.startsWith("            ")).map(x=>x.slice(12)).join("\n");
-  const base="b".repeat(40),head="a".repeat(40),writes=[];let prReads=0;
-  const labels=number=>number===131?(++prReads===1?["agent:pr"]:["agent:pr","triage:concurrent"]):["type:implementation","agent:pr"];
-  const p={parseAgentIssue:()=>130,isImplementation:()=>true,reviewerBlockPairPlan:()=>({ok:true}),fullLinkageDecision:()=>({ok:true}),escalationMutationPlan:()=>({ok:true})},a={authorizationDecision:()=>({ok:true,specHash:"spec"}),labelNames:value=>value.map(x=>typeof x==="string"?x:x.name)};
-  const github={rest:{repos:{get:async()=>({data:{full_name:"o/r",default_branch:"main"}}),getBranch:async()=>({data:{commit:{sha:base}}})},pulls:{get:async()=>({data:{state:"open",draft:false,base:{ref:"main",sha:base},head:{sha:head,repo:{full_name:"o/r"}},body:"Agent-Issue: #130",labels:labels(131)}})},issues:{listComments(){},get:async({issue_number})=>({data:{state:"open",title:"t",body:"b",labels:labels(issue_number)}}),setLabels:async args=>writes.push(args),createComment:async()=>{}}},paginate:async()=>[]};
+  const base="b".repeat(40),head="a".repeat(40),writes=[],states=new Map([[131,new Set(["agent:pr"])],[130,new Set(["type:implementation","agent:pr"])] ]);let injected=false;
+  const labels=number=>[...states.get(number)];
+  const p={STATES:["agent:pr","agent:verified","agent:needs-human"],parseAgentIssue:()=>130,isImplementation:()=>true,reviewerBlockPairPlan:()=>({ok:true}),fullLinkageDecision:()=>({ok:true}),escalationMutationPlan:value=>{const names=new Set(value);return {ok:true,add:names.has("agent:needs-human")?[]:["agent:needs-human"],remove:[...names].filter(x=>x==="agent:pr"||x==="agent:verified")};}},a={authorizationDecision:()=>({ok:true,specHash:"spec"}),labelNames:value=>value.map(x=>typeof x==="string"?x:x.name)};
+  const github={rest:{repos:{get:async()=>({data:{full_name:"o/r",default_branch:"main"}}),getBranch:async()=>({data:{commit:{sha:base}}})},pulls:{get:async()=>({data:{state:"open",draft:false,base:{ref:"main",sha:base},head:{sha:head,repo:{full_name:"o/r"}},body:"Agent-Issue: #130",labels:labels(131)}})},issues:{listComments(){},get:async({issue_number})=>({data:{state:"open",title:"t",body:"b",labels:labels(issue_number)}}),addLabels:async args=>{if(args.issue_number===131&&!injected){states.get(131).add("triage:concurrent");injected=true;}for(const label of args.labels)states.get(args.issue_number).add(label);writes.push(args);},removeLabel:async args=>{states.get(args.issue_number).delete(args.name);writes.push(args);},createComment:async()=>{}}},paginate:async()=>[]};
   const requireMock=x=>x.includes("pipeline")?p:a,core={notice(){}},context={repo:{owner:"o",repo:"r"},payload:{repository:{default_branch:"main"}}},processMock={env:{PR:"131",ISSUE:"130",SHA:head,BASE:base,SPEC:"spec"}};
   await new AsyncFunction("require","github","context","core","process",script)(requireMock,github,context,core,processMock);
-  assert.ok(writes[0].labels.includes("triage:concurrent"));
-  assert.deepEqual(writes[0].labels.filter(x=>x.startsWith("agent:")),["agent:needs-human"]);
+  assert.ok(states.get(131).has("triage:concurrent"));
+  assert.deepEqual(labels(131).filter(x=>x.startsWith("agent:")),["agent:needs-human"]);
+  assert.ok(writes.every(write=>!("labels" in write)||write.labels.every(label=>label.startsWith("agent:"))),"writes target lifecycle labels only");
 });
 
 test("Issue #130 governance escalation propagates prepared base authority",()=>{

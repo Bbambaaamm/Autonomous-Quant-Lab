@@ -52,6 +52,8 @@ The request may bind either an existing `agent:pr` pair or an `agent:needs-human
 
 Lifecycle writes use a single `setLabels` call per object after re-reading that object's latest labels and performing a fresh state-plan check, preserving concurrently added non-agent labels and writing exactly one target `agent:*` state. Pair-level partial completion remains retryable because subsequent evaluations accept only the explicitly allowed previous/next transition and re-fetch before continuing.
 
+The Codex governance-escalation path does not replace the complete label set: it adds `agent:needs-human` and removes only the prior `agent:*` lifecycle label with targeted API operations. It revalidates the complete authorization, linkage, exact-head, base, and pair lifecycle guard between those writes, and therefore cannot discard a non-agent label added after its last read.
+
 A separate read-only Codex job receives the candidate as untrusted data and the default-branch governance as its trusted baseline. It must return `PASS`, zero findings, scope consistency, no test/governance weakening, and unchanged paper-only/live-trading safety. The model job receives no GitHub write credential.
 
 Acceptance evidence is collected without checking out candidate code by a secret-bearing job that uses `AGENT_PUBLISH_TOKEN`. Its digest binds the independent review and later jobs to the exact repository, Issue, PR, head/base SHAs, CI jobs, and then-current ruleset contract. The artifact is workflow-owned audit and binding evidence, not proof that mutable repository policy is still current: its age is never used as a substitute for a live ruleset read. Candidate code is never executed with the maintenance credential.
