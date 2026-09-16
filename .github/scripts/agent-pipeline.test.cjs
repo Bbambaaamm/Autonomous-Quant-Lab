@@ -4,7 +4,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
-const { execFileSync } = require("node:child_process");
+const { execFileSync, spawnSync } = require("node:child_process");
 const test = require("node:test");
 const pipeline = require("./agent-pipeline.cjs");
 const agentConfig = require("../agent-pipeline.json");
@@ -811,7 +811,7 @@ test("Issue #96 Reviewer metadata writers have compatible least-privilege grants
     assert.doesNotMatch(section,/contents: write|OPENAI_API_KEY/,name);
   }
   const model=job(reviewer,"independent-review");
-  assert.match(model,/permissions: \{contents: read\}/);
+  assert.match(model,/permissions: \{actions: read, contents: read, issues: read, pull-requests: read\}/);
   assert.doesNotMatch(model,/issues: write|pull-requests: write|contents: write/);
   assert.match(model,/OPENAI_API_KEY/);
   assert.match(job(reviewer,"trusted-record"),/result\.reviewed_sha!==process\.env\.SHA[\s\S]*createComment[\s\S]*agent-codex-review:v2 sha=\$\{process\.env\.SHA\}/);
@@ -1058,7 +1058,7 @@ test("Issue #130 durable review marker rejects a rerun started after every other
 });
 
 test("Issue #130 real governance controller stops the paired write when authority drifts",async()=>{
-  const workflow=reviewerWorkflow(),section=workflow.slice(workflow.indexOf("  governance-escalation:"),workflow.indexOf("  independent-review:"));
+  const workflow=reviewerWorkflow(),section=workflow.slice(workflow.indexOf("  governance-escalation:"),workflow.indexOf("  collect-review-evidence:"));
   const script=section.slice(section.indexOf("          script: |")+20).split("\n").filter(x=>x.startsWith("            ")).map(x=>x.slice(12)).join("\n");
   const base="b".repeat(40),head="a".repeat(40),writes=[];let issueReads=0,prReads=0;
   const p={STATES:["agent:pr","agent:needs-human"],labelNames:value=>value,parseAgentIssue:()=>130,isImplementation:()=>true,reviewerBlockPairPlan:()=>({ok:true}),fullLinkageDecision:()=>({ok:true}),escalationMutationPlan:()=>({ok:true,add:["agent:needs-human"],remove:["agent:pr"]})},a={authorizationDecision:()=>({ok:true,specHash:"spec"})};
@@ -1077,7 +1077,7 @@ test("Issue #130 real governance controller stops the paired write when authorit
 });
 
 test("Issue #130 governance escalation preserves a non-agent label added after the final read",async()=>{
-  const workflow=reviewerWorkflow(),section=workflow.slice(workflow.indexOf("  governance-escalation:"),workflow.indexOf("  independent-review:"));
+  const workflow=reviewerWorkflow(),section=workflow.slice(workflow.indexOf("  governance-escalation:"),workflow.indexOf("  collect-review-evidence:"));
   const script=section.slice(section.indexOf("          script: |")+20).split("\n").filter(x=>x.startsWith("            ")).map(x=>x.slice(12)).join("\n");
   const base="b".repeat(40),head="a".repeat(40),writes=[],states=new Map([[131,new Set(["agent:pr"])],[130,new Set(["type:implementation","agent:pr"])] ]);let injected=false;
   const labels=number=>[...states.get(number)];
@@ -1097,4 +1097,32 @@ test("Issue #130 governance escalation preserves a non-agent label added after t
 test("Issue #130 governance escalation propagates prepared base authority",()=>{
   const prepare=reviewerWorkflow().slice(reviewerWorkflow().indexOf("  prepare:"),reviewerWorkflow().indexOf("  governance-escalation:"));
   assert.match(prepare,/GOVERNANCE_CHANGE[\s\S]*base_sha:pr\.base\.sha/);
+});
+
+
+test("Issue #128 reviewer evidence is source-bound, bounded, sealed, and credential-isolated",()=>{
+  const workflow=reviewerWorkflow(),prepare=workflow.slice(workflow.indexOf("  prepare:"),workflow.indexOf("  governance-escalation:")),collect=workflow.slice(workflow.indexOf("  collect-review-evidence:"),workflow.indexOf("  independent-review:")),model=workflow.slice(workflow.indexOf("  independent-review:"),workflow.indexOf("  trusted-record:"));
+  assert.match(prepare,/main\.commit\.sha!==sourceSha[\s\S]*pr\.base\.sha!==sourceSha[\s\S]*triggering CI is no longer newest/);
+  assert.match(collect,/permissions: \{actions: read, contents: read, issues: read, pull-requests: read\}[\s\S]*EVIDENCE_FAIL_CLOSED[\s\S]*65536[\s\S]*196608[\s\S]*agent-review-seal-v1/);
+  assert.match(model,/Verify immutable evidence and prompt binding[\s\S]*SEALED_INPUT_BINDING_INVALID[\s\S]*Independent bounded review[\s\S]*Post-model freshness and sealed-input validation[\s\S]*POST_MODEL_SOURCE_SCOPE_AUTHORIZATION_OR_CI_DRIFT/);
+  assert.doesNotMatch(collect,/OPENAI_API_KEY|AGENT_PUBLISH_TOKEN/);
+  assert.doesNotMatch(model,/AGENT_PUBLISH_TOKEN|issues: write|pull-requests: write/);
+});
+
+test("Issue #128 executes the production seal verifier and rejects binding or evidence tampering",()=>{
+  const workflow=reviewerWorkflow(),model=workflow.slice(workflow.indexOf("  independent-review:"),workflow.indexOf("  trusted-record:"));
+  const source=model.slice(model.indexOf("          node - <<'NODE'")+25,model.indexOf("          NODE")).split("\n").map(x=>x.startsWith("          ")?x.slice(10):x).join("\n");
+  const dir=fs.mkdtempSync(path.join(os.tmpdir(),"review-seal-")),input=path.join(dir,".codex-input");fs.mkdirSync(input);
+  const files={"authorized-scope.json":"scope","ci-evidence.json":"evidence","review-prompt.md":"prompt","trusted-governance.json":"governance"},crypto=require("crypto"),hash=x=>crypto.createHash("sha256").update(x).digest("hex");for(const [name,body] of Object.entries(files))fs.writeFileSync(path.join(input,name),body);
+  const env={...process.env,GITHUB_REPOSITORY:"o/r",ISSUE:"128",PR:"135",HEAD_SHA:"a".repeat(40),BASE_SHA:"b".repeat(40),SOURCE_SHA:"b".repeat(40),SPEC:"spec",CI_RUN:"7",CI_ATTEMPT:"2",OPENAI_API_KEY:"must-not-leak"};
+  const bindings={repository:"o/r",issueNumber:128,prNumber:135,headSha:env.HEAD_SHA,baseSha:env.BASE_SHA,sourceSha:env.SOURCE_SHA,specHash:"spec",ciRunId:7,ciRunAttempt:2};fs.writeFileSync(path.join(input,"seal.json"),JSON.stringify({schema:"agent-review-seal-v1",bindings,files:Object.fromEntries(Object.entries(files).map(([n,b])=>[n,hash(b)]))}));
+  let run=spawnSync(process.execPath,["-e",source],{cwd:dir,env,encoding:"utf8"});assert.equal(run.status,0,run.stderr);assert.doesNotMatch(run.stdout+run.stderr,/must-not-leak/);
+  fs.appendFileSync(path.join(input,"ci-evidence.json"),"tamper");run=spawnSync(process.execPath,["-e",source],{cwd:dir,env,encoding:"utf8"});assert.notEqual(run.status,0);assert.match(run.stderr,/SEALED_INPUT_BINDING_INVALID/);
+  fs.writeFileSync(path.join(input,"ci-evidence.json"),files["ci-evidence.json"]);env.CI_ATTEMPT="3";run=spawnSync(process.execPath,["-e",source],{cwd:dir,env,encoding:"utf8"});assert.notEqual(run.status,0);assert.match(run.stderr,/SEALED_INPUT_BINDING_INVALID/);fs.rmSync(dir,{recursive:true,force:true});
+});
+
+test("Issue #128 final trusted record binds source, authorization, newest CI, jobs, and sealed evidence",()=>{
+  const record=reviewerWorkflow().slice(reviewerWorkflow().indexOf("  trusted-record:"),reviewerWorkflow().indexOf("  verify-after-pass:"));
+  for(const proof of [/sealed evidence binding changed/,/main\.commit\.sha===process\.env\.SOURCE/,/auth\.specHash===process\.env\.SPEC/,/ciRun\.id===Number\(process\.env\.CI_RUN\)/,/successfulRequiredJobs\(freshJobs/,/newest CI changed at review record boundary/])assert.match(record,proof);
+  assert.ok(record.indexOf("sealed evidence binding changed")<record.indexOf("issues.createComment"));
 });
