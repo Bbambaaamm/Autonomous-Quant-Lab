@@ -98,7 +98,7 @@ jobs:
               const ok=repository.full_name===repo&&def===context.payload.repository.default_branch&&main.commit.sha===process.env.BASE&&pr.state==='open'&&!pr.draft&&pr.base.ref===def&&pr.base.sha===process.env.BASE&&pr.head.sha===process.env.SHA&&pr.head.repo?.full_name===repo&&p.parseAgentIssue(pr.body)===issueNumber&&issue.state==='open'&&p.isImplementation(issue.labels)&&auth.ok&&auth.specHash===process.env.SPEC&&p.reviewerBlockPairPlan(pr.labels,issue.labels).ok&&linkage.ok;
               return {ok,pr,issue};
             };
-            const escalate=async(number,labels)=>{const plan=p.escalationMutationPlan(labels);if(!plan.ok)throw new Error(plan.reason);const foreign=a.labelNames(labels).filter(x=>!x.startsWith('agent:'));await github.rest.issues.setLabels({...context.repo,issue_number:number,labels:[...foreign,'agent:needs-human']});};
+            const escalate=async(number,labels)=>{const {data:fresh}=await github.rest.issues.get({...context.repo,issue_number:number});const plan=p.escalationMutationPlan(fresh.labels);if(!plan.ok)throw new Error(plan.reason);const foreign=a.labelNames(fresh.labels).filter(x=>!x.startsWith('agent:'));await github.rest.issues.setLabels({...context.repo,issue_number:number,labels:[...foreign,'agent:needs-human']});};
             let pair=await readValidatedPair(); if(!pair.ok)return core.notice('STALE_GOVERNANCE_NO_WRITE');
             await escalate(prNumber,pair.pr.labels);
             pair=await readValidatedPair(); if(!pair.ok)return core.notice('STALE_GOVERNANCE_STOP_AFTER_FIRST_WRITE');

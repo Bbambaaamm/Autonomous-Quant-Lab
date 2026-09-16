@@ -904,8 +904,8 @@ test("Issue #130 production guards re-read CI attempts and mutable authorities a
     const section=control.slice(control.indexOf(`  ${name}:`),name==="recover"?control.indexOf("  gate:"):name==="gate"?control.indexOf("  merge:"):control.length);
     assert.match(section,/rulesEvidenceOk[\s\S]*freshGuard=async[\s\S]*listJobsForWorkflowRun[\s\S]*getWorkflowRun[\s\S]*finalRuns/);
     assert.match(section,/finalMain\.commit\.sha===process\.env\.BASE[\s\S]*finalAuth\.specHash===spec[\s\S]*linkageOk[\s\S]*run_attempt[\s\S]*jobsBound/);
-    assert.match(section,/liveRulesetValid[\s\S]*GET \/repos\/\{owner\}\/\{repo\}\/rulesets[\s\S]*rulesetValid\(live\)[\s\S]*freshGuard=async[\s\S]*await liveRulesetValid/);
-    if(name!=="merge") assert.doesNotMatch(section,/AGENT_PUBLISH_TOKEN/);
+    assert.match(section,/RULESET_READ_TOKEN: '\$\{\{ secrets\.AGENT_PUBLISH_TOKEN \}\}'[\s\S]*rulesetGithub=require\('@actions\/github'\)\.getOctokit\(process\.env\.RULESET_READ_TOKEN\)/);
+    assert.match(section,/liveRulesetValid[\s\S]*rulesetGithub\.paginate\('GET \/repos\/\{owner\}\/\{repo\}\/rulesets'[\s\S]*enforcement==='active'[\s\S]*rulesetGithub\.request\('GET \/repos\/\{owner\}\/\{repo\}\/rulesets\/\{ruleset_id\}'[\s\S]*rulesetValid\(live\)[\s\S]*freshGuard=async[\s\S]*await liveRulesetValid/);
   }
   const gate=control.slice(control.indexOf("  gate:"),control.indexOf("  merge:"));
   const merge=control.slice(control.indexOf("  merge:"));
@@ -964,6 +964,13 @@ function productionMergeCompletionSource(){
   return line.slice(line.indexOf("const {data:merged}"));
 }
 
+function productionLiveRulesetValidSource(jobName="recover"){
+  const workflow=controlWorkflow(),start=workflow.indexOf(`  ${jobName}:`),end=jobName==="recover"?workflow.indexOf("  gate:"):jobName==="gate"?workflow.indexOf("  merge:"):workflow.length;
+  const line=workflow.slice(start,end).split("\n").find(x=>x.includes("const liveRulesetValid=async"));
+  assert.ok(line,`production ${jobName} liveRulesetValid must exist`);
+  return line.trim();
+}
+
 async function executeProductionFreshGuard({newestRunChanges=false,prCloses=false,issueCloses=false,authorizationDrifts=false,linkageDrifts=false,lifecycleDrifts=false,rulesetDrifts=false,mixedAttempts=false}={}){
   const head="a".repeat(40),base="b".repeat(40),required=["agent-pipeline","quality","unit-research","api","integration-postgres","frontend","security","container-build","production-smoke"];
   const oldRun={id:10,run_attempt:1,name:"CI",event:"pull_request",head_sha:head,pull_requests:[{number:131}],status:"completed",conclusion:"success"};
@@ -990,6 +997,17 @@ test("Issue #130 live ruleset drift fails closed at every privileged boundary",a
   assert.match(merge,/freshGuard\(verified\)[\s\S]*liveRulesetValid\(\)[\s\S]*pulls\.merge/);
   assert.match(merge,/pulls\.merge[\s\S]*issues\.createComment[\s\S]*liveRulesetValid\(\)/);
   assert.doesNotMatch(workflow,/Date\.now\(\)-Date\.parse\(evidence\.collectedAt\)|age<=3600000/);
+});
+
+test("Issue #130 live ruleset reads use the maintenance client and ignore inactive namesakes",async()=>{
+  for(const jobName of ["recover","gate","merge"]){
+    const calls=[],active={id:7,name:"Protect main",target:"branch",enforcement:"active"},inactive={id:8,name:"Protect main",target:"branch",enforcement:"evaluate"};
+    const rulesetGithub={paginate:async(route)=>{calls.push(["paginate",route]);return [inactive,active]},request:async(route,args)=>{calls.push(["request",route,args.ruleset_id]);return {data:active}}};
+    const result=await new AsyncFunction("rulesetGithub","context","rulesetValid",`${productionLiveRulesetValidSource(jobName)}\nreturn liveRulesetValid();`)(rulesetGithub,{repo:{owner:"o",repo:"r"}},ruleset=>ruleset===active);
+    assert.equal(result,true,`${jobName} accepts the sole active ruleset`);
+    assert.deepEqual(calls.map(x=>x[0]),["paginate","request"]);
+    assert.equal(calls[1][2],7);
+  }
 });
 
 test("Issue #130 records a successful merge before separately reporting post-merge ruleset drift",async()=>{
@@ -1037,6 +1055,19 @@ test("Issue #130 real governance controller stops the paired write when authorit
   await new AsyncFunction("require","github","context","core","process",script)(requireMock,github,context,core,processMock);
   assert.equal(writes.length,1,"only the PR label write may occur before the injected drift");
   assert.equal(writes[0].issue_number,131);
+});
+
+test("Issue #130 governance escalation preserves a non-agent label added between reads",async()=>{
+  const workflow=reviewerWorkflow(),section=workflow.slice(workflow.indexOf("  governance-escalation:"),workflow.indexOf("  independent-review:"));
+  const script=section.slice(section.indexOf("          script: |")+20).split("\n").filter(x=>x.startsWith("            ")).map(x=>x.slice(12)).join("\n");
+  const base="b".repeat(40),head="a".repeat(40),writes=[];let prReads=0;
+  const labels=number=>number===131?(++prReads===1?["agent:pr"]:["agent:pr","triage:concurrent"]):["type:implementation","agent:pr"];
+  const p={parseAgentIssue:()=>130,isImplementation:()=>true,reviewerBlockPairPlan:()=>({ok:true}),fullLinkageDecision:()=>({ok:true}),escalationMutationPlan:()=>({ok:true})},a={authorizationDecision:()=>({ok:true,specHash:"spec"}),labelNames:value=>value.map(x=>typeof x==="string"?x:x.name)};
+  const github={rest:{repos:{get:async()=>({data:{full_name:"o/r",default_branch:"main"}}),getBranch:async()=>({data:{commit:{sha:base}}})},pulls:{get:async()=>({data:{state:"open",draft:false,base:{ref:"main",sha:base},head:{sha:head,repo:{full_name:"o/r"}},body:"Agent-Issue: #130",labels:labels(131)}})},issues:{listComments(){},get:async({issue_number})=>({data:{state:"open",title:"t",body:"b",labels:labels(issue_number)}}),setLabels:async args=>writes.push(args),createComment:async()=>{}}},paginate:async()=>[]};
+  const requireMock=x=>x.includes("pipeline")?p:a,core={notice(){}},context={repo:{owner:"o",repo:"r"},payload:{repository:{default_branch:"main"}}},processMock={env:{PR:"131",ISSUE:"130",SHA:head,BASE:base,SPEC:"spec"}};
+  await new AsyncFunction("require","github","context","core","process",script)(requireMock,github,context,core,processMock);
+  assert.ok(writes[0].labels.includes("triage:concurrent"));
+  assert.deepEqual(writes[0].labels.filter(x=>x.startsWith("agent:")),["agent:needs-human"]);
 });
 
 test("Issue #130 governance escalation propagates prepared base authority",()=>{
