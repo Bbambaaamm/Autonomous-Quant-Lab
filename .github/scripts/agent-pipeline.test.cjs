@@ -368,10 +368,15 @@ test("v2 denylist blokuje governance, dependency a execution cesty", () => {
     assert.equal(pipeline.validatePatchPaths([path], config), false, path);
 });
 
-test("v2 independent PASS je exact-SHA a nenahrazuje human review", () => {
-  const comments = [{ user: { login: "github-actions[bot]" }, body: "<!-- agent-codex-review:v2 sha=abc result=PASS -->" }];
-  assert.equal(pipeline.independentReviewSatisfied(comments, "abc"), true);
-  assert.equal(pipeline.independentReviewSatisfied(comments, "new"), false);
+test("v3 independent review requires one exact CI-bound PASS", () => {
+  const binding={repo:"o/r",issueNumber:142,prNumber:143,headSha:"a".repeat(40),specHash:"b".repeat(64),ciRunId:99,ciRunAttempt:2};
+  const marker=(result="PASS")=>`<!-- agent-codex-review:v3 repo=o/r issue=142 pr=143 sha=${binding.headSha} spec=${binding.specHash} ci=99 attempt=2 result=${result} -->`;
+  const bot=body=>({user:{login:"github-actions[bot]"},body});
+  assert.equal(pipeline.independentReviewSatisfied([bot(marker())],binding),true);
+  assert.equal(pipeline.independentReviewSatisfied([bot(marker()),bot(marker())],binding),false,"duplicate PASS is ambiguous");
+  assert.equal(pipeline.independentReviewSatisfied([bot(marker()),bot(marker("BLOCK"))],binding),false,"PASS+BLOCK conflicts");
+  assert.equal(pipeline.independentReviewSatisfied([bot(`<!-- agent-codex-review:v2 sha=${binding.headSha} result=PASS -->`)],binding),false,"legacy evidence is rejected");
+  assert.equal(pipeline.independentReviewSatisfied([bot(marker())],{...binding,ciRunAttempt:3}),false,"rerun needs fresh review");
   const base = { workflowName: "CI", workflowConclusion: "success", headSha: "abc", prHeadSha: "abc", open: true, correctBase: true, draft: false, issueIsImplementation: true, statesReconciliable: true, needsHuman: false, requiredJobsSuccessful: true };
   assert.equal(pipeline.verificationDecision({ ...base, reviewSatisfied: false, independentReviewSatisfied: true }).reason, "EXACT_SHA_REVIEW_MISSING");
   assert.equal(pipeline.verificationDecision({ ...base, reviewSatisfied: true, independentReviewSatisfied: false }).reason, "INDEPENDENT_REVIEW_PASS_MISSING");
@@ -814,7 +819,7 @@ test("Issue #96 Reviewer metadata writers have compatible least-privilege grants
   assert.match(model,/permissions: \{contents: read\}/);
   assert.doesNotMatch(model,/issues: write|pull-requests: write|contents: write/);
   assert.match(model,/OPENAI_API_KEY/);
-  assert.match(job(reviewer,"trusted-record"),/result\.reviewed_sha!==process\.env\.SHA[\s\S]*createComment[\s\S]*agent-codex-review:v2 sha=\$\{process\.env\.SHA\}/);
+  assert.match(job(reviewer,"trusted-record"),/result\.reviewed_sha!==process\.env\.SHA[\s\S]*createComment[\s\S]*agent-codex-review:v3 repo=\$\{repo\}[\s\S]*attempt=\$\{freshRun\.run_attempt\}/);
   const governance=job(reviewer,"governance-escalation");
   assert.match(governance,/fullLinkageDecision[\s\S]*reviewerBlockPairPlan[\s\S]*issues\.addLabels[\s\S]*issues\.removeLabel/);
   assert.doesNotMatch(governance,/issues\.setLabels/);
@@ -1176,4 +1181,21 @@ test("Issue #130 governance escalation preserves a non-agent label added after t
 test("Issue #130 governance escalation propagates prepared base authority",()=>{
   const prepare=reviewerWorkflow().slice(reviewerWorkflow().indexOf("  prepare:"),reviewerWorkflow().indexOf("  governance-escalation:"));
   assert.match(prepare,/GOVERNANCE_CHANGE[\s\S]*base_sha:pr\.base\.sha/);
+});
+
+test("newest exact-head CI selection is unfiltered and active or cancelled runs shadow green",()=>{
+  const sha="c".repeat(40),base={name:"CI",event:"pull_request",head_sha:sha,pull_requests:[{number:142}],run_attempt:1};
+  for(const latest of [{status:"queued",conclusion:null},{status:"in_progress",conclusion:null},{status:"completed",conclusion:"cancelled"},{status:"completed",conclusion:"failure"}]){
+    const green={...base,id:10,status:"completed",conclusion:"success"},newer={...base,...latest,id:11};
+    assert.equal(pipeline.newestAuthoritativeCiRun([green,newer],{workflowName:"CI",headSha:sha,prNumber:142}).id,11);
+    assert.deepEqual(pipeline.authoritativeCiRunCandidates([green,newer],{workflowName:"CI",headSha:sha,prNumber:142}),[]);
+  }
+});
+
+test("authoritative config and docs declare strict v3 exact-CI review",()=>{
+  const config=require("../agent-pipeline.json"),docs=fs.readFileSync("docs/autonomous-development-pipeline.md","utf8");
+  assert.equal(config.v2.reviewMarker,"agent-codex-review:v3");
+  assert.deepEqual(config.v2.reviewEvidenceBinding,["repository","issue","pr","sha","spec","ciRunId","ciRunAttempt","result"]);
+  assert.match(docs,/authoritative review format is `agent-codex-review:v3`/);
+  assert.match(docs,/Legacy v2 and SHA-only review markers are audit history only/);
 });

@@ -87,19 +87,21 @@ function authorizationDecision({ comments, repo, issueNumber, title, body, label
   return { ok: true, specHash, actor: parsed.actor, runId: parsed.runId, commentId: parsed.commentId };
 }
 
-function verificationMarker({ repo, issueNumber, prNumber, headSha, specHash, ciRunId }) {
+function verificationMarker({ repo, issueNumber, prNumber, headSha, specHash, ciRunId, ciRunAttempt }) {
   if (!/^[0-9a-f]{40}$/.test(headSha || "")) throw new Error("INVALID_HEAD_SHA");
   if (!/^[0-9a-f]{64}$/.test(specHash || "")) throw new Error("INVALID_SPEC_HASH");
   if (!Number.isSafeInteger(Number(ciRunId)) || Number(ciRunId) < 1) throw new Error("INVALID_CI_RUN_ID");
-  return `<!-- ${VERIFIED_MARKER} repo=${repo} issue=${Number(issueNumber)} pr=${Number(prNumber)} sha=${headSha} spec=${specHash} ci=${Number(ciRunId)} -->`;
+  if (!Number.isSafeInteger(Number(ciRunAttempt)) || Number(ciRunAttempt) < 1) throw new Error("INVALID_CI_RUN_ATTEMPT");
+  return `<!-- ${VERIFIED_MARKER} repo=${repo} issue=${Number(issueNumber)} pr=${Number(prNumber)} sha=${headSha} spec=${specHash} ci=${Number(ciRunId)} attempt=${Number(ciRunAttempt)} -->`;
 }
 
-function exactVerificationEvidence(comments = [], { repo, issueNumber, prNumber, headSha, specHash }) {
-  const prefix = `<!-- ${VERIFIED_MARKER} repo=${repo} issue=${Number(issueNumber)} pr=${Number(prNumber)} sha=${headSha} spec=${specHash} ci=`;
+function exactVerificationEvidence(comments = [], { repo, issueNumber, prNumber, headSha, specHash, ciRunId, ciRunAttempt }) {
+  if (!Number.isSafeInteger(Number(ciRunId)) || Number(ciRunId) < 1 || !Number.isSafeInteger(Number(ciRunAttempt)) || Number(ciRunAttempt) < 1) return false;
+  const exact = `<!-- ${VERIFIED_MARKER} repo=${repo} issue=${Number(issueNumber)} pr=${Number(prNumber)} sha=${headSha} spec=${specHash} ci=${Number(ciRunId)} attempt=${Number(ciRunAttempt)} -->`;
   const matches = comments
     .filter((comment) => comment.user?.login === "github-actions[bot]")
     .flatMap((comment) => String(comment.body || "").split("\n"))
-    .filter((line) => line.startsWith(prefix) && /^<!-- agent-verified:v2 .* ci=[1-9][0-9]* -->$/.test(line));
+    .filter((line) => line === exact);
   return matches.length === 1;
 }
 

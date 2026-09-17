@@ -129,16 +129,27 @@ function reviewSatisfied({ reviewDecision, reviews = [], acknowledgements = [], 
   return nativeExactShaApproval || hasExactShaReviewAcknowledgement(acknowledgements, headSha);
 }
 
-function parseTrustedMarker(comments, kind, headSha) {
-  const prefix = `<!-- ${kind}:v2 sha=${headSha} `;
-  const matches = comments.filter((comment) => comment.user?.login === "github-actions[bot]")
-    .flatMap((comment) => (comment.body || "").split("\n"))
-    .filter((line) => line.startsWith(prefix) && line.endsWith(" -->"));
-  return matches.length === 1 ? matches[0] : null;
+function parseTrustedMarker(comments, kind, binding) {
+  if (typeof binding === "string") { // Legacy parser retained only for non-strict callers.
+    const prefix = `<!-- ${kind}:v2 sha=${binding} `;
+    const matches = trustedCommentLines(comments).filter((line) => line.startsWith(prefix) && line.endsWith(" -->"));
+    return matches.length === 1 ? matches[0] : null;
+  }
+  const { repo, issueNumber, prNumber, headSha, specHash, ciRunId, ciRunAttempt } = binding || {};
+  if (!Number.isSafeInteger(Number(ciRunId)) || Number(ciRunId) < 1 ||
+      !Number.isSafeInteger(Number(ciRunAttempt)) || Number(ciRunAttempt) < 1) return null;
+  const marker = new RegExp(`^<!-- ${kind}:v3 repo=${escapeRegex(repo)} issue=${Number(issueNumber)} pr=${Number(prNumber)} sha=${escapeRegex(headSha)} spec=${escapeRegex(specHash)} ci=${Number(ciRunId)} attempt=${Number(ciRunAttempt)} result=(PASS|BLOCK) -->$`);
+  const matches = trustedCommentLines(comments).map((line) => ({ line, match: marker.exec(line) })).filter(({ match }) => match);
+  if (matches.length > 1) return { ambiguous: true };
+  return matches.length === 1 ? { marker: matches[0].line, result: matches[0].match[1] } : null;
 }
 
-function independentReviewSatisfied(comments, headSha) {
-  return parseTrustedMarker(comments, "agent-codex-review", headSha)?.includes(" result=PASS ") === true;
+function escapeRegex(value) {
+  return String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function independentReviewSatisfied(comments, binding) {
+  return parseTrustedMarker(comments, "agent-codex-review", binding)?.result === "PASS";
 }
 
 const FAILURE_CLASSES = ["lint-format", "typecheck", "unit-test", "api-test", "integration-postgres",
@@ -590,7 +601,7 @@ function successfulRequiredJobs(jobs, requiredNames, headSha) {
 function newestAuthoritativeCiRun(runs, { workflowName, headSha, prNumber }) {
   return runs
     .filter((run) => run.name === workflowName && run.event === "pull_request" &&
-      run.status === "completed" && run.head_sha === headSha &&
+      run.head_sha === headSha &&
       run.pull_requests?.length === 1 && run.pull_requests[0].number === prNumber)
     .sort((left, right) => right.id - left.id)[0] ?? null;
 }

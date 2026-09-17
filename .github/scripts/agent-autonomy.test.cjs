@@ -51,10 +51,10 @@ test("verification requires exact current evidence and no human escalation", () 
 });
 
 test("new SHA cannot reuse old verification or gate evidence", () => {
-  const marker = a.verificationMarker({ repo, issueNumber: 42, prNumber: 77, headSha: "a".repeat(40), specHash: spec, ciRunId: 999 });
+  const marker = a.verificationMarker({ repo, issueNumber: 42, prNumber: 77, headSha: "a".repeat(40), specHash: spec, ciRunId: 999, ciRunAttempt: 2 });
   const comments = [{ user: { login: "github-actions[bot]" }, body: marker }];
-  assert.equal(a.exactVerificationEvidence(comments, { repo, issueNumber: 42, prNumber: 77, headSha: "a".repeat(40), specHash: spec }), true);
-  assert.equal(a.exactVerificationEvidence(comments, { repo, issueNumber: 42, prNumber: 77, headSha: "b".repeat(40), specHash: spec }), false);
+  assert.equal(a.exactVerificationEvidence(comments, { repo, issueNumber: 42, prNumber: 77, headSha: "a".repeat(40), specHash: spec, ciRunId: 999, ciRunAttempt: 2 }), true);
+  assert.equal(a.exactVerificationEvidence(comments, { repo, issueNumber: 42, prNumber: 77, headSha: "b".repeat(40), specHash: spec, ciRunId: 999, ciRunAttempt: 2 }), false);
 });
 
 test("gate and merge are exact-head fail-closed decisions", () => {
@@ -181,8 +181,8 @@ test("Issue #112 verifier keeps metadata on GITHUB_TOKEN and reconciliation on p
   assert.match(gateJob, /secrets:\n\s+AGENT_PUBLISH_TOKEN:/);
 
   const headSha = "a".repeat(40);
-  const marker = a.verificationMarker({ repo, issueNumber: 112, prNumber: 114, headSha, specHash: spec, ciRunId: 1234 });
-  const args = { repo, issueNumber: 112, prNumber: 114, headSha, specHash: spec };
+  const marker = a.verificationMarker({ repo, issueNumber: 112, prNumber: 114, headSha, specHash: spec, ciRunId: 1234, ciRunAttempt: 3 });
+  const args = { repo, issueNumber: 112, prNumber: 114, headSha, specHash: spec, ciRunId: 1234, ciRunAttempt: 3 };
   assert.equal(a.exactVerificationEvidence([{ user: { login: "github-actions[bot]" }, body: marker }], args), true);
   assert.equal(a.exactVerificationEvidence([{ user: { login: "Bbambaaamm" }, body: marker }], args), false);
 });
@@ -230,4 +230,14 @@ test("Issue #116 Draft-to-Ready decisions fail closed for every required failure
   assert.deepEqual(a.draftReadyPostconditionDecision({ draft: false }), { ok: true });
   assert.equal(a.draftReadyPostconditionDecision({ draft: true }).reason, "READY_DRAFT_POSTCONDITION_FAILED");
   assert.equal(a.draftReadyPostconditionDecision({ draft: undefined }).reason, "READY_DRAFT_POSTCONDITION_FAILED");
+});
+
+test("verification evidence is bound to CI run and numeric attempt", () => {
+  const binding={repo:"o/r",issueNumber:142,prNumber:143,headSha:"a".repeat(40),specHash:"b".repeat(64),ciRunId:500,ciRunAttempt:2};
+  const marker=a.verificationMarker(binding),comments=[{user:{login:"github-actions[bot]"},body:marker}];
+  assert.equal(a.exactVerificationEvidence(comments,binding),true);
+  assert.equal(a.exactVerificationEvidence(comments,{...binding,ciRunId:501}),false);
+  assert.equal(a.exactVerificationEvidence(comments,{...binding,ciRunAttempt:3}),false);
+  assert.equal(a.exactVerificationEvidence(comments,{...binding,ciRunAttempt:undefined}),false);
+  assert.throws(()=>a.verificationMarker({...binding,ciRunAttempt:"bad"}),/INVALID_CI_RUN_ATTEMPT/);
 });
