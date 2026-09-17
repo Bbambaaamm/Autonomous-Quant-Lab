@@ -107,9 +107,10 @@ jobs:
               }
             }
 
-            const runs=await github.paginate(github.rest.actions.listWorkflowRunsForRepo,{...context.repo,event:'pull_request',head_sha:requestedSha,status:'completed',per_page:100});
+            const runs=await github.paginate(github.rest.actions.listWorkflowRunsForRepo,{...context.repo,event:'pull_request',head_sha:requestedSha,per_page:100});
             const run=p.newestAuthoritativeCiRun(runs,{workflowName:'CI',headSha:requestedSha,prNumber});
             const jobs=run?await github.paginate(github.rest.actions.listJobsForWorkflowRun,{...context.repo,run_id:run.id,filter:'all',per_page:100}):null;
+            const reviewBinding=run?{repo,issueNumber:state.issueNumber,prNumber,headSha:requestedSha,specHash:state.auth.specHash,ciRunId:run.id,ciRunAttempt:run.run_attempt}:null;
             if(!run||run.conclusion!=='success'||!p.authoritativeCiIdentity(run,{prNumber,headSha:requestedSha,conclusion:'success'})||!p.successfulRequiredJobs(jobs,c.requiredCiJobs,requestedSha)){
               core.notice('NO_WRITE: exact authoritative green CI missing');return;
             }
@@ -123,25 +124,28 @@ jobs:
               needsHuman:[...a.labelNames(state.pr.labels),...a.labelNames(state.issue.labels)].includes('agent:needs-human'),
               currentMain:state.comparison.data.behind_by===0,
               requiredCiSuccessful:p.successfulRequiredJobs(jobs,c.requiredCiJobs,requestedSha),
-              independentReviewPass:p.independentReviewSatisfied(state.prComments,requestedSha),
+              independentReviewPass:!!reviewBinding&&p.independentReviewSatisfied(state.prComments,reviewBinding),
             });
             if(!initial.ok){core.notice(`NO_WRITE:${initial.reason}`);return;}
 
             state=await load();
+            const freshRuns=await github.paginate(github.rest.actions.listWorkflowRunsForRepo,{...context.repo,event:'pull_request',head_sha:requestedSha,per_page:100}),freshRun=p.newestAuthoritativeCiRun(freshRuns,{workflowName:'CI',headSha:requestedSha,prNumber});
             const freshLifecycle=a.verificationLifecyclePlan(state.pr.labels,state.issue.labels);
-            if(!state.ok||state.pr.head.sha!==requestedSha||!state.auth.ok||!state.linkage.ok||!freshLifecycle.ok||state.comparison.data.behind_by!==0||!p.independentReviewSatisfied(state.prComments,requestedSha)||!p.successfulRequiredJobs(jobs,c.requiredCiJobs,requestedSha)) return core.setFailed('VERIFICATION_TOCTOU_REJECTED');
+            if(!state.ok||!freshRun||freshRun.id!==run.id||freshRun.run_attempt!==run.run_attempt||freshRun.status!=='completed'||freshRun.conclusion!=='success'||state.pr.head.sha!==requestedSha||!state.auth.ok||!state.linkage.ok||!freshLifecycle.ok||state.comparison.data.behind_by!==0||!reviewBinding||!p.independentReviewSatisfied(state.prComments,reviewBinding)||!p.successfulRequiredJobs(jobs,c.requiredCiJobs,requestedSha)) return core.setFailed('VERIFICATION_TOCTOU_REJECTED');
             const setVerified=async(number,item)=>{
               const names=a.labelNames(item.labels),preserved=names.filter(label=>!label.startsWith('agent:'));
               await github.rest.issues.setLabels({...context.repo,issue_number:number,labels:[...preserved,'agent:verified']});
             };
             if(!a.exactAgentState(state.pr.labels,'agent:verified')) await setVerified(prNumber,state.pr);
             state=await load();
-            if(state.pr.head.sha!==requestedSha||!state.auth.ok||!state.linkage.ok||state.comparison.data.behind_by!==0||!p.independentReviewSatisfied(state.prComments,requestedSha)) return core.setFailed('ISSUE_WRITE_TOCTOU_REJECTED');
+            const issueWriteRuns=await github.paginate(github.rest.actions.listWorkflowRunsForRepo,{...context.repo,event:'pull_request',head_sha:requestedSha,per_page:100}),issueWriteRun=p.newestAuthoritativeCiRun(issueWriteRuns,{workflowName:'CI',headSha:requestedSha,prNumber});
+            if(!issueWriteRun||issueWriteRun.id!==run.id||issueWriteRun.run_attempt!==run.run_attempt||issueWriteRun.status!=='completed'||issueWriteRun.conclusion!=='success'||state.pr.head.sha!==requestedSha||!state.auth.ok||!state.linkage.ok||state.comparison.data.behind_by!==0||!reviewBinding||!p.independentReviewSatisfied(state.prComments,reviewBinding)) return core.setFailed('ISSUE_WRITE_TOCTOU_REJECTED');
             if(!a.exactAgentState(state.issue.labels,'agent:verified')) await setVerified(state.issueNumber,state.issue);
             state=await load();
-            if(!a.lifecyclePairDecision(state.pr.labels,state.issue.labels,'agent:verified').ok||state.pr.head.sha!==requestedSha||!state.auth.ok||state.comparison.data.behind_by!==0) return core.setFailed('VERIFIED_POSTCONDITION_FAILED');
-            if(!a.exactVerificationEvidence(state.prComments,{repo,issueNumber:state.issueNumber,prNumber,headSha:requestedSha,specHash:state.auth.specHash})){
-              const marker=a.verificationMarker({repo,issueNumber:state.issueNumber,prNumber,headSha:requestedSha,specHash:state.auth.specHash,ciRunId:run.id});
+            const evidenceRuns=await github.paginate(github.rest.actions.listWorkflowRunsForRepo,{...context.repo,event:'pull_request',head_sha:requestedSha,per_page:100}),evidenceRun=p.newestAuthoritativeCiRun(evidenceRuns,{workflowName:'CI',headSha:requestedSha,prNumber});
+            if(!evidenceRun||evidenceRun.id!==run.id||evidenceRun.run_attempt!==run.run_attempt||evidenceRun.status!=='completed'||evidenceRun.conclusion!=='success'||!a.lifecyclePairDecision(state.pr.labels,state.issue.labels,'agent:verified').ok||state.pr.head.sha!==requestedSha||!state.auth.ok||state.auth.specHash!==reviewBinding.specHash||!state.linkage.ok||!p.independentReviewSatisfied(state.prComments,reviewBinding)||state.comparison.data.behind_by!==0) return core.setFailed('VERIFIED_POSTCONDITION_FAILED');
+            if(!a.exactVerificationEvidence(state.prComments,{repo,issueNumber:state.issueNumber,prNumber,headSha:requestedSha,specHash:state.auth.specHash,ciRunId:run.id,ciRunAttempt:run.run_attempt})){
+              const marker=a.verificationMarker({repo,issueNumber:state.issueNumber,prNumber,headSha:requestedSha,specHash:state.auth.specHash,ciRunId:run.id,ciRunAttempt:run.run_attempt});
               await github.rest.issues.createComment({...context.repo,issue_number:prNumber,body:`Automated exact-SHA verification PASS for \`${requestedSha}\`.\n\nCI run: ${run.html_url}\nIndependent Codex Reviewer: PASS\nAuthorization spec: \`${state.auth.specHash}\`\n\n${marker}`});
             }
             core.setOutput('verified','true');core.setOutput('pr_number',String(prNumber));core.setOutput('head_sha',requestedSha);core.setOutput('spec_hash',state.auth.specHash);

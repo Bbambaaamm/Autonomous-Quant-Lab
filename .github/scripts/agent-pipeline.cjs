@@ -137,8 +137,26 @@ function parseTrustedMarker(comments, kind, headSha) {
   return matches.length === 1 ? matches[0] : null;
 }
 
-function independentReviewSatisfied(comments, headSha) {
-  return parseTrustedMarker(comments, "agent-codex-review", headSha)?.includes(" result=PASS ") === true;
+function independentReviewMarker({ repo, issueNumber, prNumber, headSha, specHash, ciRunId, ciRunAttempt, result }) {
+  if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo || "")) throw new Error("INVALID_REPOSITORY");
+  if (![issueNumber, prNumber, ciRunId, ciRunAttempt].every((value) => Number.isSafeInteger(Number(value)) && Number(value) > 0)) throw new Error("INVALID_REVIEW_BINDING");
+  if (!/^[0-9a-f]{40}$/.test(headSha || "")) throw new Error("INVALID_HEAD_SHA");
+  if (!/^[0-9a-f]{64}$/.test(specHash || "")) throw new Error("INVALID_SPEC_HASH");
+  if (!["PASS", "BLOCK"].includes(result)) throw new Error("INVALID_REVIEW_RESULT");
+  return `<!-- agent-codex-review:v3 repo=${repo} issue=${Number(issueNumber)} pr=${Number(prNumber)} sha=${headSha} spec=${specHash} ci=${Number(ciRunId)} attempt=${Number(ciRunAttempt)} result=${result} -->`;
+}
+
+function exactIndependentReviewEvidence(comments = [], binding) {
+  let marker;
+  try { marker = independentReviewMarker({ ...binding, result: binding.result || "PASS" }); }
+  catch { return false; }
+  return comments.filter((comment) => comment.user?.login === "github-actions[bot]")
+    .flatMap((comment) => String(comment.body || "").split("\n"))
+    .filter((line) => line === marker).length === 1;
+}
+
+function independentReviewSatisfied(comments, binding) {
+  return exactIndependentReviewEvidence(comments, { ...binding, result: "PASS" });
 }
 
 const FAILURE_CLASSES = ["lint-format", "typecheck", "unit-test", "api-test", "integration-postgres",
@@ -590,7 +608,7 @@ function successfulRequiredJobs(jobs, requiredNames, headSha) {
 function newestAuthoritativeCiRun(runs, { workflowName, headSha, prNumber }) {
   return runs
     .filter((run) => run.name === workflowName && run.event === "pull_request" &&
-      run.status === "completed" && run.head_sha === headSha &&
+      run.head_sha === headSha &&
       run.pull_requests?.length === 1 && run.pull_requests[0].number === prNumber)
     .sort((left, right) => right.id - left.id)[0] ?? null;
 }
@@ -656,6 +674,8 @@ module.exports = {
   parseAgentIssue,
   parseDurableLink,
   reviewSatisfied,
+  independentReviewMarker,
+  exactIndependentReviewEvidence,
   independentReviewSatisfied,
   parseTrustedMarker,
   classifyCiFailure,
