@@ -1137,7 +1137,7 @@ test("Issue #130 durable review marker rejects a rerun started after every other
 });
 
 test("Issue #130 real governance controller stops the paired write when authority drifts",async()=>{
-  const workflow=reviewerWorkflow(),section=workflow.slice(workflow.indexOf("  governance-escalation:"),workflow.indexOf("  independent-review:"));
+  const workflow=reviewerWorkflow(),section=workflow.slice(workflow.indexOf("  governance-escalation:"),workflow.indexOf("  collect-ci-evidence:"));
   const script=section.slice(section.indexOf("          script: |")+20).split("\n").filter(x=>x.startsWith("            ")).map(x=>x.slice(12)).join("\n");
   const base="b".repeat(40),head="a".repeat(40),writes=[];let issueReads=0,prReads=0;
   const p={STATES:["agent:pr","agent:needs-human"],labelNames:value=>value,parseAgentIssue:()=>130,isImplementation:()=>true,reviewerBlockPairPlan:()=>({ok:true}),fullLinkageDecision:()=>({ok:true}),escalationMutationPlan:()=>({ok:true,add:["agent:needs-human"],remove:["agent:pr"]})},a={authorizationDecision:()=>({ok:true,specHash:"spec"})};
@@ -1156,7 +1156,7 @@ test("Issue #130 real governance controller stops the paired write when authorit
 });
 
 test("Issue #130 governance escalation preserves a non-agent label added after the final read",async()=>{
-  const workflow=reviewerWorkflow(),section=workflow.slice(workflow.indexOf("  governance-escalation:"),workflow.indexOf("  independent-review:"));
+  const workflow=reviewerWorkflow(),section=workflow.slice(workflow.indexOf("  governance-escalation:"),workflow.indexOf("  collect-ci-evidence:"));
   const script=section.slice(section.indexOf("          script: |")+20).split("\n").filter(x=>x.startsWith("            ")).map(x=>x.slice(12)).join("\n");
   const base="b".repeat(40),head="a".repeat(40),writes=[],states=new Map([[131,new Set(["agent:pr"])],[130,new Set(["type:implementation","agent:pr"])] ]);let injected=false;
   const labels=number=>[...states.get(number)];
@@ -1176,4 +1176,48 @@ test("Issue #130 governance escalation preserves a non-agent label added after t
 test("Issue #130 governance escalation propagates prepared base authority",()=>{
   const prepare=reviewerWorkflow().slice(reviewerWorkflow().indexOf("  prepare:"),reviewerWorkflow().indexOf("  governance-escalation:"));
   assert.match(prepare,/GOVERNANCE_CHANGE[\s\S]*base_sha:pr\.base\.sha/);
+});
+
+function reviewerSection(name,next){
+  const workflow=reviewerWorkflow(),start=workflow.indexOf(`  ${name}:`),end=next?workflow.indexOf(`  ${next}:`,start):workflow.length;
+  assert.ok(start>=0&&end>start,`${name} section exists`); return workflow.slice(start,end);
+}
+
+function inlineGithubScript(section){
+  const marker="          script: |\n",start=section.indexOf(marker); assert.ok(start>=0,"inline program exists");
+  return section.slice(start+marker.length).split("\n").filter(line=>line.startsWith("            ")).map(line=>line.slice(12)).join("\n");
+}
+
+async function executeCiEvidenceCollector(change={}){
+  const head="a".repeat(40),base="b".repeat(40),run={id:41,run_attempt:2,workflow_id:7,name:"CI",event:"pull_request",head_sha:head,pull_requests:[{number:129}],status:"completed",conclusion:"success"};
+  const workflow={id:7,name:"CI",path:".github/workflows/ci.yml",state:"active"}; let runReads=0;
+  const jobs=agentConfig.requiredCiJobs.map((name,id)=>({id:id+1,name,status:"completed",conclusion:"success",run_attempt:2,head_sha:head}));
+  const currentRun=()=>change.newer&&++runReads>1?[{...run,id:42,run_attempt:3,status:"in_progress",conclusion:null},run]:[run];
+  const github={rest:{repos:{get:async()=>{if(change.http403)throw Object.assign(new Error("forbidden"),{status:403});return {data:{full_name:change.repo||"o/r",default_branch:"main"}}}},actions:{getWorkflow:async({workflow_id})=>({data:workflow_id===9?{id:9,name:"Agent Codex review",path:".github/workflows/agent-codex-review.yml",state:"active"}:{...workflow,...change.workflow}}),listWorkflowRuns(){},listJobsForWorkflowRun(){},getWorkflowRun:async({run_id})=>({data:run_id===99?{id:99,run_attempt:1,workflow_id:9,head_sha:base}:{...run,...change.freshRun}})},pulls:{get:async()=>({data:{state:"open",draft:false,head:{sha:change.prHead||head,repo:{full_name:"o/r"}},base:{ref:change.baseRef||"main",sha:base},body:"Agent-Issue: #128",labels:["agent:pr"]}})},issues:{get:async()=>({data:{state:"open",title:"t",body:"b",labels:["type:implementation","agent:pr"]}}),listComments(){}}},paginate:async fn=>fn===github.rest.actions.listWorkflowRuns?currentRun():fn===github.rest.actions.listJobsForWorkflowRun?(change.missingJob?jobs.slice(1):jobs):[]};
+  const p={...pipeline,parseAgentIssue:()=>128,isImplementation:()=>true,lifecycleAtAgentPr:()=>({ok:true}),fullLinkageDecision:()=>({ok:true}),successfulRequiredJobs:pipeline.successfulRequiredJobs},a={authorizationDecision:()=>({ok:!change.authorizationDrift,specHash:"spec"})};
+  const temp=fs.mkdtempSync(path.join(os.tmpdir(),"ci-evidence-")),outputs={};
+  const processMock={env:{PR:"129",ISSUE:"128",SHA:head,BASE:base,SPEC:"spec",RUNNER_TEMP:temp}},context={repo:{owner:"o",repo:"r"},runId:99,runAttempt:1,eventName:"workflow_run",payload:{repository:{default_branch:"main"},workflow_run:{id:41,run_attempt:change.triggerAttempt||2}}},core={setOutput:(key,value)=>{outputs[key]=value;}};
+  const requireMock=value=>value==="fs"?fs:value==="crypto"?require("node:crypto"):value.includes("agent-pipeline.cjs")?p:value.includes("agent-autonomy.cjs")?a:agentConfig;
+  await new AsyncFunction("require","github","context","core","process",inlineGithubScript(reviewerSection("collect-ci-evidence","independent-review")))(requireMock,github,context,core,processMock);
+  return {temp,outputs,evidence:JSON.parse(fs.readFileSync(path.join(temp,"ci-evidence.json"),"utf8"))};
+}
+
+test("Issue #128 executes the real bounded CI evidence collector",async()=>{
+  const {temp,outputs,evidence}=await executeCiEvidenceCollector();
+  assert.equal(evidence.schema,"agent-ci-evidence-v1"); assert.equal(evidence.ci.runId,41); assert.equal(evidence.ci.runAttempt,2);
+  assert.equal(evidence.source.path,".github/workflows/ci.yml"); assert.match(outputs.artifact,/^ci-evidence-a{40}-7-41-2$/); assert.match(outputs.digest,/^[0-9a-f]{64}$/);
+  assert.ok(fs.statSync(path.join(temp,"ci-evidence.json")).size<=65536);
+});
+
+test("Issue #128 real collector rejects untrusted, stale, incomplete, and unauthorized inputs",async()=>{
+  for(const change of [{repo:"evil/r"},{workflow:{path:".github/workflows/other.yml"}},{triggerAttempt:1},{prHead:"c".repeat(40)},{baseRef:"other"},{authorizationDrift:true},{missingJob:true},{newer:true},{http403:true}])
+    await assert.rejects(executeCiEvidenceCollector(change));
+});
+
+test("Issue #128 evidence is sealed into the prompt and mutation credentials stay outside the model",()=>{
+  const model=reviewerSection("independent-review","trusted-record"),record=reviewerSection("trusted-record","verify-after-pass");
+  assert.match(model,/sha256sum -c ci-evidence\.sha256[\s\S]*needs\.collect-ci-evidence\.outputs\.digest[\s\S]*BEGIN WORKFLOW-OWNED EXACT CI EVIDENCE/);
+  assert.match(model,/GH_TOKEN: \$\{\{ github\.token \}\}/); assert.doesNotMatch(model,/AGENT_PUBLISH_TOKEN|issues: write|pull-requests: write/);
+  assert.match(record,/getWorkflow[\s\S]*evidenceOk[\s\S]*successfulRequiredJobs[\s\S]*final trusted snapshot changed/);
+  const collect=reviewerSection("collect-ci-evidence","independent-review"); assert.doesNotMatch(collect,/OPENAI_API_KEY|AGENT_PUBLISH_TOKEN|issues: write|pull-requests: write/);
 });
