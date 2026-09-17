@@ -964,10 +964,18 @@ const AsyncFunction=Object.getPrototypeOf(async function(){}).constructor;
 const controlWorkflow=()=>fs.readFileSync(".github/workflows/agent-control-plane-remediation.yml","utf8");
 const reviewerWorkflow=()=>fs.readFileSync(".github/workflows/agent-codex-review.yml","utf8");
 
-function productionFreshGuardSource(){
-  const recover=controlWorkflow().slice(controlWorkflow().indexOf("  recover:"),controlWorkflow().indexOf("  gate:"));
-  const line=recover.split("\n").find(x=>x.includes("const freshGuard=async"));
+function productionFreshGuardSource(jobName="recover"){
+  const workflow=controlWorkflow(),start=workflow.indexOf(`  ${jobName}:`),end=jobName==="recover"?workflow.indexOf("  gate:"):jobName==="gate"?workflow.indexOf("  merge:"):workflow.length;
+  const section=workflow.slice(start,end);
+  const line=section.split("\n").find(x=>x.includes("const freshGuard=async"));
   assert.ok(line,"production freshGuard must exist");
+  return line.trim();
+}
+
+function productionRequestActorAuthorizedSource(jobName="recover"){
+  const workflow=controlWorkflow(),start=workflow.indexOf(`  ${jobName}:`),end=jobName==="recover"?workflow.indexOf("  gate:"):jobName==="gate"?workflow.indexOf("  merge:"):workflow.length;
+  const line=workflow.slice(start,end).split("\n").find(x=>x.includes("const requestActorAuthorized=async"));
+  assert.ok(line,`production ${jobName} requestActorAuthorized must exist`);
   return line.trim();
 }
 
@@ -1001,19 +1009,34 @@ function protectedRuleset(){
   ]};
 }
 
-async function executeProductionFreshGuard({newestRunChanges=false,prCloses=false,issueCloses=false,authorizationDrifts=false,linkageDrifts=false,lifecycleDrifts=false,rulesetDrifts=false,rulesetDriftsAfterMutableReads=false,mixedAttempts=false}={}){
+async function executeProductionFreshGuard({jobName="recover",newestRunChanges=false,prCloses=false,issueCloses=false,authorizationDrifts=false,linkageDrifts=false,lifecycleDrifts=false,rulesetDrifts=false,rulesetDriftsAfterMutableReads=false,permissionRevoked=false,mixedAttempts=false}={}){
   const head="a".repeat(40),base="b".repeat(40),required=["agent-pipeline","quality","unit-research","api","integration-postgres","frontend","security","container-build","production-smoke"];
   const oldRun={id:10,run_attempt:1,name:"CI",event:"pull_request",head_sha:head,pull_requests:[{number:131}],status:"completed",conclusion:"success"};
   const newer={...oldRun,id:11,run_attempt:2,status:"in_progress",conclusion:null};let runReads=0;
   const api={runs(){runReads++;return newestRunChanges&&runReads>1?[newer,oldRun]:[oldRun]},jobs(){return required.map((name,id)=>({id,name,status:"completed",conclusion:"success",run_attempt:mixedAttempts&&id%2===0?2:1}))}};
-  const github={rest:{actions:{listWorkflowRunsForRepo(){},listJobsForWorkflowRun(){},getWorkflowRun:async()=>({data:oldRun})},issues:{listComments(){}},repos:{get:async()=>({data:{full_name:"o/r",default_branch:"main"}}),getBranch:async()=>({data:{commit:{sha:base}}})},pulls:{get:async()=>({data:{number:131,state:prCloses?"closed":"open",draft:false,head:{sha:head,repo:{full_name:"o/r"}},base:{ref:"main",sha:base},body:"Agent-Issue: #130",labels:[]}})}},paginate:async(fn)=>fn===github.rest.actions.listWorkflowRunsForRepo?api.runs():fn===github.rest.actions.listJobsForWorkflowRun?api.jobs():[]};
+  const github={rest:{actions:{listWorkflowRunsForRepo(){},listJobsForWorkflowRun(){},getWorkflowRun:async()=>({data:oldRun})},issues:{listComments(){}},repos:{get:async()=>({data:{full_name:"o/r",default_branch:"main"}}),getCollaboratorPermissionLevel:async({username})=>({data:{permission:username==="maintainer"&&!permissionRevoked?"write":"read"}}),getBranch:async()=>({data:{commit:{sha:base}}})},pulls:{get:async()=>({data:{number:131,state:prCloses?"closed":"open",draft:false,head:{sha:head,repo:{full_name:"o/r"}},base:{ref:"main",sha:base},body:"Agent-Issue: #130",labels:[]}})}},paginate:async(fn)=>fn===github.rest.actions.listWorkflowRunsForRepo?api.runs():fn===github.rest.actions.listJobsForWorkflowRun?api.jobs():[]};
   let mutableReads=0;github.rest.issues.get=async({issue_number})=>{mutableReads++;return {data:{number:issue_number,state:issueCloses?"closed":"open",title:"t",body:"b",labels:[]}}};
   const p={parseAgentIssue:()=>130,isImplementation:()=>true,fullLinkageDecision:()=>({ok:!linkageDrifts}),durablePrLinkDecision:()=>({ok:true,prNumber:131}),durableIssueLinkDecision:()=>({ok:true,issueNumber:130}),successfulRequiredJobs:()=>true};
   const a={authorizationDecision:()=>({ok:!authorizationDrifts,specHash:"spec"})},c={requiredCiJobs:required},evidence={ci:{runId:10,runAttempt:1,headSha:head,jobs:api.jobs().map(x=>({...x,runAttempt:x.run_attempt}))}},context={repo:{owner:"o",repo:"r"}},processMock={env:{BASE:base}};
-  return new AsyncFunction("github","context","p","a","c","evidence","headSha","prNumber","issueNumber","repo","def","spec","rulesEvidenceOk","liveRulesetValid","process","lifecycle",`${productionFreshGuardSource()}\nreturn freshGuard(lifecycle);`)(github,context,p,a,c,evidence,head,131,130,"o/r","main","spec",()=>true,async()=>!rulesetDrifts&&!(rulesetDriftsAfterMutableReads&&mutableReads>0),processMock,()=>!lifecycleDrifts);
+  return new AsyncFunction("github","context","p","a","c","evidence","headSha","prNumber","issueNumber","repo","def","spec","rulesEvidenceOk","liveRulesetValid","requestActor","process","lifecycle",`${productionRequestActorAuthorizedSource(jobName)}\n${productionFreshGuardSource(jobName)}\nreturn freshGuard(lifecycle);`)(github,context,p,a,c,evidence,head,131,130,"o/r","main","spec",()=>true,async()=>!rulesetDrifts&&!(rulesetDriftsAfterMutableReads&&mutableReads>0),"maintainer",processMock,()=>!lifecycleDrifts);
 }
 
 
+
+test("Issue #138 mutable requester authority is revalidated in every mutation stage",async()=>{
+  const workflow=controlWorkflow();
+  assert.match(workflow,/request_actor: \$\{\{ steps\.prepare\.outputs\.request_actor \}\}/);
+  for(const jobName of ["recover","gate","merge"]){
+    assert.equal((await executeProductionFreshGuard({jobName})).ok,true,`${jobName} accepts an unchanged authorized actor`);
+    assert.equal((await executeProductionFreshGuard({jobName,permissionRevoked:true})).ok,false,`${jobName} rejects authority revoked after prepare`);
+    const start=workflow.indexOf(`  ${jobName}:`),end=jobName==="recover"?workflow.indexOf("  gate:"):jobName==="gate"?workflow.indexOf("  merge:"):workflow.length,section=workflow.slice(start,end);
+    assert.match(section,/ACTOR: '\$\{\{ needs\.prepare\.outputs\.request_actor \}\}'/);
+    assert.match(section,/getCollaboratorPermissionLevel\(\{\.\.\.context\.repo,username:requestActor\}\)/);
+  }
+  const merge=workflow.slice(workflow.indexOf("  merge:"));
+  assert.match(merge,/requestActorAuthorized\(\)[\s\S]{0,300}pulls\.merge/);
+  assert.match(merge,/pulls\.merge[\s\S]{0,700}requestActorAuthorized\(\)[\s\S]{0,300}issues\.createComment/);
+});
 
 test("Issue #130 live ruleset drift fails closed at every privileged boundary",async()=>{
   assert.equal((await executeProductionFreshGuard({rulesetDrifts:true})).ok,false);
@@ -1074,7 +1097,7 @@ test("Issue #130 records a successful merge before separately reporting post-mer
   const head="a".repeat(40),mergeSha="c".repeat(40),events=[];
   const github={rest:{pulls:{merge:async()=>{events.push("merge");return {data:{merged:true,sha:mergeSha}}}},issues:{createComment:async args=>events.push({comment:args})}}};
   const core={setFailed:message=>events.push({failure:message})},context={repo:{owner:"o",repo:"r"}};
-  await new AsyncFunction("github","context","core","prNumber","issueNumber","headSha","liveRulesetValid",productionMergeCompletionSource())(github,context,core,134,130,head,async()=>false);
+  await new AsyncFunction("github","context","core","prNumber","issueNumber","headSha","liveRulesetValid","requestActorAuthorized",productionMergeCompletionSource())(github,context,core,134,130,head,async()=>false,async()=>true);
   assert.deepEqual(events.map(event=>typeof event==="string"?event:Object.keys(event)[0]),["merge","comment","failure"]);
   assert.equal(events[1].comment.issue_number,130);
   assert.ok(events[1].comment.body.includes(`head \`${head}\` as \`${mergeSha}\``));
