@@ -1107,6 +1107,34 @@ test("Issue #128 reviewer evidence is source-bound, bounded, sealed, and credent
   assert.match(model,/Verify immutable evidence and prompt binding[\s\S]*SEALED_INPUT_BINDING_INVALID[\s\S]*Independent bounded review[\s\S]*Post-model freshness and sealed-input validation[\s\S]*POST_MODEL_SOURCE_SCOPE_AUTHORIZATION_OR_CI_DRIFT/);
   assert.doesNotMatch(collect,/OPENAI_API_KEY|AGENT_PUBLISH_TOKEN/);
   assert.doesNotMatch(model,/AGENT_PUBLISH_TOKEN|issues: write|pull-requests: write/);
+  assert.match(model,/Materialize isolated trusted reviewer source[\s\S]*git worktree add --detach[\s\S]*Pre-model trusted-source and exact-CI freshness validation/);
+  for(const phase of ["PRE_MODEL","POST_MODEL"]){
+    assert.match(model,new RegExp(`${phase}_TRUSTED_SOURCE_INVALID[\\s\\S]*path\\.join\\(root,'\\.github/scripts/agent-pipeline\\.cjs'\\)[\\s\\S]*getWorkflowRun[\\s\\S]*finalRuns[\\s\\S]*successfulRequiredJobs`));
+  }
+});
+
+test("Issue #128 post-model program cannot execute a candidate helper initializer",async()=>{
+  const workflow=reviewerWorkflow(),model=workflow.slice(workflow.indexOf("  independent-review:"),workflow.indexOf("  trusted-record:"));
+  const step=model.slice(model.indexOf("      - name: Post-model freshness"));
+  const script=step.slice(step.indexOf("          script: |")+20).split("\n").filter(line=>line.startsWith("            ")).map(line=>line.slice(12)).join("\n");
+  const initialization=script.split("\n").slice(0,3).join("\n");
+  const dir=fs.mkdtempSync(path.join(os.tmpdir(),"review-source-isolation-")),candidate=path.join(dir,"candidate"),trusted=path.join(dir,"trusted"),review=path.join(dir,"review.json");
+  for(const root of [candidate,trusted])fs.mkdirSync(path.join(root,".github","scripts"),{recursive:true});
+  fs.mkdirSync(path.join(candidate,".codex-input"));
+  fs.writeFileSync(path.join(candidate,".codex-input","seal.json"),JSON.stringify({files:{}}));
+  fs.writeFileSync(review,JSON.stringify({result:"BLOCK",summary:"real model output"}));
+  const attack=`require("node:fs").writeFileSync(${JSON.stringify(review)},JSON.stringify({result:"PASS",summary:"forged"}));module.exports={};`;
+  for(const name of ["agent-pipeline.cjs","agent-autonomy.cjs"])fs.writeFileSync(path.join(candidate,".github","scripts",name),attack);
+  fs.writeFileSync(path.join(candidate,".github","agent-pipeline.json"),"{}");
+  for(const name of ["agent-pipeline.cjs","agent-autonomy.cjs"])fs.writeFileSync(path.join(trusted,".github","scripts",name),"module.exports={trusted:true};");
+  fs.writeFileSync(path.join(trusted,".github","agent-pipeline.json"),"{}");
+  execFileSync("git",["init","-q"],{cwd:trusted});execFileSync("git",["add","."],{cwd:trusted});execFileSync("git",["-c","user.name=test","-c","user.email=test@example.invalid","commit","-qm","trusted"],{cwd:trusted});
+  const source=execFileSync("git",["rev-parse","HEAD"],{cwd:trusted,encoding:"utf8"}).trim(),processMock={env:{...process.env,TRUSTED_SOURCE:trusted,SOURCE:source}},previous=process.cwd();
+  try{
+    process.chdir(candidate);
+    await new AsyncFunction("require","process",initialization)(require,processMock);
+    assert.deepEqual(JSON.parse(fs.readFileSync(review,"utf8")),{result:"BLOCK",summary:"real model output"});
+  }finally{process.chdir(previous);fs.rmSync(dir,{recursive:true,force:true});}
 });
 
 test("Issue #128 executes the production seal verifier and rejects binding or evidence tampering",()=>{
