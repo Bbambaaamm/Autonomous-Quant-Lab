@@ -1121,33 +1121,29 @@ test("Issue #130 real freshGuard rejects mutable PR drift after comment paginati
   assert.equal((await executeProductionFreshGuard({lifecycleDrifts:true})).ok,false);
 });
 
-test("Issue #130 durable review marker rejects a rerun started after every other mutable read",async()=>{
+async function executeIssue128FinalWrite(change={}){
   const workflow=reviewerWorkflow(),record=workflow.slice(workflow.indexOf("  trusted-record:"),workflow.indexOf("  verify-after-pass:"));
-  const lines=record.split("\n"),start=lines.findIndex(x=>x.includes("const writeRuns=await")),end=lines.findIndex((x,i)=>i>start&&x.includes("await github.rest.issues.createComment"));
-  assert.ok(start>=0&&end>start,"production final CI boundary must exist");
-  const source=lines.slice(start,end+1).map(x=>x.trim()).join("\n"),head="a".repeat(40),writes=[],failures=[];
-  const accepted={id:10,run_attempt:1,name:"CI",event:"pull_request",head_sha:head,pull_requests:[{number:134}],status:"completed",conclusion:"success"};
-  const rerun={...accepted,id:11,run_attempt:2,status:"in_progress",conclusion:null};
-  const github={rest:{actions:{listWorkflowRunsForRepo(){},getWorkflowRun:async()=>({data:{id:90,run_attempt:4}})},issues:{createComment:async args=>writes.push(args)}},paginate:async()=>[rerun,accepted]};
-  const core={setFailed:message=>failures.push(message)},context={repo:{owner:"o",repo:"r"},runId:90},processMock={env:{SHA:head,REVIEW_RUN:"90",REVIEW_ATTEMPT:"4",GITHUB_RUN_ATTEMPT:"4"}};
-  await new AsyncFunction("github","context","process","prNumber","freshRun","core","safeSummary","result",source)(github,context,processMock,134,accepted,core,"safe",{result:"PASS"});
-  assert.deepEqual(writes,[]);
-  assert.deepEqual(failures,["NO_WRITE: newest CI changed at review record boundary"]);
-  assert.doesNotMatch(source,/status:\s*['"]completed['"]/,"the final workflow-run request must be unfiltered");
-});
+  const lines=record.split("\n"),start=lines.findIndex(x=>x.includes("const writeJobs=await")),end=lines.findIndex((x,i)=>i>start&&x.includes("await github.rest.issues.createComment"));
+  assert.ok(start>=0&&end>start,"production final authority boundary must exist");
+  const source=lines.slice(start,end+1).map(x=>x.trim()).join("\n"),head="a".repeat(40),base="b".repeat(40),writes=[],failures=[];
+  const ci={id:10,workflow_id:700,path:".github/workflows/ci.yml",head_repository:{full_name:"o/r"},run_attempt:1,name:"CI",event:"pull_request",head_sha:head,pull_requests:[{number:135}],status:"completed",conclusion:"success"};
+  const reviewer={id:90,workflow_id:900,path:".github/workflows/agent-codex-review.yml",head_sha:base,run_attempt:4};let drift=false;
+  const actions={listJobsForWorkflowRun(){},listWorkflowRunsForRepo(){},getWorkflowRun:async({run_id})=>({data:run_id===90?{...reviewer,run_attempt:change.reviewerAttempt||reviewer.run_attempt}:{...ci}}),getWorkflow:async({workflow_id})=>({data:workflow_id===900?{id:900,name:"Agent Codex review",path:reviewer.path}:{id:700,name:"CI",path:ci.path}})};
+  const github={rest:{actions,repos:{get:async()=>({data:{full_name:"o/r",default_branch:"main"}}),getBranch:async()=>({data:{commit:{sha:change.mainDrift||base}}})},pulls:{get:async()=>({data:{state:"open",draft:false,base:{ref:change.baseDrift?"other":"main",sha:base},head:{sha:drift||change.headDrift?"c".repeat(40):head,repo:{full_name:"o/r"}},body:"Agent-Issue: #128",labels:["agent:pr"]}})},issues:{listComments(){},get:async()=>({data:{state:"open",title:"t",body:"b",labels:["type:implementation","agent:pr"]}}),createComment:async x=>writes.push(x)}},paginate:async(route)=>{if(route===actions.listJobsForWorkflowRun)return [{name:"required",status:"completed",conclusion:"success"}];if(route===actions.listWorkflowRunsForRepo)return change.newerCi?[{...ci,id:11,run_attempt:2,status:"in_progress",conclusion:null},ci]:[ci];if(change.driftDuringPagination)drift=true;return [];}};
+  const p={parseAgentIssue:()=>128,isImplementation:()=>true,lifecycleAtAgentPr:()=>({ok:!change.lifecycleDrift}),fullLinkageDecision:()=>({ok:!change.linkageDrift}),authoritativeCiIdentity:run=>run.status==="completed"&&run.conclusion==="success",successfulRequiredJobs:()=>true,parseTrustedMarker:()=>false},a={authorizationDecision:()=>({ok:!change.authorizationDrift,specHash:"spec"})},c={requiredCiJobs:["required"]};
+  const evidence={repository:"o/r",issueNumber:128,prNumber:135,headSha:head,baseSha:base,sourceSha:base,specHash:"spec",reviewer:{runId:90,runAttempt:4,workflowId:900,path:reviewer.path,sourceSha:base},ci:{runId:10,runAttempt:1,workflowId:700,path:ci.path}},sealedBindings={repository:"o/r",issueNumber:128,prNumber:135,headSha:head,baseSha:base,sourceSha:base,specHash:"spec",reviewerRunId:90,reviewerRunAttempt:4,ciRunId:10,ciRunAttempt:1},seal={schema:"agent-review-seal-v1",bindings:sealedBindings,files:{proof:"digest"}};
+  const env={SHA:head,BASE:base,SOURCE:base,SPEC:"spec",REVIEW_RUN:"90",REVIEW_ATTEMPT:"4",CI_RUN:"10",CI_ATTEMPT:"1",GITHUB_WORKFLOW_SHA:base,GITHUB_RUN_ATTEMPT:change.runtimeAttempt===undefined?"4":change.runtimeAttempt};if(change.missingRuntimeAttempt)delete env.GITHUB_RUN_ATTEMPT;
+  await new AsyncFunction("github","context","process","prNumber","issueNumber","repo","p","a","c","evidence","seal","sealedBindings","hash","result","core","safeSummary",source)(github,{repo:{owner:"o",repo:"r"},runId:90,workflow:"Agent Codex review",payload:{repository:{default_branch:"main"}}},{env},135,128,"o/r",p,a,c,evidence,seal,sealedBindings,()=>"digest",{reviewed_sha:head,result:"PASS"},{setFailed:x=>failures.push(x),notice:x=>failures.push(x)},"safe");
+  return {writes,failures};
+}
 
-test("Issue #128 final write uses the GitHub runtime attempt and fails closed when it is invalid",async()=>{
-  const workflow=reviewerWorkflow(),record=workflow.slice(workflow.indexOf("  trusted-record:"),workflow.indexOf("  verify-after-pass:"));
-  const lines=record.split("\n"),start=lines.findIndex(x=>x.includes("const writeRuns=await")),end=lines.findIndex((x,i)=>i>start&&x.includes("await github.rest.issues.createComment"));
-  const source=lines.slice(start,end+1).map(x=>x.trim()).join("\n"),head="a".repeat(40),accepted={id:10,workflow_id:700,path:".github/workflows/ci.yml",run_attempt:1,name:"CI",event:"pull_request",head_sha:head,pull_requests:[{number:135}],status:"completed",conclusion:"success"};
-  const execute=async runtimeAttempt=>{
-    const writes=[],failures=[],github={rest:{actions:{listWorkflowRunsForRepo(){},getWorkflowRun:async()=>({data:{id:90,run_attempt:4}})},issues:{createComment:async args=>writes.push(args)}},paginate:async()=>[accepted]};
-    const env={SHA:head,REVIEW_RUN:"90",REVIEW_ATTEMPT:"4"};if(runtimeAttempt!==undefined)env.GITHUB_RUN_ATTEMPT=runtimeAttempt;
-    await new AsyncFunction("github","context","process","prNumber","freshRun","ciWorkflow","core","safeSummary","result",source)(github,{repo:{owner:"o",repo:"r"},runId:90},{env},135,accepted,{id:700,path:accepted.path},{setFailed:message=>failures.push(message)},"safe",{result:"PASS"});
-    return {writes,failures};
-  };
-  assert.equal((await execute("4")).writes.length,1,"the exact env-backed attempt permits the trusted write");
-  for(const attempt of [undefined,"","not-a-number","3","5"]){const result=await execute(attempt);assert.deepEqual(result.writes,[],`runtime attempt ${String(attempt)} must not write`);assert.deepEqual(result.failures,["NO_WRITE: reviewer attempt changed at review record boundary"]);}
+test("Issue #128 final write re-reads every mutable authority and fails closed on intervening drift",async()=>{
+  assert.equal((await executeIssue128FinalWrite()).writes.length,1);
+  for(const attack of [{authorizationDrift:true},{lifecycleDrift:true},{linkageDrift:true},{headDrift:true},{baseDrift:true},{mainDrift:"d".repeat(40)},{driftDuringPagination:true},{newerCi:true},{reviewerAttempt:5}]){
+    const result=await executeIssue128FinalWrite(attack);assert.deepEqual(result.writes,[],`must reject ${JSON.stringify(attack)}`);assert.deepEqual(result.failures,["NO_WRITE: final authority changed at review record boundary"]);
+  }
+  for(const runtimeAttempt of ["","not-a-number","3","5"]){const result=await executeIssue128FinalWrite({runtimeAttempt});assert.deepEqual(result.writes,[]);}
+  assert.deepEqual((await executeIssue128FinalWrite({missingRuntimeAttempt:true})).writes,[]);
 });
 
 test("Issue #130 real governance controller stops the paired write when authority drifts",async()=>{
@@ -1206,6 +1202,14 @@ test("Issue #128 reviewer evidence is source-bound, bounded, sealed, and credent
   }
 });
 
+test("Issue #128 review artifacts are attempt-bound across every upload and download",()=>{
+  const workflow=reviewerWorkflow(),references=[...workflow.matchAll(/name: '((?:review-scope|sealed-review-input|codex-review)-[^']+)'/g)].map(match=>match[1]);
+  assert.equal(references.length,7,"all review artifact uploads and downloads are covered");
+  assert.ok(references.every(name=>name.endsWith("${{ github.run_id }}-${{ github.run_attempt }}")));
+  for(const [prefix,count] of [["review-scope-",2],["sealed-review-input-",3],["codex-review-",2]]){const names=references.filter(name=>name.startsWith(prefix));assert.equal(names.length,count);assert.equal(new Set(names).size,1);}
+  assert.doesNotMatch(workflow,/name: '(?:review-scope|sealed-review-input|codex-review)-\$\{\{ github\.run_id \}\}'/);
+});
+
 test("Issue #128 post-model program cannot execute a candidate helper initializer",async()=>{
   const workflow=reviewerWorkflow(),model=workflow.slice(workflow.indexOf("  independent-review:"),workflow.indexOf("  trusted-record:"));
   const step=model.slice(model.indexOf("      - name: Post-model freshness"));
@@ -1245,7 +1249,7 @@ test("Issue #128 executes the production seal verifier and rejects binding or ev
 
 test("Issue #128 final trusted record binds source, authorization, newest CI, jobs, and sealed evidence",()=>{
   const record=reviewerWorkflow().slice(reviewerWorkflow().indexOf("  trusted-record:"),reviewerWorkflow().indexOf("  verify-after-pass:"));
-  for(const proof of [/sealed evidence binding changed/,/reviewerRunAttempt:Number\(process\.env\.REVIEW_ATTEMPT\)/,/reviewRun\.run_attempt===Number\(process\.env\.REVIEW_ATTEMPT\)/,/reviewRun\.run_attempt===Number\(process\.env\.GITHUB_RUN_ATTEMPT\)/,/evidence\.reviewer\?\.runAttempt===reviewRun\.run_attempt/,/writeReviewRun\.run_attempt!==Number\(process\.env\.REVIEW_ATTEMPT\)/,/writeReviewRun\.run_attempt!==Number\(process\.env\.GITHUB_RUN_ATTEMPT\)/,/reviewer attempt changed at review record boundary/,/main\.commit\.sha===process\.env\.SOURCE/,/auth\.specHash===process\.env\.SPEC/,/ciRun\.id===Number\(process\.env\.CI_RUN\)/,/successfulRequiredJobs\(freshJobs/,/newest CI changed at review record boundary/])assert.match(record,proof);
+  for(const proof of [/sealed evidence binding changed/,/reviewerRunAttempt:Number\(process\.env\.REVIEW_ATTEMPT\)/,/reviewRun\.run_attempt===Number\(process\.env\.REVIEW_ATTEMPT\)/,/reviewRun\.run_attempt===Number\(process\.env\.GITHUB_RUN_ATTEMPT\)/,/evidence\.reviewer\?\.runAttempt===reviewRun\.run_attempt/,/writeReviewRun\.run_attempt===Number\(process\.env\.REVIEW_ATTEMPT\)/,/writeReviewRun\.run_attempt===Number\(process\.env\.GITHUB_RUN_ATTEMPT\)/,/writeMain\.commit\.sha===process\.env\.SOURCE/,/writeAuth\.specHash===process\.env\.SPEC/,/writeCi\.id===Number\(process\.env\.CI_RUN\)/,/successfulRequiredJobs\(writeJobs/,/final authority changed at review record boundary/])assert.match(record,proof);
   assert.doesNotMatch(record,/context\.runAttempt/);
   assert.ok(record.indexOf("sealed evidence binding changed")<record.indexOf("issues.createComment"));
 });
