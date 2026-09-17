@@ -918,9 +918,21 @@ test("Issue #130 production guards re-read CI attempts and mutable authorities a
 
 test("Issue #130 production ruleset guard enforces the complete immutable contract", () => {
   const control=fs.readFileSync(".github/workflows/agent-control-plane-remediation.yml","utf8");
-  for(const token of ["'Protect main'","target==='branch'","enforcement==='active'","bypass_actors.length===0","strict_required_status_checks_policy===true","gate?.integration_id===actionsIntegrationId","typed('deletion').length===1","typed('non_fast_forward').length===1","typed('pull_request').length===1"]) assert.ok(control.includes(token),token);
-  assert.match(control,/requiredContexts=\[\.\.\.required,'agent-verified-gate'\]\.sort\(\)/);
+  for(const token of ["'Protect main'","target==='branch'","enforcement==='active'","bypass_actors.length===0","strict_required_status_checks_policy===true","items.every(x=>x.integration_id===actionsIntegrationId)","typed('deletion').length===1","typed('non_fast_forward').length===1","typed('pull_request').length===1","typed('code_scanning')","security_alerts_threshold:'high_or_higher'","alerts_threshold:'errors'"]) assert.ok(control.includes(token),token);
+  assert.match(control,/requiredContexts=\[\.\.\.rulesetRequired,'agent-verified-gate'\]\.sort\(\)/);
   assert.match(control,/JSON\.stringify\(configured\)===JSON\.stringify\(requiredContexts\)/);
+});
+
+test("Issue #137 ruleset contract excludes agent-pipeline without weakening required CI", () => {
+  const control=fs.readFileSync(".github/workflows/agent-control-plane-remediation.yml","utf8");
+  const ciRequired="const required=['agent-pipeline','quality','unit-research','api','integration-postgres','frontend','security','container-build','production-smoke'];";
+  const rulesetRequired="const rulesetRequired=['quality','unit-research','api','integration-postgres','frontend','security','container-build','production-smoke'];";
+  assert.equal(control.split(ciRequired).length-1,1,"evidence collection retains all nine required CI jobs");
+  assert.equal(control.split(rulesetRequired).length-1,4,"evidence collection and all three downstream validators use the exact eight-context ruleset contract");
+  assert.equal(control.split("const requiredContexts=[...rulesetRequired,'agent-verified-gate'].sort()").length-1,4);
+  assert.equal(control.split("codeScanning.length===1&&JSON.stringify(codeScanning[0].parameters)===JSON.stringify(expectedCodeScanning)").length-1,4,"all four ruleset validators preserve the CodeQL rule");
+  assert.equal(control.split("items.every(x=>x.integration_id===actionsIntegrationId)").length-1,4,"all four ruleset validators bind every required context to GitHub Actions");
+  assert.doesNotMatch(control,/requiredContexts=\[\.\.\.(?:required|c\.requiredCiJobs),'agent-verified-gate'\]/);
 });
 
 test("Issue #130 evidence collection is isolated, bounded, complete, and fail closed before the model", () => {
@@ -952,10 +964,18 @@ const AsyncFunction=Object.getPrototypeOf(async function(){}).constructor;
 const controlWorkflow=()=>fs.readFileSync(".github/workflows/agent-control-plane-remediation.yml","utf8");
 const reviewerWorkflow=()=>fs.readFileSync(".github/workflows/agent-codex-review.yml","utf8");
 
-function productionFreshGuardSource(){
-  const recover=controlWorkflow().slice(controlWorkflow().indexOf("  recover:"),controlWorkflow().indexOf("  gate:"));
-  const line=recover.split("\n").find(x=>x.includes("const freshGuard=async"));
+function productionFreshGuardSource(jobName="recover"){
+  const workflow=controlWorkflow(),start=workflow.indexOf(`  ${jobName}:`),end=jobName==="recover"?workflow.indexOf("  gate:"):jobName==="gate"?workflow.indexOf("  merge:"):workflow.length;
+  const section=workflow.slice(start,end);
+  const line=section.split("\n").find(x=>x.includes("const freshGuard=async"));
   assert.ok(line,"production freshGuard must exist");
+  return line.trim();
+}
+
+function productionRequestActorAuthorizedSource(jobName="recover"){
+  const workflow=controlWorkflow(),start=workflow.indexOf(`  ${jobName}:`),end=jobName==="recover"?workflow.indexOf("  gate:"):jobName==="gate"?workflow.indexOf("  merge:"):workflow.length;
+  const line=workflow.slice(start,end).split("\n").find(x=>x.includes("const requestActorAuthorized=async"));
+  assert.ok(line,`production ${jobName} requestActorAuthorized must exist`);
   return line.trim();
 }
 
@@ -973,19 +993,50 @@ function productionLiveRulesetValidSource(jobName="recover"){
   return line.trim();
 }
 
-async function executeProductionFreshGuard({newestRunChanges=false,prCloses=false,issueCloses=false,authorizationDrifts=false,linkageDrifts=false,lifecycleDrifts=false,rulesetDrifts=false,rulesetDriftsAfterMutableReads=false,mixedAttempts=false}={}){
+function productionRulesetValidSource(jobName="recover"){
+  const workflow=controlWorkflow(),start=workflow.indexOf(`  ${jobName}:`),end=jobName==="recover"?workflow.indexOf("  gate:"):jobName==="gate"?workflow.indexOf("  merge:"):workflow.length;
+  const line=workflow.slice(start,end).split("\n").find(x=>x.includes("const rulesetValid=r=>"));
+  assert.ok(line,`production ${jobName} rulesetValid must exist`);
+  return line.trim();
+}
+
+function protectedRuleset(){
+  const contexts=["quality","unit-research","api","integration-postgres","frontend","security","container-build","production-smoke","agent-verified-gate"];
+  return {id:7,name:"Protect main",target:"branch",enforcement:"active",bypass_actors:[],conditions:{ref_name:{include:["refs/heads/main"],exclude:[]}},rules:[
+    {type:"deletion"},{type:"non_fast_forward"},{type:"pull_request",parameters:{required_approving_review_count:0}},
+    {type:"code_scanning",parameters:{code_scanning_tools:[{tool:"CodeQL",security_alerts_threshold:"high_or_higher",alerts_threshold:"errors"}]}},
+    {type:"required_status_checks",parameters:{strict_required_status_checks_policy:true,required_status_checks:contexts.map(context=>({context,integration_id:15368}))}},
+  ]};
+}
+
+async function executeProductionFreshGuard({jobName="recover",newestRunChanges=false,prCloses=false,issueCloses=false,authorizationDrifts=false,linkageDrifts=false,lifecycleDrifts=false,rulesetDrifts=false,rulesetDriftsAfterMutableReads=false,permissionRevoked=false,mixedAttempts=false}={}){
   const head="a".repeat(40),base="b".repeat(40),required=["agent-pipeline","quality","unit-research","api","integration-postgres","frontend","security","container-build","production-smoke"];
   const oldRun={id:10,run_attempt:1,name:"CI",event:"pull_request",head_sha:head,pull_requests:[{number:131}],status:"completed",conclusion:"success"};
   const newer={...oldRun,id:11,run_attempt:2,status:"in_progress",conclusion:null};let runReads=0;
   const api={runs(){runReads++;return newestRunChanges&&runReads>1?[newer,oldRun]:[oldRun]},jobs(){return required.map((name,id)=>({id,name,status:"completed",conclusion:"success",run_attempt:mixedAttempts&&id%2===0?2:1}))}};
-  const github={rest:{actions:{listWorkflowRunsForRepo(){},listJobsForWorkflowRun(){},getWorkflowRun:async()=>({data:oldRun})},issues:{listComments(){}},repos:{get:async()=>({data:{full_name:"o/r",default_branch:"main"}}),getBranch:async()=>({data:{commit:{sha:base}}})},pulls:{get:async()=>({data:{number:131,state:prCloses?"closed":"open",draft:false,head:{sha:head,repo:{full_name:"o/r"}},base:{ref:"main",sha:base},body:"Agent-Issue: #130",labels:[]}})}},paginate:async(fn)=>fn===github.rest.actions.listWorkflowRunsForRepo?api.runs():fn===github.rest.actions.listJobsForWorkflowRun?api.jobs():[]};
+  const github={rest:{actions:{listWorkflowRunsForRepo(){},listJobsForWorkflowRun(){},getWorkflowRun:async()=>({data:oldRun})},issues:{listComments(){}},repos:{get:async()=>({data:{full_name:"o/r",default_branch:"main"}}),getCollaboratorPermissionLevel:async({username})=>({data:{permission:username==="maintainer"&&!permissionRevoked?"write":"read"}}),getBranch:async()=>({data:{commit:{sha:base}}})},pulls:{get:async()=>({data:{number:131,state:prCloses?"closed":"open",draft:false,head:{sha:head,repo:{full_name:"o/r"}},base:{ref:"main",sha:base},body:"Agent-Issue: #130",labels:[]}})}},paginate:async(fn)=>fn===github.rest.actions.listWorkflowRunsForRepo?api.runs():fn===github.rest.actions.listJobsForWorkflowRun?api.jobs():[]};
   let mutableReads=0;github.rest.issues.get=async({issue_number})=>{mutableReads++;return {data:{number:issue_number,state:issueCloses?"closed":"open",title:"t",body:"b",labels:[]}}};
   const p={parseAgentIssue:()=>130,isImplementation:()=>true,fullLinkageDecision:()=>({ok:!linkageDrifts}),durablePrLinkDecision:()=>({ok:true,prNumber:131}),durableIssueLinkDecision:()=>({ok:true,issueNumber:130}),successfulRequiredJobs:()=>true};
   const a={authorizationDecision:()=>({ok:!authorizationDrifts,specHash:"spec"})},c={requiredCiJobs:required},evidence={ci:{runId:10,runAttempt:1,headSha:head,jobs:api.jobs().map(x=>({...x,runAttempt:x.run_attempt}))}},context={repo:{owner:"o",repo:"r"}},processMock={env:{BASE:base}};
-  return new AsyncFunction("github","context","p","a","c","evidence","headSha","prNumber","issueNumber","repo","def","spec","rulesEvidenceOk","liveRulesetValid","process","lifecycle",`${productionFreshGuardSource()}\nreturn freshGuard(lifecycle);`)(github,context,p,a,c,evidence,head,131,130,"o/r","main","spec",()=>true,async()=>!rulesetDrifts&&!(rulesetDriftsAfterMutableReads&&mutableReads>0),processMock,()=>!lifecycleDrifts);
+  return new AsyncFunction("github","context","p","a","c","evidence","headSha","prNumber","issueNumber","repo","def","spec","rulesEvidenceOk","liveRulesetValid","requestActor","process","lifecycle",`${productionRequestActorAuthorizedSource(jobName)}\n${productionFreshGuardSource(jobName)}\nreturn freshGuard(lifecycle);`)(github,context,p,a,c,evidence,head,131,130,"o/r","main","spec",()=>true,async()=>!rulesetDrifts&&!(rulesetDriftsAfterMutableReads&&mutableReads>0),"maintainer",processMock,()=>!lifecycleDrifts);
 }
 
 
+
+test("Issue #138 mutable requester authority is revalidated in every mutation stage",async()=>{
+  const workflow=controlWorkflow();
+  assert.match(workflow,/request_actor: \$\{\{ steps\.prepare\.outputs\.request_actor \}\}/);
+  for(const jobName of ["recover","gate","merge"]){
+    assert.equal((await executeProductionFreshGuard({jobName})).ok,true,`${jobName} accepts an unchanged authorized actor`);
+    assert.equal((await executeProductionFreshGuard({jobName,permissionRevoked:true})).ok,false,`${jobName} rejects authority revoked after prepare`);
+    const start=workflow.indexOf(`  ${jobName}:`),end=jobName==="recover"?workflow.indexOf("  gate:"):jobName==="gate"?workflow.indexOf("  merge:"):workflow.length,section=workflow.slice(start,end);
+    assert.match(section,/ACTOR: '\$\{\{ needs\.prepare\.outputs\.request_actor \}\}'/);
+    assert.match(section,/getCollaboratorPermissionLevel\(\{\.\.\.context\.repo,username:requestActor\}\)/);
+  }
+  const merge=workflow.slice(workflow.indexOf("  merge:"));
+  assert.match(merge,/requestActorAuthorized\(\)[\s\S]{0,300}pulls\.merge/);
+  assert.match(merge,/pulls\.merge[\s\S]{0,700}requestActorAuthorized\(\)[\s\S]{0,300}issues\.createComment/);
+});
 
 test("Issue #130 live ruleset drift fails closed at every privileged boundary",async()=>{
   assert.equal((await executeProductionFreshGuard({rulesetDrifts:true})).ok,false);
@@ -1003,14 +1054,42 @@ test("Issue #130 live ruleset drift fails closed at every privileged boundary",a
   assert.doesNotMatch(workflow,/Date\.now\(\)-Date\.parse\(evidence\.collectedAt\)|age<=3600000/);
 });
 
+test("Issue #138 ruleset predicate rejects CodeQL and required-check producer drift",async()=>{
+  for(const jobName of ["recover","gate","merge"]){
+    const validate=new Function("def","requiredContexts","actionsIntegrationId",`${productionRulesetValidSource(jobName)}\nreturn rulesetValid;`)("main",["quality","unit-research","api","integration-postgres","frontend","security","container-build","production-smoke","agent-verified-gate"].sort(),15368);
+    const valid=protectedRuleset();
+    assert.equal(validate(valid),true,`${jobName} accepts the complete ruleset`);
+    const noCodeql=structuredClone(valid);noCodeql.rules=noCodeql.rules.filter(rule=>rule.type!=="code_scanning");
+    assert.equal(validate(noCodeql),false,`${jobName} rejects CodeQL removal`);
+    const changedCodeql=structuredClone(valid);changedCodeql.rules.find(rule=>rule.type==="code_scanning").parameters.code_scanning_tools[0].alerts_threshold="errors_and_warnings";
+    assert.equal(validate(changedCodeql),false,`${jobName} rejects CodeQL modification`);
+    for(const integrationId of [undefined,1]){
+      const changedCheck=structuredClone(valid),item=changedCheck.rules.find(rule=>rule.type==="required_status_checks").parameters.required_status_checks.find(check=>check.context==="quality");
+      if(integrationId===undefined)delete item.integration_id;else item.integration_id=integrationId;
+      assert.equal(validate(changedCheck),false,`${jobName} rejects ${integrationId===undefined?"missing":"wrong"} integration ID on a non-gate context`);
+    }
+  }
+});
+
 test("Issue #130 live ruleset reads use the maintenance client and ignore inactive namesakes",async()=>{
   for(const jobName of ["recover","gate","merge"]){
     const calls=[],active={id:7,name:"Protect main",target:"branch",enforcement:"active"},inactive={id:8,name:"Protect main",target:"branch",enforcement:"evaluate"};
     const rulesetGithub={paginate:async(route)=>{calls.push(["paginate",route]);return [inactive,active]},request:async(route,args)=>{calls.push(["request",route,args.ruleset_id]);return {data:active}}};
-    const result=await new AsyncFunction("rulesetGithub","context","rulesetValid",`${productionLiveRulesetValidSource(jobName)}\nreturn liveRulesetValid();`)(rulesetGithub,{repo:{owner:"o",repo:"r"}},ruleset=>ruleset===active);
+    const evidence={ruleset:{id:7,name:"Protect main",target:"branch",enforcement:"active"}};
+    const result=await new AsyncFunction("rulesetGithub","context","rulesetValid","evidence",`${productionLiveRulesetValidSource(jobName)}\nreturn liveRulesetValid();`)(rulesetGithub,{repo:{owner:"o",repo:"r"}},ruleset=>ruleset===active,evidence);
     assert.equal(result,true,`${jobName} accepts the sole active ruleset`);
     assert.deepEqual(calls.map(x=>x[0]),["paginate","request"]);
     assert.equal(calls[1][2],7);
+  }
+});
+
+test("Issue #138 live ruleset guard binds every preserved field to collected evidence",async()=>{
+  for(const jobName of ["recover","gate","merge"]){
+    const live=protectedRuleset(),evidence={ruleset:{id:live.id,name:live.name,target:live.target,enforcement:live.enforcement,conditions:live.conditions,rules:live.rules,bypassActors:live.bypass_actors}};
+    const run=async candidate=>new AsyncFunction("rulesetGithub","context","rulesetValid","evidence",`${productionLiveRulesetValidSource(jobName)}\nreturn liveRulesetValid();`)({paginate:async()=>[candidate],request:async()=>({data:candidate})},{repo:{owner:"o",repo:"r"}},()=>true,evidence);
+    assert.equal(await run(live),true,`${jobName} accepts the unchanged snapshot`);
+    const extraRule=structuredClone(live);extraRule.rules.push({type:"required_signatures"});
+    assert.equal(await run(extraRule),false,`${jobName} rejects changes to additional preserved protection fields`);
   }
 });
 
@@ -1018,7 +1097,7 @@ test("Issue #130 records a successful merge before separately reporting post-mer
   const head="a".repeat(40),mergeSha="c".repeat(40),events=[];
   const github={rest:{pulls:{merge:async()=>{events.push("merge");return {data:{merged:true,sha:mergeSha}}}},issues:{createComment:async args=>events.push({comment:args})}}};
   const core={setFailed:message=>events.push({failure:message})},context={repo:{owner:"o",repo:"r"}};
-  await new AsyncFunction("github","context","core","prNumber","issueNumber","headSha","liveRulesetValid",productionMergeCompletionSource())(github,context,core,134,130,head,async()=>false);
+  await new AsyncFunction("github","context","core","prNumber","issueNumber","headSha","liveRulesetValid","requestActorAuthorized",productionMergeCompletionSource())(github,context,core,134,130,head,async()=>false,async()=>true);
   assert.deepEqual(events.map(event=>typeof event==="string"?event:Object.keys(event)[0]),["merge","comment","failure"]);
   assert.equal(events[1].comment.issue_number,130);
   assert.ok(events[1].comment.body.includes(`head \`${head}\` as \`${mergeSha}\``));
