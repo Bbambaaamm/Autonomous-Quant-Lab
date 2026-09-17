@@ -918,7 +918,7 @@ test("Issue #130 production guards re-read CI attempts and mutable authorities a
 
 test("Issue #130 production ruleset guard enforces the complete immutable contract", () => {
   const control=fs.readFileSync(".github/workflows/agent-control-plane-remediation.yml","utf8");
-  for(const token of ["'Protect main'","target==='branch'","enforcement==='active'","bypass_actors.length===0","strict_required_status_checks_policy===true","gate?.integration_id===actionsIntegrationId","typed('deletion').length===1","typed('non_fast_forward').length===1","typed('pull_request').length===1"]) assert.ok(control.includes(token),token);
+  for(const token of ["'Protect main'","target==='branch'","enforcement==='active'","bypass_actors.length===0","strict_required_status_checks_policy===true","items.every(x=>x.integration_id===actionsIntegrationId)","typed('deletion').length===1","typed('non_fast_forward').length===1","typed('pull_request').length===1","typed('code_scanning')","security_alerts_threshold:'high_or_higher'","alerts_threshold:'errors'"]) assert.ok(control.includes(token),token);
   assert.match(control,/requiredContexts=\[\.\.\.rulesetRequired,'agent-verified-gate'\]\.sort\(\)/);
   assert.match(control,/JSON\.stringify\(configured\)===JSON\.stringify\(requiredContexts\)/);
 });
@@ -930,6 +930,8 @@ test("Issue #137 ruleset contract excludes agent-pipeline without weakening requ
   assert.equal(control.split(ciRequired).length-1,1,"evidence collection retains all nine required CI jobs");
   assert.equal(control.split(rulesetRequired).length-1,4,"evidence collection and all three downstream validators use the exact eight-context ruleset contract");
   assert.equal(control.split("const requiredContexts=[...rulesetRequired,'agent-verified-gate'].sort()").length-1,4);
+  assert.equal(control.split("codeScanning.length===1&&JSON.stringify(codeScanning[0].parameters)===JSON.stringify(expectedCodeScanning)").length-1,4,"all four ruleset validators preserve the CodeQL rule");
+  assert.equal(control.split("items.every(x=>x.integration_id===actionsIntegrationId)").length-1,4,"all four ruleset validators bind every required context to GitHub Actions");
   assert.doesNotMatch(control,/requiredContexts=\[\.\.\.(?:required|c\.requiredCiJobs),'agent-verified-gate'\]/);
 });
 
@@ -983,6 +985,22 @@ function productionLiveRulesetValidSource(jobName="recover"){
   return line.trim();
 }
 
+function productionRulesetValidSource(jobName="recover"){
+  const workflow=controlWorkflow(),start=workflow.indexOf(`  ${jobName}:`),end=jobName==="recover"?workflow.indexOf("  gate:"):jobName==="gate"?workflow.indexOf("  merge:"):workflow.length;
+  const line=workflow.slice(start,end).split("\n").find(x=>x.includes("const rulesetValid=r=>"));
+  assert.ok(line,`production ${jobName} rulesetValid must exist`);
+  return line.trim();
+}
+
+function protectedRuleset(){
+  const contexts=["quality","unit-research","api","integration-postgres","frontend","security","container-build","production-smoke","agent-verified-gate"];
+  return {id:7,name:"Protect main",target:"branch",enforcement:"active",bypass_actors:[],conditions:{ref_name:{include:["refs/heads/main"],exclude:[]}},rules:[
+    {type:"deletion"},{type:"non_fast_forward"},{type:"pull_request",parameters:{required_approving_review_count:0}},
+    {type:"code_scanning",parameters:{code_scanning_tools:[{tool:"CodeQL",security_alerts_threshold:"high_or_higher",alerts_threshold:"errors"}]}},
+    {type:"required_status_checks",parameters:{strict_required_status_checks_policy:true,required_status_checks:contexts.map(context=>({context,integration_id:15368}))}},
+  ]};
+}
+
 async function executeProductionFreshGuard({newestRunChanges=false,prCloses=false,issueCloses=false,authorizationDrifts=false,linkageDrifts=false,lifecycleDrifts=false,rulesetDrifts=false,rulesetDriftsAfterMutableReads=false,mixedAttempts=false}={}){
   const head="a".repeat(40),base="b".repeat(40),required=["agent-pipeline","quality","unit-research","api","integration-postgres","frontend","security","container-build","production-smoke"];
   const oldRun={id:10,run_attempt:1,name:"CI",event:"pull_request",head_sha:head,pull_requests:[{number:131}],status:"completed",conclusion:"success"};
@@ -1013,14 +1031,42 @@ test("Issue #130 live ruleset drift fails closed at every privileged boundary",a
   assert.doesNotMatch(workflow,/Date\.now\(\)-Date\.parse\(evidence\.collectedAt\)|age<=3600000/);
 });
 
+test("Issue #138 ruleset predicate rejects CodeQL and required-check producer drift",async()=>{
+  for(const jobName of ["recover","gate","merge"]){
+    const validate=new Function("def","requiredContexts","actionsIntegrationId",`${productionRulesetValidSource(jobName)}\nreturn rulesetValid;`)("main",["quality","unit-research","api","integration-postgres","frontend","security","container-build","production-smoke","agent-verified-gate"].sort(),15368);
+    const valid=protectedRuleset();
+    assert.equal(validate(valid),true,`${jobName} accepts the complete ruleset`);
+    const noCodeql=structuredClone(valid);noCodeql.rules=noCodeql.rules.filter(rule=>rule.type!=="code_scanning");
+    assert.equal(validate(noCodeql),false,`${jobName} rejects CodeQL removal`);
+    const changedCodeql=structuredClone(valid);changedCodeql.rules.find(rule=>rule.type==="code_scanning").parameters.code_scanning_tools[0].alerts_threshold="errors_and_warnings";
+    assert.equal(validate(changedCodeql),false,`${jobName} rejects CodeQL modification`);
+    for(const integrationId of [undefined,1]){
+      const changedCheck=structuredClone(valid),item=changedCheck.rules.find(rule=>rule.type==="required_status_checks").parameters.required_status_checks.find(check=>check.context==="quality");
+      if(integrationId===undefined)delete item.integration_id;else item.integration_id=integrationId;
+      assert.equal(validate(changedCheck),false,`${jobName} rejects ${integrationId===undefined?"missing":"wrong"} integration ID on a non-gate context`);
+    }
+  }
+});
+
 test("Issue #130 live ruleset reads use the maintenance client and ignore inactive namesakes",async()=>{
   for(const jobName of ["recover","gate","merge"]){
     const calls=[],active={id:7,name:"Protect main",target:"branch",enforcement:"active"},inactive={id:8,name:"Protect main",target:"branch",enforcement:"evaluate"};
     const rulesetGithub={paginate:async(route)=>{calls.push(["paginate",route]);return [inactive,active]},request:async(route,args)=>{calls.push(["request",route,args.ruleset_id]);return {data:active}}};
-    const result=await new AsyncFunction("rulesetGithub","context","rulesetValid",`${productionLiveRulesetValidSource(jobName)}\nreturn liveRulesetValid();`)(rulesetGithub,{repo:{owner:"o",repo:"r"}},ruleset=>ruleset===active);
+    const evidence={ruleset:{id:7,name:"Protect main",target:"branch",enforcement:"active"}};
+    const result=await new AsyncFunction("rulesetGithub","context","rulesetValid","evidence",`${productionLiveRulesetValidSource(jobName)}\nreturn liveRulesetValid();`)(rulesetGithub,{repo:{owner:"o",repo:"r"}},ruleset=>ruleset===active,evidence);
     assert.equal(result,true,`${jobName} accepts the sole active ruleset`);
     assert.deepEqual(calls.map(x=>x[0]),["paginate","request"]);
     assert.equal(calls[1][2],7);
+  }
+});
+
+test("Issue #138 live ruleset guard binds every preserved field to collected evidence",async()=>{
+  for(const jobName of ["recover","gate","merge"]){
+    const live=protectedRuleset(),evidence={ruleset:{id:live.id,name:live.name,target:live.target,enforcement:live.enforcement,conditions:live.conditions,rules:live.rules,bypassActors:live.bypass_actors}};
+    const run=async candidate=>new AsyncFunction("rulesetGithub","context","rulesetValid","evidence",`${productionLiveRulesetValidSource(jobName)}\nreturn liveRulesetValid();`)({paginate:async()=>[candidate],request:async()=>({data:candidate})},{repo:{owner:"o",repo:"r"}},()=>true,evidence);
+    assert.equal(await run(live),true,`${jobName} accepts the unchanged snapshot`);
+    const extraRule=structuredClone(live);extraRule.rules.push({type:"required_signatures"});
+    assert.equal(await run(extraRule),false,`${jobName} rejects changes to additional preserved protection fields`);
   }
 });
 
