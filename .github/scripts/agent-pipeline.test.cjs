@@ -1129,11 +1129,25 @@ test("Issue #130 durable review marker rejects a rerun started after every other
   const accepted={id:10,run_attempt:1,name:"CI",event:"pull_request",head_sha:head,pull_requests:[{number:134}],status:"completed",conclusion:"success"};
   const rerun={...accepted,id:11,run_attempt:2,status:"in_progress",conclusion:null};
   const github={rest:{actions:{listWorkflowRunsForRepo(){},getWorkflowRun:async()=>({data:{id:90,run_attempt:4}})},issues:{createComment:async args=>writes.push(args)}},paginate:async()=>[rerun,accepted]};
-  const core={setFailed:message=>failures.push(message)},context={repo:{owner:"o",repo:"r"},runId:90,runAttempt:4},processMock={env:{SHA:head,REVIEW_RUN:"90",REVIEW_ATTEMPT:"4"}};
+  const core={setFailed:message=>failures.push(message)},context={repo:{owner:"o",repo:"r"},runId:90},processMock={env:{SHA:head,REVIEW_RUN:"90",REVIEW_ATTEMPT:"4",GITHUB_RUN_ATTEMPT:"4"}};
   await new AsyncFunction("github","context","process","prNumber","freshRun","core","safeSummary","result",source)(github,context,processMock,134,accepted,core,"safe",{result:"PASS"});
   assert.deepEqual(writes,[]);
   assert.deepEqual(failures,["NO_WRITE: newest CI changed at review record boundary"]);
   assert.doesNotMatch(source,/status:\s*['"]completed['"]/,"the final workflow-run request must be unfiltered");
+});
+
+test("Issue #128 final write uses the GitHub runtime attempt and fails closed when it is invalid",async()=>{
+  const workflow=reviewerWorkflow(),record=workflow.slice(workflow.indexOf("  trusted-record:"),workflow.indexOf("  verify-after-pass:"));
+  const lines=record.split("\n"),start=lines.findIndex(x=>x.includes("const writeRuns=await")),end=lines.findIndex((x,i)=>i>start&&x.includes("await github.rest.issues.createComment"));
+  const source=lines.slice(start,end+1).map(x=>x.trim()).join("\n"),head="a".repeat(40),accepted={id:10,workflow_id:700,path:".github/workflows/ci.yml",run_attempt:1,name:"CI",event:"pull_request",head_sha:head,pull_requests:[{number:135}],status:"completed",conclusion:"success"};
+  const execute=async runtimeAttempt=>{
+    const writes=[],failures=[],github={rest:{actions:{listWorkflowRunsForRepo(){},getWorkflowRun:async()=>({data:{id:90,run_attempt:4}})},issues:{createComment:async args=>writes.push(args)}},paginate:async()=>[accepted]};
+    const env={SHA:head,REVIEW_RUN:"90",REVIEW_ATTEMPT:"4"};if(runtimeAttempt!==undefined)env.GITHUB_RUN_ATTEMPT=runtimeAttempt;
+    await new AsyncFunction("github","context","process","prNumber","freshRun","ciWorkflow","core","safeSummary","result",source)(github,{repo:{owner:"o",repo:"r"},runId:90},{env},135,accepted,{id:700,path:accepted.path},{setFailed:message=>failures.push(message)},"safe",{result:"PASS"});
+    return {writes,failures};
+  };
+  assert.equal((await execute("4")).writes.length,1,"the exact env-backed attempt permits the trusted write");
+  for(const attempt of [undefined,"","not-a-number","3","5"]){const result=await execute(attempt);assert.deepEqual(result.writes,[],`runtime attempt ${String(attempt)} must not write`);assert.deepEqual(result.failures,["NO_WRITE: reviewer attempt changed at review record boundary"]);}
 });
 
 test("Issue #130 real governance controller stops the paired write when authority drifts",async()=>{
@@ -1231,7 +1245,8 @@ test("Issue #128 executes the production seal verifier and rejects binding or ev
 
 test("Issue #128 final trusted record binds source, authorization, newest CI, jobs, and sealed evidence",()=>{
   const record=reviewerWorkflow().slice(reviewerWorkflow().indexOf("  trusted-record:"),reviewerWorkflow().indexOf("  verify-after-pass:"));
-  for(const proof of [/sealed evidence binding changed/,/reviewerRunAttempt:Number\(process\.env\.REVIEW_ATTEMPT\)/,/reviewRun\.run_attempt===Number\(process\.env\.REVIEW_ATTEMPT\)/,/reviewRun\.run_attempt===context\.runAttempt/,/evidence\.reviewer\?\.runAttempt===reviewRun\.run_attempt/,/writeReviewRun\.run_attempt!==Number\(process\.env\.REVIEW_ATTEMPT\)/,/reviewer attempt changed at review record boundary/,/main\.commit\.sha===process\.env\.SOURCE/,/auth\.specHash===process\.env\.SPEC/,/ciRun\.id===Number\(process\.env\.CI_RUN\)/,/successfulRequiredJobs\(freshJobs/,/newest CI changed at review record boundary/])assert.match(record,proof);
+  for(const proof of [/sealed evidence binding changed/,/reviewerRunAttempt:Number\(process\.env\.REVIEW_ATTEMPT\)/,/reviewRun\.run_attempt===Number\(process\.env\.REVIEW_ATTEMPT\)/,/reviewRun\.run_attempt===Number\(process\.env\.GITHUB_RUN_ATTEMPT\)/,/evidence\.reviewer\?\.runAttempt===reviewRun\.run_attempt/,/writeReviewRun\.run_attempt!==Number\(process\.env\.REVIEW_ATTEMPT\)/,/writeReviewRun\.run_attempt!==Number\(process\.env\.GITHUB_RUN_ATTEMPT\)/,/reviewer attempt changed at review record boundary/,/main\.commit\.sha===process\.env\.SOURCE/,/auth\.specHash===process\.env\.SPEC/,/ciRun\.id===Number\(process\.env\.CI_RUN\)/,/successfulRequiredJobs\(freshJobs/,/newest CI changed at review record boundary/])assert.match(record,proof);
+  assert.doesNotMatch(record,/context\.runAttempt/);
   assert.ok(record.indexOf("sealed evidence binding changed")<record.indexOf("issues.createComment"));
 });
 
@@ -1265,8 +1280,8 @@ async function executeIssue128Collector(change={}){
   const p={parseAgentIssue:()=>change.wrongIssue?127:128,isImplementation:()=>true,lifecycleAtAgentPr:()=>({ok:true}),fullLinkageDecision:()=>({ok:!change.linkageDrift}),authoritativeCiIdentity:run=>run.status==="completed"&&run.conclusion==="success"&&run.head_sha===head&&run.pull_requests?.[0]?.number===135,successfulRequiredJobs:jobs=>jobs.length===1&&jobs[0].conclusion==="success"};
   const a={authorizationDecision:()=>({ok:!change.authDrift,specHash:change.wrongSpec?"other":"spec"})},c={requiredCiJobs:["required"]};
   const requireMock=id=>id.includes("agent-pipeline.cjs")?p:id.includes("agent-autonomy.cjs")?a:id.includes("agent-pipeline.json")?c:require(id);
-  const context={repo:{owner:"o",repo:"r"},runId:90,runAttempt:change.contextAttempt??4,workflow:"Agent Codex review",payload:{repository:{default_branch:"main"}}};
-  const env={...process.env,RUNNER_TEMP:"",PR:change.wrongPr?"136":"135",ISSUE:change.wrongIssueEnv?"127":"128",HEAD:head,BASE:base,SOURCE:change.wrongSource?"d".repeat(40):source,SPEC:"spec",REVIEW_RUN:change.wrongReviewerRun?"91":"90",REVIEW_ATTEMPT:change.wrongReviewerAttempt?"3":"4",CI_RUN:change.wrongRun?"71":"70",CI_ATTEMPT:change.wrongAttempt?"1":"2",GITHUB_WORKFLOW_SHA:source,AGENT_PUBLISH_TOKEN:secret,OPENAI_API_KEY:secret};
+  const context={repo:{owner:"o",repo:"r"},runId:90,workflow:"Agent Codex review",payload:{repository:{default_branch:"main"}}};
+  const env={...process.env,RUNNER_TEMP:"",PR:change.wrongPr?"136":"135",ISSUE:change.wrongIssueEnv?"127":"128",HEAD:head,BASE:base,SOURCE:change.wrongSource?"d".repeat(40):source,SPEC:"spec",REVIEW_RUN:change.wrongReviewerRun?"91":"90",REVIEW_ATTEMPT:change.wrongReviewerAttempt?"3":"4",CI_RUN:change.wrongRun?"71":"70",CI_ATTEMPT:change.wrongAttempt?"1":"2",GITHUB_WORKFLOW_SHA:source,GITHUB_RUN_ATTEMPT:change.runtimeAttempt===undefined?"4":change.runtimeAttempt,AGENT_PUBLISH_TOKEN:secret,OPENAI_API_KEY:secret};if(change.missingRuntimeAttempt)delete env.GITHUB_RUN_ATTEMPT;
   const dir=fs.mkdtempSync(path.join(os.tmpdir(),"issue128-collector-")),input=path.join(dir,"review-input"),previous=process.cwd();env.RUNNER_TEMP=dir;fs.mkdirSync(input);
   const governance={"AGENTS.md":"rules",".github/agent-pipeline.json":"{}","docs/autonomous-development-pipeline.md":"docs","docs/adr/0003-autonomous-development-pipeline-v2.md":"adr"};
   const scope={issueNumber:128,title:"t",body:"b",headSha:head,changedFiles:[".github/scripts/agent-pipeline.test.cjs",".github/workflows/agent-codex-review.yml"]};
@@ -1290,7 +1305,7 @@ test("Issue #128 actual evidence collector closes the post-pagination race and f
   assert.doesNotMatch(Buffer.concat(Object.values(control.files)).toString(),new RegExp(control.secret),"credentials and mutation tokens never enter model input or evidence");
   const attacks=[
     {wrongRepository:true},{wrongIssue:true},{wrongIssueEnv:true},{wrongPr:true},{wrongHead:true},{wrongBase:true},{wrongSource:true},{wrongMain:true},{authDrift:true},{linkageDrift:true},{wrongSpec:true},
-    {wrongReviewerRun:true},{wrongReviewerAttempt:true},{contextAttempt:5},{reviewerRun:{run_attempt:5}},{reviewerRun:{workflow_id:901}},{reviewerRun:{path:".github/workflows/evil.yml"}},{reviewerRun:{head_sha:"c".repeat(40)}},{reviewerWorkflow:{path:".github/workflows/evil.yml"}},
+    {wrongReviewerRun:true},{wrongReviewerAttempt:true},{missingRuntimeAttempt:true},{runtimeAttempt:""},{runtimeAttempt:"not-a-number"},{runtimeAttempt:"3"},{runtimeAttempt:"5"},{reviewerRun:{run_attempt:5}},{reviewerRun:{workflow_id:901}},{reviewerRun:{path:".github/workflows/evil.yml"}},{reviewerRun:{head_sha:"c".repeat(40)}},{reviewerWorkflow:{path:".github/workflows/evil.yml"}},
     {freshCi:{workflow_id:701}},{freshCi:{path:".github/workflows/fake-ci.yml"}},{ciWorkflow:{path:".github/workflows/fake-ci.yml"}},{wrongRun:true},{wrongAttempt:true},{apiFailure:true},
     {missingJob:true},{failingJob:true},{newerRun:true},{newerAttempt:true},{missingArtifact:true},{swappedArtifact:true},
   ];
@@ -1318,8 +1333,8 @@ async function executeIssue128FreshnessProgram(stepName,change={}){
   const github={rest:{actions,repos:{get:async()=>({data:{full_name:"o/r",default_branch:"main"}}),getBranch:async()=>({data:{commit:{sha:source}}})},pulls:{get:async()=>({data:{state:change.prClosed?"closed":"open",draft:false,base:{ref:"main",sha:base},head:{sha:head,repo:{full_name:"o/r"}},body:"Agent-Issue: #128",labels:["agent:pr"]}})},issues:{listComments(){},get:async()=>({data:{state:"open",title:"t",body:"b",labels:["type:implementation","agent:pr"]}}),createComment:async x=>writes.push(x)}},paginate:async(route)=>{if(route===actions.listWorkflowRunsForRepo){runLists++;if(change.newerRun&&runLists>1)return [{...ci,id:71,run_attempt:3},ci];return [ci];}if(route===actions.listJobsForWorkflowRun)return change.badJobs?[]:[{id:1,name:"required",status:"completed",conclusion:"success",run_attempt:2}];return []}};
   const p={parseAgentIssue:()=>128,isImplementation:()=>true,lifecycleAtAgentPr:()=>({ok:true}),fullLinkageDecision:()=>({ok:!change.linkageDrift}),authoritativeCiIdentity:run=>run.status==="completed"&&run.conclusion==="success",successfulRequiredJobs:jobs=>!change.badJobs&&jobs.length===1},a={authorizationDecision:()=>({ok:!change.authDrift,specHash:"spec"})},c={requiredCiJobs:["required"]};
   const requireMock=id=>id.includes("agent-pipeline.cjs")?p:id.includes("agent-autonomy.cjs")?a:id.includes("agent-pipeline.json")?c:require(id);
-  const context={repo:{owner:"o",repo:"r"},runId:90,runAttempt:change.contextAttempt??4,workflow:"Agent Codex review",payload:{repository:{default_branch:"main"}}};
-  const env={...process.env,TRUSTED_SOURCE:root,PR:"135",ISSUE:"128",HEAD:head,BASE:base,SOURCE:source,SPEC:"spec",REVIEW_RUN:change.wrongReviewerRun?"91":"90",REVIEW_ATTEMPT:change.wrongReviewerAttempt?"3":"4",CI_RUN:"70",CI_ATTEMPT:change.wrongAttempt?"1":"2",GITHUB_WORKFLOW_SHA:change.workflowSha||source,RUNNER_TEMP:os.tmpdir()};
+  const context={repo:{owner:"o",repo:"r"},runId:90,workflow:"Agent Codex review",payload:{repository:{default_branch:"main"}}};
+  const env={...process.env,TRUSTED_SOURCE:root,PR:"135",ISSUE:"128",HEAD:head,BASE:base,SOURCE:source,SPEC:"spec",REVIEW_RUN:change.wrongReviewerRun?"91":"90",REVIEW_ATTEMPT:change.wrongReviewerAttempt?"3":"4",CI_RUN:"70",CI_ATTEMPT:change.wrongAttempt?"1":"2",GITHUB_WORKFLOW_SHA:change.workflowSha||source,GITHUB_RUN_ATTEMPT:change.runtimeAttempt===undefined?"4":change.runtimeAttempt,RUNNER_TEMP:os.tmpdir()};if(change.missingRuntimeAttempt)delete env.GITHUB_RUN_ATTEMPT;
   const dir=fs.mkdtempSync(path.join(os.tmpdir(),"issue128-freshness-")),previous=process.cwd();
   try{
     fs.mkdirSync(path.join(dir,".codex-input"));
@@ -1335,7 +1350,7 @@ test("Issue #128 actual pre/post freshness programs fail closed on provenance, A
   for(const step of ["Pre-model trusted-source and exact-CI freshness validation","Post-model freshness and sealed-input validation"]){
     {const control=await executeIssue128FreshnessProgram(step);assert.equal(control.ok,true,`${step} unchanged control: ${control.error?.stack}`);}
     const attacks=[
-      {wrongReviewerRun:true},{wrongReviewerAttempt:true},{contextAttempt:5},{reviewerRun:{run_attempt:5}},{reviewerWorkflow:{path:".github/workflows/evil.yml"}},{reviewerWorkflow:{name:"Candidate review"}},{reviewerRun:{head_sha:"c".repeat(40)}},{workflowSha:"d".repeat(40)},
+      {wrongReviewerRun:true},{wrongReviewerAttempt:true},{missingRuntimeAttempt:true},{runtimeAttempt:""},{runtimeAttempt:"not-a-number"},{runtimeAttempt:"3"},{runtimeAttempt:"5"},{reviewerRun:{run_attempt:5}},{reviewerWorkflow:{path:".github/workflows/evil.yml"}},{reviewerWorkflow:{name:"Candidate review"}},{reviewerRun:{head_sha:"c".repeat(40)}},{workflowSha:"d".repeat(40)},
       {ciWorkflow:{path:".github/workflows/fake-ci.yml"}},{ciWorkflow:{name:"Not CI"}},{freshCi:{path:".github/workflows/fake-ci.yml"}},{newerRun:true},{wrongAttempt:true},{freshCi:{run_attempt:3}},
       {apiFailure:true},{badJobs:true},{prClosed:true},{authDrift:true},{linkageDrift:true},...(step.startsWith("Post")?[{tamperedEvidence:true}]:[]),
     ];
