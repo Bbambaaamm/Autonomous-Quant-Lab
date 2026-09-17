@@ -368,10 +368,14 @@ test("v2 denylist blokuje governance, dependency a execution cesty", () => {
     assert.equal(pipeline.validatePatchPaths([path], config), false, path);
 });
 
-test("v2 independent PASS je exact-SHA a nenahrazuje human review", () => {
-  const comments = [{ user: { login: "github-actions[bot]" }, body: "<!-- agent-codex-review:v2 sha=abc result=PASS -->" }];
-  assert.equal(pipeline.independentReviewSatisfied(comments, "abc"), true);
-  assert.equal(pipeline.independentReviewSatisfied(comments, "new"), false);
+test("strict independent PASS is bound to authorization and exact CI attempt", () => {
+  const binding = { repo: "o/r", issueNumber: 140, prNumber: 141, headSha: "a".repeat(40), specHash: "b".repeat(64), ciRunId: 900, ciRunAttempt: 2 };
+  const marker = pipeline.independentReviewMarker({ ...binding, result: "PASS" });
+  const comments = [{ user: { login: "github-actions[bot]" }, body: marker }];
+  assert.equal(pipeline.independentReviewSatisfied(comments, binding), true);
+  assert.equal(pipeline.independentReviewSatisfied(comments, { ...binding, ciRunId: 901 }), false);
+  assert.equal(pipeline.independentReviewSatisfied(comments, { ...binding, ciRunAttempt: 3 }), false);
+  assert.equal(pipeline.independentReviewSatisfied([{ user: { login: "github-actions[bot]" }, body: `<!-- agent-codex-review:v2 sha=${binding.headSha} result=PASS -->` }], binding), false);
   const base = { workflowName: "CI", workflowConclusion: "success", headSha: "abc", prHeadSha: "abc", open: true, correctBase: true, draft: false, issueIsImplementation: true, statesReconciliable: true, needsHuman: false, requiredJobsSuccessful: true };
   assert.equal(pipeline.verificationDecision({ ...base, reviewSatisfied: false, independentReviewSatisfied: true }).reason, "EXACT_SHA_REVIEW_MISSING");
   assert.equal(pipeline.verificationDecision({ ...base, reviewSatisfied: true, independentReviewSatisfied: false }).reason, "INDEPENDENT_REVIEW_PASS_MISSING");
@@ -814,7 +818,7 @@ test("Issue #96 Reviewer metadata writers have compatible least-privilege grants
   assert.match(model,/permissions: \{contents: read\}/);
   assert.doesNotMatch(model,/issues: write|pull-requests: write|contents: write/);
   assert.match(model,/OPENAI_API_KEY/);
-  assert.match(job(reviewer,"trusted-record"),/result\.reviewed_sha!==process\.env\.SHA[\s\S]*createComment[\s\S]*agent-codex-review:v2 sha=\$\{process\.env\.SHA\}/);
+  assert.match(job(reviewer,"trusted-record"),/result\.reviewed_sha!==process\.env\.SHA[\s\S]*createComment[\s\S]*independentReviewMarker/);
   const governance=job(reviewer,"governance-escalation");
   assert.match(governance,/fullLinkageDecision[\s\S]*reviewerBlockPairPlan[\s\S]*issues\.addLabels[\s\S]*issues\.removeLabel/);
   assert.doesNotMatch(governance,/issues\.setLabels/);
@@ -1176,4 +1180,32 @@ test("Issue #130 governance escalation preserves a non-agent label added after t
 test("Issue #130 governance escalation propagates prepared base authority",()=>{
   const prepare=reviewerWorkflow().slice(reviewerWorkflow().indexOf("  prepare:"),reviewerWorkflow().indexOf("  governance-escalation:"));
   assert.match(prepare,/GOVERNANCE_CHANGE[\s\S]*base_sha:pr\.base\.sha/);
+});
+
+test("Issue #140 newest exact-head CI includes active and unsuccessful runs", () => {
+  const sha="1".repeat(40),base={name:"CI",event:"pull_request",head_sha:sha,pull_requests:[{number:140}],run_attempt:1};
+  const green={...base,id:10,status:"completed",conclusion:"success"};
+  for(const newer of [
+    {...base,id:11,status:"queued",conclusion:null},
+    {...base,id:12,status:"in_progress",conclusion:null},
+    {...base,id:13,status:"completed",conclusion:"failure"},
+    {...base,id:14,status:"completed",conclusion:"cancelled"},
+  ]) assert.equal(pipeline.newestAuthoritativeCiRun([green,newer],{workflowName:"CI",headSha:sha,prNumber:140}).id,newer.id);
+});
+
+test("Issue #140 workflow consumers use unfiltered CI and exact run-attempt evidence", () => {
+  const verify=fs.readFileSync(".github/workflows/agent-verify.yml","utf8");
+  const gate=fs.readFileSync(".github/workflows/agent-verified-gate.yml","utf8");
+  const reviewer=fs.readFileSync(".github/workflows/agent-codex-review.yml","utf8");
+  for(const workflow of [verify,gate]) {
+    assert.doesNotMatch(workflow,/listWorkflowRunsForRepo[^\n]*status:\s*['"]completed['"]/);
+    assert.match(workflow,/ciRunAttempt|run_attempt/);
+    assert.match(workflow,/ciRunId:[^\n]+ciRunAttempt:/);
+    assert.match(workflow,/independentReviewSatisfied\(/);
+  }
+  assert.match(verify,/exactVerificationEvidence\([^\n]+ciRunId:run\.id,ciRunAttempt:run\.run_attempt/);
+  assert.match(gate,/exactVerificationEvidence\([^\n]+ciRunId:ciRun\.id,ciRunAttempt:ciRun\.run_attempt/);
+  assert.match(reviewer,/independentReviewMarker\(\{\.\.\.reviewBinding,result:result\.result\}\)/);
+  const model=reviewer.slice(reviewer.indexOf("  independent-review:"),reviewer.indexOf("  trusted-record:"));
+  assert.doesNotMatch(model,/contents: write|issues: write|pull-requests: write|AGENT_PUBLISH_TOKEN/);
 });
