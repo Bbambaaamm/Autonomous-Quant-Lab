@@ -304,6 +304,12 @@ jobs:
             const writeCiOk=!!writeCi&&writeCi.id===Number(process.env.CI_RUN)&&writeCi.run_attempt===Number(process.env.CI_ATTEMPT)&&writeCiRun.id===writeCi.id&&writeCiRun.run_attempt===writeCi.run_attempt&&writeCiRun.workflow_id===writeCi.workflow_id&&evidence.ci.runId===writeCiRun.id&&evidence.ci.runAttempt===writeCiRun.run_attempt&&p.authoritativeCiIdentity(writeCiRun,{prNumber,headSha:process.env.SHA,conclusion:'success'})&&p.successfulRequiredJobs(writeJobs,c.requiredCiJobs,process.env.SHA);
             if(result.reviewed_sha!==process.env.SHA||!writeSealOk||!writeProvenanceOk||!writeAuthorityOk||!writeCiOk)return core.setFailed('NO_WRITE: final authority changed at review record boundary');
             if(p.parseTrustedMarker(writePrComments,'agent-codex-review',process.env.SHA))return core.notice('Idempotent NO_WRITE');
+            // Comments and the other authority reads above may paginate long enough for a new
+            // exact-head CI run to start. Make the newest-run query the final read before writing.
+            const boundaryRuns=await github.paginate(github.rest.actions.listWorkflowRunsForRepo,{...context.repo,per_page:100});
+            const boundaryCi=boundaryRuns.filter(run=>run.name==='CI'&&run.event==='pull_request'&&run.head_sha===process.env.SHA&&run.pull_requests?.length===1&&run.pull_requests[0].number===prNumber).sort((x,y)=>y.id-x.id)[0];
+            const boundaryCiOk=!!boundaryCi&&boundaryCi.id===Number(process.env.CI_RUN)&&boundaryCi.run_attempt===Number(process.env.CI_ATTEMPT)&&boundaryCi.status==='completed'&&boundaryCi.conclusion==='success'&&boundaryCi.workflow_id===writeCiWorkflow.id&&boundaryCi.path===writeCiWorkflow.path&&p.authoritativeCiIdentity(boundaryCi,{prNumber,headSha:process.env.SHA,conclusion:'success'});
+            if(!boundaryCiOk)return core.setFailed('NO_WRITE: newest CI changed at final review record boundary');
             await github.rest.issues.createComment({...context.repo,issue_number:prNumber,body:`Independent Codex review: **${result.result}** for exact SHA \`${process.env.SHA}\`.\n\n${safeSummary}\n\n<!-- agent-codex-review:v2 sha=${process.env.SHA} result=${result.result} -->`});
             if(result.result!=="PASS") { core.setOutput('blocked','true'); core.setOutput('block_reason',safeSummary); return; }
             core.setOutput('pass','true');
