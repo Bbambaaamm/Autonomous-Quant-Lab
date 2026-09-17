@@ -1161,6 +1161,69 @@ function issue128GithubScript(stepName){
   return step.slice(step.indexOf("          script: |")+20).split("\n").filter(line=>line.startsWith("            ")).map(line=>line.slice(12)).join("\n");
 }
 
+function issue128CollectorProgram(){
+  const workflow=reviewerWorkflow(),section=workflow.slice(workflow.indexOf("  collect-review-evidence:"),workflow.indexOf("  independent-review:"));
+  const tail=section.slice(section.indexOf("      - name: Collect and seal exact CI evidence and prompt"));
+  return tail.slice(tail.indexOf("          script: |")+20).split("\n").filter(line=>line.startsWith("            ")).map(line=>line.slice(12)).join("\n");
+}
+
+async function executeIssue128Collector(change={}){
+  const source=execFileSync("git",["rev-parse","HEAD"],{encoding:"utf8"}).trim(),head="a".repeat(40),base="b".repeat(40),secret="mutation-token-must-not-leak";
+  const ci={id:70,workflow_id:700,path:".github/workflows/ci.yml",name:"CI",event:"pull_request",head_sha:head,head_repository:{full_name:"o/r"},pull_requests:[{number:135}],run_attempt:2,status:"completed",conclusion:"success"};
+  const reviewer={id:90,workflow_id:900,path:".github/workflows/agent-codex-review.yml",head_sha:source};
+  let runLists=0;
+  const actions={listWorkflowRunsForRepo(){},listJobsForWorkflowRun(){},getWorkflowRun:async({run_id})=>{
+    if(change.apiFailure)throw Object.assign(Error("HTTP 403"),{status:403});
+    if(run_id===90)return {data:{...reviewer,...change.reviewerRun}};
+    return {data:{...ci,...change.freshCi}};
+  },getWorkflow:async({workflow_id})=>({data:workflow_id===900?{id:900,name:"Agent Codex review",path:".github/workflows/agent-codex-review.yml",...change.reviewerWorkflow}:{id:workflow_id,name:"CI",path:".github/workflows/ci.yml",...change.ciWorkflow}})};
+  const github={rest:{actions,repos:{get:async()=>({data:{full_name:change.wrongRepository?"attacker/r":"o/r",default_branch:"main"}}),getBranch:async()=>({data:{commit:{sha:change.wrongMain?"c".repeat(40):source}}})},pulls:{get:async()=>({data:{state:"open",draft:false,base:{ref:"main",sha:change.wrongBase?"c".repeat(40):base},head:{sha:change.wrongHead?"c".repeat(40):head,repo:{full_name:"o/r"}},body:"Agent-Issue: #128",labels:["agent:pr"]}})},issues:{listComments(){},get:async()=>({data:{state:"open",title:"t",body:"b",labels:["type:implementation","agent:pr"]}})}},paginate:async route=>{
+    if(route===actions.listWorkflowRunsForRepo){runLists++;if(runLists>1&&change.newerRun)return [{...ci,id:71,run_attempt:1},ci];if(runLists>1&&change.newerAttempt)return [{...ci,run_attempt:3},ci];return [ci];}
+    if(route===actions.listJobsForWorkflowRun)return change.missingJob?[]:[{id:1,name:"required",status:"completed",conclusion:change.failingJob?"failure":"success",run_attempt:2,head_sha:head}];
+    return [];
+  }};
+  const p={parseAgentIssue:()=>change.wrongIssue?127:128,isImplementation:()=>true,lifecycleAtAgentPr:()=>({ok:true}),fullLinkageDecision:()=>({ok:!change.linkageDrift}),authoritativeCiIdentity:run=>run.status==="completed"&&run.conclusion==="success"&&run.head_sha===head&&run.pull_requests?.[0]?.number===135,successfulRequiredJobs:jobs=>jobs.length===1&&jobs[0].conclusion==="success"};
+  const a={authorizationDecision:()=>({ok:!change.authDrift,specHash:change.wrongSpec?"other":"spec"})},c={requiredCiJobs:["required"]};
+  const requireMock=id=>id.includes("agent-pipeline.cjs")?p:id.includes("agent-autonomy.cjs")?a:id.includes("agent-pipeline.json")?c:require(id);
+  const context={repo:{owner:"o",repo:"r"},runId:90,workflow:"Agent Codex review",payload:{repository:{default_branch:"main"}}};
+  const env={...process.env,RUNNER_TEMP:"",PR:change.wrongPr?"136":"135",ISSUE:change.wrongIssueEnv?"127":"128",HEAD:head,BASE:base,SOURCE:change.wrongSource?"d".repeat(40):source,SPEC:"spec",CI_RUN:change.wrongRun?"71":"70",CI_ATTEMPT:change.wrongAttempt?"1":"2",GITHUB_WORKFLOW_SHA:source,AGENT_PUBLISH_TOKEN:secret,OPENAI_API_KEY:secret};
+  const dir=fs.mkdtempSync(path.join(os.tmpdir(),"issue128-collector-")),input=path.join(dir,"review-input"),previous=process.cwd();env.RUNNER_TEMP=dir;fs.mkdirSync(input);
+  const governance={"AGENTS.md":"rules",".github/agent-pipeline.json":"{}","docs/autonomous-development-pipeline.md":"docs","docs/adr/0003-autonomous-development-pipeline-v2.md":"adr"};
+  const scope={issueNumber:128,title:"t",body:"b",headSha:head};
+  if(!change.missingArtifact){fs.writeFileSync(path.join(input,"authorized-scope.json"),JSON.stringify(change.swappedArtifact?governance:scope));fs.writeFileSync(path.join(input,"trusted-governance.json"),JSON.stringify(change.swappedArtifact?scope:governance));}
+  try{
+    await new AsyncFunction("require","github","context","process",issue128CollectorProgram())(requireMock,github,context,{env});
+    const files=Object.fromEntries(fs.readdirSync(input).map(name=>[name,fs.readFileSync(path.join(input,name))]));
+    return {ok:true,files,secret};
+  }catch(error){return {ok:false,error,files:Object.fromEntries(fs.readdirSync(input).map(name=>[name,fs.readFileSync(path.join(input,name))])),secret};}
+  finally{process.chdir(previous);fs.rmSync(dir,{recursive:true,force:true});}
+}
+
+test("Issue #128 actual evidence collector closes the post-pagination race and fails closed on every trust boundary",async()=>{
+  const control=await executeIssue128Collector();assert.equal(control.ok,true,control.error?.stack);
+  for(const name of ["ci-evidence.json","review-prompt.md","seal.json"])assert.ok(control.files[name]?.length,`collector emits ${name}`);
+  assert.doesNotMatch(Buffer.concat(Object.values(control.files)).toString(),new RegExp(control.secret),"credentials and mutation tokens never enter model input or evidence");
+  const attacks=[
+    {wrongRepository:true},{wrongIssue:true},{wrongIssueEnv:true},{wrongPr:true},{wrongHead:true},{wrongBase:true},{wrongSource:true},{wrongMain:true},{authDrift:true},{linkageDrift:true},{wrongSpec:true},
+    {reviewerRun:{workflow_id:901}},{reviewerRun:{path:".github/workflows/evil.yml"}},{reviewerRun:{head_sha:"c".repeat(40)}},{reviewerWorkflow:{path:".github/workflows/evil.yml"}},
+    {freshCi:{workflow_id:701}},{freshCi:{path:".github/workflows/fake-ci.yml"}},{ciWorkflow:{path:".github/workflows/fake-ci.yml"}},{wrongRun:true},{wrongAttempt:true},{apiFailure:true},
+    {missingJob:true},{failingJob:true},{newerRun:true},{newerAttempt:true},{missingArtifact:true},{swappedArtifact:true},
+  ];
+  for(const attack of attacks){const result=await executeIssue128Collector(attack);assert.equal(result.ok,false,`collector must reject ${JSON.stringify(attack)}`);assert.equal(result.files["ci-evidence.json"],undefined,"rejection must precede trusted evidence/model input");}
+});
+
+test("Issue #128 collector output remains bound to the production seal verifier",async()=>{
+  const collected=await executeIssue128Collector();assert.equal(collected.ok,true,collected.error?.stack);
+  const workflow=reviewerWorkflow(),model=workflow.slice(workflow.indexOf("  independent-review:"),workflow.indexOf("  trusted-record:"));
+  const verifier=model.slice(model.indexOf("          node - <<'NODE'")+25,model.indexOf("          NODE")).split("\n").map(x=>x.startsWith("          ")?x.slice(10):x).join("\n");
+  const dir=fs.mkdtempSync(path.join(os.tmpdir(),"issue128-collected-seal-")),input=path.join(dir,".codex-input");fs.mkdirSync(input);
+  for(const [name,body] of Object.entries(collected.files))fs.writeFileSync(path.join(input,name),body);
+  const env={...process.env,GITHUB_REPOSITORY:"o/r",ISSUE:"128",PR:"135",HEAD_SHA:"a".repeat(40),BASE_SHA:"b".repeat(40),SOURCE_SHA:execFileSync("git",["rev-parse","HEAD"],{encoding:"utf8"}).trim(),SPEC:"spec",CI_RUN:"70",CI_ATTEMPT:"2"};
+  let run=spawnSync(process.execPath,["-e",verifier],{cwd:dir,env,encoding:"utf8"});assert.equal(run.status,0,run.stderr);
+  fs.appendFileSync(path.join(input,"review-prompt.md"),"tampered prompt");run=spawnSync(process.execPath,["-e",verifier],{cwd:dir,env,encoding:"utf8"});assert.notEqual(run.status,0);assert.match(run.stderr,/SEALED_INPUT_BINDING_INVALID/);
+  fs.writeFileSync(path.join(input,"review-prompt.md"),collected.files["review-prompt.md"]);fs.appendFileSync(path.join(input,"ci-evidence.json"),"tampered evidence");run=spawnSync(process.execPath,["-e",verifier],{cwd:dir,env,encoding:"utf8"});assert.notEqual(run.status,0);assert.match(run.stderr,/SEALED_INPUT_BINDING_INVALID/);fs.rmSync(dir,{recursive:true,force:true});
+});
+
 async function executeIssue128FreshnessProgram(stepName,change={}){
   const root=process.cwd(),program=issue128GithubScript(stepName),source=execFileSync("git",["rev-parse","HEAD"],{encoding:"utf8"}).trim(),head="a".repeat(40),base="b".repeat(40),writes=[];
   const ci={id:70,workflow_id:700,path:".github/workflows/ci.yml",name:"CI",event:"pull_request",head_sha:head,head_repository:{full_name:"o/r"},pull_requests:[{number:135}],run_attempt:2,status:"completed",conclusion:"success"};
