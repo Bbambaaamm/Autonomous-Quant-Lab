@@ -919,8 +919,18 @@ test("Issue #130 production guards re-read CI attempts and mutable authorities a
 test("Issue #130 production ruleset guard enforces the complete immutable contract", () => {
   const control=fs.readFileSync(".github/workflows/agent-control-plane-remediation.yml","utf8");
   for(const token of ["'Protect main'","target==='branch'","enforcement==='active'","bypass_actors.length===0","strict_required_status_checks_policy===true","gate?.integration_id===actionsIntegrationId","typed('deletion').length===1","typed('non_fast_forward').length===1","typed('pull_request').length===1"]) assert.ok(control.includes(token),token);
-  assert.match(control,/requiredContexts=\[\.\.\.required,'agent-verified-gate'\]\.sort\(\)/);
+  assert.match(control,/requiredContexts=\[\.\.\.rulesetRequired,'agent-verified-gate'\]\.sort\(\)/);
   assert.match(control,/JSON\.stringify\(configured\)===JSON\.stringify\(requiredContexts\)/);
+});
+
+test("Issue #137 ruleset contract excludes agent-pipeline without weakening required CI", () => {
+  const control=fs.readFileSync(".github/workflows/agent-control-plane-remediation.yml","utf8");
+  const ciRequired="const required=['agent-pipeline','quality','unit-research','api','integration-postgres','frontend','security','container-build','production-smoke'];";
+  const rulesetRequired="const rulesetRequired=['quality','unit-research','api','integration-postgres','frontend','security','container-build','production-smoke'];";
+  assert.equal(control.split(ciRequired).length-1,1,"evidence collection retains all nine required CI jobs");
+  assert.equal(control.split(rulesetRequired).length-1,4,"evidence collection and all three downstream validators use the exact eight-context ruleset contract");
+  assert.equal(control.split("const requiredContexts=[...rulesetRequired,'agent-verified-gate'].sort()").length-1,4);
+  assert.doesNotMatch(control,/requiredContexts=\[\.\.\.(?:required|c\.requiredCiJobs),'agent-verified-gate'\]/);
 });
 
 test("Issue #130 evidence collection is isolated, bounded, complete, and fail closed before the model", () => {
