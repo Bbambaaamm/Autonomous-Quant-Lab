@@ -116,6 +116,7 @@
     "authorizationMarker": "agent-merge-authorization:v2",
     "verificationMarker": "agent-verified:v2",
     "verifiedGateContext": "agent-verified-gate",
+    "authoritativeCiWorkflowId": 331418792,
     "authoritativeCiWorkflowPath": ".github/workflows/ci.yml",
     "gateEvidenceMarker": "agent-verified-gate-evidence:v1",
     "mergeMarker": "agent-auto-merge:v2",
