@@ -6,6 +6,7 @@ const AUTH_MARKER = "agent-merge-authorization:v2";
 const VERIFIED_MARKER = "agent-verified:v2";
 const MERGE_MARKER = "agent-auto-merge:v2";
 const GATE_CONTEXT = "agent-verified-gate";
+const GATE_MARKER = "agent-verified-gate-evidence:v1";
 const AGENT_STATES = new Set([
   "agent:ready",
   "agent:running",
@@ -103,6 +104,31 @@ function exactVerificationEvidence(comments = [], { repo, issueNumber, prNumber,
     .flatMap((comment) => String(comment.body || "").split("\n"))
     .filter((line) => line === exact);
   return matches.length === 1;
+}
+
+function gateEvidenceMarker({ repo, issueNumber, prNumber, headSha, specHash, ciRunId, ciRunAttempt, result = "PASS" }) {
+  if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo || "") || !/^[0-9a-f]{40}$/.test(headSha || "") ||
+      !/^[0-9a-f]{64}$/.test(specHash || "") || !Number.isSafeInteger(Number(ciRunId)) || Number(ciRunId) < 1 ||
+      !Number.isSafeInteger(Number(ciRunAttempt)) || Number(ciRunAttempt) < 1 || !["PASS", "BLOCK"].includes(result)) {
+    throw new Error("INVALID_GATE_EVIDENCE");
+  }
+  return `<!-- ${GATE_MARKER} repo=${repo} issue=${Number(issueNumber)} pr=${Number(prNumber)} sha=${headSha} spec=${specHash} ci=${Number(ciRunId)} attempt=${Number(ciRunAttempt)} result=${result} -->`;
+}
+
+function gateEvidenceDecision(comments = [], binding) {
+  let pass;
+  try { pass = gateEvidenceMarker({ ...binding, result: "PASS" }); } catch { return { ok: false, reason: "GATE_EVIDENCE_BINDING_INVALID" }; }
+  const block = gateEvidenceMarker({ ...binding, result: "BLOCK" });
+  const matches = comments.filter((comment) => comment.user?.login === "github-actions[bot]")
+    .flatMap((comment) => String(comment.body || "").split("\n"))
+    .filter((line) => line === pass || line === block);
+  if (matches.length === 0) return { ok: false, reason: "GATE_EVIDENCE_MISSING" };
+  if (matches.length !== 1) return { ok: false, reason: "GATE_EVIDENCE_AMBIGUOUS" };
+  return matches[0] === pass ? { ok: true } : { ok: false, reason: "GATE_EVIDENCE_BLOCKED" };
+}
+
+function exactGateEvidence(comments = [], binding) {
+  return gateEvidenceDecision(comments, binding).ok;
 }
 
 function mergeMarker({ repo, issueNumber, prNumber, headSha, specHash, mergeSha }) {
@@ -276,6 +302,7 @@ module.exports = {
   VERIFIED_MARKER,
   MERGE_MARKER,
   GATE_CONTEXT,
+  GATE_MARKER,
   labelNames,
   exactAgentState,
   implementationClassification,
@@ -287,6 +314,9 @@ module.exports = {
   authorizationDecision,
   verificationMarker,
   exactVerificationEvidence,
+  gateEvidenceMarker,
+  gateEvidenceDecision,
+  exactGateEvidence,
   mergeMarker,
   lifecyclePairDecision,
   verificationLifecyclePlan,

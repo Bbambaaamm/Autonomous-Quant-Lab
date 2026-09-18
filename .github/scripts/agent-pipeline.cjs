@@ -213,8 +213,9 @@ function fixerInvocationDecision({ eventName, mode, prNumber, headSha, reviewBlo
   return { ok: false, reason: "INVALID_INVOCATION_MODE" };
 }
 
-function authoritativeCiIdentity(run, { prNumber, headSha, conclusion }) {
-  return !!run && run.name === "CI" && run.event === "pull_request" && run.status === "completed" &&
+function authoritativeCiIdentity(run, { workflowId, workflowPath, prNumber, headSha, conclusion }) {
+  return !!run && Number.isSafeInteger(Number(workflowId)) && Number(run.workflow_id) === Number(workflowId) &&
+    run.path === workflowPath && run.event === "pull_request" && run.status === "completed" &&
     run.conclusion === conclusion && run.head_sha === headSha && run.pull_requests?.length === 1 &&
     run.pull_requests[0].number === Number(prNumber);
 }
@@ -598,12 +599,18 @@ function successfulRequiredJobs(jobs, requiredNames, headSha) {
   return requiredNames.every((name) => latest.get(name)?.conclusion === "success");
 }
 
-function newestAuthoritativeCiRun(runs, { workflowName, headSha, prNumber }) {
-  return runs
-    .filter((run) => run.name === workflowName && run.event === "pull_request" &&
+function newestAuthoritativeCiRun(runs, { workflowId, workflowPath, headSha, prNumber }) {
+  const candidates = runs
+    .filter((run) => Number(run.workflow_id) === Number(workflowId) && run.path === workflowPath && run.event === "pull_request" &&
       run.head_sha === headSha &&
-      run.pull_requests?.length === 1 && run.pull_requests[0].number === prNumber)
-    .sort((left, right) => right.id - left.id)[0] ?? null;
+      run.pull_requests?.length === 1 && run.pull_requests[0].number === prNumber);
+  if (!Number.isSafeInteger(Number(workflowId)) || Number(workflowId) < 1 || !workflowPath ||
+      candidates.some((run) => !Number.isSafeInteger(Number(run.id)) || Number(run.id) < 1 ||
+        !Number.isSafeInteger(Number(run.run_attempt)) || Number(run.run_attempt) < 1 ||
+        !Number.isFinite(Date.parse(run.updated_at)))) return null;
+  return candidates.sort((left, right) =>
+    Date.parse(right.updated_at) - Date.parse(left.updated_at) ||
+    Number(right.run_attempt) - Number(left.run_attempt) || Number(right.id) - Number(left.id))[0] ?? null;
 }
 
 function authoritativeCiRunCandidates(runs, binding) {

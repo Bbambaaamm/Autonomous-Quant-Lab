@@ -116,10 +116,22 @@
     "authorizationMarker": "agent-merge-authorization:v2",
     "verificationMarker": "agent-verified:v2",
     "verifiedGateContext": "agent-verified-gate",
+    "authoritativeCiWorkflowPath": ".github/workflows/ci.yml",
+    "gateEvidenceMarker": "agent-verified-gate-evidence:v1",
     "mergeMarker": "agent-auto-merge:v2",
     "builderMaxPatchFiles": 20,
     "builderMaxPatchBytes": 262144,
     "reviewEvidenceBinding": [
+      "repository",
+      "issue",
+      "pr",
+      "sha",
+      "spec",
+      "ciRunId",
+      "ciRunAttempt",
+      "result"
+    ],
+    "gateEvidenceBinding": [
       "repository",
       "issue",
       "pr",

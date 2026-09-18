@@ -107,17 +107,18 @@ jobs:
               }
             }
 
+            const {data:ciWorkflow}=await github.rest.actions.getWorkflow({...context.repo,workflow_id:c.v2.authoritativeCiWorkflowPath});if(ciWorkflow.path!==c.v2.authoritativeCiWorkflowPath||ciWorkflow.state!=='active'||!Number.isSafeInteger(ciWorkflow.id))return core.setFailed('AUTHORITATIVE_CI_WORKFLOW_INVALID');const ciBinding={workflowId:ciWorkflow.id,workflowPath:c.v2.authoritativeCiWorkflowPath};
             const runs=await github.paginate(github.rest.actions.listWorkflowRunsForRepo,{...context.repo,event:'pull_request',head_sha:requestedSha,per_page:100});
-            const run=p.newestAuthoritativeCiRun(runs,{workflowName:'CI',headSha:requestedSha,prNumber});
+            const run=p.newestAuthoritativeCiRun(runs,{...ciBinding,headSha:requestedSha,prNumber});
             const jobs=run?await github.paginate(github.rest.actions.listJobsForWorkflowRun,{...context.repo,run_id:run.id,filter:'all',per_page:100}):null;
-            if(!run||run.conclusion!=='success'||!p.authoritativeCiIdentity(run,{prNumber,headSha:requestedSha,conclusion:'success'})||!p.successfulRequiredJobs(jobs,c.requiredCiJobs,requestedSha)){
+            if(!run||run.conclusion!=='success'||!p.authoritativeCiIdentity(run,{...ciBinding,prNumber,headSha:requestedSha,conclusion:'success'})||!p.successfulRequiredJobs(jobs,c.requiredCiJobs,requestedSha)){
               core.notice('NO_WRITE: exact authoritative green CI missing');return;
             }
             const exactCiCurrent=async()=>{
               const {data:freshRun}=await github.rest.actions.getWorkflowRun({...context.repo,run_id:run.id});
               const freshRuns=await github.paginate(github.rest.actions.listWorkflowRunsForRepo,{...context.repo,event:'pull_request',head_sha:requestedSha,per_page:100});
-              const newest=p.newestAuthoritativeCiRun(freshRuns,{workflowName:'CI',headSha:requestedSha,prNumber});
-              return newest?.id===run.id&&newest.run_attempt===run.run_attempt&&freshRun.id===run.id&&freshRun.run_attempt===run.run_attempt&&p.authoritativeCiIdentity(freshRun,{prNumber,headSha:requestedSha,conclusion:'success'});
+              const newest=p.newestAuthoritativeCiRun(freshRuns,{...ciBinding,headSha:requestedSha,prNumber});
+              return newest?.id===run.id&&newest.run_attempt===run.run_attempt&&freshRun.id===run.id&&freshRun.run_attempt===run.run_attempt&&p.authoritativeCiIdentity(freshRun,{...ciBinding,prNumber,headSha:requestedSha,conclusion:'success'});
             };
             if(!await exactCiCurrent()) return core.notice('NO_WRITE: CI binding changed');
             const initial=a.verificationDecision({
