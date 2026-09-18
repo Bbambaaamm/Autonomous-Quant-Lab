@@ -7,9 +7,9 @@ const path = require("node:path");
 const { execFileSync } = require("node:child_process");
 const test = require("node:test");
 const pipeline = require("./agent-pipeline.cjs");
-const CI_BINDING = { workflowId: 4242, workflowPath: ".github/workflows/ci.yml" };
-const CI_META = { workflow_id: 4242, path: ".github/workflows/ci.yml", run_attempt: 1, updated_at: "2026-01-01T00:00:00Z" };
 const agentConfig = require("../agent-pipeline.json");
+const CI_BINDING = { workflowId: agentConfig.v2.authoritativeCiWorkflowId, workflowPath: agentConfig.v2.authoritativeCiWorkflowPath };
+const CI_META = { workflow_id: agentConfig.v2.authoritativeCiWorkflowId, path: agentConfig.v2.authoritativeCiWorkflowPath, run_attempt: 1, updated_at: "2026-01-01T00:00:00Z" };
 const classifierConfig = {...agentConfig.v2, requiredCiJobs: agentConfig.requiredCiJobs};
 
 test("ready vyžaduje jednoznačný implementační ticket", () => {
