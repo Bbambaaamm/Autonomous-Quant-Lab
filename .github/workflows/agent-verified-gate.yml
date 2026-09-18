@@ -12,13 +12,17 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: agent-verified-gate-${{ github.repository }}-${{ inputs.pr_number }}-${{ inputs.head_sha }}-${{ inputs.spec_hash }}
+  cancel-in-progress: false
+
 jobs:
   gate:
     runs-on: ubuntu-latest
     permissions:
       actions: read
       contents: read
-      issues: read
+      issues: write
       pull-requests: read
       statuses: write
     outputs:
@@ -50,8 +54,11 @@ jobs:
               const linkage=p.fullLinkageDecision({prBody:pr.body,prComments,issueComments,...context.repo,issueNumber,prNumber});
               const {data:main}=await github.rest.repos.getBranch({...context.repo,branch:context.payload.repository.default_branch});
               const comparison=await github.rest.repos.compareCommits({...context.repo,base:main.commit.sha,head:headSha});
-              const runs=await github.paginate(github.rest.actions.listWorkflowRunsForRepo,{...context.repo,event:'pull_request',head_sha:headSha,status:'completed',per_page:100});
-              const ciRun=p.newestAuthoritativeCiRun(runs,{workflowName:'CI',headSha,prNumber});
+              const {data:ciWorkflow}=await github.rest.actions.getWorkflow({...context.repo,workflow_id:c.v2.authoritativeCiWorkflowPath});
+              if(ciWorkflow.path!==c.v2.authoritativeCiWorkflowPath||Number(ciWorkflow.id)!==Number(c.v2.authoritativeCiWorkflowId)||ciWorkflow.state!=='active'||!Number.isSafeInteger(ciWorkflow.id)) return core.setFailed('AUTHORITATIVE_CI_WORKFLOW_INVALID');
+              const ciBinding={workflowId:ciWorkflow.id,workflowPath:c.v2.authoritativeCiWorkflowPath};
+              const runs=await github.paginate(github.rest.actions.listWorkflowRunsForRepo,{...context.repo,event:'pull_request',head_sha:headSha,per_page:100});
+              const ciRun=p.newestAuthoritativeCiRun(runs,{...ciBinding,headSha,prNumber});
               const jobs=ciRun?await github.paginate(github.rest.actions.listJobsForWorkflowRun,{...context.repo,run_id:ciRun.id,filter:'all',per_page:100}):null;
               const verifiedLifecycle=a.lifecyclePairDecision(pr.labels,issue.labels,'agent:verified').ok;
               const decision=a.gateDecision({
@@ -67,10 +74,10 @@ jobs:
                 needsHuman:[...a.labelNames(pr.labels),...a.labelNames(issue.labels)].includes('agent:needs-human'),
                 currentMain:comparison.data.behind_by===0,
                 requiredCiSuccessful:!!ciRun&&ciRun.conclusion==='success'&&p.successfulRequiredJobs(jobs,c.requiredCiJobs,headSha),
-                independentReviewPass:p.independentReviewSatisfied(prComments,headSha),
-                verificationEvidence:a.exactVerificationEvidence(prComments,{repo,issueNumber,prNumber,headSha,specHash:spec}),
+                independentReviewPass:p.independentReviewSatisfied(prComments,{repo,issueNumber,prNumber,headSha,specHash:spec,ciRunId:ciRun?.id,ciRunAttempt:ciRun?.run_attempt}),
+                verificationEvidence:a.exactVerificationEvidence(prComments,{repo,issueNumber,prNumber,headSha,specHash:spec,ciRunId:ciRun?.id,ciRunAttempt:ciRun?.run_attempt}),
               });
-              return {...decision,pr,issue,issueNumber,ciRun,currentHead:pr.head.sha};
+              return {...decision,pr,issue,issueNumber,ciRun,currentHead:pr.head.sha,prComments};
             };
             let result=await evaluate();
             if(!result.ok){
@@ -81,6 +88,10 @@ jobs:
             }
             result=await evaluate();
             if(!result.ok) return core.setFailed(`GATE_TOCTOU_REJECTED:${result.reason}`);
+            const gateBinding={repo,issueNumber:result.issueNumber,prNumber,headSha,specHash:spec,ciRunId:result.ciRun.id,ciRunAttempt:result.ciRun.run_attempt};
+            const existingGate=a.gateEvidenceDecision(result.prComments,gateBinding);
+            if(existingGate.reason==='GATE_EVIDENCE_MISSING') await github.rest.issues.createComment({...context.repo,issue_number:prNumber,body:`Trusted verified gate PASS for exact CI attempt.\n\n${a.gateEvidenceMarker(gateBinding)}`});
+            else if(!existingGate.ok) return core.setFailed(existingGate.reason);
             await github.rest.repos.createCommitStatus({...context.repo,sha:headSha,state:'success',context:a.GATE_CONTEXT,description:'Exact authorization + CI + Codex review verified'});
             core.setOutput('pass','true');
 

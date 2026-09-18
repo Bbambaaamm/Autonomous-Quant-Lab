@@ -12,7 +12,7 @@
       "generationProfile": ":read-only",
       "reviewProfile": ":read-only"
     },
-    "reviewMarker": "agent-codex-review:v2",
+    "reviewMarker": "agent-codex-review:v3",
     "fixMarker": "agent-fix:v2",
     "classificationMarker": "agent-ci-classification:v2",
     "classificationSchema": [
@@ -116,9 +116,32 @@
     "authorizationMarker": "agent-merge-authorization:v2",
     "verificationMarker": "agent-verified:v2",
     "verifiedGateContext": "agent-verified-gate",
+    "authoritativeCiWorkflowId": 331418792,
+    "authoritativeCiWorkflowPath": ".github/workflows/ci.yml",
+    "gateEvidenceMarker": "agent-verified-gate-evidence:v1",
     "mergeMarker": "agent-auto-merge:v2",
     "builderMaxPatchFiles": 20,
-    "builderMaxPatchBytes": 262144
+    "builderMaxPatchBytes": 262144,
+    "reviewEvidenceBinding": [
+      "repository",
+      "issue",
+      "pr",
+      "sha",
+      "spec",
+      "ciRunId",
+      "ciRunAttempt",
+      "result"
+    ],
+    "gateEvidenceBinding": [
+      "repository",
+      "issue",
+      "pr",
+      "sha",
+      "spec",
+      "ciRunId",
+      "ciRunAttempt",
+      "result"
+    ]
   },
   "implementationLabel": "type:implementation",
   "epicLabels": [

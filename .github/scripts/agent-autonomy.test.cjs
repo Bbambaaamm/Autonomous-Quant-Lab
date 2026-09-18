@@ -51,10 +51,20 @@ test("verification requires exact current evidence and no human escalation", () 
 });
 
 test("new SHA cannot reuse old verification or gate evidence", () => {
-  const marker = a.verificationMarker({ repo, issueNumber: 42, prNumber: 77, headSha: "a".repeat(40), specHash: spec, ciRunId: 999 });
+  const marker = a.verificationMarker({ repo, issueNumber: 42, prNumber: 77, headSha: "a".repeat(40), specHash: spec, ciRunId: 999, ciRunAttempt: 2 });
   const comments = [{ user: { login: "github-actions[bot]" }, body: marker }];
-  assert.equal(a.exactVerificationEvidence(comments, { repo, issueNumber: 42, prNumber: 77, headSha: "a".repeat(40), specHash: spec }), true);
-  assert.equal(a.exactVerificationEvidence(comments, { repo, issueNumber: 42, prNumber: 77, headSha: "b".repeat(40), specHash: spec }), false);
+  assert.equal(a.exactVerificationEvidence(comments, { repo, issueNumber: 42, prNumber: 77, headSha: "a".repeat(40), specHash: spec, ciRunId: 999, ciRunAttempt: 2 }), true);
+  assert.equal(a.exactVerificationEvidence(comments, { repo, issueNumber: 42, prNumber: 77, headSha: "b".repeat(40), specHash: spec, ciRunId: 999, ciRunAttempt: 2 }), false);
+});
+
+test("gate evidence is uniquely bound to the current CI attempt", () => {
+  const binding={repo,issueNumber:42,prNumber:77,headSha:"a".repeat(40),specHash:spec,ciRunId:999,ciRunAttempt:2};
+  const marker=a.gateEvidenceMarker(binding),trusted={user:{login:"github-actions[bot]"},body:marker};
+  assert.equal(a.exactGateEvidence([trusted],binding),true);
+  assert.equal(a.exactGateEvidence([trusted],{...binding,ciRunAttempt:3}),false);
+  assert.equal(a.exactGateEvidence([trusted,trusted],binding),false);
+  assert.equal(a.exactGateEvidence([trusted,{user:{login:"github-actions[bot]"},body:a.gateEvidenceMarker({...binding,result:"BLOCK"})}],binding),false);
+  assert.equal(a.exactGateEvidence([trusted],{...binding,ciRunAttempt:null}),false);
 });
 
 test("gate and merge are exact-head fail-closed decisions", () => {
@@ -125,7 +135,7 @@ test("transient CI failures retry only within the bounded budget", () => {
 
 test("closed Issue invalidates authorization",()=>{assert.equal(a.authorizationDecision({comments:authComments,repo,issueNumber:42,title,body,labels,state:"closed"}).reason,"ISSUE_NOT_OPEN");});
 test("retired durable link is inactive",()=>{const p=require("./agent-pipeline.cjs"),c=[{user:{login:"github-actions[bot]"},body:"<!-- agent-link:v1 repo=Bbambaaamm/Autonomous-Quant-Lab issue=42 pr=70 -->\n<!-- agent-link-retired:v1 repo=Bbambaaamm/Autonomous-Quant-Lab issue=42 pr=70 -->"}];assert.deepEqual(p.durablePrLinkDecision(c,{owner:"Bbambaaamm",repo:"Autonomous-Quant-Lab",issueNumber:42}),{ok:true,prNumber:null});});
-test("newest CI failure defeats older success",()=>{const p=require("./agent-pipeline.cjs"),sha="d".repeat(40),b={name:"CI",event:"pull_request",status:"completed",head_sha:sha,pull_requests:[{number:88}]};assert.equal(p.newestAuthoritativeCiRun([{...b,id:10,conclusion:"success"},{...b,id:11,conclusion:"failure"}],{workflowName:"CI",headSha:sha,prNumber:88}).conclusion,"failure");});
+test("newest CI failure defeats older success",()=>{const p=require("./agent-pipeline.cjs"),cfg=require("../agent-pipeline.json"),sha="d".repeat(40),b={workflow_id:cfg.v2.authoritativeCiWorkflowId,path:cfg.v2.authoritativeCiWorkflowPath,run_attempt:1,created_at:"2025-12-31T23:59:00Z",run_started_at:"2026-01-01T00:00:00Z",updated_at:"2026-01-01T00:00:00Z",name:"CI",event:"pull_request",status:"completed",head_sha:sha,pull_requests:[{number:88}]};assert.equal(p.newestAuthoritativeCiRun([{...b,id:10,conclusion:"success"},{...b,id:11,run_started_at:"2026-01-02T00:00:00Z",updated_at:"2026-01-02T00:00:10Z",conclusion:"failure"}],{workflowId:cfg.v2.authoritativeCiWorkflowId,workflowPath:cfg.v2.authoritativeCiWorkflowPath,headSha:sha,prNumber:88}).conclusion,"failure");});
 test("npm registry 503 is infra transient",()=>{const p=require("./agent-pipeline.cjs"),sha="e".repeat(40),r=p.classifyCiFailure({jobs:[{id:7,name:"security",conclusion:"failure",steps:[{name:"npm audit",conclusion:"failure"}]}],runHeadSha:sha,expectedHeadSha:sha,sourceRunId:77,runAttempt:1,logExcerpt:"503 Service Unavailable",config:{requiredCiJobs:["security"],failureClassPolicy:{eligible:[],denied:["infra-transient","security"]},protectedDiagnosticPatterns:[]}});assert.equal(r.failureClass,"infra-transient");});
 
 test("ordinary security failure log boilerplate is not transient",()=>{const p=require("./agent-pipeline.cjs"),sha="f".repeat(40),r=p.classifyCiFailure({jobs:[{id:8,name:"security",conclusion:"failure",steps:[{name:"npm audit",conclusion:"failure"}]}],runHeadSha:sha,expectedHeadSha:sha,sourceRunId:78,runAttempt:1,logExcerpt:"Current runner version 2.337.0\nDownloading action\nnpm audit found a critical vulnerability",config:{requiredCiJobs:["security"],failureClassPolicy:{eligible:[],denied:["infra-transient","security"]},protectedDiagnosticPatterns:[]}});assert.equal(r.failureClass,"security");});
@@ -176,13 +186,15 @@ test("Issue #112 verifier keeps metadata on GITHUB_TOKEN and reconciliation on p
   assert.match(reconciliation, /authorization:`Bearer \$\{process\.env\.AGENT_PUBLISH_TOKEN\}`/);
   assert.match(reconciliation, /pulls\/\$\{prNumber\}\/update-branch/);
   assert.doesNotMatch(metadata, /process\.env\.AGENT_PUBLISH_TOKEN/);
-  assert.match(metadata, /github\.rest\.issues\.setLabels/);
+  assert.match(metadata, /github\.rest\.issues\.addLabels/);
+  assert.match(metadata, /github\.rest\.issues\.removeLabel/);
+  assert.doesNotMatch(metadata, /github\.rest\.issues\.setLabels/);
   assert.match(metadata, /github\.rest\.issues\.createComment/);
   assert.match(gateJob, /secrets:\n\s+AGENT_PUBLISH_TOKEN:/);
 
   const headSha = "a".repeat(40);
-  const marker = a.verificationMarker({ repo, issueNumber: 112, prNumber: 114, headSha, specHash: spec, ciRunId: 1234 });
-  const args = { repo, issueNumber: 112, prNumber: 114, headSha, specHash: spec };
+  const marker = a.verificationMarker({ repo, issueNumber: 112, prNumber: 114, headSha, specHash: spec, ciRunId: 1234, ciRunAttempt: 3 });
+  const args = { repo, issueNumber: 112, prNumber: 114, headSha, specHash: spec, ciRunId: 1234, ciRunAttempt: 3 };
   assert.equal(a.exactVerificationEvidence([{ user: { login: "github-actions[bot]" }, body: marker }], args), true);
   assert.equal(a.exactVerificationEvidence([{ user: { login: "Bbambaaamm" }, body: marker }], args), false);
 });
@@ -230,4 +242,14 @@ test("Issue #116 Draft-to-Ready decisions fail closed for every required failure
   assert.deepEqual(a.draftReadyPostconditionDecision({ draft: false }), { ok: true });
   assert.equal(a.draftReadyPostconditionDecision({ draft: true }).reason, "READY_DRAFT_POSTCONDITION_FAILED");
   assert.equal(a.draftReadyPostconditionDecision({ draft: undefined }).reason, "READY_DRAFT_POSTCONDITION_FAILED");
+});
+
+test("verification evidence is bound to CI run and numeric attempt", () => {
+  const binding={repo:"o/r",issueNumber:142,prNumber:143,headSha:"a".repeat(40),specHash:"b".repeat(64),ciRunId:500,ciRunAttempt:2};
+  const marker=a.verificationMarker(binding),comments=[{user:{login:"github-actions[bot]"},body:marker}];
+  assert.equal(a.exactVerificationEvidence(comments,binding),true);
+  assert.equal(a.exactVerificationEvidence(comments,{...binding,ciRunId:501}),false);
+  assert.equal(a.exactVerificationEvidence(comments,{...binding,ciRunAttempt:3}),false);
+  assert.equal(a.exactVerificationEvidence(comments,{...binding,ciRunAttempt:undefined}),false);
+  assert.throws(()=>a.verificationMarker({...binding,ciRunAttempt:"bad"}),/INVALID_CI_RUN_ATTEMPT/);
 });
