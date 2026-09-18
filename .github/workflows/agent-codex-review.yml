@@ -26,6 +26,8 @@ jobs:
       head_sha: ${{ steps.meta.outputs.head_sha }}
       base_sha: ${{ steps.meta.outputs.base_sha }}
       spec_hash: ${{ steps.meta.outputs.spec_hash }}
+      ci_run_id: ${{ steps.meta.outputs.ci_run_id }}
+      ci_run_attempt: ${{ steps.meta.outputs.ci_run_attempt }}
       escalation: ${{ steps.meta.outputs.escalation }}
       reason: ${{ steps.meta.outputs.reason }}
     steps:
@@ -63,8 +65,8 @@ jobs:
             }
             const governance={}; for(const file of protectedGovernance) governance[file]=fs.readFileSync(file,'utf8');
             fs.writeFileSync(`${process.env.RUNNER_TEMP}/trusted-governance.json`,JSON.stringify(governance));
-            fs.writeFileSync(`${process.env.RUNNER_TEMP}/authorized-scope.json`,JSON.stringify({issueNumber,title:p.redactDiagnostic(issue.title,256),body,headSha:sha}));
-            for(const [k,v] of Object.entries({eligible:'true',pr_number:prNumber,issue_number:issueNumber,head_sha:sha,base_sha:pr.base.sha,spec_hash:auth.specHash})) core.setOutput(k,v);
+            fs.writeFileSync(`${process.env.RUNNER_TEMP}/authorized-scope.json`,JSON.stringify({issueNumber,title:p.redactDiagnostic(issue.title,256),body,headSha:sha,ciRunId:ciRun.id,ciRunAttempt:ciRun.run_attempt}));
+            for(const [k,v] of Object.entries({eligible:'true',ci_run_id:ciRun.id,ci_run_attempt:ciRun.run_attempt,pr_number:prNumber,issue_number:issueNumber,head_sha:sha,base_sha:pr.base.sha,spec_hash:auth.specHash})) core.setOutput(k,v);
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: steps.meta.outputs.eligible == 'true'
         with: {name: 'review-scope-${{ github.run_id }}', path: '${{ runner.temp }}/*.json', if-no-files-found: error, retention-days: 1}
@@ -116,7 +118,7 @@ jobs:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with: {name: 'review-scope-${{ github.run_id }}', path: '.codex-input'}
       - name: Build deterministic bounded review prompt
-        env: {HEAD_SHA: '${{ needs.prepare.outputs.head_sha }}', BASE_SHA: '${{ needs.prepare.outputs.base_sha }}'}
+        env: {HEAD_SHA: '${{ needs.prepare.outputs.head_sha }}', BASE_SHA: '${{ needs.prepare.outputs.base_sha }}', CI_RUN_ID: '${{ needs.prepare.outputs.ci_run_id }}', CI_RUN_ATTEMPT: '${{ needs.prepare.outputs.ci_run_attempt }}'}
         run: |
           test "$(stat -c%s .codex-input/authorized-scope.json)" -le 17408
           cat > .codex-input/review-prompt.md <<'EOF'
@@ -126,7 +128,7 @@ jobs:
           cat .codex-input/authorized-scope.json >> .codex-input/review-prompt.md
           printf '\n--- END UNTRUSTED AUTHORIZED ISSUE DATA ---\n--- BEGIN TRUSTED GOVERNANCE ---\n' >> .codex-input/review-prompt.md
           cat .codex-input/trusted-governance.json >> .codex-input/review-prompt.md
-          printf '\n--- END TRUSTED GOVERNANCE ---\nBase SHA: %s\nExact SHA: %s\n' "$BASE_SHA" "$HEAD_SHA" >> .codex-input/review-prompt.md
+          printf '\n--- END TRUSTED GOVERNANCE ---\nBase SHA: %s\nExact SHA: %s\nReviewed CI run ID: %s\nReviewed CI run attempt: %s\nReturn these exact values in reviewed_ci_run_id and reviewed_ci_run_attempt.\n' "$BASE_SHA" "$HEAD_SHA" "$CI_RUN_ID" "$CI_RUN_ATTEMPT" >> .codex-input/review-prompt.md
           test "$(stat -c%s .codex-input/review-prompt.md)" -le 131072
       - run: test "$(git rev-parse HEAD)" = "$HEAD_SHA" && git cat-file -e "$BASE_SHA^{commit}" && git diff --quiet "$BASE_SHA" "$HEAD_SHA" -- AGENTS.md .github/agent-pipeline.json docs/autonomous-development-pipeline.md docs/adr/0003-autonomous-development-pipeline-v2.md
         env: {HEAD_SHA: '${{ needs.prepare.outputs.head_sha }}', BASE_SHA: '${{ needs.prepare.outputs.base_sha }}'}
@@ -141,13 +143,15 @@ jobs:
           allow-bot-users: "github-actions[bot]"
           output-file: ${{ runner.temp }}/review.json
           output-schema: >-
-            {"type":"object","additionalProperties":false,"required":["reviewed_sha","result","findings","issue_scope_consistent","test_or_governance_weakened","paper_only_live_trading_safe","summary"],"properties":{"reviewed_sha":{"type":"string","pattern":"^[0-9a-f]{40}$"},"result":{"type":"string","enum":["PASS","BLOCK"]},"findings":{"type":"array","maxItems":50,"items":{"type":"object","additionalProperties":false,"required":["severity","location","message"],"properties":{"severity":{"type":"string","enum":["critical","high","medium","low"]},"location":{"type":"string","maxLength":512},"message":{"type":"string","maxLength":2048}}}},"issue_scope_consistent":{"type":"boolean"},"test_or_governance_weakened":{"type":"boolean"},"paper_only_live_trading_safe":{"type":"boolean"},"summary":{"type":"string","maxLength":4096}}}
+            {"type":"object","additionalProperties":false,"required":["reviewed_sha","reviewed_ci_run_id","reviewed_ci_run_attempt","result","findings","issue_scope_consistent","test_or_governance_weakened","paper_only_live_trading_safe","summary"],"properties":{"reviewed_sha":{"type":"string","pattern":"^[0-9a-f]{40}$"},"result":{"type":"string","enum":["PASS","BLOCK"]},"findings":{"type":"array","maxItems":50,"items":{"type":"object","additionalProperties":false,"required":["severity","location","message"],"properties":{"severity":{"type":"string","enum":["critical","high","medium","low"]},"location":{"type":"string","maxLength":512},"message":{"type":"string","maxLength":2048}}}},"issue_scope_consistent":{"type":"boolean"},"test_or_governance_weakened":{"type":"boolean"},"paper_only_live_trading_safe":{"type":"boolean"},"summary":{"type":"string","maxLength":4096},"reviewed_ci_run_id":{"type":"integer","minimum":1},"reviewed_ci_run_attempt":{"type":"integer","minimum":1}}}
           prompt-file: .codex-input/review-prompt.md
       - run: |
           test -s "$RUNNER_TEMP/review.json"
           test "$(jq -r .reviewed_sha "$RUNNER_TEMP/review.json")" = "$HEAD_SHA"
+          test "$(jq -r .reviewed_ci_run_id "$RUNNER_TEMP/review.json")" = "$CI_RUN_ID"
+          test "$(jq -r .reviewed_ci_run_attempt "$RUNNER_TEMP/review.json")" = "$CI_RUN_ATTEMPT"
           jq -e '(.result=="BLOCK" or (.findings|length)==0) and (if .result=="PASS" then .issue_scope_consistent and (.test_or_governance_weakened|not) and .paper_only_live_trading_safe else true end)' "$RUNNER_TEMP/review.json"
-        env: {HEAD_SHA: '${{ needs.prepare.outputs.head_sha }}'}
+        env: {HEAD_SHA: '${{ needs.prepare.outputs.head_sha }}', CI_RUN_ID: '${{ needs.prepare.outputs.ci_run_id }}', CI_RUN_ATTEMPT: '${{ needs.prepare.outputs.ci_run_attempt }}'}
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with: {name: 'codex-review-${{ github.run_id }}', path: '${{ runner.temp }}/review.json', if-no-files-found: error, retention-days: 7}
 
@@ -166,16 +170,19 @@ jobs:
         with: {name: 'codex-review-${{ github.run_id }}', path: '${{ runner.temp }}'}
       - id: record
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
-        env: {PR: '${{ needs.prepare.outputs.pr_number }}', ISSUE: '${{ needs.prepare.outputs.issue_number }}', SHA: '${{ needs.prepare.outputs.head_sha }}', BASE: '${{ needs.prepare.outputs.base_sha }}', SPEC: '${{ needs.prepare.outputs.spec_hash }}'}
+        env: {PR: '${{ needs.prepare.outputs.pr_number }}', ISSUE: '${{ needs.prepare.outputs.issue_number }}', SHA: '${{ needs.prepare.outputs.head_sha }}', BASE: '${{ needs.prepare.outputs.base_sha }}', SPEC: '${{ needs.prepare.outputs.spec_hash }}', CI_RUN_ID: '${{ needs.prepare.outputs.ci_run_id }}', CI_RUN_ATTEMPT: '${{ needs.prepare.outputs.ci_run_attempt }}'}
         with:
           script: |
             const fs=require('fs'),p=require('./.github/scripts/agent-pipeline.cjs'),a=require('./.github/scripts/agent-autonomy.cjs'),c=require('./.github/agent-pipeline.json'),result=JSON.parse(fs.readFileSync(`${process.env.RUNNER_TEMP}/review.json`));
             const prNumber=Number(process.env.PR),issueNumber=Number(process.env.ISSUE),repo=`${context.repo.owner}/${context.repo.repo}`;
+            const preparedCiId=Number(process.env.CI_RUN_ID),preparedCiAttempt=Number(process.env.CI_RUN_ATTEMPT);
+            if(!Number.isSafeInteger(preparedCiId)||preparedCiId<1||!Number.isSafeInteger(preparedCiAttempt)||preparedCiAttempt<1||result.reviewed_sha!==process.env.SHA||result.reviewed_ci_run_id!==preparedCiId||result.reviewed_ci_run_attempt!==preparedCiAttempt)return core.setFailed('NO_WRITE: reviewer output differs from prepared CI binding');
             // Collect potentially paginated CI first; every mutable authority is fetched again afterwards.
             const {data:ciWorkflow}=await github.rest.actions.getWorkflow({...context.repo,workflow_id:c.v2.authoritativeCiWorkflowPath});if(ciWorkflow.path!==c.v2.authoritativeCiWorkflowPath||Number(ciWorkflow.id)!==Number(c.v2.authoritativeCiWorkflowId)||ciWorkflow.state!=='active'||!Number.isSafeInteger(ciWorkflow.id))return core.setFailed('AUTHORITATIVE_CI_WORKFLOW_INVALID');const ciBinding={workflowId:ciWorkflow.id,workflowPath:c.v2.authoritativeCiWorkflowPath};
             const runs=await github.paginate(github.rest.actions.listWorkflowRunsForRepo,{...context.repo,event:'pull_request',head_sha:process.env.SHA,per_page:100});
             const matches=[p.newestAuthoritativeCiRun(runs,{...ciBinding,headSha:process.env.SHA,prNumber})].filter(Boolean);
             if(matches.length<1)return core.setFailed('NO_WRITE: authoritative CI missing'); const ciRun=matches[0];
+            if(ciRun.id!==preparedCiId||ciRun.run_attempt!==preparedCiAttempt)return core.setFailed('NO_WRITE: prepared CI binding changed during review');
             await github.paginate(github.rest.actions.listJobsForWorkflowRun,{...context.repo,run_id:ciRun.id,filter:'all',per_page:100});
             const {data:freshRun}=await github.rest.actions.getWorkflowRun({...context.repo,run_id:ciRun.id});
             const freshJobs=await github.paginate(github.rest.actions.listJobsForWorkflowRun,{...context.repo,run_id:ciRun.id,filter:'all',per_page:100});

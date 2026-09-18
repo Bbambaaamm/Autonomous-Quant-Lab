@@ -9,7 +9,7 @@ const test = require("node:test");
 const pipeline = require("./agent-pipeline.cjs");
 const agentConfig = require("../agent-pipeline.json");
 const CI_BINDING = { workflowId: agentConfig.v2.authoritativeCiWorkflowId, workflowPath: agentConfig.v2.authoritativeCiWorkflowPath };
-const CI_META = { workflow_id: agentConfig.v2.authoritativeCiWorkflowId, path: agentConfig.v2.authoritativeCiWorkflowPath, run_attempt: 1, updated_at: "2026-01-01T00:00:00Z" };
+const CI_META = { workflow_id: agentConfig.v2.authoritativeCiWorkflowId, path: agentConfig.v2.authoritativeCiWorkflowPath, run_attempt: 1, created_at: "2025-12-31T23:59:00Z", run_started_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:00:00Z" };
 const classifierConfig = {...agentConfig.v2, requiredCiJobs: agentConfig.requiredCiJobs};
 
 test("ready vyžaduje jednoznačný implementační ticket", () => {
@@ -82,9 +82,9 @@ test("verified vyžaduje přesný SHA, ready PR, review, stav a kompletní CI", 
 test("review event po dřívějším green CI znovu vybere pouze exact-head autoritativní run", () => {
   const runs = [
     { ...CI_META, id: 10, name: "CI", event: "pull_request", status: "completed", conclusion: "success", head_sha: "old", pull_requests: [{ number: 85 }] },
-    { ...CI_META, id: 11, name: "CI", event: "pull_request", status: "completed", conclusion: "failure", head_sha: "new", pull_requests: [{ number: 85 }] },
-    { ...CI_META, id: 12, name: "Other", event: "pull_request", status: "completed", conclusion: "success", head_sha: "new", pull_requests: [{ number: 85 }] },
-    { ...CI_META, id: 13, name: "CI", event: "pull_request", status: "completed", conclusion: "success", head_sha: "new", pull_requests: [{ number: 85 }] },
+    { ...CI_META, run_started_at: "2026-01-01T00:00:01Z", updated_at: "2026-01-01T00:00:10Z", id: 11, name: "CI", event: "pull_request", status: "completed", conclusion: "failure", head_sha: "new", pull_requests: [{ number: 85 }] },
+    { ...CI_META, run_started_at: "2026-01-01T00:00:02Z", updated_at: "2026-01-01T00:00:10Z", id: 12, name: "Other", event: "pull_request", status: "completed", conclusion: "success", head_sha: "new", pull_requests: [{ number: 85 }] },
+    { ...CI_META, run_started_at: "2026-01-01T00:00:03Z", updated_at: "2026-01-01T00:00:10Z", id: 13, name: "CI", event: "pull_request", status: "completed", conclusion: "success", head_sha: "new", pull_requests: [{ number: 85 }] },
   ];
   assert.deepEqual(pipeline.authoritativeCiRunCandidates(runs, { ...CI_BINDING, headSha: "new", prNumber: 85 }).map((run) => run.id), [13]);
   assert.deepEqual(pipeline.authoritativeCiRunCandidates(runs, { ...CI_BINDING, headSha: "stale", prNumber: 85 }), []);
@@ -1189,8 +1189,8 @@ test("Issue #130 governance escalation propagates prepared base authority",()=>{
 test("newest exact-head CI selection is unfiltered and active or cancelled runs shadow green",()=>{
   const sha="c".repeat(40),base={...CI_META,name:"CI",event:"pull_request",head_sha:sha,pull_requests:[{number:142}],run_attempt:1};
   for(const latest of [{status:"queued",conclusion:null},{status:"in_progress",conclusion:null},{status:"completed",conclusion:"cancelled"},{status:"completed",conclusion:"failure"}]){
-    const green={...base,id:10,status:"completed",conclusion:"success"},newer={...base,...latest,id:11};
-    assert.equal(pipeline.newestAuthoritativeCiRun([green,newer],{...CI_BINDING,headSha:sha,prNumber:142}).id,11);
+    const green={...base,id:10,status:"completed",conclusion:"success"},newer={...base,...latest,id:11,run_started_at:"2026-01-02T00:00:00Z",updated_at:"2026-01-02T00:00:10Z"};
+    assert.equal(pipeline.newestAuthoritativeCiRun([green,newer],{...CI_BINDING,headSha:sha,prNumber:142})?.id,latest.status==="completed"?11:undefined);
     assert.deepEqual(pipeline.authoritativeCiRunCandidates([green,newer],{...CI_BINDING,headSha:sha,prNumber:142}),[]);
   }
 });
@@ -1205,18 +1205,18 @@ test("authoritative config and docs declare strict v3 exact-CI review",()=>{
 
 test("attempt recency shadows run id and malformed recency fails closed",()=>{
   const sha="e".repeat(40),base={...CI_META,name:"CI",event:"pull_request",head_sha:sha,pull_requests:[{number:143}]};
-  const oldSuccess={...base,id:200,run_attempt:1,updated_at:"2026-09-17T20:00:00Z",status:"completed",conclusion:"success"};
+  const oldSuccess={...base,id:200,run_attempt:1,run_started_at:"2026-09-17T20:00:00Z",updated_at:"2026-09-17T20:30:00Z",status:"completed",conclusion:"success"};
   for(const state of [{status:"queued",conclusion:null},{status:"in_progress",conclusion:null},{status:"completed",conclusion:"failure"},{status:"completed",conclusion:"cancelled"}]){
-    const rerun={...base,...state,id:100,run_attempt:2,updated_at:"2026-09-17T21:00:00Z"};
-    assert.equal(pipeline.newestAuthoritativeCiRun([oldSuccess,rerun],{...CI_BINDING,headSha:sha,prNumber:143}),rerun);
+    const rerun={...base,...state,id:100,run_attempt:2,run_started_at:"2026-09-17T21:00:00Z",updated_at:"2026-09-17T21:30:00Z"};
+    assert.equal(pipeline.newestAuthoritativeCiRun([oldSuccess,rerun],{...CI_BINDING,headSha:sha,prNumber:143}),state.status==="completed"?rerun:null);
   }
   assert.equal(pipeline.newestAuthoritativeCiRun([oldSuccess,{...oldSuccess,id:100,run_attempt:2,updated_at:"not-a-date"}],{...CI_BINDING,headSha:sha,prNumber:143}),null);
   const tied={...oldSuccess,id:100,run_attempt:2};
-  assert.equal(pipeline.newestAuthoritativeCiRun([oldSuccess,tied],{...CI_BINDING,headSha:sha,prNumber:143}).id,100);
+  assert.equal(pipeline.newestAuthoritativeCiRun([oldSuccess,tied],{...CI_BINDING,headSha:sha,prNumber:143}),null);
 });
 
 test("authoritative workflow identity rejects CI namesakes and path drift",()=>{
-  const sha="f".repeat(40),real={...CI_META,id:10,name:"CI",event:"pull_request",head_sha:sha,pull_requests:[{number:143}]},evil={...real,id:99,workflow_id:999,path:".github/workflows/evil.yml"};
+  const sha="f".repeat(40),real={...CI_META,id:10,name:"CI",event:"pull_request",status:"completed",head_sha:sha,pull_requests:[{number:143}]},evil={...real,id:99,workflow_id:999,path:".github/workflows/evil.yml"};
   assert.equal(pipeline.newestAuthoritativeCiRun([real,evil],{...CI_BINDING,headSha:sha,prNumber:143}),real);
   assert.equal(pipeline.newestAuthoritativeCiRun([{...real,path:".github/workflows/renamed.yml"}],{...CI_BINDING,headSha:sha,prNumber:143}),null);
 });
@@ -1348,4 +1348,252 @@ test("serialized gate executions revalidate and publish one exact-attempt marker
   assert.deepEqual(failures, ["GATE_REJECTED:LIFECYCLE_INVALID"]);
   assert.equal(markerWrites, 1);
   assert.equal(statuses.at(-1).state, "failure");
+});
+
+test("overlapping completion cannot hide the attempt that started later", () => {
+  const binding = {...CI_BINDING, headSha: "e".repeat(40), prNumber: 143};
+  const base = {...CI_META, event: "pull_request", head_sha: binding.headSha, pull_requests: [{number: 143}], status: "completed"};
+  const slowSuccess = {...base, id: 200, run_started_at: "2026-01-01T10:00:00Z", updated_at: "2026-01-01T14:00:00Z", conclusion: "success"};
+  const laterFailure = {...base, id: 201, run_started_at: "2026-01-01T11:00:00Z", updated_at: "2026-01-01T12:00:00Z", conclusion: "failure"};
+  for (const runs of [[slowSuccess, laterFailure], [laterFailure, slowSuccess]]) {
+    assert.equal(pipeline.newestAuthoritativeCiRun(runs, binding), laterFailure);
+    assert.deepEqual(pipeline.authoritativeCiRunCandidates(runs, binding), []);
+  }
+  // A later rerun of the older run is newest even with the lower run ID.
+  const rerun = {...slowSuccess, run_attempt: 2, run_started_at: "2026-01-01T15:00:00Z", updated_at: "2026-01-01T16:00:00Z"};
+  assert.equal(pipeline.newestAuthoritativeCiRun([laterFailure, rerun], binding), rerun);
+  for (const drift of [
+    {run_started_at: undefined}, {run_started_at: "bad"}, {created_at: undefined},
+    {created_at: "2026-01-02T00:00:00Z"}, {updated_at: "2025-12-31T00:00:00Z"},
+    {run_attempt: 2, run_started_at: base.created_at},
+    {status: "queued"}, {status: "in_progress"},
+  ]) {
+    assert.equal(pipeline.newestAuthoritativeCiRun([laterFailure, {...rerun, ...drift}], binding), null);
+  }
+  assert.equal(pipeline.newestAuthoritativeCiRun([rerun, {...rerun, id: 300}], binding), null, "equal start times are ambiguous");
+  assert.equal(pipeline.newestAuthoritativeCiRun([rerun, {...rerun, run_attempt: 3}], binding), null, "duplicate IDs are ambiguous");
+});
+
+function exactCiWorkflowScript(file, job) {
+  const workflow = fs.readFileSync(".github/workflows/" + file + ".yml", "utf8");
+  const section = workflow.slice(workflow.indexOf("  " + job + ":"));
+  const match = section.match(/          script: \|\n((?:            [^\n]*(?:\n|$)|\n)+)/);
+  assert.ok(match, "production script " + file + "/" + job);
+  return match[1].split("\n").map(line => line.slice(12)).join("\n").replace(/\$\{\{[^}]+\}\}/g, "");
+}
+
+function exactCiWorkflowFixture() {
+  const a = require("./agent-autonomy.cjs"), headSha = "a".repeat(40), baseSha = "b".repeat(40);
+  const trusted = body => ({user: {login: "github-actions[bot]"}, body});
+  const link = trusted("<!-- agent-link:v1 repo=o/r issue=142 pr=143 -->");
+  const issue = {title: "Exact CI", body: "Authorized scope", state: "open", labels: ["type:implementation", "agent:pr", "priority:high"]};
+  const specHash = a.issueSpecHash(issue);
+  const auth = () => trusted(a.authorizationMarker({repo: "o/r", issueNumber: 142, specHash: a.issueSpecHash(issue), actor: "maintainer", runId: 7}));
+  const review = (result = "PASS") => trusted("<!-- agent-codex-review:v3 repo=o/r issue=142 pr=143 sha=" + headSha + " spec=" + specHash + " ci=10 attempt=1 result=" + result + " -->");
+  const state = {
+    issue, pr: {state: "open", draft: false, body: "Agent-Issue: #142", labels: ["agent:pr", "priority:high"], head: {sha: headSha, repo: {full_name: "o/r"}}, base: {ref: "main", sha: baseSha}},
+    run: {...CI_META, id: 10, name: "CI", event: "pull_request", head_sha: headSha, pull_requests: [{number: 143}], status: "completed", conclusion: "success", html_url: "https://example.test/ci/10"},
+    jobs: agentConfig.requiredCiJobs.map(name => ({name, run_attempt: 1, conclusion: "success"})),
+    prComments: [link, review()], issueComments: [link, auth()],
+    behind: 0, defaultBranch: "main", writes: [], failures: [], outputs: {}, notices: [], auth, review, headSha, baseSha, specHash,
+    onWrite() {}, onPaginate() {}, beforeLabelWrite() {},
+  };
+  const data = value => ({data: structuredClone(value)});
+  const github = {rest: {
+    pulls: {get: async () => data(state.pr), listFiles() {}},
+    issues: {
+      get: async args => { assert.equal(args.issue_number, 142); return data(state.issue); }, listComments() {},
+      setLabels: async args => {
+        (args.issue_number === 143 ? state.pr : state.issue).labels = [...args.labels];
+        state.writes.push({kind: "labels", ...args}); state.onWrite(state);
+      },
+      addLabels: async args => {
+        state.beforeLabelWrite(state);
+        const item = args.issue_number === 143 ? state.pr : state.issue;
+        item.labels = [...new Set([...item.labels, ...args.labels])];
+        state.writes.push({kind: "add", ...args}); state.onWrite(state);
+      },
+      removeLabel: async args => {
+        state.beforeLabelWrite(state);
+        const item = args.issue_number === 143 ? state.pr : state.issue;
+        item.labels = item.labels.filter(label => label !== args.name);
+        state.writes.push({kind: "remove", ...args}); state.onWrite(state);
+      },
+      createComment: async args => {
+        state.prComments.push(trusted(args.body)); state.writes.push({kind: "comment", ...args}); state.onWrite(state);
+      },
+    },
+    repos: {
+      get: async () => data({full_name: "o/r", default_branch: state.defaultBranch}),
+      getBranch: async () => data({commit: {sha: baseSha}}),
+      compareCommits: async () => data({behind_by: state.behind}),
+    },
+    actions: {
+      getWorkflow: async () => data({id: CI_BINDING.workflowId, path: CI_BINDING.workflowPath, state: "active"}),
+      getWorkflowRun: async () => data(state.run), listWorkflowRunsForRepo() {}, listJobsForWorkflowRun() {},
+    },
+  }};
+  github.paginate = async (route, args) => {
+    let value;
+    if (route === github.rest.actions.listWorkflowRunsForRepo) value = [state.run];
+    else if (route === github.rest.actions.listJobsForWorkflowRun) value = state.jobs;
+    else if (route === github.rest.pulls.listFiles) value = [{filename: ".github/scripts/agent-pipeline.cjs"}];
+    else if (route === github.rest.issues.listComments) value = args.issue_number === 143 ? state.prComments : state.issueComments;
+    else throw new Error("Unexpected paginated route");
+    const snapshot = structuredClone(value);
+    state.onPaginate(state, route, args);
+    return snapshot;
+  };
+  const core = {notice: message => state.notices.push(message), setFailed: message => state.failures.push(message), setOutput: (name, value) => { state.outputs[name] = value; }};
+  const context = {repo: {owner: "o", repo: "r"}, eventName: "workflow_dispatch", payload: {repository: {default_branch: "main"}, workflow_run: structuredClone(state.run)}};
+  const modelResult = {reviewed_sha: headSha, reviewed_ci_run_id: 10, reviewed_ci_run_attempt: 1, result: "PASS", findings: [], issue_scope_consistent: true, test_or_governance_weakened: false, paper_only_live_trading_safe: true, summary: "No findings."};
+  const files = {};
+  const requireMock = name => name === "fs" ? {readFileSync: file => file.endsWith("review.json") ? JSON.stringify(modelResult) : "trusted governance", writeFileSync: (file, content) => { files[file] = JSON.parse(content); }} : name.endsWith("agent-pipeline.cjs") ? pipeline : name.endsWith("agent-autonomy.cjs") ? a : name.endsWith("agent-pipeline.json") ? agentConfig : require(name);
+  const processMock = {env: {PR: "143", ISSUE: "142", SHA: headSha, BASE: baseSha, SPEC: specHash, CI_RUN_ID: "10", CI_RUN_ATTEMPT: "1", REQUEST_PR: "143", REQUEST_SHA: headSha, RUNNER_TEMP: "/review"}};
+  const execute = async (file, job) => new AsyncFunction("require", "github", "context", "core", "process", exactCiWorkflowScript(file, job))(requireMock, github, context, core, processMock);
+  return {state, github, execute, modelResult, files};
+}
+
+test("review preparation emits its exact CI binding in outputs and scope", async () => {
+  const f = exactCiWorkflowFixture();
+  await f.execute("agent-codex-review", "prepare");
+  assert.deepEqual(f.state.failures, []);
+  assert.equal(f.state.outputs.eligible, "true");
+  assert.equal(f.state.outputs.ci_run_id, 10);
+  assert.equal(f.state.outputs.ci_run_attempt, 1);
+  assert.equal(f.files["/review/authorized-scope.json"].ciRunId, 10);
+  assert.equal(f.files["/review/authorized-scope.json"].ciRunAttempt, 1);
+  const workflow = reviewerWorkflow();
+  const schema = JSON.parse(workflow.match(/output-schema: >-\n\s+(\{[^\n]+\})/)[1]);
+  for (const field of ["reviewed_ci_run_id", "reviewed_ci_run_attempt"]) {
+    assert.ok(schema.required.includes(field));
+    assert.equal(schema.properties[field].type, "integer");
+  }
+});
+
+test("review recorder never rebinds old model output to a replacement CI run or attempt", async () => {
+  const control = exactCiWorkflowFixture();
+  control.state.prComments.pop();
+  await control.execute("agent-codex-review", "trusted-record");
+  assert.deepEqual(control.state.failures, []);
+  assert.equal(control.state.outputs.pass, "true");
+  assert.match(control.state.writes[0].body, /ci=10 attempt=1 result=PASS/);
+  for (const drift of [{id: 11}, {run_attempt: 2}]) {
+    const f = exactCiWorkflowFixture();
+    f.state.prComments.pop();
+    Object.assign(f.state.run, drift);
+    await f.execute("agent-codex-review", "trusted-record");
+    assert.deepEqual(f.state.writes, []);
+    assert.deepEqual(f.state.failures, ["NO_WRITE: prepared CI binding changed during review"]);
+  }
+  for (const drift of [{reviewed_ci_run_id: 11}, {reviewed_ci_run_attempt: 2}, {reviewed_ci_run_id: undefined}]) {
+    const f = exactCiWorkflowFixture();
+    f.state.prComments.pop();
+    Object.assign(f.modelResult, drift);
+    await f.execute("agent-codex-review", "trusted-record");
+    assert.deepEqual(f.state.writes, []);
+    assert.deepEqual(f.state.failures, ["NO_WRITE: reviewer output differs from prepared CI binding"]);
+  }
+});
+
+test("verifier validates the complete authority at every label and marker boundary", async () => {
+  const drifts = {
+    escalation: s => { s.issue.labels = ["type:implementation", "agent:needs-human"]; },
+    lifecycle: s => { s.pr.labels = ["agent:running"]; },
+    issueClosed: s => { s.issue.state = "closed"; },
+    prClosed: s => { s.pr.state = "closed"; },
+    draft: s => { s.pr.draft = true; },
+    base: s => { s.pr.base.ref = "other"; },
+    repository: s => { s.pr.head.repo.full_name = "other/repo"; },
+    defaultBranch: s => { s.defaultBranch = "other"; },
+    head: s => { s.pr.head.sha = "c".repeat(40); },
+    behind: s => { s.behind = 1; },
+    authorization: s => { s.issue.body += " changed"; },
+    authorizedSpec: s => { s.issue.body += " reauthorized"; s.issueComments[1] = s.auth(); },
+    linkage: s => { s.prComments = s.prComments.filter(c => !c.body.includes("agent-link:")); },
+    rebind: s => { s.pr.body = "Agent-Issue: #144"; },
+    reviewMissing: s => { s.prComments = s.prComments.filter(c => !c.body.includes("agent-codex-review:")); },
+    reviewConflict: s => { s.prComments.push(s.review("BLOCK")); },
+    ciRerun: s => { s.run.run_attempt = 2; },
+    ciReplacement: s => { s.run.id = 11; },
+    ciFailure: s => { s.run.conclusion = "failure"; },
+    jobFailure: s => { s.jobs[0].conclusion = "failure"; },
+  };
+  for (const [name, drift] of Object.entries(drifts)) {
+    // A body rebind must stop before fetching or writing the unrelated Issue.
+    for (const boundary of [1, 2, 3, 4]) {
+      const f = exactCiWorkflowFixture();
+      f.state.onWrite = s => { if (s.writes.length === boundary) drift(s); };
+      if (name === "rebind") {
+        const get = f.github.rest.issues.get;
+        f.github.rest.issues.get = async args => args.issue_number === 144 ? {data: structuredClone(f.state.issue)} : get(args);
+      }
+      await f.execute("agent-verify", "verify");
+      assert.equal(f.state.writes.length, boundary, name + " after write " + boundary);
+      assert.equal(f.state.outputs.verified, undefined, name);
+      assert.equal(f.state.failures.length, 1, name);
+      if (name === "escalation") assert.ok(f.state.issue.labels.includes("agent:needs-human"));
+    }
+  }
+  for (const partial of [false, true]) {
+    const f = exactCiWorkflowFixture();
+    if (partial) f.state.pr.labels = ["agent:verified", "priority:high"];
+    await f.execute("agent-verify", "verify");
+    assert.deepEqual(f.state.failures, []);
+    assert.equal(f.state.outputs.verified, "true");
+    assert.equal(f.state.writes.length, partial ? 3 : 5);
+    assert.ok(f.state.pr.labels.includes("priority:high"));
+    assert.ok(f.state.issue.labels.includes("priority:high"));
+    assert.match(f.state.writes.at(-1).body, /agent-verified:v2 .* ci=10 attempt=1/);
+  }
+});
+
+test("verifier sees escalation injected during comment pagination before its first label write", async () => {
+  const f = exactCiWorkflowFixture();
+  let ciRead = false;
+  f.state.onPaginate = (s, route, args) => {
+    if (route === f.github.rest.actions.listWorkflowRunsForRepo) ciRead = true;
+    if (ciRead && route === f.github.rest.issues.listComments && args.issue_number === 142) s.issue.labels = ["type:implementation", "agent:needs-human"];
+  };
+  await f.execute("agent-verify", "verify");
+  assert.deepEqual(f.state.writes, []);
+  assert.deepEqual(f.state.failures, ["VERIFICATION_TOCTOU_REJECTED"]);
+});
+
+test("exact-CI changes preserve default-branch failure classification", () => {
+  for (const diagnostic of ["EAI_AGAIN", "ECONNRESET", "ETIMEDOUT"]) {
+    assert.equal(pipeline.normalizedFailureClass({name: "security", steps: [], conclusion: "failure"}, diagnostic), "security");
+    assert.equal(pipeline.normalizedFailureClass({name: "security", steps: [], conclusion: "failure"}, "\b" + diagnostic + "\b"), "infra-transient");
+  }
+  assert.equal(pipeline.normalizedFailureClass({name: "api", steps: [], conclusion: "failure"}), "unknown");
+  assert.equal(pipeline.normalizedFailureClass({name: "\bapi\b", steps: [], conclusion: "failure"}), "api-test");
+});
+
+test("verifier rejects a rerun that starts during its final comment pagination", async () => {
+  const f = exactCiWorkflowFixture();
+  let ciRead = false;
+  f.state.onPaginate = (s, route, args) => {
+    if (route === f.github.rest.actions.listWorkflowRunsForRepo) ciRead = true;
+    if (ciRead && route === f.github.rest.issues.listComments && args.issue_number === 142) s.run.run_attempt = 2;
+  };
+  await f.execute("agent-verify", "verify");
+  assert.deepEqual(f.state.writes, []);
+  assert.deepEqual(f.state.failures, ["VERIFICATION_TOCTOU_REJECTED"]);
+});
+
+test("verification label requests cannot erase escalation added after the final read", async () => {
+  for (const boundary of [0, 1, 2, 3]) {
+    const f = exactCiWorkflowFixture();
+    f.state.beforeLabelWrite = s => {
+      if (s.writes.length === boundary) {
+        s.issue.labels.push("agent:needs-human", "triage:concurrent");
+      }
+    };
+    await f.execute("agent-verify", "verify");
+    assert.ok(f.state.issue.labels.includes("agent:needs-human"), "boundary " + boundary);
+    assert.ok(f.state.issue.labels.includes("triage:concurrent"), "boundary " + boundary);
+    assert.equal(f.state.outputs.verified, undefined);
+    assert.equal(f.state.writes.length, boundary + 1);
+    assert.equal(f.state.failures.length, 1);
+  }
 });

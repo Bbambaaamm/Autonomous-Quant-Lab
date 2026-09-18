@@ -189,7 +189,7 @@ function normalizedFailureClass(job, logExcerpt = "") {
   const steps = failedStepNames(job).join(" ");
   const diagnostic = String(logExcerpt || "").toLowerCase();
   const metadata = `${name} ${steps} ${diagnostic}`;
-  const transientEvidence = /network timeout|audit endpoint returned an error|\beai_again\b|\beconnreset\b|\betimedout\b|socket hang up|temporary failure|connection reset|502 bad gateway|503 service unavailable|504 gateway timeout/;
+  const transientEvidence = /network timeout|audit endpoint returned an error|eai_again|econnreset|etimedout|socket hang up|temporary failure|connection reset|502 bad gateway|503 service unavailable|504 gateway timeout/;
   if (job.conclusion === "timed_out" || transientEvidence.test(diagnostic)) return "infra-transient";
   if (/dependenc|lock|npm ci|uv lock|uv sync/.test(metadata)) return "dependency-lock";
   if (/security|audit|bandit|pip-audit/.test(metadata)) return "security";
@@ -199,7 +199,7 @@ function normalizedFailureClass(job, logExcerpt = "") {
   if (/frontend|npm test|next build/.test(metadata)) return "frontend-test-build";
   if (/mypy|typecheck|type check/.test(metadata)) return "typecheck";
   if (/ruff|lint|format/.test(metadata)) return "lint-format";
-  if (/\bapi\b/.test(metadata)) return "api-test";
+  if (/api/.test(metadata)) return "api-test";
   if (/unit|pytest/.test(metadata)) return "unit-test";
   return "unknown";
 }
@@ -620,17 +620,28 @@ function newestAuthoritativeCiRun(runs, { workflowId, workflowPath, headSha, prN
     .filter((run) => Number(run.workflow_id) === binding.workflowId && run.path === binding.workflowPath && run.event === "pull_request" &&
       run.head_sha === headSha &&
       run.pull_requests?.length === 1 && run.pull_requests[0].number === prNumber);
-  if (candidates.some((run) => !Number.isSafeInteger(Number(run.id)) || Number(run.id) < 1 ||
+  const timestamp = (value) => typeof value === "string" &&
+    /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/.test(value) ? Date.parse(value) : NaN;
+  // Completion order is not attempt order. Wait for every matching run to settle:
+  // queued reruns can still expose the previous attempt's start timestamp.
+  if (candidates.some((run) => run.status !== "completed" ||
+        !Number.isSafeInteger(Number(run.id)) || Number(run.id) < 1 ||
         !Number.isSafeInteger(Number(run.run_attempt)) || Number(run.run_attempt) < 1 ||
-        !Number.isFinite(Date.parse(run.updated_at)))) return null;
-  return candidates.sort((left, right) =>
-    Date.parse(right.updated_at) - Date.parse(left.updated_at) ||
-    Number(right.run_attempt) - Number(left.run_attempt) || Number(right.id) - Number(left.id))[0] ?? null;
+        ![run.created_at, run.run_started_at, run.updated_at].every((value) => Number.isFinite(timestamp(value))) ||
+        timestamp(run.created_at) > timestamp(run.run_started_at) ||
+        timestamp(run.run_started_at) > timestamp(run.updated_at) ||
+        (Number(run.run_attempt) > 1 && timestamp(run.run_started_at) <= timestamp(run.created_at)))) return null;
+  if (new Set(candidates.map((run) => Number(run.id))).size !== candidates.length) return null;
+  candidates.sort((left, right) => timestamp(right.run_started_at) - timestamp(left.run_started_at));
+  // IDs and attempt counters from different runs cannot resolve a start-time tie.
+  if (candidates.length > 1 &&
+      timestamp(candidates[0].run_started_at) === timestamp(candidates[1].run_started_at)) return null;
+  return candidates[0] ?? null;
 }
 
 function authoritativeCiRunCandidates(runs, binding) {
   const newest = newestAuthoritativeCiRun(runs, binding);
-  return newest?.conclusion === "success" ? [newest] : [];
+  return newest?.status === "completed" && newest.conclusion === "success" ? [newest] : [];
 }
 
 function verificationTriggerDecision({ workflowRun, workflowCallInputs = {} }) {
