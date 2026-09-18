@@ -220,13 +220,10 @@ function fixerInvocationDecision({ eventName, mode, prNumber, headSha, reviewBlo
 function trustedCiBinding(workflowId, workflowPath) {
   if (!Number.isSafeInteger(TRUSTED_CI_WORKFLOW_ID) || TRUSTED_CI_WORKFLOW_ID < 1 ||
       typeof TRUSTED_CI_WORKFLOW_PATH !== "string" || !TRUSTED_CI_WORKFLOW_PATH) return null;
-  if (workflowId === undefined && workflowPath === undefined) {
-    return { workflowId: TRUSTED_CI_WORKFLOW_ID, workflowPath: TRUSTED_CI_WORKFLOW_PATH };
-  }
-  if (workflowId === undefined || workflowPath === undefined) return null;
-  const effectiveId = Number(workflowId);
-  if (!Number.isSafeInteger(effectiveId) || effectiveId < 1 || typeof workflowPath !== "string" || !workflowPath) return null;
-  return { workflowId: effectiveId, workflowPath };
+  const effectiveId = workflowId === undefined ? TRUSTED_CI_WORKFLOW_ID : Number(workflowId);
+  const effectivePath = workflowPath === undefined ? TRUSTED_CI_WORKFLOW_PATH : workflowPath;
+  return effectiveId === TRUSTED_CI_WORKFLOW_ID && effectivePath === TRUSTED_CI_WORKFLOW_PATH
+    ? { workflowId: effectiveId, workflowPath: effectivePath } : null;
 }
 
 function authoritativeCiIdentity(run, { workflowId, workflowPath, prNumber, headSha, conclusion } = {}) {

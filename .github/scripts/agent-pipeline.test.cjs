@@ -1133,7 +1133,8 @@ test("Issue #130 durable review marker rejects a rerun started after every other
   const lines=record.split("\n"),start=lines.findIndex(x=>x.includes("const writeRuns=await")),end=lines.findIndex((x,i)=>i>start&&x.includes("await github.rest.issues.createComment"));
   assert.ok(start>=0&&end>start,"production final CI boundary must exist");
   const source=lines.slice(start,end+1).map(x=>x.trim()).join("\n"),head="a".repeat(40),writes=[],failures=[];
-  const accepted={id:10,workflow_id:4242,path:".github/workflows/ci.yml",updated_at:"2026-01-01T00:00:00Z",run_attempt:1,name:"CI",event:"pull_request",head_sha:head,pull_requests:[{number:134}],status:"completed",conclusion:"success"};
+  const accepted={...CI_META,id:10,name:"CI",event:"pull_request",head_sha:head,pull_requests:[{number:134}],status:"completed",conclusion:"success"};
+  assert.equal(pipeline.newestAuthoritativeCiRun([accepted],{...CI_BINDING,headSha:head,prNumber:134}),accepted);
   const rerun={...accepted,id:11,updated_at:"2026-01-02T00:00:00Z",run_attempt:2,status:"in_progress",conclusion:null};
   const github={rest:{actions:{listWorkflowRunsForRepo(){}},issues:{createComment:async args=>writes.push(args)}},paginate:async()=>[rerun,accepted]};
   const core={setFailed:message=>failures.push(message)},context={repo:{owner:"o",repo:"r"}},processMock={env:{SHA:head}};
@@ -1218,4 +1219,133 @@ test("authoritative workflow identity rejects CI namesakes and path drift",()=>{
   const sha="f".repeat(40),real={...CI_META,id:10,name:"CI",event:"pull_request",head_sha:sha,pull_requests:[{number:143}]},evil={...real,id:99,workflow_id:999,path:".github/workflows/evil.yml"};
   assert.equal(pipeline.newestAuthoritativeCiRun([real,evil],{...CI_BINDING,headSha:sha,prNumber:143}),real);
   assert.equal(pipeline.newestAuthoritativeCiRun([{...real,path:".github/workflows/renamed.yml"}],{...CI_BINDING,headSha:sha,prNumber:143}),null);
+});
+
+test("unchanged CI fixer calls use trusted defaults and reject workflow impostors", () => {
+  const sha = "a".repeat(40);
+  const real = {...CI_META, id: 10, name: "CI", event: "pull_request", status: "completed", conclusion: "failure", head_sha: sha, pull_requests: [{number: 143}]};
+  const fixer = fs.readFileSync(".github/workflows/agent-ci-fixer.yml", "utf8");
+  const calls = fixer.match(/p\.authoritativeCiIdentity\(run,\{[^}]+\}\)/g);
+  assert.equal(calls.length, 2, "classification and transient retry both retain their original call shape");
+  for (const call of calls) {
+    assert.doesNotMatch(call, /workflowId|workflowPath/);
+    const invoke = new Function("p", "run", "prNumber", "requestedSha", "sha", `return ${call};`);
+    assert.equal(invoke(pipeline, real, 143, sha, sha), true);
+    for (const drift of [{workflow_id: 999}, {path: ".github/workflows/evil.yml"}, {workflow_id: undefined}, {path: undefined}]) {
+      assert.equal(invoke(pipeline, {...real, ...drift}, 143, sha, sha), false);
+    }
+  }
+  const binding = {headSha: sha, prNumber: 143};
+  assert.equal(pipeline.newestAuthoritativeCiRun([real], binding), real);
+  assert.equal(pipeline.newestAuthoritativeCiRun([{...real, workflow_id: 999}], binding), null);
+});
+
+test("caller-supplied CI identity cannot replace configured authority", () => {
+  const sha = "b".repeat(40);
+  const real = {...CI_META, id: 10, name: "CI", event: "pull_request", status: "completed", conclusion: "success", head_sha: sha, pull_requests: [{number: 143}]};
+  const binding = {headSha: sha, prNumber: 143, conclusion: "success"};
+  for (const explicit of [{}, CI_BINDING, {workflowId: CI_BINDING.workflowId}, {workflowPath: CI_BINDING.workflowPath}]) {
+    assert.equal(pipeline.authoritativeCiIdentity(real, {...binding, ...explicit}), true);
+    assert.equal(pipeline.newestAuthoritativeCiRun([real], {...binding, ...explicit}), real);
+  }
+  for (const explicit of [
+    {...CI_BINDING, workflowId: 999},
+    {...CI_BINDING, workflowPath: ".github/workflows/evil.yml"},
+    {workflowId: 999, workflowPath: ".github/workflows/evil.yml"},
+    {workflowId: null}, {workflowId: 0}, {workflowId: NaN}, {workflowPath: null}, {workflowPath: ""},
+  ]) {
+    const impostor = {...real, workflow_id: explicit.workflowId ?? real.workflow_id, path: explicit.workflowPath ?? real.path};
+    assert.equal(pipeline.authoritativeCiIdentity(impostor, {...binding, ...explicit}), false);
+    assert.equal(pipeline.newestAuthoritativeCiRun([impostor], {...binding, ...explicit}), null);
+    assert.deepEqual(pipeline.authoritativeCiRunCandidates([impostor], {...binding, ...explicit}), []);
+  }
+});
+
+test("every dynamic CI metadata guard rejects drift from trusted configuration", async () => {
+  let guards = 0;
+  const valid = {id: CI_BINDING.workflowId, path: CI_BINDING.workflowPath, state: "active"};
+  for (const file of ["agent-codex-review", "agent-verify", "agent-verified-gate", "agent-auto-merge"]) {
+    const workflow = fs.readFileSync(`.github/workflows/${file}.yml`, "utf8");
+    const sources = [...workflow.matchAll(/const \{data:ciWorkflow\}=await github\.rest\.actions\.getWorkflow\([^\n]+?\);[\s\S]*?const ciBinding=\{[^}]+\};/g)];
+    assert.equal(sources.length, file === "agent-codex-review" ? 2 : 1, file);
+    for (const [source] of sources) {
+      guards++;
+      for (const drift of [{}, {id: 999}, {path: ".github/workflows/evil.yml"}, {state: "disabled_manually"}, {id: null}, {id: "331418792"}]) {
+        const failures = [];
+        const github = {rest: {actions: {getWorkflow: async args => {
+          assert.equal(args.workflow_id, CI_BINDING.workflowPath);
+          return {data: {...valid, ...drift}};
+        }}}};
+        const core = {setFailed: reason => { failures.push(reason); }};
+        const binding = await new AsyncFunction("github", "context", "c", "core", `${source}\nreturn ciBinding;`)(github, {repo: {owner: "o", repo: "r"}}, agentConfig, core);
+        if (Object.keys(drift).length) {
+          assert.deepEqual(failures, ["AUTHORITATIVE_CI_WORKFLOW_INVALID"], file);
+          assert.equal(binding, undefined);
+        } else {
+          assert.deepEqual(failures, []);
+          assert.deepEqual(binding, CI_BINDING);
+        }
+      }
+    }
+  }
+  assert.equal(guards, 5);
+});
+
+test("serialized gate executions revalidate and publish one exact-attempt marker", async () => {
+  const autonomy = require("./agent-autonomy.cjs");
+  const workflow = fs.readFileSync(".github/workflows/agent-verified-gate.yml", "utf8");
+  assert.match(workflow, /concurrency:\n  group: agent-verified-gate-\$\{\{ github\.repository \}\}-\$\{\{ inputs\.pr_number \}\}-\$\{\{ inputs\.head_sha \}\}-\$\{\{ inputs\.spec_hash \}\}\n  cancel-in-progress: false/);
+  const section = workflow.slice(workflow.indexOf("          script: |") + "          script: |".length, workflow.indexOf("\n  merge:"));
+  const source = section.split("\n").filter(line => line.startsWith("            ")).map(line => line.slice(12)).join("\n");
+  const headSha = "c".repeat(40), specHash = "d".repeat(64), repo = "o/r", issueNumber = 142, prNumber = 143;
+  const binding = {repo, issueNumber, prNumber, headSha, specHash, ciRunId: 10, ciRunAttempt: 1};
+  const trusted = body => ({user: {login: "github-actions[bot]"}, body});
+  const comments = [
+    trusted(`<!-- agent-codex-review:v3 repo=${repo} issue=${issueNumber} pr=${prNumber} sha=${headSha} spec=${specHash} ci=10 attempt=1 result=PASS -->`),
+    trusted(autonomy.verificationMarker(binding)),
+  ];
+  let prReads = 0, markerWrites = 0, needsHuman = false;
+  const statuses = [], failures = [];
+  const run = {...CI_META, id: 10, name: "CI", event: "pull_request", head_sha: headSha, pull_requests: [{number: prNumber}], status: "completed", conclusion: "success"};
+  const github = {rest: {
+    pulls: {get: async () => { prReads++; return {data: {state: "open", draft: false, head: {sha: headSha}, base: {ref: "main"}, body: `Agent-Issue: #${issueNumber}`, labels: needsHuman ? ["agent:verified", "agent:needs-human"] : ["agent:verified"]}}; }},
+    issues: {
+      get: async () => ({data: {state: "open", title: "t", body: "b", labels: ["type:implementation", "agent:verified"]}}),
+      listComments() {},
+      createComment: async args => { markerWrites++; comments.push(trusted(args.body)); },
+    },
+    repos: {
+      getBranch: async () => ({data: {commit: {sha: "e".repeat(40)}}}),
+      compareCommits: async () => ({data: {behind_by: 0}}),
+      createCommitStatus: async args => statuses.push(args),
+    },
+    actions: {
+      getWorkflow: async () => ({data: {id: CI_BINDING.workflowId, path: CI_BINDING.workflowPath, state: "active"}}),
+      listWorkflowRunsForRepo() {}, listJobsForWorkflowRun() {},
+    },
+  }, paginate: async (method, args) => {
+    if (method === github.rest.issues.listComments) return args.issue_number === prNumber ? [...comments] : [];
+    if (method === github.rest.actions.listWorkflowRunsForRepo) return [run];
+    if (method === github.rest.actions.listJobsForWorkflowRun) return agentConfig.requiredCiJobs.map(name => ({name, run_attempt: 1, status: "completed", conclusion: "success"}));
+    throw new Error("Unexpected paginated API");
+  }};
+  const requireMock = name => name.endsWith("agent-pipeline.cjs") ? {...pipeline, fullLinkageDecision: () => ({ok: true})}
+    : name.endsWith("agent-autonomy.cjs") ? {...autonomy, authorizationDecision: () => ({ok: true, specHash})} : agentConfig;
+  const execute = () => new AsyncFunction("require", "github", "context", "core", "process", source)(
+    requireMock, github, {repo: {owner: "o", repo: "r"}, payload: {repository: {default_branch: "main"}}},
+    {setFailed: reason => failures.push(reason), setOutput() {}}, {env: {PR: String(prNumber), HEAD: headSha, SPEC: specHash}},
+  );
+  // The workflow concurrency group admits the second execution only after the first.
+  await execute();
+  await execute();
+  assert.deepEqual(failures, []);
+  assert.equal(prReads, 4, "each admitted execution fetches current state twice");
+  assert.equal(markerWrites, 1, "the second execution observes the first marker");
+  assert.equal(statuses.filter(status => status.state === "success").length, 2);
+  assert.equal(autonomy.exactGateEvidence(comments, binding), true);
+  needsHuman = true;
+  await execute();
+  assert.deepEqual(failures, ["GATE_REJECTED:LIFECYCLE_INVALID"]);
+  assert.equal(markerWrites, 1);
+  assert.equal(statuses.at(-1).state, "failure");
 });
