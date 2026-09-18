@@ -1,5 +1,9 @@
 "use strict";
 
+const AGENT_CONFIG = require("../agent-pipeline.json");
+const TRUSTED_CI_WORKFLOW_ID = Number(AGENT_CONFIG.v2.authoritativeCiWorkflowId);
+const TRUSTED_CI_WORKFLOW_PATH = AGENT_CONFIG.v2.authoritativeCiWorkflowPath;
+
 const STATES = ["agent:ready", "agent:running", "agent:pr", "agent:needs-human", "agent:verified"];
 const EPIC_LABELS = new Set(["type:epic", "type:roadmap", "type:capability"]);
 const ALLOWED = new Set([
@@ -185,7 +189,7 @@ function normalizedFailureClass(job, logExcerpt = "") {
   const steps = failedStepNames(job).join(" ");
   const diagnostic = String(logExcerpt || "").toLowerCase();
   const metadata = `${name} ${steps} ${diagnostic}`;
-  const transientEvidence = /network timeout|audit endpoint returned an error|eai_again|econnreset|etimedout|socket hang up|temporary failure|connection reset|502 bad gateway|503 service unavailable|504 gateway timeout/;
+  const transientEvidence = /network timeout|audit endpoint returned an error|\beai_again\b|\beconnreset\b|\betimedout\b|socket hang up|temporary failure|connection reset|502 bad gateway|503 service unavailable|504 gateway timeout/;
   if (job.conclusion === "timed_out" || transientEvidence.test(diagnostic)) return "infra-transient";
   if (/dependenc|lock|npm ci|uv lock|uv sync/.test(metadata)) return "dependency-lock";
   if (/security|audit|bandit|pip-audit/.test(metadata)) return "security";
@@ -195,7 +199,7 @@ function normalizedFailureClass(job, logExcerpt = "") {
   if (/frontend|npm test|next build/.test(metadata)) return "frontend-test-build";
   if (/mypy|typecheck|type check/.test(metadata)) return "typecheck";
   if (/ruff|lint|format/.test(metadata)) return "lint-format";
-  if (/api/.test(metadata)) return "api-test";
+  if (/\bapi\b/.test(metadata)) return "api-test";
   if (/unit|pytest/.test(metadata)) return "unit-test";
   return "unknown";
 }
@@ -213,9 +217,19 @@ function fixerInvocationDecision({ eventName, mode, prNumber, headSha, reviewBlo
   return { ok: false, reason: "INVALID_INVOCATION_MODE" };
 }
 
-function authoritativeCiIdentity(run, { workflowId, workflowPath, prNumber, headSha, conclusion }) {
-  return !!run && Number.isSafeInteger(Number(workflowId)) && Number(run.workflow_id) === Number(workflowId) &&
-    run.path === workflowPath && run.event === "pull_request" && run.status === "completed" &&
+function trustedCiBinding(workflowId, workflowPath) {
+  if (!Number.isSafeInteger(TRUSTED_CI_WORKFLOW_ID) || TRUSTED_CI_WORKFLOW_ID < 1 ||
+      typeof TRUSTED_CI_WORKFLOW_PATH !== "string" || !TRUSTED_CI_WORKFLOW_PATH) return null;
+  const effectiveId = workflowId === undefined ? TRUSTED_CI_WORKFLOW_ID : Number(workflowId);
+  const effectivePath = workflowPath === undefined ? TRUSTED_CI_WORKFLOW_PATH : workflowPath;
+  return effectiveId === TRUSTED_CI_WORKFLOW_ID && effectivePath === TRUSTED_CI_WORKFLOW_PATH
+    ? { workflowId: effectiveId, workflowPath: effectivePath } : null;
+}
+
+function authoritativeCiIdentity(run, { workflowId, workflowPath, prNumber, headSha, conclusion } = {}) {
+  const binding = trustedCiBinding(workflowId, workflowPath);
+  return !!run && !!binding && Number(run.workflow_id) === binding.workflowId &&
+    run.path === binding.workflowPath && run.event === "pull_request" && run.status === "completed" &&
     run.conclusion === conclusion && run.head_sha === headSha && run.pull_requests?.length === 1 &&
     run.pull_requests[0].number === Number(prNumber);
 }
@@ -599,13 +613,14 @@ function successfulRequiredJobs(jobs, requiredNames, headSha) {
   return requiredNames.every((name) => latest.get(name)?.conclusion === "success");
 }
 
-function newestAuthoritativeCiRun(runs, { workflowId, workflowPath, headSha, prNumber }) {
+function newestAuthoritativeCiRun(runs, { workflowId, workflowPath, headSha, prNumber } = {}) {
+  const binding = trustedCiBinding(workflowId, workflowPath);
+  if (!binding) return null;
   const candidates = runs
-    .filter((run) => Number(run.workflow_id) === Number(workflowId) && run.path === workflowPath && run.event === "pull_request" &&
+    .filter((run) => Number(run.workflow_id) === binding.workflowId && run.path === binding.workflowPath && run.event === "pull_request" &&
       run.head_sha === headSha &&
       run.pull_requests?.length === 1 && run.pull_requests[0].number === prNumber);
-  if (!Number.isSafeInteger(Number(workflowId)) || Number(workflowId) < 1 || !workflowPath ||
-      candidates.some((run) => !Number.isSafeInteger(Number(run.id)) || Number(run.id) < 1 ||
+  if (candidates.some((run) => !Number.isSafeInteger(Number(run.id)) || Number(run.id) < 1 ||
         !Number.isSafeInteger(Number(run.run_attempt)) || Number(run.run_attempt) < 1 ||
         !Number.isFinite(Date.parse(run.updated_at)))) return null;
   return candidates.sort((left, right) =>
