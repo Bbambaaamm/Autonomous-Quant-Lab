@@ -495,7 +495,8 @@ class OperatorReadModel:
                 )
             )
             engine = session.get_bind()
-            assert isinstance(engine, Engine)
+            if not isinstance(engine, Engine):
+                raise TypeError("Operator read model requires an Engine-bound session")
             provider = build_market_data_provider(self._settings, engine).metadata
             return {
                 "provider": {
