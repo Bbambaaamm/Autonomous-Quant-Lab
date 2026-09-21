@@ -58,3 +58,27 @@ Frontend testy ověřují disabled kritickou akci, zákaz double-submit a zobraz
 falešného optimistic success. Existující B1 PostgreSQL acceptance spojuje data → snapshot → experiment
 → promotion → deployment → approval → monitoring; M1 testy dokazují immutable eligibility gate a
 Stage C testy autonomous/XNYS orchestration. M4 tyto stejné endpointy pouze zpřístupňuje.
+
+## Account isolation in dashboard projections
+
+The Paper, Overview and Risk account views select `paper-main` evidence only.
+Monitoring must reference a deployment belonging to that account; a newer pilot or
+acceptance monitoring run must not replace it. Missing monitoring produces null
+metrics and an empty performance series, never a fallback to another account.
+Orders, fills (through their order), positions, reconciliation, trading cycles,
+risk decisions/events and the next scheduled execution are account-filtered.
+Worker health and general ingestion readiness remain system-wide indicators.
+Performance charts exclude sessions and evidence timestamps later than their query time.
+
+`as_of` denotes the selected performance evidence timestamp, or the account's
+`updated_at` if no snapshot exists; it is not the HTTP refresh time. Empty charts
+therefore require checking the selected monitoring's persisted snapshots.
+Strategy pages use the API's `strategy_name` and `strategy_version` fields.
+Provider capabilities come from the configured provider factory without fetching
+market data. Data freshness covers all registered active XNYS instruments, as the
+UI label states; it does not claim deployment-specific readiness.
+
+Regression checks: `tests/test_operator_account_isolation.py` (two accounts,
+newer foreign monitoring, absent main monitoring, activity isolation, future
+performance evidence and configured providers), and frontend
+`tests/strategy-pages.test.tsx` (list/detail rendering of the real field contract).
