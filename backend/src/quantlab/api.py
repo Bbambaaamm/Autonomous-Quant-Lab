@@ -31,6 +31,7 @@ from quantlab.config import get_settings
 from quantlab.control_plane import ControlPlaneRegistryService
 from quantlab.demo import run_demo
 from quantlab.domain import AuditEventType
+from quantlab.market_catalog import CatalogError, MarketCatalogService
 from quantlab.market_data import AssetType, DatasetInvalid, Instrument, XNYSCalendar
 from quantlab.market_data_service import DatasetSnapshotService, PersistentMarketDataService
 from quantlab.multi_asset import STRATEGY_REGISTRY
@@ -1644,3 +1645,54 @@ def research_report(experiment_id: str) -> dict[str, str]:
 def api_root() -> str:
     """Backend je API; produktové uživatelské rozhraní obsluhuje Next.js."""
     return "/docs"
+
+
+@app.get("/operator/market-coverage", response_model=OperatorDocument)
+def operator_market_coverage(
+    q: str = Query("", max_length=100),
+    offset: int = Query(0, ge=0),
+    limit: int = Query(50, ge=1, le=200),
+) -> dict[str, object]:
+    return MarketCatalogService(session_factory).read(
+        datetime.now(UTC), query=q, offset=offset, limit=limit
+    )
+
+
+@app.post("/operator/market-coverage/sync", response_model=OperatorDocument)
+def operator_market_catalog_sync(body: ReasonedMutation, request: Request) -> dict[str, object]:
+    try:
+        identity = MarketCatalogService(session_factory).sync(
+            actor=current_principal(request).actor_id, reason=body.reason
+        )
+    except CatalogError as exc:
+        raise HTTPException(502, str(exc)) from exc
+    return {"snapshot_id": identity, "status": "RECEIVED"}
+
+
+@app.post("/operator/market-coverage/schedule", response_model=OperatorDocument)
+def operator_market_catalog_schedule(body: ReasonedMutation, request: Request) -> dict[str, object]:
+    job_id = "market-catalog-daily"
+    with session_factory() as session:
+        existing = session.get(ScheduledJob, job_id)
+        if existing is not None:
+            return {"job_id": job_id, "enabled": existing.enabled}
+    job = automation_repository.create_job(
+        job_id=job_id,
+        job_type=JobType.SYNC_MARKET_CATALOG,
+        account_id="paper-main",
+        schedule_type=ScheduleType.DAILY,
+        daily_time="01:00",
+        timezone="UTC",
+        next_run_at=datetime.now(UTC),
+        max_attempts=3,
+        config={},
+    )
+    _audit_control_mutation(
+        "CONTROL_CATALOG_SCHEDULED",
+        "scheduled_job",
+        job.id,
+        _actor(request),
+        body.reason,
+        _correlation(request),
+    )
+    return {"job_id": job.id, "enabled": job.enabled}

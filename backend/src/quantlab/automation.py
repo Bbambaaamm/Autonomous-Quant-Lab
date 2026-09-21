@@ -43,6 +43,7 @@ from quantlab.phase4 import ReconciliationService, TradingCycleRecord, TradingCy
 
 
 class JobType(StrEnum):
+    SYNC_MARKET_CATALOG = "SYNC_MARKET_CATALOG"
     RUN_PAPER_CYCLE = "RUN_PAPER_CYCLE"
     RUN_PAPER_DEPLOYMENT = "RUN_PAPER_DEPLOYMENT"
     PREPARE_PAPER_SESSION = "PREPARE_PAPER_SESSION"
@@ -394,6 +395,8 @@ class AutomationRepository:
         config = config or {}
         validate_payload(config)
         ZoneInfo(timezone)
+        if job_type == JobType.SYNC_MARKET_CATALOG and (config or strategy_id is not None):
+            raise ValueError("Katalog nepřijímá strategy_id ani vlastní konfiguraci")
         if job_type == JobType.RUN_PAPER_CYCLE and not strategy_id:
             raise ValueError("Paper cycle vyžaduje strategy_id")
         if job_type == JobType.RUN_PAPER_DEPLOYMENT:
@@ -1174,6 +1177,21 @@ class JobExecutor:
         ):
             raise PermanentJobError("JobRun obsahuje neplatnou execution identitu")
         validate_payload(payload)
+        if job_type == JobType.SYNC_MARKET_CATALOG:
+            if payload or strategy_id is not None:
+                raise PermanentJobError("Katalog nepřijímá vlastní konfiguraci")
+            from quantlab.market_catalog import MarketCatalogService
+
+            MarketCatalogService(lambda: Session(self.repository.engine)).sync(
+                actor="scheduled-worker",
+                reason=f"Pravidelná aktualizace: {run.id}",
+                clock=self.clock,
+            )
+            return {
+                "trading_cycle_id": None,
+                "reconciliation_id": None,
+                "outcome": "CATALOG_RECEIVED",
+            }
         if job_type == JobType.MONITOR_PAPER_DEPLOYMENT:
             monitoring_id = payload.get("monitoring_id")
             if not isinstance(monitoring_id, str) or not monitoring_id:

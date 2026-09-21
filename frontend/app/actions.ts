@@ -36,6 +36,7 @@ async function mutate(path: string, body: Record<string, unknown>): Promise<void
     }
     revalidatePath("/");
     revalidatePath("/data");
+    revalidatePath("/market");
     revalidatePath("/research");
     revalidatePath("/strategies");
     revalidatePath("/operations");
@@ -111,4 +112,12 @@ export async function experimentAction(_: ActionState, form: FormData) {
         return { error: "Zkontrolujte parametry strategie; pokročilé varianty musí být platné pole JSON." };
     }
     return result(() => mutate("/operator/research/experiments", { snapshot_id: value(form, "snapshot_id"), strategy_name: value(form, "strategy_name"), strategy_version: value(form, "strategy_version"), parameter_configs: parameters, code_sha: value(form, "guided") === "true" ? null : value(form, "code_sha"), seed: Number(value(form, "seed") || 42), reason: value(form, "reason") }), "Výzkumný experiment byl dokončen.");
+}
+
+export async function marketCatalogAction(_previous: ActionState, form: FormData): Promise<ActionState> {
+    return result(() => mutate("/operator/market-coverage/sync", { reason: value(form, "reason") }), "Referenční katalog byl aktualizován. Dostupnost cen se ověřuje samostatně.");
+}
+
+export async function marketCatalogScheduleAction(_previous: ActionState, form: FormData): Promise<ActionState> {
+    return result(() => mutate("/operator/market-coverage/schedule", { reason: value(form, "reason") }), "Denní úloha je evidována. Její zapnutí a průběh ověřte na stránce Provoz.");
 }

@@ -2,13 +2,14 @@ import logging
 import os
 from logging.config import fileConfig
 
-from alembic import context
+import quantlab.automation
+import quantlab.market_catalog
+import quantlab.phase4
+import quantlab.phase7  # noqa: F401
+from quantlab.persistence import Base
 from sqlalchemy import engine_from_config, pool
 
-import quantlab.automation  # noqa: F401, E402
-import quantlab.phase4  # noqa: F401, E402
-import quantlab.phase7  # noqa: F401, E402
-from quantlab.persistence import Base
+from alembic import context
 
 config = context.config
 if config.config_file_name:
