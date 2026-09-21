@@ -202,6 +202,7 @@ jobs:
         env:
           FIX_SCOPE: '${{ needs.classify.outputs.fix_scope }}'
           DIAGNOSTIC: '${{ needs.classify.outputs.diagnostic }}'
+          FAILURE_CLASS: '${{ needs.classify.outputs.failure_class }}'
         run: |
           mkdir "$RUNNER_TEMP/generation-context"
           node - <<'NODE' > "$RUNNER_TEMP/generation-context/source-context.json"
@@ -239,7 +240,7 @@ jobs:
           const plan = p.trackedPriorityMaterializationPlan({trackedEntries,fixScopePaths:process.env.FIX_SCOPE,diagnostic:process.env.DIAGNOSTIC,config:c.v2});
           if(!plan.ok) throw new Error(plan.reason);
           for(const filePath of plan.priorityPaths) addFile(filePath,{required:true});
-          const out=p.buildBoundedSourceContext({files:[...filesByPath.values()],fixScopePaths:process.env.FIX_SCOPE,diagnostic:process.env.DIAGNOSTIC,sourceBudgetBytes:SOURCE_CONTEXT_MAX_BYTES}).json;
+          const out=p.buildBoundedSourceContext({files:[...filesByPath.values()],fixScopePaths:process.env.FIX_SCOPE,diagnostic:process.env.DIAGNOSTIC,sourceBudgetBytes:SOURCE_CONTEXT_MAX_BYTES,priorityOnly:process.env.FAILURE_CLASS==='lint-format'}).json;
           process.stdout.write(out);
           NODE
           cp ../.trusted-policy/AGENTS.md "$RUNNER_TEMP/generation-context/trusted-AGENTS.md"
@@ -492,8 +493,8 @@ jobs:
         env: {PR: '${{ needs.classify.outputs.pr_number }}', SHA: '${{ needs.classify.outputs.source_sha }}', EXPECTED_RESULT: '${{ steps.publish.outputs.expected_result }}', EVIDENCE: '${{ needs.classify.outputs.evidence }}', ATTEMPT: '${{ needs.classify.outputs.attempt }}', FAILURE_CLASS: '${{ needs.classify.outputs.failure_class }}', CI_RUN: '${{ needs.classify.outputs.ci_run_id }}', CI_ATTEMPT: '${{ needs.classify.outputs.ci_run_attempt }}'}
         with:
           script: |
-            const {data:pr}=await github.rest.pulls.get({...context.repo,pull_number:Number(process.env.PR)});
-            if(pr.head.sha!==process.env.EXPECTED_RESULT) return core.setFailed("POST_PUSH_HEAD_MISMATCH");
+            const p=require(`${process.env.GITHUB_WORKSPACE}/.trusted-policy/.github/scripts/agent-pipeline.cjs`);
+            const pr=await p.awaitPublishedPullRequest({sourceSha:process.env.SHA,expectedSha:process.env.EXPECTED_RESULT,fetchPr:async()=>(await github.rest.pulls.get({...context.repo,pull_number:Number(process.env.PR)})).data});
             await github.rest.issues.createComment({...context.repo,issue_number:Number(process.env.PR),body:`CI fixer: attempt ${process.env.ATTEMPT}/2, old SHA \`${process.env.SHA}\`, resulting SHA \`${pr.head.sha}\`, class \`${process.env.FAILURE_CLASS}\`, CI run ${process.env.CI_RUN} attempt ${process.env.CI_ATTEMPT}, producing workflow ${context.workflow} run ${context.runId}.\n<!-- agent-fix:v2 source=${process.env.SHA} evidence=${process.env.EVIDENCE} attempt=${process.env.ATTEMPT} result=${pr.head.sha} class=${process.env.FAILURE_CLASS} ci_run=${process.env.CI_RUN} ci_attempt=${process.env.CI_ATTEMPT} workflow_run=${context.runId} -->`});
 
 

@@ -940,7 +940,7 @@ test("v2 classify job guard admits reusable review-block despite inherited calle
   assert.match(fixer,/trackedPriorityMaterializationPlan\(\{trackedEntries,fixScopePaths:process\.env\.FIX_SCOPE,diagnostic:process\.env\.DIAGNOSTIC,config:c\.v2\}\)/);
   assert.match(fixer,/fs\.lstatSync/);
   assert.doesNotMatch(fixer,/fs\.statSync/);
-  assert.match(fixer,/buildBoundedSourceContext\(\{files:\[\.\.\.filesByPath\.values\(\)\],fixScopePaths:process\.env\.FIX_SCOPE,diagnostic:process\.env\.DIAGNOSTIC,sourceBudgetBytes:SOURCE_CONTEXT_MAX_BYTES\}\)/);
+  assert.match(fixer,/buildBoundedSourceContext\(\{files:\[\.\.\.filesByPath\.values\(\)\],fixScopePaths:process\.env\.FIX_SCOPE,diagnostic:process\.env\.DIAGNOSTIC,sourceBudgetBytes:SOURCE_CONTEXT_MAX_BYTES,priorityOnly:process\.env\.FAILURE_CLASS==='lint-format'\}\)/);
   assert.match(fixer,/SOURCE_CONTEXT_MAX_BYTES=917504/);
   assert.match(fixer,/test "\$\(stat -c%s \.codex-input\/prompt\.md\)" -lt 1048576/);
 });
@@ -1325,6 +1325,7 @@ function exactCiWorkflowFixture() {
 
 test("review preparation emits its exact CI binding in outputs and scope", async () => {
   const f = exactCiWorkflowFixture();
+  f.state.prComments.pop();
   await f.execute("agent-codex-review", "prepare");
   assert.deepEqual(f.state.failures, []);
   assert.equal(f.state.outputs.eligible, "true");
@@ -1675,4 +1676,64 @@ test("duplicate CI notifications cannot cancel an active reviewer or admit push 
   }
   assert.equal(Boolean(evaluate({event_name:"workflow_run",event:{workflow_run:{event:"pull_request",conclusion:"success",pull_requests:[{number:149}]}}})), true);
   assert.equal(Boolean(evaluate({event_name:"workflow_dispatch",event:{}})), true);
+});
+
+
+test("review preparation avoids paid duplicate PASS but reviews changed bindings", async () => {
+  const duplicate = exactCiWorkflowFixture();
+  await duplicate.execute("agent-codex-review", "prepare");
+  assert.equal(duplicate.state.outputs.eligible, undefined);
+  assert.ok(duplicate.state.notices.some(x => x.startsWith("NO_API:")));
+  assert.deepEqual(duplicate.files, {});
+  for (const change of [
+    f => { f.state.prComments.pop(); },
+    f => { f.state.prComments[1] = {user:{login:"outsider"},body:f.state.prComments[1].body}; },
+    f => { f.state.prComments[1] = f.state.review("BLOCK"); },
+    f => { f.state.prComments[1].body = f.state.prComments[1].body.replace("ci=10", "ci=9"); },
+    f => { f.state.prComments[1].body = f.state.prComments[1].body.replace("attempt=1", "attempt=2"); },
+    f => { f.state.prComments[1].body = f.state.prComments[1].body.replace(f.state.headSha, "c".repeat(40)); },
+    f => { f.state.prComments[1].body = f.state.prComments[1].body.replace(f.state.specHash, "c".repeat(64)); },
+    f => { f.state.prComments.push(f.state.review("BLOCK")); },
+  ]) {
+    const f = exactCiWorkflowFixture(); change(f);
+    await f.execute("agent-codex-review", "prepare");
+    assert.equal(f.state.outputs.eligible, "true");
+    assert.deepEqual(f.state.failures, []);
+  }
+});
+
+
+test("formatting context excludes unrelated source without truncating priority files", () => {
+  const files = [
+    {path:"backend/tests/test_research.py",content:"complete test file\n"},
+    {path:"backend/src/quantlab/research.py",content:"diagnosed source file\n"},
+    {path:"frontend/src/unrelated.ts",content:"unrelated ".repeat(10000)},
+  ];
+  const input = {files,fixScopePaths:[files[0].path],diagnostic:files[1].path,sourceBudgetBytes:200000};
+  const full = pipeline.buildBoundedSourceContext(input);
+  const narrow = pipeline.buildBoundedSourceContext({...input,priorityOnly:true});
+  assert.deepEqual(narrow.files,files.slice(0,2));
+  assert.equal(full.files.length,3);
+  assert.ok(Buffer.byteLength(narrow.json) < Buffer.byteLength(full.json)/100);
+  assert.throws(() => pipeline.buildBoundedSourceContext({...input,priorityOnly:true,sourceBudgetBytes:256,files:[{...files[0],content:"x".repeat(1000)}]}),/PRIORITY_SOURCE_CONTEXT_TOO_LARGE/);
+});
+
+
+test("post-push confirmation tolerates only bounded propagation of the old head", async () => {
+  const sourceSha="a".repeat(40), expectedSha="b".repeat(40), unrelated="c".repeat(40);
+  const run=async(sequence) => {
+    let calls=0, waits=0;
+    const promise=pipeline.awaitPublishedPullRequest({sourceSha,expectedSha,fetchPr:async()=>{const sha=sequence[Math.min(calls++,sequence.length-1)];return {state:"open",head:{sha}};},pause:async ms=>{assert.equal(ms,2000);waits++;}});
+    return {promise,counts:()=>({calls,waits})};
+  };
+  const eventual=await run([sourceSha,sourceSha,expectedSha]);
+  assert.equal((await eventual.promise).head.sha,expectedSha);
+  assert.deepEqual(eventual.counts(),{calls:3,waits:2});
+  const moved=await run([unrelated]);
+  await assert.rejects(moved.promise,/POST_PUSH_HEAD_MISMATCH/);
+  assert.deepEqual(moved.counts(),{calls:1,waits:0});
+  const stale=await run([sourceSha]);
+  await assert.rejects(stale.promise,/POST_PUSH_HEAD_NOT_PROPAGATED/);
+  assert.deepEqual(stale.counts(),{calls:5,waits:4});
+  await assert.rejects(pipeline.awaitPublishedPullRequest({sourceSha,expectedSha,fetchPr:async()=>({state:"closed",head:{sha:expectedSha}})}),/POST_PUSH_PR_CLOSED/);
 });
