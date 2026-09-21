@@ -10,6 +10,7 @@ from uuid import uuid4
 import pytest
 from alembic import command
 from alembic.config import Config
+from alembic.script import ScriptDirectory
 from sqlalchemy import create_engine, func, select, text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import sessionmaker
@@ -788,7 +789,10 @@ def test_downgrade_preserves_immutable_canonicalization_and_revisions(scope) -> 
         command.downgrade(config, "20260830_02")
 
     with factory() as session:
-        assert session.scalar(text("SELECT version_num FROM alembic_version")) == "20260831_02"
+        assert (
+            session.scalar(text("SELECT version_num FROM alembic_version"))
+            == ScriptDirectory.from_config(config).get_current_head()
+        )
         assert (
             session.scalar(
                 select(func.count()).select_from(CorporateActionRevisionCanonicalizationRecord)

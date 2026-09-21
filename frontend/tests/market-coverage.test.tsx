@@ -1,0 +1,19 @@
+import { afterEach, expect, it, vi } from "vitest";
+import { cleanup, render, screen } from "@testing-library/react";
+const fixtures = vi.hoisted(() => ({ api: vi.fn(), session: vi.fn() }));
+vi.mock("../lib/api", () => ({ api: fixtures.api }));
+vi.mock("../lib/auth", () => ({ session: fixtures.session }));
+vi.mock("../components/mutation-form", () => ({ MutationForm: ({ title }: {title: string}) => <section>{title}</section> }));
+vi.mock("../app/actions", () => ({ marketCatalogAction: vi.fn(), marketCatalogScheduleAction: vi.fn() }));
+import Market from "../app/market/page";
+afterEach(() => { cleanup(); vi.clearAllMocks(); });
+it("searches the server and shows unknown price coverage separately from directory counts", async () => {
+  fixtures.session.mockResolvedValue({ role: "VIEWER" });
+  fixtures.api.mockResolvedValue({ status: "RECEIVED", total: 110, offset: 50, limit: 50, snapshot: { listing_count: 13000, received_at: "2026-09-21T20:00:00Z", test_count: 5 }, items: [{symbol: "IBM", name: "IBM company", exchange: "NYSE", security_type: "OTHER_LISTED_SECURITY"}], exchanges: [], limitations: ["Globální data nejsou pokryta."] });
+  render(await Market({ searchParams: Promise.resolve({ q: "IBM &", page: "2" }) }));
+  expect(fixtures.api).toHaveBeenCalledWith("/operator/market-coverage?q=IBM%20%26&offset=50&limit=50");
+  expect(screen.getByText("Dosud neověřeno")).toBeInTheDocument();
+  expect(screen.getByText("IBM company")).toBeInTheDocument();
+  expect(screen.queryByText("Aktualizace referenčního katalogu")).not.toBeInTheDocument();
+  expect(screen.getByRole("link", { name: /Další strana/ })).toHaveAttribute("href", "/market?q=IBM+%26&page=3");
+});
