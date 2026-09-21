@@ -568,7 +568,11 @@ test("v2 fourth-audit wiring validates before checks and closes dispatch and pus
   assert.ok(validation.indexOf("validatePatchPaths(x,c.v2)") < validation.indexOf("case \"$(jq -r .failure_class"));
   assert.match(fixer,/authoritativeCiIdentity\(run,\{prNumber,headSha:requestedSha,conclusion:"failure"\}\)/);
   assert.match(fixer,/cmp "\$RUNNER_TEMP\/validated\.patch" "\$RUNNER_TEMP\/publisher\.patch"/);
-  assert.match(fixer,/ls-remote --refs origin "refs\/heads\/\$HEAD_REF"[\s\S]*= "\$SHA"[\s\S]*push origin[\s\S]*ls-remote --refs origin/);
+  assert.match(fixer,/publication_retry "\$SHA" "\$EXPECTED_RESULT" "\$SHA" publication_read_ref publication_authorize publication_push/);
+  const retry=fs.readFileSync(".github/scripts/agent-publication-retry.sh","utf8");
+  assert.match(retry,/"\$authorize" \|\| return 2/);
+  assert.match(retry,/\[\[ "\$remote" == "\$source" \]\] \|\| return 2/);
+  assert.match(retry,/"\$push_commit"[\s\S]*remote="\$\("\$read_ref"\)"/);
   assert.match(fixer,/prepare-generation-context:[\s\S]*source-context\.json/);
   const generation=fixer.slice(fixer.indexOf("generate-patch:"),fixer.indexOf("validate-patch:"));
   assert.doesNotMatch(generation,/actions\/checkout|git |npm |pytest|ruff|mypy/);

@@ -48,6 +48,7 @@ jobs:
           git remote set-url origin "https://github.com/${GH_REPO}.git"
           AUTH_HEADER="AUTHORIZATION: basic $(printf x-access-token:%s "$GH_TOKEN" | base64 -w0)"
           revalidate_issue(){
+            test "$(GH_TOKEN="$JOB_TOKEN" gh api "repos/$GH_REPO/branches/main" --jq .commit.sha)" = "$BASE" || return 1
             local issue_file="$RUNNER_TEMP/publish-issue.json" comments_file="$RUNNER_TEMP/publish-comments.json"
             GH_TOKEN="$JOB_TOKEN" gh api "repos/$GH_REPO/issues/$ISSUE" > "$issue_file"
             GH_TOKEN="$JOB_TOKEN" gh api --paginate --slurp "repos/$GH_REPO/issues/$ISSUE/comments?per_page=100" | jq 'add // []' > "$comments_file"
@@ -78,7 +79,10 @@ jobs:
             else
               test -z "$remote"
               revalidate_issue
-              git -c http.extraheader="$AUTH_HEADER" push origin "HEAD:refs/heads/$branch"
+              source .github/scripts/agent-publication-retry.sh
+              publication_read_ref(){ git -c http.extraheader="$AUTH_HEADER" ls-remote --refs origin "refs/heads/$branch" | awk '{print $1}'; }
+              publication_push(){ git -c http.extraheader="$AUTH_HEADER" push origin "HEAD:refs/heads/$branch"; }
+              publication_retry "" "$sealed" "$BASE" publication_read_ref revalidate_issue publication_push
               sha="$(git -c http.extraheader="$AUTH_HEADER" ls-remote --refs origin "refs/heads/$branch" | awk '{print $1}')"
               test "$sha" = "$sealed"
             fi
@@ -91,9 +95,17 @@ jobs:
           - Agent-Issue: #$ISSUE
           <!-- agent-builder-publish:v1 issue=$ISSUE spec=$SPEC base=$parent tree=$tree -->
           BODY
-            revalidate_issue
-            gh pr create --repo "$GH_REPO" --draft --base main --head "$branch" --title "Agent: Issue #$ISSUE" --body-file "$RUNNER_TEMP/body"
-            q="$(prs)"
+            for publication_attempt in 1 2 3; do
+              revalidate_issue
+              q="$(prs)"
+              test "$(jq length<<<"$q")" -le 1
+              if test "$(jq length<<<"$q")" -eq 1; then owned "$(jq -r '.[0].head.sha'<<<"$q")"; break; fi
+              gh pr create --repo "$GH_REPO" --draft --base main --head "$branch" --title "Agent: Issue #$ISSUE" --body-file "$RUNNER_TEMP/body" || true
+              q="$(prs)"
+              test "$(jq length<<<"$q")" -le 1
+              if test "$(jq length<<<"$q")" -eq 1; then owned "$(jq -r '.[0].head.sha'<<<"$q")"; break; fi
+              if test "$publication_attempt" -lt 3; then sleep 2; fi
+            done
             test "$(jq length<<<"$q")" -eq 1
           fi
           echo "pr=$(jq -r '.[0].number'<<<"$q")" >> "$GITHUB_OUTPUT"

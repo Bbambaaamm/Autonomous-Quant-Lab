@@ -1,0 +1,22 @@
+name: Publication reuse regressions
+on:
+  pull_request:
+    paths: ['.github/scripts/**', '.github/workflows/agent-builder-publish.yml', '.github/workflows/agent-ci-fixer.yml', '.github/workflows/agent-publication-regressions.yml']
+  push:
+    branches: [main]
+    paths: ['.github/scripts/**', '.github/workflows/agent-builder-publish.yml', '.github/workflows/agent-ci-fixer.yml', '.github/workflows/agent-publication-regressions.yml']
+permissions: {contents: read}
+jobs:
+  publication-reuse-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with: {persist-credentials: false}
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with: {node-version: '24'}
+      - name: Test real Git publication recovery without API credentials
+        run: |
+          bash -n .github/scripts/agent-publication-retry.sh
+          node --check .github/scripts/agent-publication-guard.cjs
+          node --test .github/scripts/agent-publication-retry.test.cjs
