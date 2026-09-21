@@ -2,12 +2,14 @@
 
 import argparse
 import ast
+import base64
 import hashlib
 import json
 import os
 import re
 import subprocess
 import sys
+import tempfile
 import tomllib
 from pathlib import Path
 
@@ -28,7 +30,7 @@ def git(candidate, *args):
     return subprocess.check_output(["git", "--no-pager", *args], cwd=candidate, timeout=30)
 
 
-def generate(candidate, trusted, output, scope, source_sha, evidence):
+def generate(candidate, trusted, output, scope, source_sha, evidence, metadata_sha=None):
     candidate, trusted = candidate.resolve(), trusted.resolve()
     if not re.fullmatch(r"[0-9a-f]{40}", source_sha):
         raise ValueError("INVALID_SOURCE_SHA")
@@ -115,9 +117,78 @@ def generate(candidate, trusted, output, scope, source_sha, evidence):
     (output / "output.json").write_bytes(encoded)
     (output / "checksum").write_text(hashlib.sha256(encoded).hexdigest())
     (output / "metadata.json").write_text(
-        json.dumps({"source_sha": source_sha, "evidence": evidence, "failure_class": "lint-format"})
+        json.dumps(
+            {
+                "source_sha": metadata_sha or source_sha,
+                "evidence": evidence,
+                "failure_class": "lint-format",
+            }
+        )
     )
     return result
+
+
+def generate_snapshot(snapshot, trusted, output, scope, source_sha, evidence):
+    """Materialize only authenticated blob data, never a PR checkout or its Git config."""
+    if snapshot.stat().st_size > 3_000_000:
+        raise ValueError("FORMAT_SNAPSHOT_TOO_LARGE")
+    data = json.loads(snapshot.read_bytes())
+    if not re.fullmatch(r"[0-9a-f]{40}", source_sha) or data.get("source_sha") != source_sha:
+        raise ValueError("SOURCE_SHA_MISMATCH")
+    if not isinstance(scope, list) or any(not isinstance(p, str) for p in scope):
+        raise ValueError("INVALID_FORMAT_SCOPE")
+    expected = sorted({p for p in scope if p.startswith("backend/") and p.endswith(".py")})
+    files = data.get("files")
+    if not isinstance(files, list) or sorted(f.get("path", "") for f in files) != expected:
+        raise ValueError("FORMAT_SNAPSHOT_SCOPE_MISMATCH")
+    with tempfile.TemporaryDirectory(prefix="format-data-") as tmp:
+        candidate = Path(tmp)
+        total = 0
+        for entry in files:
+            name = entry["path"]
+            if not re.fullmatch(r"backend/[A-Za-z0-9_./-]+\.py", name) or any(
+                part in ("", ".", "..", ".git") for part in name.split("/")
+            ):
+                raise ValueError("INVALID_FORMAT_PATH")
+            if entry.get("mode") not in ("100644", "100755"):
+                raise ValueError("FORMAT_NOT_TRACKED_REGULAR")
+            content = base64.b64decode(entry["content"], validate=True)
+            total += len(content)
+            if len(content) > 1_048_576 or total > 2_097_152:
+                raise ValueError("FORMAT_SCOPE_TOO_LARGE")
+            blob_sha = hashlib.sha1(
+                b"blob " + str(len(content)).encode() + b"\0" + content
+            ).hexdigest()
+            if blob_sha != entry.get("sha"):
+                raise ValueError("FORMAT_BLOB_HASH_MISMATCH")
+            target = candidate / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(content)
+            target.chmod(int(entry["mode"], 8) & 0o777)
+        git(candidate, "init", "-q", "--template=")
+        git(candidate, "add", "--", "backend")
+        git(
+            candidate,
+            "-c",
+            "user.name=formatter",
+            "-c",
+            "user.email=formatter@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-qm",
+            "Data-only formatting baseline",
+        )
+        baseline = git(candidate, "rev-parse", "HEAD").decode().strip()
+        return generate(
+            candidate,
+            trusted,
+            output,
+            scope,
+            baseline,
+            evidence,
+            metadata_sha=source_sha,
+        )
 
 
 def main():
@@ -125,13 +196,14 @@ def main():
     parser.add_argument("--trusted", type=Path, required=True)
     parser.add_argument("--requirements", action="store_true")
     parser.add_argument("--candidate", type=Path)
+    parser.add_argument("--snapshot", type=Path)
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
     if args.requirements:
         print(locked_requirements(args.trusted))
         return
-    generate(
-        args.candidate,
+    (generate_snapshot if args.snapshot else generate)(
+        args.snapshot or args.candidate,
         args.trusted,
         args.output,
         json.loads(os.environ["FIX_SCOPE"]),

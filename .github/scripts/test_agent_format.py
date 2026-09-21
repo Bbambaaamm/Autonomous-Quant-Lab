@@ -1,5 +1,6 @@
 """Exercise the actual Ruff/Git artifact path without API access."""
 
+import base64
 import hashlib
 import importlib.util
 import json
@@ -87,7 +88,10 @@ class FormatTests(unittest.TestCase):
             check=True,
         )
         subprocess.run(
-            ["git", "apply", "-"], input=result["patch"].encode(), cwd=self.candidate, check=True
+            ["git", "apply", "-"],
+            input=result["patch"].encode(),
+            cwd=self.candidate,
+            check=True,
         )
         self.assertEqual((self.candidate / self.target).read_text(), formatted)
 
@@ -135,6 +139,83 @@ class FormatTests(unittest.TestCase):
     def test_hash_locked_requirements(self):
         requirement = FORMAT.locked_requirements(TRUSTED)
         self.assertRegex(requirement, r"^ruff==\d+\.\d+\.\d+ --hash=sha256:")
+
+    def snapshot_data(self):
+        content = self.original.encode()
+        return {
+            "source_sha": self.sha,
+            "files": [
+                {
+                    "path": self.target,
+                    "mode": "100644",
+                    "sha": hashlib.sha1(
+                        b"blob " + str(len(content)).encode() + b"\0" + content
+                    ).hexdigest(),
+                    "content": base64.b64encode(content).decode(),
+                }
+            ],
+        }
+
+    def from_snapshot(self, data, scope=None):
+        snapshot = self.root / "snapshot.json"
+        snapshot.write_text(json.dumps(data))
+        return FORMAT.generate_snapshot(
+            snapshot,
+            TRUSTED,
+            self.output,
+            scope or [self.target],
+            self.sha,
+            "fixture-evidence",
+        )
+
+    def test_data_only_snapshot_produces_patch_for_real_source(self):
+        result = self.from_snapshot(self.snapshot_data())
+        self.assertEqual((self.candidate / self.target).read_text(), self.original)
+        subprocess.run(
+            ["git", "apply", "--check", "-"],
+            input=result["patch"].encode(),
+            cwd=self.candidate,
+            check=True,
+        )
+        subprocess.run(
+            ["git", "apply", "-"],
+            input=result["patch"].encode(),
+            cwd=self.candidate,
+            check=True,
+        )
+        self.assertIn("date(2025, 1, 5)", (self.candidate / self.target).read_text())
+        self.assertEqual(
+            json.loads((self.output / "metadata.json").read_text())["source_sha"],
+            self.sha,
+        )
+
+    def test_snapshot_rejects_wrong_commit_blob_mode_and_scope(self):
+        for field, value, error in [
+            ("source_sha", "a" * 40, "SOURCE_SHA_MISMATCH"),
+            ("sha", "a" * 40, "FORMAT_BLOB_HASH_MISMATCH"),
+            ("mode", "120000", "FORMAT_NOT_TRACKED_REGULAR"),
+            ("path", "backend/tests/other.py", "FORMAT_SNAPSHOT_SCOPE_MISMATCH"),
+        ]:
+            with self.subTest(field=field):
+                data = self.snapshot_data()
+                (data if field == "source_sha" else data["files"][0])[field] = value
+                with self.assertRaisesRegex(ValueError, error):
+                    self.from_snapshot(data)
+                self.assertFalse(self.output.exists())
+
+    def test_snapshot_rejects_traversal_even_if_in_scope(self):
+        data = self.snapshot_data()
+        data["files"][0]["path"] = "backend/../../escape.py"
+        with self.assertRaisesRegex(ValueError, "INVALID_FORMAT_PATH"):
+            self.from_snapshot(data, ["backend/../../escape.py"])
+        self.assertFalse(self.output.exists())
+
+    def test_snapshot_rejects_protected_target(self):
+        data = self.snapshot_data()
+        data["files"][0]["path"] = "backend/src/quantlab/trading.py"
+        with self.assertRaises(subprocess.CalledProcessError):
+            self.from_snapshot(data, ["backend/src/quantlab/trading.py"])
+        self.assertFalse(self.output.exists())
 
 
 if __name__ == "__main__":

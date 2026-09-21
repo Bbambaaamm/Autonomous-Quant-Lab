@@ -1760,6 +1760,9 @@ test("deterministic formatting is credential-free and joins the validated publis
   assert.doesNotMatch(deterministic,/OPENAI_API_KEY|AGENT_PUBLISH_TOKEN|codex-action|: write/);
   assert.match(deterministic,/--only-binary=:all: --no-deps --require-hashes/);
   assert.match(deterministic,/persist-credentials: false/);
+  assert.doesNotMatch(deterministic,/path: candidate|--candidate/);
+  assert.match(deterministic,/github\.rest\.git\.getBlob/);
+  assert.match(deterministic,/--snapshot/);
   for(const name of ["generate-patch","prepare-generation-context"]) assert.match(section(name),/deterministic_format != 'true'/);
   assert.match(section("validate-patch"),/needs: \[classify, generate-patch, deterministic-format\]/);
   assert.match(section("validate-patch"),/always\(\) && !cancelled\(\)/);

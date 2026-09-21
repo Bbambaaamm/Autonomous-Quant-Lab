@@ -198,8 +198,6 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with: {ref: '${{ github.event.repository.default_branch }}', path: .trusted-policy, persist-credentials: false}
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with: {ref: '${{ needs.classify.outputs.source_sha }}', path: candidate, persist-credentials: false}
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with: {python-version: '3.12'}
       - name: Install only hash-locked trusted Ruff
@@ -207,6 +205,32 @@ jobs:
           python .trusted-policy/.github/scripts/agent-format.py --trusted .trusted-policy --requirements > "$RUNNER_TEMP/ruff-requirements.txt"
           python -m venv "$RUNNER_TEMP/formatter"
           "$RUNNER_TEMP/formatter/bin/python" -I -m pip install --only-binary=:all: --no-deps --require-hashes -r "$RUNNER_TEMP/ruff-requirements.txt"
+      - name: Read authorized source blobs as data only
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        env:
+          FIX_SCOPE: '${{ needs.classify.outputs.fix_scope }}'
+          SOURCE_SHA: '${{ needs.classify.outputs.source_sha }}'
+        with:
+          script: |
+            const fs=require('fs'),path=require('path'),p=require(`${process.env.GITHUB_WORKSPACE}/.trusted-policy/.github/scripts/agent-pipeline.cjs`),c=require(`${process.env.GITHUB_WORKSPACE}/.trusted-policy/.github/agent-pipeline.json`);
+            const sha=process.env.SOURCE_SHA,scope=JSON.parse(process.env.FIX_SCOPE);
+            if(!/^[0-9a-f]{40}$/.test(sha)||!Array.isArray(scope)||scope.some(x=>typeof x!=='string'))throw Error('INVALID_FORMAT_SCOPE');
+            const paths=[...new Set(scope.filter(x=>x.startsWith('backend/')&&x.endsWith('.py')))].sort();
+            if(!paths.length||!p.validatePatchPaths(paths,c.v2))throw Error('FORMAT_SCOPE_REJECTED');
+            const {data:commit}=await github.rest.git.getCommit({...context.repo,commit_sha:sha});
+            if(commit.sha!==sha)throw Error('SOURCE_SHA_MISMATCH');
+            const {data:tree}=await github.rest.git.getTree({...context.repo,tree_sha:commit.tree.sha,recursive:'1'});
+            if(tree.truncated)throw Error('FORMAT_TREE_TRUNCATED');
+            const files=[];let total=0;
+            for(const name of paths){
+              const entry=tree.tree.find(x=>x.path===name);
+              if(!entry||entry.type!=='blob'||!['100644','100755'].includes(entry.mode)||!Number.isInteger(entry.size)||entry.size>1048576)throw Error('FORMAT_NOT_BOUNDED_REGULAR');
+              total+=entry.size;if(total>2097152)throw Error('FORMAT_SCOPE_TOO_LARGE');
+              const {data:blob}=await github.rest.git.getBlob({...context.repo,file_sha:entry.sha});
+              if(blob.encoding!=='base64'||blob.sha!==entry.sha||blob.size!==entry.size)throw Error('FORMAT_BLOB_MISMATCH');
+              files.push({path:name,mode:entry.mode,sha:entry.sha,content:blob.content.replace(/\s/g,'')});
+            }
+            fs.writeFileSync(path.join(process.env.RUNNER_TEMP,'format-source.json'),JSON.stringify({source_sha:sha,files}),{flag:'wx'});
       - name: Format authorized Python files without API credentials
         env:
           FIX_SCOPE: '${{ needs.classify.outputs.fix_scope }}'
@@ -214,7 +238,7 @@ jobs:
           EVIDENCE: '${{ needs.classify.outputs.evidence }}'
         run: >-
           "$RUNNER_TEMP/formatter/bin/python" -I .trusted-policy/.github/scripts/agent-format.py
-          --trusted .trusted-policy --candidate candidate --output "$RUNNER_TEMP/generated"
+          --trusted .trusted-policy --snapshot "$RUNNER_TEMP/format-source.json" --output "$RUNNER_TEMP/generated"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with: {name: 'generated-patch-${{ github.run_id }}', path: '${{ runner.temp }}/generated', if-no-files-found: error, retention-days: 1}
 
