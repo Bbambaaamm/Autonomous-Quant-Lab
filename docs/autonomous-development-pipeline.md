@@ -398,3 +398,12 @@ confined to the model step. #119 contributes base-bound builder publication, and
 Tests that extracted the removed inline controller are superseded by executable
 controller/runtime tests covering authority, ruleset, CI, recovery and write-boundary
 changes. The authoritative application CI workflow is unchanged from merged main.
+
+
+### API cost: duplicate reviews
+
+Before preparing model input, the reviewer skips the paid model job when a trusted, unambiguous PASS already binds the same repository, issue, PR, authorized specification, head SHA, authoritative CI run and attempt. A changed binding, untrusted marker or conflicting result never qualifies for this cost shortcut. This only avoids duplicate generation; verification and merge retain their existing independent freshness checks. Ordinary CI, classification, authorization and merge decisions do not require a model call.
+
+For `lint-format` only, source context includes complete authorized changed files and complete files identified by diagnostics, without filling the remaining budget with unrelated repository source. Other failure classes keep their broader context. Priority files are never silently truncated; oversized mandatory context still blocks generation. This reduces input tokens without changing patch validation or the independent review requirement.
+
+Post-push audit confirmation allows at most five PR reads over eight seconds when the API still reports the source head, because the Git ref can update before the PR read model. A different head or closed PR fails immediately. Only the exact expected head may receive the fixer audit record; this retry does not call the model or push another commit.

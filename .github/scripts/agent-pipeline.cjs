@@ -441,7 +441,7 @@ function trackedPriorityMaterializationPlan({ trackedEntries = [], fixScopePaths
   };
 }
 
-function buildBoundedSourceContext({ files, fixScopePaths = [], diagnostic = "", sourceBudgetBytes }) {
+function buildBoundedSourceContext({ files, fixScopePaths = [], diagnostic = "", sourceBudgetBytes, priorityOnly = false }) {
   if (!Number.isSafeInteger(sourceBudgetBytes) || sourceBudgetBytes < 256) throw new Error("INVALID_SOURCE_CONTEXT_BUDGET");
   const normalized = [...new Map((files || [])
     .filter((file) => typeof file?.path === "string" && typeof file?.content === "string")
@@ -464,6 +464,7 @@ function buildBoundedSourceContext({ files, fixScopePaths = [], diagnostic = "",
   let out = JSON.stringify({ format: "source-context-v1", files: selected });
   if (Buffer.byteLength(out) > sourceBudgetBytes) throw new Error("SOURCE_CONTEXT_TOO_LARGE");
   for (const file of prioritized) {
+    if (priorityOnly && !prioritySet.has(file.path)) continue;
     const candidate = [...selected, { path: file.path, content: file.content }];
     const encoded = JSON.stringify({ format: "source-context-v1", files: candidate });
     if (Buffer.byteLength(encoded) <= sourceBudgetBytes) {
@@ -685,7 +686,21 @@ function verificationDecision(input) {
   return { ok: true };
 }
 
+// Git refs can be current before the pull-request read model catches up.
+async function awaitPublishedPullRequest({fetchPr, sourceSha, expectedSha, pause = ms => new Promise(resolve => setTimeout(resolve, ms)), maxAttempts = 5}) {
+  if (!/^[0-9a-f]{40}$/.test(sourceSha) || !/^[0-9a-f]{40}$/.test(expectedSha) || sourceSha === expectedSha || !Number.isInteger(maxAttempts) || maxAttempts < 1 || maxAttempts > 5) throw new Error("INVALID_POST_PUSH_BINDING");
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    const pr = await fetchPr();
+    if (pr.state !== "open") throw new Error("POST_PUSH_PR_CLOSED");
+    if (pr.head?.sha === expectedSha) return pr;
+    if (pr.head?.sha !== sourceSha) throw new Error("POST_PUSH_HEAD_MISMATCH");
+    if (attempt + 1 < maxAttempts) await pause(2000);
+  }
+  throw new Error("POST_PUSH_HEAD_NOT_PROPAGATED");
+}
+
 module.exports = {
+  awaitPublishedPullRequest,
   STATES,
   FAILURE_CLASSES,
   labelNames,

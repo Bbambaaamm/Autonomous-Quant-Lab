@@ -65,6 +65,8 @@ jobs:
             const issueComments=await github.paginate(github.rest.issues.listComments,{...context.repo,issue_number:issueNumber,per_page:100});
             const auth=a.authorizationDecision({comments:issueComments,repo,issueNumber,title:issue.title,body:issue.body||'',labels:issue.labels,state:issue.state});
             if(!p.isImplementation(issue.labels)||!auth.ok||!p.lifecycleAtAgentPr(pr.labels,issue.labels).ok||!p.fullLinkageDecision({prBody:pr.body,prComments,issueComments,...context.repo,issueNumber,prNumber}).ok) return core.notice('NO_WRITE: lifecycle/linkage');
+            const existingPass=p.independentReviewSatisfied(prComments,{repo,issueNumber,prNumber,headSha:sha,specHash:auth.specHash,ciRunId:ciRun.id,ciRunAttempt:ciRun.run_attempt});
+            if(existingPass) return core.notice('NO_API: exact authorized head and CI already have trusted PASS');
             const body=p.redactDiagnostic(issue.body,16384);
             const protectedGovernance=["AGENTS.md",".github/agent-pipeline.json","docs/autonomous-development-pipeline.md","docs/adr/0003-autonomous-development-pipeline-v2.md"];
             const changed=await github.paginate(github.rest.pulls.listFiles,{...context.repo,pull_number:prNumber,per_page:100});
