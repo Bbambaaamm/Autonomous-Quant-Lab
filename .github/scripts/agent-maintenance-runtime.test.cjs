@@ -648,3 +648,30 @@ test('follower transports one immutable recover receipt to both consumers', () =
   assert.equal((workflow.match(/uses: actions\/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02\n\s+with:\n\s+name: maintenance-recovery-receipt/g) || []).length, 1);
   for (const job of ['gate', 'merge']) assert.match(followerJob(job), /Consume original recovery receipt[\s\S]*maintenance-recovery-receipt/);
 });
+
+test('historical ruleset sync is now a GET-only audit and preserves stronger review settings', async () => {
+  const workflow = fs.readFileSync('.github/workflows/agent-ruleset-sync.yml', 'utf8');
+  assert.match(workflow, /ref: \$\{\{ github\.workflow_sha \}\}/);
+  assert.doesNotMatch(workflow, /--method PUT|contents: write|pull-requests: write/);
+  const script = workflow.split('          script: |\n')[1].split('\n').map(line => line.replace(/^            /, '')).join('\n');
+  const f = fixture(), calls = [], notices = [];
+  f.d.ruleset.rules.find(r => r.type === 'pull_request').parameters.required_approving_review_count = 2;
+  const original = clone(f.d.ruleset);
+  const fetcher = async (url, options) => {
+    assert.equal(options.method, 'GET'); calls.push(url);
+    return {ok: true, text: async () => JSON.stringify(url.includes('/rulesets?') ? [{id: 99, name: 'Protect main', target: 'branch'}] : f.d.ruleset)};
+  };
+  const runtime = {...m, rulesetReader: repo => m.rulesetReader(repo, 'synthetic-audit-token', fetcher)};
+  const summary = {addHeading() {return this;}, addRaw() {return this;}, async write() {}};
+  const execute = new (Object.getPrototypeOf(async function(){}).constructor)('require', 'context', 'github', 'core', 'process', script);
+  const context = {repo: {owner:'owner',repo:'repo'}, payload:{repository:{default_branch:'main'}}, ref:'refs/heads/main', sha:f.d.main};
+  await execute(() => runtime, context, f.github, {notice: value => notices.push(value), summary}, {env:{}});
+  assert.equal(calls.length, 2); assert.equal(notices.length, 1);
+  assert.deepEqual(f.d.ruleset, original); assert.equal(f.writes.length, 0);
+  delete f.d.ruleset.bypass_actors;
+  await assert.rejects(execute(() => runtime, context, f.github, {notice: value => notices.push(value), summary}, {env:{}}));
+  assert.equal(notices.length, 1);
+  const count = calls.length;
+  await assert.rejects(execute(() => runtime, {...context, sha:'f'.repeat(40)}, f.github, {notice() {}, summary}, {env:{}}), /STALE_OR_NON_DEFAULT/);
+  assert.equal(calls.length, count);
+});

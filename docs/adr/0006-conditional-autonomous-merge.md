@@ -18,8 +18,8 @@ The normal flow is:
 6. The independent Codex Reviewer must PASS the exact current head SHA.
 7. `agent-verify.yml` re-fetches mutable state, validates the current Issue authorization, exact linkage, current-main ancestry, all authoritative CI jobs, independent Codex PASS, lifecycle, and absence of `agent:needs-human`. If `main` moved it requests a normal branch update without force-push and requires a fresh exact-SHA cycle.
 8. Only after both Issue and PR are `agent:verified`, `agent-verified-gate.yml` independently revalidates the same evidence and publishes the `agent-verified-gate` success status for that exact SHA.
-9. `agent-auto-merge.yml` is the only trusted merge domain. It executes no PR-controlled code, uses an expected exact head SHA, re-fetches mutable state immediately before the merge API call, and fails closed if any evidence changed.
-10. `agent-ruleset-sync.yml` updates the active `Protect main` ruleset so `agent-verified-gate` is a strict required status check while preserving the existing required checks, deletion/non-fast-forward protection, and zero bypass actors.
+9. `agent-auto-merge.yml` is the trusted autonomous merge domain. It executes no PR-controlled code, uses an expected exact head SHA, re-fetches mutable state immediately before the merge API call, and fails closed if any evidence changed.
+10. Following the maintainer decision on 2026-09-21, `Protect main` requires eight CI contexts and CodeQL, with strict freshness and no bypass actors. `agent-verified-gate` remains mandatory inside the autonomous merge controller, but is not a required branch check for manual merges. The historical `agent-ruleset-sync.yml` entrypoint now only audits these protections with GET requests; it never changes rules or review settings. Manual merges remain subject to native repository protection.
 
 ## Trust boundaries
 
