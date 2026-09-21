@@ -1,0 +1,27 @@
+name: Deterministic formatting regressions
+on:
+  pull_request:
+    paths: ['.github/scripts/**', '.github/workflows/agent-ci-fixer.yml', '.github/workflows/agent-format-regressions.yml', '.github/agent-pipeline.json', 'backend/uv.lock', 'backend/pyproject.toml']
+  push:
+    branches: [main]
+    paths: ['.github/scripts/**', '.github/workflows/agent-ci-fixer.yml', '.github/workflows/agent-format-regressions.yml', '.github/agent-pipeline.json', 'backend/uv.lock', 'backend/pyproject.toml']
+permissions: {contents: read}
+jobs:
+  real-ruff-artifact-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with: {persist-credentials: false}
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with: {python-version: '3.12'}
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with: {node-version: '24'}
+      - name: Exercise real Ruff and Git without API credentials
+        run: |
+          python .github/scripts/agent-format.py --trusted . --requirements > "$RUNNER_TEMP/ruff-requirements.txt"
+          python -m venv "$RUNNER_TEMP/formatter-tests"
+          "$RUNNER_TEMP/formatter-tests/bin/python" -I -m pip install --only-binary=:all: --no-deps --require-hashes -r "$RUNNER_TEMP/ruff-requirements.txt"
+          "$RUNNER_TEMP/formatter-tests/bin/python" -I -m ruff format --check --config backend/pyproject.toml .github/scripts/agent-format.py .github/scripts/test_agent_format.py
+          "$RUNNER_TEMP/formatter-tests/bin/python" -I -m ruff check --config backend/pyproject.toml .github/scripts/agent-format.py .github/scripts/test_agent_format.py
+          "$RUNNER_TEMP/formatter-tests/bin/python" -I .github/scripts/test_agent_format.py

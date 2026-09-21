@@ -184,6 +184,14 @@ function failedStepNames(job) {
     .map((step) => step.name.toLowerCase());
 }
 
+function pureRuffFormatFailure(jobs) {
+  const failed=(jobs||[]).filter(j=>["failure","timed_out"].includes(j.conclusion));
+  if(failed.length!==1||failed[0].name!=="quality"||failed[0].conclusion!=="failure")return false;
+  const steps=(failed[0].steps||[]).filter(s=>["failure","timed_out"].includes(s.conclusion));
+  return steps.length===1&&steps[0].conclusion==="failure"&&
+    steps[0].name.toLowerCase().replace(/^run /,"")==="uv run ruff format --check .";
+}
+
 function normalizedFailureClass(job, logExcerpt = "") {
   const name = job.name.toLowerCase();
   const steps = failedStepNames(job).join(" ");
@@ -700,6 +708,7 @@ async function awaitPublishedPullRequest({fetchPr, sourceSha, expectedSha, pause
 }
 
 module.exports = {
+  pureRuffFormatFailure,
   awaitPublishedPullRequest,
   STATES,
   FAILURE_CLASSES,

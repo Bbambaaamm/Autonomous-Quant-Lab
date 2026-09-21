@@ -407,3 +407,12 @@ Before preparing model input, the reviewer skips the paid model job when a trust
 For `lint-format` only, source context includes complete authorized changed files and complete files identified by diagnostics, without filling the remaining budget with unrelated repository source. Other failure classes keep their broader context. Priority files are never silently truncated; oversized mandatory context still blocks generation. This reduces input tokens without changing patch validation or the independent review requirement.
 
 Post-push audit confirmation allows at most five PR reads over eight seconds when the API still reports the source head, because the Git ref can update before the PR read model. A different head or closed PR fails immediately. Only the exact expected head may receive the fixer audit record; this retry does not call the model or push another commit.
+
+
+### Deterministic Python formatting (no model API)
+
+A sole failure in the authoritative quality step `uv run ruff format --check .` routes to `deterministic-format`, not model generation. The classifier still requires the same issue authorization, linkage, exact head, eligibility and two-commit budget. Ruff lint errors, type errors and other eligible failures retain their existing model route.
+
+The formatting runner has read-only repository permissions and no API/write secrets. It installs only Ruff from the trusted default-branch lockfile, with wheel hashes enforced, and uses the trusted Ruff configuration. Only tracked regular Python files inside the authorized changed-file scope can be formatted. Parent symlinks, protected paths, dirty/stale checkouts, oversized input, empty patches and Python AST changes are rejected. No PR Python module or test is executed during generation.
+
+The generated artifact uses the same checksum/metadata contract as model patches, then passes the existing independent validation, sealing, exact-head publication and subsequent CI/review gates. Skipped model jobs are explicitly handled in the join conditions. Failure stops without an automatic paid fallback. Independent review remains a separate API operation after green CI; zero API cost here refers only to producing the formatting patch, not the entire PR lifecycle.

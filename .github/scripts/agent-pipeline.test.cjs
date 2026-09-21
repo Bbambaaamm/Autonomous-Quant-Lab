@@ -1737,3 +1737,34 @@ test("post-push confirmation tolerates only bounded propagation of the old head"
   assert.deepEqual(stale.counts(),{calls:5,waits:4});
   await assert.rejects(pipeline.awaitPublishedPullRequest({sourceSha,expectedSha,fetchPr:async()=>({state:"closed",head:{sha:expectedSha}})}),/POST_PUSH_PR_CLOSED/);
 });
+
+
+test("only the exact failed Ruff format step selects deterministic repair", () => {
+  const job = {name:"quality",conclusion:"failure",steps:[{name:"Run uv run ruff format --check .",conclusion:"failure"}]};
+  assert.equal(pipeline.pureRuffFormatFailure([job]),true);
+  for (const bad of [
+    [{...job,conclusion:"timed_out"}],
+    [{...job,name:"frontend"}],
+    [{...job,steps:[]}],
+    [{...job,steps:[{name:"Run uv run ruff check .",conclusion:"failure"}]}],
+    [{...job,steps:[...job.steps,{name:"other",conclusion:"failure"}]}],
+    [job,{name:"security",conclusion:"failure"}],
+  ]) assert.equal(pipeline.pureRuffFormatFailure(bad),false);
+});
+
+test("deterministic formatting is credential-free and joins the validated publisher", () => {
+  const workflow=fs.readFileSync(".github/workflows/agent-ci-fixer.yml","utf8");
+  const section = name => workflow.split("\n  "+name+":\n")[1].split(/\n  [a-z][a-z-]+:\n/)[0];
+  const deterministic=section("deterministic-format");
+  assert.match(deterministic,/deterministic_format == 'true'/);
+  assert.doesNotMatch(deterministic,/OPENAI_API_KEY|AGENT_PUBLISH_TOKEN|codex-action|: write/);
+  assert.match(deterministic,/--only-binary=:all: --no-deps --require-hashes/);
+  assert.match(deterministic,/persist-credentials: false/);
+  for(const name of ["generate-patch","prepare-generation-context"]) assert.match(section(name),/deterministic_format != 'true'/);
+  assert.match(section("validate-patch"),/needs: \[classify, generate-patch, deterministic-format\]/);
+  assert.match(section("validate-patch"),/always\(\) && !cancelled\(\)/);
+  assert.match(section("validate-patch"),/needs\.deterministic-format\.result == 'success'/);
+  assert.match(section("seal-patch"),/needs\.validate-patch\.result == 'success'/);
+  assert.match(section("trusted-publish"),/needs\.seal-patch\.result == 'success'/);
+  assert.match(section("fail-closed-finalizer"),/deterministic-format/);
+});

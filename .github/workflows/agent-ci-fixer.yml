@@ -52,6 +52,7 @@ jobs:
       budget_state: ${{ steps.classify.outputs.budget_state }}
       fix_scope: ${{ steps.classify.outputs.fix_scope }}
       transient_retry: ${{ steps.classify.outputs.transient_retry }}
+      deterministic_format: ${{ steps.classify.outputs.deterministic_format }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with: {ref: '${{ github.event.repository.default_branch }}', path: .trusted-policy, persist-credentials: false}
@@ -106,6 +107,7 @@ jobs:
             }
             const classification=p.classifyCiFailure({jobs,runHeadSha:run.head_sha,expectedHeadSha:pr.head.sha,sourceRunId:run.id,runAttempt:run.run_attempt,logExcerpt,config:{...c.v2,requiredCiJobs:c.requiredCiJobs}});
             core.setOutput("failure_class",classification.failureClass);
+            core.setOutput("deterministic_format",String(classification.failureClass==="lint-format"&&p.pureRuffFormatFailure(jobs)));
             if (classification.failureClass==="infra-transient") { const retry=a.transientCiRetryDecision({failureClass:classification.failureClass,runAttempt:run.run_attempt,maxRetries:c.v2.maxTransientCiRetries}); core.setOutput("budget_state",JSON.stringify(retry)); if(retry.action==="RETRY"){core.setOutput("transient_retry","true");return;} if(retry.action==="NEEDS_HUMAN"){core.setOutput("escalation","true");core.setOutput("reason",retry.reason);return;} }
             if (classification.disposition!=="FIX") { core.setOutput("escalation","true"); core.setOutput("reason",classification.reason); return; }
             const budget=p.fixAttemptDecision({comments,commits,sourceSha:requestedSha,evidence:classification.evidence,maxAttempts:c.v2.maxFixCommits});
@@ -187,9 +189,38 @@ jobs:
             }
             await github.rest.issues.createComment({...context.repo,issue_number:prNumber,body:`Automatická oprava zastavena: ${process.env.REASON} pro exact SHA \`${process.env.SHA}\`. Stav byl fail-closed předán člověku.`});
 
+  deterministic-format:
+    needs: [classify, record-classification]
+    if: needs.classify.outputs.eligible == 'true' && needs.classify.outputs.deterministic_format == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {contents: read}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with: {ref: '${{ github.event.repository.default_branch }}', path: .trusted-policy, persist-credentials: false}
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with: {ref: '${{ needs.classify.outputs.source_sha }}', path: candidate, persist-credentials: false}
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with: {python-version: '3.12'}
+      - name: Install only hash-locked trusted Ruff
+        run: |
+          python .trusted-policy/.github/scripts/agent-format.py --trusted .trusted-policy --requirements > "$RUNNER_TEMP/ruff-requirements.txt"
+          python -m venv "$RUNNER_TEMP/formatter"
+          "$RUNNER_TEMP/formatter/bin/python" -I -m pip install --only-binary=:all: --no-deps --require-hashes -r "$RUNNER_TEMP/ruff-requirements.txt"
+      - name: Format authorized Python files without API credentials
+        env:
+          FIX_SCOPE: '${{ needs.classify.outputs.fix_scope }}'
+          SOURCE_SHA: '${{ needs.classify.outputs.source_sha }}'
+          EVIDENCE: '${{ needs.classify.outputs.evidence }}'
+        run: >-
+          "$RUNNER_TEMP/formatter/bin/python" -I .trusted-policy/.github/scripts/agent-format.py
+          --trusted .trusted-policy --candidate candidate --output "$RUNNER_TEMP/generated"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with: {name: 'generated-patch-${{ github.run_id }}', path: '${{ runner.temp }}/generated', if-no-files-found: error, retention-days: 1}
+
   prepare-generation-context:
     needs: [classify, record-classification]
-    if: needs.classify.outputs.eligible == 'true'
+    if: needs.classify.outputs.eligible == 'true' && needs.classify.outputs.deterministic_format != 'true'
     runs-on: ubuntu-latest
     permissions: {contents: read}
     steps:
@@ -251,7 +282,7 @@ jobs:
 
   generate-patch:
     needs: [classify, prepare-generation-context]
-    if: needs.classify.outputs.eligible == 'true'
+    if: needs.classify.outputs.eligible == 'true' && needs.classify.outputs.deterministic_format != 'true'
     runs-on: ubuntu-latest
     permissions: {contents: read}
     outputs:
@@ -316,7 +347,8 @@ jobs:
         with: {name: 'generated-patch-${{ github.run_id }}', path: '${{ runner.temp }}/generated', if-no-files-found: error, retention-days: 1}
 
   validate-patch:
-    needs: [classify, generate-patch]
+    needs: [classify, generate-patch, deterministic-format]
+    if: always() && !cancelled() && needs.classify.outputs.eligible == 'true' && (needs.generate-patch.result == 'success' || needs.deterministic-format.result == 'success')
     runs-on: ubuntu-latest
     permissions: {contents: read}
     steps:
@@ -372,7 +404,8 @@ jobs:
           node --test .github/scripts/agent-pipeline.test.cjs
 
   seal-patch:
-    needs: [classify, generate-patch, validate-patch]
+    needs: [classify, generate-patch, deterministic-format, validate-patch]
+    if: always() && !cancelled() && needs.validate-patch.result == 'success'
     runs-on: ubuntu-latest
     permissions: {contents: read}
     steps:
@@ -418,6 +451,7 @@ jobs:
 
   trusted-publish:
     needs: [classify, seal-patch]
+    if: always() && !cancelled() && needs.seal-patch.result == 'success'
     runs-on: ubuntu-latest
     permissions: {contents: write, issues: write, pull-requests: write}
     steps:
@@ -499,7 +533,7 @@ jobs:
 
 
   fail-closed-finalizer:
-    needs: [classify, generate-patch, validate-patch, seal-patch, trusted-publish]
+    needs: [classify, generate-patch, deterministic-format, validate-patch, seal-patch, trusted-publish]
     if: always() && needs.classify.outputs.eligible == 'true' && needs.trusted-publish.result != 'success'
     runs-on: ubuntu-latest
     permissions: {contents: read, issues: write, pull-requests: write}
