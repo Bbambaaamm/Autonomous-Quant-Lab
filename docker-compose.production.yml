@@ -19,7 +19,11 @@ services:
     security_opt: [no-new-privileges:true]
   backend:
     image: quantlab-backend
-    build: {context: ., dockerfile: backend/Dockerfile}
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+      args:
+        QUANTLAB_CODE_SHA: "${QUANTLAB_CODE_SHA:-}"
     env_file: [.env.production]
     environment:
       AUTOMATION_ENABLED: "true"

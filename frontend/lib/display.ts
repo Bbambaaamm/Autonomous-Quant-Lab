@@ -13,6 +13,11 @@ export const labels: Record<string, string> = {
     provider: "Zdroj dat", calendar: "Kalendář", exchange: "Burza", asset_type: "Typ aktiva", active_from: "Aktivní od", active_to: "Aktivní do", valid_from: "Platnost od", valid_to: "Platnost do", known_at: "Známo od", kind: "Typ", requested_start: "Požadováno od", requested_end: "Požadováno do", checked_at: "Ověřeno", action_count: "Počet událostí", row_count: "Počet řádků", scope_hash: "Otisk rozsahu", end_at: "Konec období", coverage: "Pokrytí", session_date: "Obchodní den", index: "Pořadí", evaluated_at: "Vyhodnoceno", paper_metrics_json: "Metriky simulace", algorithm_version: "Verze algoritmu", performance_snapshot_id: "Záznam výkonnosti", evaluation_id: "ID vyhodnocení", lookback: "Historie (seance)", rebalance_frequency: "Rebalancování", threshold: "Prahová hodnota",
 };
 export const states: Record<string, string> = {
+    COMPLETED: "Dokončeno", STOPPED: "Ukončený proces", CLAIMED: "Převzato ke zpracování", RETRY_SCHEDULED: "Naplánováno opakování", CANCELLED: "Zrušeno", cross_sectional_momentum: "Relativní síla aktiv",
+    deployment: "Nasazení", scheduled_job: "Plánovaná úloha", job_run: "Běh úlohy", reconciliation: "Kontrola shody", account: "Účet",
+    PHASE6_DEPLOYMENT_APPROVED: "Schválení nasazení", PHASE6_DEPLOYMENT_CREATED: "Vytvoření nasazení",
+    CONTROL_AUTONOMOUS_SCHEDULE_DISABLED: "Vypnutí automatického plánování", CONTROL_AUTONOMOUS_SCHEDULE_ENABLED: "Zapnutí automatického plánování",
+    CONTROL_RECONCILIATION_RUN: "Vyžádání kontroly shody", RECONCILIATION_SUCCEEDED: "Úspěšná kontrola shody", RECONCILIATION_STARTED: "Zahájení kontroly shody", CONTROL_AUTOMATION_RUN_RETRY: "Opakování běhu",
     TRUE: "Ano", FALSE: "Ne", persistent: "Uložená data", OPERATOR_ENROLLMENT: "Zapnuto operátorem",
     NORMAL: "V provozu", SAFE: "V pořádku", UNSAFE: "Nesoulad", HALTED: "Obchodování zastaveno", SUSPENDED: "Pozastaveno ochranou", ACTIVE: "Aktivní", PAUSED: "Pozastaveno", RETIRED: "Ukončeno", HEALTHY: "V pořádku", STALE: "Neaktuální odezva", UNAVAILABLE: "Nedostupné", READY: "Připraveno", NOT_READY: "Nepřipraveno", MISSING_SESSION_DATA: "Chybí data seance", SUPPORTED: "Podporováno", UNSUPPORTED: "Nepodporováno", CAPABILITY_NOT_REPORTED: "Podpora neověřena", ENABLED: "Zapnuto", DISABLED: "Vypnuto", ON: "Zapnuto", OFF: "Vypnuto", INSUFFICIENT_DATA: "Málo dat k vyhodnocení", WATCH: "Ke sledování", REVIEW_REQUIRED: "Vyžaduje kontrolu", NOT_ENROLLED: "Monitoring nenastaven", PENDING_REVIEW: "Čeká na schválení", APPROVED: "Schváleno", SUCCEEDED: "Dokončeno", COMPLETE: "Dokončeno", FAILED: "Chyba", DEAD_LETTER: "Vyčerpány pokusy", STARTED: "Spuštěno", RUNNING: "Probíhá", PENDING: "Čeká", ELIGIBLE: "Způsobilé", INELIGIBLE: "Nezpůsobilé", PAPER_CANDIDATE: "Kandidát pro simulaci", "NOT EVALUATED": "Nevyhodnoceno", "NOT PROMOTED": "Dosud nezařazeno", NO_ACTION: "Bez změny", NO_TRADE_DELTA: "Není potřeba změnit portfolio", DAILY: "Denně", WEEKLY: "Týdně", MONTHLY: "Měsíčně", INTERVAL: "V intervalu", RUN_ONCE_IF_MISSED: "Dohnat jedním spuštěním", SKIP_IF_TOO_OLD: "Staré spuštění přeskočit", PREPARE_PAPER_SESSION: "Příprava obchodní seance", MONITOR_PAPER_DEPLOYMENT: "Kontrola výkonnosti", RUN_PAPER_DEPLOYMENT: "Simulovaný obchodní běh", BUY: "Nákup", SELL: "Prodej", EQUITY: "Akcie", POINT_IN_TIME_MEMBERSHIP: "Členství s historickou platností", multi_asset_mean_reversion: "Návrat k průměru", multi_asset_trend: "Sledování trendu",
 };
@@ -27,4 +32,11 @@ export function dateText(value: string): string {
     if (!Number.isFinite(date.getTime()))
         return value;
     return new Intl.DateTimeFormat("cs-CZ", { dateStyle: "short", timeStyle: "short", timeZone: "UTC" }).format(date) + " UTC";
+}
+/** Keep exact nonzero decimal strings; normalize only representations of zero. */
+export function decimalText(value: unknown): string {
+    if (value === null || value === undefined || String(value).trim() === "")
+        return "Neuvedeno";
+    const raw = String(value);
+    return /^[+-]?0+(?:\.0+)?(?:e[+-]?\d+)?$/i.test(raw) ? "0" : raw;
 }

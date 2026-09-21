@@ -60,6 +60,7 @@ from quantlab.phase6_runtime import (
     Phase6EligibilityService,
     Phase6ExperimentRequest,
     Phase6ExperimentRunner,
+    normalize_strategy_config,
 )
 from quantlab.phase7 import (
     DEFAULT_POLICY,
@@ -233,7 +234,7 @@ class ExperimentCreate(BaseModel):
     initial_cash: Decimal = Field(Decimal("100000"), gt=0)
     commission_bps: Decimal = Field(Decimal("1"), ge=0)
     seed: int = 42
-    code_sha: str = Field(min_length=40, max_length=40)
+    code_sha: str | None = Field(default=None, min_length=40, max_length=40)
     reason: str = Field(min_length=3, max_length=1000)
 
 
@@ -289,6 +290,8 @@ class OperatorOverview(BaseModel):
     dead_letter_count: int
     healthy_worker_count: int
     stale_worker_count: int
+    stopped_worker_count: int
+    latest_paper_run: dict[str, object] | None
     as_of: datetime | None
 
 
@@ -343,6 +346,25 @@ def operator_strategy(strategy_identity: str) -> dict[str, object]:
     if result is None:
         raise HTTPException(404, "Strategie neexistuje")
     return result
+
+
+@app.get("/operator/research/options", response_model=OperatorDocument)
+def operator_research_options() -> dict[str, object]:
+    try:
+        revision = Phase6ExperimentRunner._code_sha(None)
+    except DatasetInvalid:
+        revision = None
+    return {
+        "code_sha": revision,
+        "strategies": [
+            {
+                "name": name,
+                "version": strategy().version,
+                "defaults": normalize_strategy_config(name, strategy().version, {}),
+            }
+            for name, strategy in STRATEGY_REGISTRY.items()
+        ],
+    }
 
 
 @app.get("/operator/research/experiments", response_model=OperatorList)

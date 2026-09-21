@@ -69,3 +69,7 @@
 .summary-grid dd{font-size:15px}
 .badge[aria-current="page"]{color:var(--accent);border-color:var(--accent);background:#1c3e36}
 .mutation-form{max-width:100%}
+
+.performance-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,360px),1fr));gap:16px}.performance-grid .chart{min-height:120px;max-height:190px}.performance-grid .card{margin-bottom:0}.form-fields{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,240px),1fr));gap:16px}.diagnostic-note{border-left:3px solid #61dfbc;padding-left:16px}
+
+.mutation-form input[type="checkbox"]{width:auto;margin-right:8px}

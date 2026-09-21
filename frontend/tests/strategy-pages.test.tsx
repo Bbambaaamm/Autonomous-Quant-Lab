@@ -17,7 +17,7 @@ const strategy = {
 it("renders the persisted API strategy name and version in the list", async () => {
     vi.mocked(api).mockResolvedValue([strategy]);
     render(await Strategies());
-    expect(screen.getByText(strategy.strategy_name)).toBeInTheDocument();
+    expect(screen.getByText("Návrat k průměru")).toBeInTheDocument();
     expect(screen.getByText(strategy.strategy_version)).toBeInTheDocument();
     expect(screen.queryByText("undefined")).not.toBeInTheDocument();
 });

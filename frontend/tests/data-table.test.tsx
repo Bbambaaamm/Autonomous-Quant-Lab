@@ -50,3 +50,9 @@ it("shows a marker for one session and rejects missing values instead of plottin
     expect(screen.getByText(/některé hodnoty chybí/)).toBeInTheDocument();
     expect(screen.queryByRole("img")).not.toBeInTheDocument();
 });
+it("labels constant chart values only once on the axis and includes currency", () => {
+    const p = { session_date: "2026-09-18", marked_equity: "100000" } as Point;
+    const { container } = render(<LineChart points={[p, p]} field="marked_equity" label="Portfolio" currency="USD"/>);
+    expect(container.querySelectorAll('svg text').length).toBe(3);
+    expect(screen.getByText(/USD/)).toBeInTheDocument();
+});
