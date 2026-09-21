@@ -123,7 +123,7 @@ jobs:
     permissions: {actions: read, contents: read, issues: read, pull-requests: read}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with: {ref: '${{ needs.prepare.outputs.source_sha }}', persist-credentials: false}
+        with: {ref: '${{ github.workflow_sha }}', persist-credentials: false}
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with: {name: 'review-scope-${{ github.run_id }}-${{ github.run_attempt }}', path: '${{ runner.temp }}/review-input'}
       - name: Collect and seal exact CI evidence and prompt
@@ -253,7 +253,7 @@ jobs:
       block_reason: ${{ steps.record.outputs.block_reason }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with: {ref: '${{ needs.prepare.outputs.source_sha }}', persist-credentials: false}
+        with: {ref: '${{ github.workflow_sha }}', persist-credentials: false}
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with: {name: 'codex-review-${{ github.run_id }}-${{ github.run_attempt }}', path: '${{ runner.temp }}'}
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4

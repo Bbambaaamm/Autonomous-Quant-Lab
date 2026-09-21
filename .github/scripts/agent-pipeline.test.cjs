@@ -1604,3 +1604,12 @@ test("review recorder records a conflicting BLOCK and stops downstream verificat
   assert.equal(f.state.outputs.blocked,"true");
   assert.equal(pipeline.independentReviewSatisfied(f.state.prComments,{repo:"o/r",issueNumber:142,prNumber:143,headSha:f.state.headSha,specHash:f.state.specHash,ciRunId:10,ciRunAttempt:1}),false);
 });
+
+test("privileged reviewer jobs check out the GitHub-owned workflow SHA",()=>{
+  const workflow=reviewerWorkflow();
+  for(const name of ["collect-review-evidence","trusted-record"]){
+    const section=workflow.slice(workflow.indexOf(`  ${name}:`)).split(/\n  [a-z][a-z-]+:/)[0];
+    assert.match(section,/ref: '\$\{\{ github\.workflow_sha \}\}'/);
+    assert.doesNotMatch(section,/ref: '\$\{\{ needs\.prepare\.outputs\.(source_sha|head_sha) \}\}'/);
+  }
+});
