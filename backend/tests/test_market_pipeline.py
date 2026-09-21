@@ -274,3 +274,39 @@ def test_pipeline_endpoints_enforce_roles_and_validate_parameters(tmp_path, monk
         ).status_code
         == 403
     )
+
+
+def test_market_job_control_cannot_change_trading_jobs(tmp_path, monkeypatch):
+    from test_phase8_api import client
+
+    from quantlab import api as module
+
+    api = client(tmp_path, monkeypatch)
+    response = api.post("/operator/market-coverage/schedule", json={"reason": "Test daily job"})
+    assert response.status_code == 200
+    assert (
+        api.post(
+            "/operator/market-pipeline/control",
+            json={
+                "job_id": "market-catalog-daily",
+                "enabled": False,
+                "reason": "Pause acquisition",
+            },
+        ).json()["enabled"]
+        is False
+    )
+    assert (
+        api.post(
+            "/operator/market-pipeline/control",
+            json={"job_id": "paper-main", "enabled": False, "reason": "Invalid scope"},
+        ).status_code
+        == 422
+    )
+    api.headers["Authorization"] = f"Bearer {module.settings.api_viewer_token}"
+    assert (
+        api.post(
+            "/operator/market-pipeline/control",
+            json={"job_id": "market-catalog-daily", "enabled": True, "reason": "Reject viewer"},
+        ).status_code
+        == 403
+    )

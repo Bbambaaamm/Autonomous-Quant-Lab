@@ -128,3 +128,7 @@ export async function marketIdentitiesAction(_previous: ActionState, form: FormD
 export async function marketBatchAction(_previous: ActionState, form: FormData): Promise<ActionState> {
     return result(() => mutate("/operator/market-pipeline/batches", { start: value(form, "start"), end: value(form, "end"), reason: value(form, "reason") }), "Dávka je připravena. Stav fronty ověřte níže a zapnutí workeru v Provozu.");
 }
+
+export async function marketJobControlAction(_previous: ActionState, form: FormData): Promise<ActionState> {
+    return result(() => mutate("/operator/market-pipeline/control", { job_id: value(form, "job_id"), enabled: value(form, "enabled") === "true", reason: value(form, "reason") }), "Nastavení datové úlohy bylo uloženo. Rozpracovaný požadavek může ještě doběhnout.");
+}

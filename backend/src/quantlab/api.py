@@ -1778,3 +1778,36 @@ def operator_market_batch(body: MarketBatchCreate, request: Request) -> dict[str
         config={},
     )
     return {"batch_id": batch_id, "queue_enabled": job.enabled}
+
+
+class MarketJobControl(ReasonedMutation):
+    job_id: str
+    enabled: bool
+
+
+@app.post("/operator/market-pipeline/control", response_model=OperatorDocument)
+def operator_market_job_control(body: MarketJobControl, request: Request) -> dict[str, object]:
+    allowed = {
+        "market-catalog-daily": JobType.SYNC_MARKET_CATALOG,
+        "market-identities-daily": JobType.SYNC_MARKET_IDENTITIES,
+        "market-price-queue": JobType.SYNC_MARKET_PRICE_TASK,
+    }
+    if body.job_id not in allowed:
+        raise HTTPException(422, "Tato akce ovládá pouze sběr tržních dat")
+    with session_factory() as session, session.begin():
+        job = session.get(ScheduledJob, body.job_id)
+        if job is None:
+            raise HTTPException(404, "Datová úloha dosud není založena")
+        if job.job_type != allowed[body.job_id]:
+            raise HTTPException(409, "Identita úlohy neodpovídá datovému sběru")
+        job.enabled = body.enabled
+        job.updated_at = datetime.now(UTC)
+    _audit_control_mutation(
+        "CONTROL_MARKET_JOB_ENABLED" if body.enabled else "CONTROL_MARKET_JOB_DISABLED",
+        "scheduled_job",
+        body.job_id,
+        _actor(request),
+        body.reason,
+        _correlation(request),
+    )
+    return {"job_id": body.job_id, "enabled": body.enabled}

@@ -1,4 +1,4 @@
-import { automationRetryAction } from "@/app/actions";
+import { automationRetryAction, marketJobControlAction } from "@/app/actions";
 import { MutationForm } from "@/components/mutation-form";
 import { JsonTable, Status } from "@/components/ui";
 import { api } from "@/lib/api";
@@ -37,6 +37,7 @@ export default async function Operations() {
     <p>Automatický provoz: <Status value={data.enabled ? "ENABLED" : "DISABLED"}/></p>
     <h2>Plánované úlohy</h2>
     <JsonTable rows={data.jobs} columns={["job_type", "enabled", "schedule_type", "next_run_at"]}/>
+    {admin && jobs.some(job => ["market-catalog-daily", "market-identities-daily", "market-price-queue"].includes(String(job.id))) && <section><h2>Ovládání sběru tržních dat</h2><p>Vypnutí zastaví další běhy. Rozpracovaný požadavek může ještě doběhnout.</p>{jobs.filter(job => ["market-catalog-daily", "market-identities-daily", "market-price-queue"].includes(String(job.id))).map(job => <MutationForm key={String(job.id)} action={marketJobControlAction} title={job.id === "market-price-queue" ? "Cenová fronta" : job.id === "market-identities-daily" ? "Adresář identit" : "Referenční katalog"} submit={job.enabled ? "Pozastavit sběr" : "Zapnout sběr"}><input type="hidden" name="job_id" value={String(job.id)}/><input type="hidden" name="enabled" value={job.enabled ? "false" : "true"}/><label>Důvod změny<textarea name="reason" required minLength={3} maxLength={1000}/></label></MutationForm>)}</section>}
     <h2>Historie běhů</h2>
     <JsonTable rows={data.runs} columns={["scheduled_for", "status", "outcome", "no_action_reason", "attempt_count"]}/>
     {admin && recoverable.length > 0 && <section>
