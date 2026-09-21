@@ -1613,3 +1613,17 @@ test("privileged reviewer jobs check out the GitHub-owned workflow SHA",()=>{
     assert.doesNotMatch(section,/ref: '\$\{\{ needs\.prepare\.outputs\.(source_sha|head_sha) \}\}'/);
   }
 });
+
+
+test("duplicate CI notifications cannot cancel an active reviewer or admit push CI", () => {
+  const workflow = fs.readFileSync(".github/workflows/agent-codex-review.yml", "utf8");
+  const concurrency = workflow.split("concurrency:\n")[1].split("permissions:")[0];
+  assert.match(concurrency, /cancel-in-progress: false/);
+  const condition = workflow.split("  prepare:\n    if: ")[1].split("\n")[0];
+  const evaluate = new Function("github", "return " + condition.replaceAll(" == ", " === "));
+  for (const event of ["push", "workflow_dispatch", "schedule"]) {
+    assert.equal(Boolean(evaluate({event_name:"workflow_run",event:{workflow_run:{event,conclusion:"success",pull_requests:[{number:149}]}}})), false);
+  }
+  assert.equal(Boolean(evaluate({event_name:"workflow_run",event:{workflow_run:{event:"pull_request",conclusion:"success",pull_requests:[{number:149}]}}})), true);
+  assert.equal(Boolean(evaluate({event_name:"workflow_dispatch",event:{}})), true);
+});
