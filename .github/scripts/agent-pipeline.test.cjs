@@ -339,6 +339,30 @@ test("classifier uses failed-step metadata instead of successful setup log keywo
   assert.equal(classify("quality", "Unrecognized validation", "ruff format error").disposition, "NEEDS_HUMAN");
 });
 
+test("fixer requests applicable contextual diffs while validation rejects truncated middle hunks", () => {
+  const workflow = fs.readFileSync(".github/workflows/agent-ci-fixer.yml", "utf8");
+  assert.match(workflow, /three unchanged context lines before AND after every edit/);
+  assert.match(workflow, /If the supplied source lacks enough exact context, return BLOCK/);
+  assert.doesNotMatch(workflow, /git apply[^\n]*(?:--unidiff-zero|--recount)/);
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "fixer-context-"));
+  try {
+    execFileSync("git", ["init", "-q", dir]);
+    const file = path.join(dir, "test.py");
+    const source = "# unchanged\n\n\ndef test_sunday():\n    calendar=Calendar()\n    assert calendar.is_session(date(2025,1,5)) is False\n\n\ndef test_next():\n    pass\n";
+    fs.writeFileSync(file, source);
+    execFileSync("git", ["add", "test.py"], {cwd: dir});
+    const repaired = source.replace("calendar=Calendar()", "calendar = Calendar()").replace("date(2025,1,5)", "date(2025, 1, 5)");
+    fs.writeFileSync(file, repaired);
+    const contextual = execFileSync("git", ["diff", "--", "test.py"], {cwd: dir, encoding: "utf8"});
+    fs.writeFileSync(file, source);
+    const truncated = "--- a/test.py\n+++ b/test.py\n@@ -4,3 +4,3 @@\n def test_sunday():\n-    calendar=Calendar()\n-    assert calendar.is_session(date(2025,1,5)) is False\n+    calendar = Calendar()\n+    assert calendar.is_session(date(2025, 1, 5)) is False\n";
+    assert.notEqual(spawnSync("git", ["apply", "--check", "-"], {cwd: dir, input: truncated}).status, 0);
+    execFileSync("git", ["apply", "--check", "-"], {cwd: dir, input: contextual});
+    execFileSync("git", ["apply", "-"], {cwd: dir, input: contextual});
+    assert.equal(fs.readFileSync(file, "utf8"), repaired);
+  } finally { fs.rmSync(dir, {recursive: true, force: true}); }
+});
+
 test("v2 classes, diagnostics and trusted command map are deterministic", () => {
   assert.deepEqual(pipeline.FAILURE_CLASSES, ["lint-format", "typecheck", "unit-test", "api-test", "integration-postgres", "frontend-test-build", "security", "container-build", "production-smoke", "dependency-lock", "infra-transient", "multiple-failures", "unknown"]);
   assert.equal(pipeline.normalizedFailureClass({ name: "quality", steps: [{ name: "mypy", conclusion: "failure" }] }), "typecheck");

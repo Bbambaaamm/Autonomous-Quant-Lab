@@ -231,6 +231,10 @@ commands or incidental keywords in whole-job logs cannot classify a Ruff failure
 as a dependency failure. Bounded diagnostics still supply transient-error evidence
 and protected-invariant checks; unknown failed-step metadata remains fail-closed.
 
+Generated patches must include exact unified-diff context on both sides of each
+edit. Credential-free validation applies them with plain `git apply --check`;
+missing context is not repaired through relaxed patch options or guessed bytes.
+
 The fixer is split into three trust domains: Codex patch generation has `OPENAI_API_KEY`, a
 read-only GitHub permission and no repository command execution; validation has neither model
 secret nor write credential and verifies checksums, paths, patch bounds and prescribed checks;
