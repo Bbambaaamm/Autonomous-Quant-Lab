@@ -204,7 +204,7 @@ test("Issue #116 Builder keeps metadata on GITHUB_TOKEN and isolates Draft-to-Re
   const metadataStart = workflow.indexOf("- name: Link, transition, release Draft and recover completed CI");
   const metadata = workflow.slice(metadataStart);
   const releaseStart = metadata.indexOf("if(pr.draft){");
-  const releaseEnd = metadata.indexOf("({data:pr}=await github.rest.pulls.get", releaseStart);
+  const releaseEnd = metadata.indexOf("s=await snapshot(); pr=s.pr", releaseStart);
   const release = metadata.slice(releaseStart, releaseEnd);
   const beforeRelease = metadata.slice(0, releaseStart);
   const afterRelease = metadata.slice(releaseEnd);
@@ -253,3 +253,59 @@ test("verification evidence is bound to CI run and numeric attempt", () => {
   assert.equal(a.exactVerificationEvidence(comments,{...binding,ciRunAttempt:undefined}),false);
   assert.throws(()=>a.verificationMarker({...binding,ciRunAttempt:"bad"}),/INVALID_CI_RUN_ATTEMPT/);
 });
+
+test("Issue #118 Builder branch identity binds the authorized base and remains retry-idempotent", () => {
+  const workflow = fs.readFileSync(".github/workflows/agent-builder-publish.yml", "utf8");
+  assert.match(workflow, /branch="agent\/issue-\$\{ISSUE\}-\$\{SPEC:0:12\}-\$\{BASE:0:12\}"/);
+
+  const branchFor = (issue, specHash, baseSha) =>
+    `agent/issue-${issue}-${specHash.slice(0, 12)}-${baseSha.slice(0, 12)}`;
+  const specHash = "c".repeat(64);
+  const baseA = "a".repeat(40);
+  const baseB = "b".repeat(40);
+
+  const first = branchFor(109, specHash, baseA);
+  assert.equal(first, branchFor(109, specHash, baseA));
+  assert.notEqual(first, branchFor(109, specHash, baseB));
+});
+
+test("Issue #118 Builder revalidates authorization immediately before trigger-capable writes", () => {
+  const workflow = fs.readFileSync(".github/workflows/agent-builder-publish.yml", "utf8");
+  const publish = workflow.slice(workflow.indexOf("- id: p"), workflow.indexOf("- name: Link, transition"));
+  const revalidation = publish.slice(publish.indexOf("revalidate_issue(){"), publish.indexOf("owned(){"));
+  assert.match(revalidation, /authorizationDecision/);
+  assert.match(revalidation, /p\.isImplementation\(issue\.labels\)/);
+  assert.match(revalidation, /exactAgentState\(issue\.labels,\"agent:running\"\)/);
+  assert.match(revalidation, /GH_TOKEN=\"\$JOB_TOKEN\" gh api/);
+
+  const push = publish.indexOf('git -c http.extraheader="$AUTH_HEADER" push origin "HEAD:refs/heads/$branch"');
+  const create = publish.indexOf('gh pr create --repo "$GH_REPO"');
+  const calls = [...publish.matchAll(/^\s+revalidate_issue$/gm)].map(match => match.index);
+  assert.equal(calls.length, 2);
+  assert.ok(calls[0] < push);
+  assert.ok(calls[1] > push && calls[1] < create);
+});
+
+test("Issue #118 Builder metadata writes revalidate complete authorization, head and linkage", () => {
+  const workflow = fs.readFileSync(".github/workflows/agent-builder-publish.yml", "utf8");
+  const metadata = workflow.slice(workflow.indexOf("- name: Link, transition, release Draft"));
+  assert.match(metadata, /const snapshot=async\(\)=>/);
+  assert.match(metadata, /const immutableBindingOk=.*s\.auth\.ok.*s\.pr\.head\.sha===process\.env\.HEAD.*parents\?\.\[0\]\?\.sha===process\.env\.BASE/);
+  assert.match(metadata, /const fullLinkOk=.*fullLinkageDecision/);
+  assert.match(metadata, /LINK_BINDING_CHANGED/);
+  const issueLinkWrite=metadata.indexOf("issue_number:n,body:`Linked autonomous PR");
+  const prLinkWrite=metadata.indexOf("issue_number:prn,body:`Linked authorized Issue");
+  const issueStateWrite=metadata.indexOf("await state(n,s.i.labels)");
+  const prStateWrite=metadata.indexOf("await state(prn,s.pr.labels)");
+  assert.ok(metadata.lastIndexOf("immutableBindingOk(s)",issueLinkWrite)>=0);
+  assert.ok(metadata.lastIndexOf("immutableBindingOk(s)",prLinkWrite)>issueLinkWrite);
+  assert.ok(metadata.lastIndexOf("fullLinkOk(s)",issueStateWrite)>prLinkWrite);
+  assert.ok(metadata.lastIndexOf("fullLinkOk(s)",prStateWrite)>issueStateWrite);
+});
+
+// Maintenance regressions run under the unchanged authoritative CI entrypoint.
+require("./agent-maintenance-guards.test.cjs");
+require("./agent-maintenance-controller.test.cjs");
+require("./agent-maintenance-runtime.test.cjs");
+
+require("./agent-maintenance-premerge.test.cjs");

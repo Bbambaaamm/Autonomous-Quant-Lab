@@ -4,7 +4,7 @@ import json
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import Engine, func, select
 from sqlalchemy.orm import Session
 
 from quantlab.automation import JobRun, ScheduledJob, WorkerHeartbeat
@@ -42,6 +42,7 @@ from quantlab.phase7 import (
     PaperPerformanceEvaluationRecord,
     PaperPerformanceSnapshotRecord,
 )
+from quantlab.provider_factory import build_market_data_provider
 
 
 def _utc(value: datetime | None) -> datetime | None:
@@ -68,6 +69,14 @@ class OperatorReadModel:
     def _latest_monitoring(self, session: Session) -> PaperMonitoringRunRecord | None:
         return session.scalar(
             select(PaperMonitoringRunRecord)
+            .join(
+                StrategyDeploymentRecord,
+                StrategyDeploymentRecord.deployment_id == PaperMonitoringRunRecord.deployment_id,
+            )
+            .where(
+                PaperMonitoringRunRecord.paper_account_id == "paper-main",
+                StrategyDeploymentRecord.paper_account_id == "paper-main",
+            )
             .order_by(
                 PaperMonitoringRunRecord.created_at.desc(),
                 PaperMonitoringRunRecord.monitoring_id.desc(),
@@ -78,9 +87,12 @@ class OperatorReadModel:
     def _latest_snapshot(
         self, session: Session, monitoring_id: str | None = None
     ) -> PaperPerformanceSnapshotRecord | None:
-        query = select(PaperPerformanceSnapshotRecord)
-        if monitoring_id:
-            query = query.where(PaperPerformanceSnapshotRecord.monitoring_id == monitoring_id)
+        if monitoring_id is None:
+            return None
+        query = select(PaperPerformanceSnapshotRecord).where(
+            PaperPerformanceSnapshotRecord.paper_account_id == "paper-main"
+        )
+        query = query.where(PaperPerformanceSnapshotRecord.monitoring_id == monitoring_id)
         return session.scalar(
             query.order_by(
                 PaperPerformanceSnapshotRecord.session_date.desc(),
@@ -91,9 +103,10 @@ class OperatorReadModel:
     def _latest_evaluation(
         self, session: Session, monitoring_id: str | None = None
     ) -> PaperPerformanceEvaluationRecord | None:
+        if monitoring_id is None:
+            return None
         query = select(PaperPerformanceEvaluationRecord)
-        if monitoring_id:
-            query = query.where(PaperPerformanceEvaluationRecord.monitoring_id == monitoring_id)
+        query = query.where(PaperPerformanceEvaluationRecord.monitoring_id == monitoring_id)
         return session.scalar(
             query.order_by(
                 PaperPerformanceEvaluationRecord.created_at.desc(),
@@ -115,11 +128,13 @@ class OperatorReadModel:
             )
             reconciliation = session.scalar(
                 select(ReconciliationRecord)
+                .where(ReconciliationRecord.account_id == "paper-main")
                 .order_by(ReconciliationRecord.timestamp.desc(), ReconciliationRecord.id.desc())
                 .limit(1)
             )
             cycle = session.scalar(
                 select(TradingCycleRecord)
+                .where(TradingCycleRecord.account_id == "paper-main")
                 .order_by(TradingCycleRecord.started_at.desc(), TradingCycleRecord.id.desc())
                 .limit(1)
             )
@@ -136,6 +151,7 @@ class OperatorReadModel:
                 .where(
                     ScheduledJob.enabled.is_(True),
                     ScheduledJob.job_type == "RUN_PAPER_DEPLOYMENT",
+                    ScheduledJob.account_id == "paper-main",
                 )
                 .order_by(ScheduledJob.next_run_at)
                 .limit(1)
@@ -203,11 +219,19 @@ class OperatorReadModel:
                 "paper_cash": snapshot.cash if snapshot else (account.cash if account else None),
                 "cumulative_return": snapshot.cumulative_return if snapshot else None,
                 "current_drawdown": snapshot.drawdown if snapshot else None,
-                "position_count": snapshot.position_count if snapshot else 0,
+                "position_count": session.scalar(
+                    select(func.count())
+                    .select_from(PositionRecord)
+                    .where(PositionRecord.account_id == "paper-main", PositionRecord.quantity != 0)
+                )
+                or 0,
                 "open_order_count": session.scalar(
                     select(func.count())
                     .select_from(PaperOrderRecord)
-                    .where(PaperOrderRecord.status.in_(("NEW", "SUBMITTED", "PARTIALLY_FILLED")))
+                    .where(
+                        PaperOrderRecord.account_id == "paper-main",
+                        PaperOrderRecord.status.in_(("NEW", "SUBMITTED", "PARTIALLY_FILLED")),
+                    )
                 )
                 or 0,
                 "last_trading_cycle": _utc(cycle.completed_at or cycle.started_at)
@@ -253,8 +277,12 @@ class OperatorReadModel:
                 if monitoring_id
                 else self._latest_monitoring(session)
             )
-            query = select(PaperPerformanceSnapshotRecord)
-            if monitoring:
+            query = select(PaperPerformanceSnapshotRecord).where(
+                PaperPerformanceSnapshotRecord.paper_account_id == "paper-main",
+                PaperPerformanceSnapshotRecord.session_date <= end,
+                PaperPerformanceSnapshotRecord.as_of <= now,
+            )
+            if monitoring and monitoring.paper_account_id == "paper-main":
                 query = query.where(
                     PaperPerformanceSnapshotRecord.monitoring_id == monitoring.monitoring_id
                 )
@@ -305,6 +333,7 @@ class OperatorReadModel:
             )
             reconciliation = session.scalar(
                 select(ReconciliationRecord)
+                .where(ReconciliationRecord.account_id == "paper-main")
                 .order_by(ReconciliationRecord.timestamp.desc(), ReconciliationRecord.id.desc())
                 .limit(1)
             )
@@ -314,13 +343,16 @@ class OperatorReadModel:
                 "positions": [
                     _row(x)
                     for x in session.scalars(
-                        select(PositionRecord).order_by(PositionRecord.instrument_id)
+                        select(PositionRecord)
+                        .where(PositionRecord.account_id == "paper-main")
+                        .order_by(PositionRecord.instrument_id)
                     )
                 ],
                 "orders": [
                     _row(x)
                     for x in session.scalars(
                         select(PaperOrderRecord)
+                        .where(PaperOrderRecord.account_id == "paper-main")
                         .order_by(PaperOrderRecord.created_at.desc(), PaperOrderRecord.id.desc())
                         .limit(100)
                     )
@@ -329,6 +361,8 @@ class OperatorReadModel:
                     _row(x)
                     for x in session.scalars(
                         select(PaperFillRecord)
+                        .join(PaperOrderRecord, PaperOrderRecord.id == PaperFillRecord.order_id)
+                        .where(PaperOrderRecord.account_id == "paper-main")
                         .order_by(PaperFillRecord.timestamp.desc(), PaperFillRecord.id.desc())
                         .limit(100)
                     )
@@ -343,7 +377,10 @@ class OperatorReadModel:
         config = ProductionRiskConfig()
         with self._session_factory() as session:
             account = session.get(PaperAccountRecord, "paper-main")
-            snapshot = self._latest_snapshot(session)
+            monitoring = self._latest_monitoring(session)
+            snapshot = self._latest_snapshot(
+                session, monitoring.monitoring_id if monitoring else None
+            )
             return {
                 "trading_state": account.trading_state if account else None,
                 "reconciliation_safe": account.reconciliation_safe if account else None,
@@ -351,12 +388,18 @@ class OperatorReadModel:
                 "current_drawdown": snapshot.drawdown if snapshot else None,
                 "gross_exposure": snapshot.gross_exposure if snapshot else None,
                 "net_exposure": snapshot.net_exposure if snapshot else None,
-                "position_count": snapshot.position_count if snapshot else 0,
+                "position_count": session.scalar(
+                    select(func.count())
+                    .select_from(PositionRecord)
+                    .where(PositionRecord.account_id == "paper-main", PositionRecord.quantity != 0)
+                )
+                or 0,
                 "limits": {k: v for k, v in vars(config).items()},
                 "decisions": [
                     _row(x)
                     for x in session.scalars(
                         select(RiskDecisionRecord)
+                        .where(RiskDecisionRecord.account_id == "paper-main")
                         .order_by(RiskDecisionRecord.timestamp.desc(), RiskDecisionRecord.id.desc())
                         .limit(50)
                     )
@@ -365,6 +408,7 @@ class OperatorReadModel:
                     _row(x)
                     for x in session.scalars(
                         select(RiskEventRecord)
+                        .where(RiskEventRecord.account_id == "paper-main")
                         .order_by(RiskEventRecord.timestamp.desc(), RiskEventRecord.id.desc())
                         .limit(50)
                     )
@@ -450,11 +494,15 @@ class OperatorReadModel:
                     .offset(membership_offset)
                 )
             )
+            engine = session.get_bind()
+            if not isinstance(engine, Engine):
+                raise TypeError("Operator read model requires an Engine-bound session")
+            provider = build_market_data_provider(self._settings, engine).metadata
             return {
                 "provider": {
-                    "name": "stooq",
+                    "name": provider.name,
                     "type": "persistent",
-                    "supports_actions": False,
+                    "supports_actions": provider.supports_actions,
                 },
                 "calendar_identity": XNYSCalendar().identity,
                 "latest_completed_session": completed,

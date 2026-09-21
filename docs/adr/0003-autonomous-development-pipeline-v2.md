@@ -74,3 +74,30 @@ validation, or publication jobs.
 ## Issue #100 bootstrap boundary — retired
 
 The one-time Issue #100 bootstrap publisher/generator was migration infrastructure only and is now retired. It is not an active authorization, generation, publication, verification, or merge boundary. The authoritative post-#100 model is ADR 0006 and the current default-branch agent authorization, Builder, fixer, independent Reviewer, verifier, gate, merge, and ruleset-sync workflows. Model execution remains read-only; validation/sealing remain credential-free; trusted mutation jobs receive only narrowly required credentials.
+
+## Issue #123 Reviewer evidence credential boundary
+
+The independent Reviewer may receive the job-scoped GitHub token only as `GH_TOKEN` on the
+`Independent bounded review` step and only with `actions: read`, `checks: read`, `contents: read`,
+`issues: read`, and `pull-requests: read`. This credential exists solely so the read-only model can
+verify exact workflow/check/Issue/PR evidence for the bound repository, PR, and SHA. It is not
+mutation authority, is never replaced by `AGENT_PUBLISH_TOKEN`, and is not exposed to repository
+execution. Every model-job checkout sets `persist-credentials: false`. A pinned trusted preflight
+uses the same job credential to read and bind fresh repository, Issue, PR, head/base, commit, check,
+and authoritative CI metadata into a bounded local evidence bundle before model invocation. A
+failed, forbidden, missing, stale, or mismatched read terminates the job, and the output guard checks
+the bundle binding again before accepting model output. The bundle binds repository, Issue, PR,
+head/base, exact review-workflow source revision, producer run/attempt, authoritative CI workflow
+ID/path/run/attempt, and all configured required-job results. A credential-free contract step then
+validates the exact prompt inputs and records their SHA-256 integrity separately from producer
+provenance. Those explicitly named paths and their manifest are uploaded with a source/head/run/
+attempt-bound immutable artifact name before model execution, retaining diagnostic inputs even if
+the model or later processing fails. This proves only trusted preflight verification of bounded CI
+evidence; it is not canary or production operational acceptance and does not alter Issue #126's
+acceptance contract. `OPENAI_API_KEY` remains a separate model
+credential; neither a preparation-job read nor a model-authored flag can substitute for this
+preflight.
+
+Integration note: the consolidated collector/seal and v3 exact-CI contract in
+`docs/autonomous-development-pipeline.md` supersede the earlier evidence-access
+filename and upload naming details. The read-only credential boundary is retained.
