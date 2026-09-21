@@ -86,8 +86,8 @@ def test_us_exchange_calendar_rejects_sunday() -> None:
 
 
 def test_us_exchange_calendar_rejects_sunday_2025_01_05() -> None:
-    calendar=USExchangeCalendar(frozenset())
-    assert calendar.is_session(date(2025,1,5)) is False
+    calendar = USExchangeCalendar(frozenset())
+    assert calendar.is_session(date(2025, 1, 5)) is False
 
 
 def test_split_and_walk_forward_boundaries() -> None:
