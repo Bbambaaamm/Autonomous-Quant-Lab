@@ -215,6 +215,7 @@ def test_data_health_requires_persisted_observation_coverage(tmp_path, monkeypat
     empty = api.get("/operator/data-health").json()
     assert empty["fresh"] is False
     assert empty["current_observation_count"] == 0
+    assert empty["missing_instrument_ids"] == ["SPY"]
 
     with Session(module.paper_repository.engine) as session:
         session.add(
@@ -241,6 +242,7 @@ def test_data_health_requires_persisted_observation_coverage(tmp_path, monkeypat
 
     covered = api.get("/operator/data-health").json()
     assert covered["fresh"] is True
+    assert covered["missing_instrument_ids"] == []
     assert covered["latest_successful_session"] == completed.isoformat()
 
 
@@ -252,3 +254,16 @@ def test_resume_persists_long_reason_outside_bounded_correlation_id(tmp_path, mo
     audit = api.get("/operator/audit?event_type=KILL_SWITCH_RESUMED").json()["items"][0]
     assert len(audit["correlation_id"]) <= 64
     assert audit["payload"]["reason"] == reason
+
+
+def test_guided_research_options_resolve_actual_runtime_revision(tmp_path, monkeypatch):
+    monkeypatch.setenv("QUANTLAB_CODE_SHA", "a" * 40)
+    api = client(tmp_path, monkeypatch)
+    options = api.get("/operator/research/options")
+    assert options.status_code == 200
+    assert options.json()["code_sha"] == "a" * 40
+    strategies = {s["name"]: s for s in options.json()["strategies"]}
+    assert strategies["multi_asset_trend"]["defaults"]["slow"] == 100
+    assert strategies["multi_asset_mean_reversion"]["defaults"]["threshold"] == "0.95"
+    monkeypatch.setenv("QUANTLAB_CODE_SHA", "not-a-revision")
+    assert api.get("/operator/research/options").json()["code_sha"] is None

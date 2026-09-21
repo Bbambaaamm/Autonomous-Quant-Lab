@@ -34,6 +34,8 @@ COPY --from=build /usr/local /usr/local
 COPY --from=build --chown=65532:65532 /app/backend /app/backend
 COPY --chown=65532:65532 alembic.ini /app/alembic.ini
 COPY --chown=65532:65532 alembic /app/alembic
+ARG QUANTLAB_CODE_SHA=""
+ENV QUANTLAB_CODE_SHA=$QUANTLAB_CODE_SHA
 ENV PATH=/app/backend/.venv/bin:$PATH PYTHONPATH=/app/backend/src
 USER 65532:65532
 EXPOSE 8000

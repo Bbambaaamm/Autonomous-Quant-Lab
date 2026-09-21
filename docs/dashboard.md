@@ -56,3 +56,32 @@ původní hodnoty jsou vždy v detailu.
 Rozložení používá zmenšitelné sloupce, vodorovné posouvání uvnitř tabulek,
 zalamovatelné štítky a mobilní navigaci. Formuláře zachovávají stejné akce,
 povinné důvody, role a potvrzení HALT/RESUME. Změna rozhraní nemění obchodování.
+
+### Guided research and operational evidence
+
+The research form obtains strategy defaults/version from `/operator/research/options`
+and offers VALID snapshots returned by data-health. The normal form uses named numeric
+fields and selects; it sends no user-supplied code SHA. Advanced JSON variants and
+explicit revision input remain available. The backend still validates every parameter,
+chronological split, snapshot and permission. No experiment is launched by viewing a page.
+
+For container builds, supply the checked-out revision as `QUANTLAB_CODE_SHA` via the
+backend build argument (production Compose forwards it). Example before the existing
+build/deployment command: `export QUANTLAB_CODE_SHA="$(git rev-parse HEAD)"`.
+This value must describe the clean source checkout being built, not an earlier experiment
+or the latest remote branch. Rebuild the backend to embed it. Without a valid revision,
+the normal form reports the missing build identity and disables submission; it never
+invents provenance. Local development can resolve Git HEAD through the existing runner.
+
+Overview diagnostics use the most recent preparation/execution JobRun joined to a
+paper-main deployment, excluding monitoring jobs and other accounts. They display the
+persisted outcome, reason, timestamp and run ID. NO_TRADE_DELTA is not interpreted as
+proof of a particular signal or data deficiency. Monitoring verdicts and global data
+coverage are presented separately. The next scheduled cycle includes preparation jobs.
+Stopped workers are counted separately from running workers without a recent heartbeat.
+Data-health exposes sorted missing instrument IDs from successful persisted observation
+coverage for the latest completed XNYS session; no inference from ingestion success alone.
+
+Currency is sourced from the account, UTC is explicit, constant charts have one value
+label, and scientific representations of exact zero are normalized without rounding
+nonzero decimal strings. Original record values remain available in details.

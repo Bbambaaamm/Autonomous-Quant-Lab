@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 import shutil
 import subprocess
 from collections.abc import Callable, Sequence
@@ -235,7 +236,7 @@ class Phase6ExperimentRunner:
 
     @staticmethod
     def _code_sha(explicit: str | None) -> str:
-        value = explicit
+        value = explicit if explicit is not None else os.environ.get("QUANTLAB_CODE_SHA") or None
         if value is None:
             git = shutil.which("git")
             if git is None:

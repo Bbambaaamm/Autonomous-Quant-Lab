@@ -150,11 +150,33 @@ class OperatorReadModel:
                 select(ScheduledJob.next_run_at)
                 .where(
                     ScheduledJob.enabled.is_(True),
-                    ScheduledJob.job_type == "RUN_PAPER_DEPLOYMENT",
+                    ScheduledJob.job_type.in_(("PREPARE_PAPER_SESSION", "RUN_PAPER_DEPLOYMENT")),
                     ScheduledJob.account_id == "paper-main",
                 )
                 .order_by(ScheduledJob.next_run_at)
                 .limit(1)
+            )
+            latest_run = session.scalar(
+                select(JobRun)
+                .join(
+                    StrategyDeploymentRecord,
+                    StrategyDeploymentRecord.deployment_id == JobRun.deployment_id,
+                )
+                .join(ScheduledJob, ScheduledJob.id == JobRun.scheduled_job_id)
+                .where(
+                    StrategyDeploymentRecord.paper_account_id == "paper-main",
+                    ScheduledJob.job_type.in_(("PREPARE_PAPER_SESSION", "RUN_PAPER_DEPLOYMENT")),
+                )
+                .order_by(JobRun.scheduled_for.desc(), JobRun.created_at.desc(), JobRun.id.desc())
+                .limit(1)
+            )
+            stopped = (
+                session.scalar(
+                    select(func.count())
+                    .select_from(WorkerHeartbeat)
+                    .where(WorkerHeartbeat.stopped_at.is_not(None))
+                )
+                or 0
             )
             worker_cutoff = now - timedelta(seconds=self._settings.worker_lease_timeout)
             healthy = (
@@ -255,7 +277,9 @@ class OperatorReadModel:
                 )
                 or 0,
                 "healthy_worker_count": healthy,
-                "stale_worker_count": workers - healthy,
+                "stale_worker_count": workers - healthy - stopped,
+                "stopped_worker_count": stopped,
+                "latest_paper_run": _row(latest_run) if latest_run else None,
                 "as_of": snapshot.as_of if snapshot else (account.updated_at if account else None),
             }
 
@@ -514,6 +538,7 @@ class OperatorReadModel:
                 ),
                 "relevant_instrument_count": len(relevant_instruments),
                 "current_observation_count": len(observed_instruments),
+                "missing_instrument_ids": sorted(relevant_instruments - observed_instruments),
                 "instruments": [
                     _row(x)
                     for x in session.scalars(
@@ -576,7 +601,9 @@ class OperatorReadModel:
                     {
                         **_row(x),
                         "state": (
-                            "HEALTHY"
+                            "STOPPED"
+                            if x.stopped_at is not None
+                            else "HEALTHY"
                             if (heartbeat := _utc(x.last_heartbeat_at)) is not None
                             and heartbeat >= cutoff
                             else "STALE"
