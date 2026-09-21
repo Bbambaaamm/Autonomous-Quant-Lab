@@ -188,7 +188,10 @@ function normalizedFailureClass(job, logExcerpt = "") {
   const name = job.name.toLowerCase();
   const steps = failedStepNames(job).join(" ");
   const diagnostic = String(logExcerpt || "").toLowerCase();
-  const metadata = `${name} ${steps} ${diagnostic}`;
+  // Whole-job logs contain successful setup commands (uv sync, lockfiles,
+  // Docker paths, etc.). Only failed-step/job metadata identifies the failed
+  // component; diagnostic text remains evidence for transient/protected errors.
+  const metadata = `${name} ${steps}`;
   const transientEvidence = /network timeout|audit endpoint returned an error|eai_again|econnreset|etimedout|socket hang up|temporary failure|connection reset|502 bad gateway|503 service unavailable|504 gateway timeout/;
   if (job.conclusion === "timed_out" || transientEvidence.test(diagnostic)) return "infra-transient";
   if (/dependenc|lock|npm ci|uv lock|uv sync/.test(metadata)) return "dependency-lock";
