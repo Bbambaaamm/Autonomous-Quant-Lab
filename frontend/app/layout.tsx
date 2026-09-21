@@ -1,4 +1,6 @@
-import "./globals.css";import Link from "next/link";
-const links=[["/","Přehled"],["/paper","Paper"],["/strategies","Strategie"],["/research","Research"],["/risk","Risk"],["/data","Data"],["/operations","Operations"],["/audit","Audit"]];
-export const metadata={title:"Quant Lab · Operator",description:"Lokální paper-only operator control plane"};
-export default function Layout({children}:{children:React.ReactNode}){return <html lang="cs"><body><header><strong>Autonomous Quant Lab</strong><span className="badge safe">REŽIM: PAPER · LIVE ABSENT</span></header><div className="shell"><nav aria-label="Hlavní navigace">{links.map(([h,t])=><Link key={h} href={h}>{t}</Link>)}</nav><main>{children}</main></div></body></html>}
+import "./globals.css";
+import { Navigation } from "@/components/navigation";
+export const metadata = { title: "Quant Lab · Investiční laboratoř", description: "Přehled strategií, simulovaného portfolia a provozu" };
+export default function Layout({ children }: {
+    children: React.ReactNode;
+}) { return <html lang="cs"><body><a className="skip-link" href="#content">Přejít na obsah</a><header><div className="brand"><span className="brand-icon" aria-hidden="true">Q</span><div><strong>Quant Lab</strong><small>Investiční laboratoř</small></div></div><span className="badge safe">Simulační režim · Bez skutečných objednávek</span></header><div className="shell"><Navigation /><main id="content">{children}</main></div><footer>Quant Lab · Simulované obchodování · Časy záznamů jsou uváděny v UTC.</footer></body></html>; }

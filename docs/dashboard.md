@@ -39,3 +39,20 @@ Lookback a rebalance nejsou vlastnosti samotné registrace: detail zobrazuje ulo
 `parameters_json` každého deploymentu samostatně, bez doplnění výchozích hodnot.
 Globální data readiness zahrnuje všechny aktivní XNYS instrumenty, nikoli jen universe
 jednoho deploymentu; chybějící instrument proto není sám o sobě důkazem blokace jeho běhu.
+
+## České uživatelské rozhraní
+
+Navigace, akce a běžné stavy mají české popisky. Původní stavový kód je v titulku
+stavového štítku; neznámé stavy jsou neutrální, nikdy automaticky zelené. Datum
+a čas v tabulkách se formátují v češtině s explicitním UTC.
+
+Tabulky mají přehled důležitých sloupců, hledání ve všech načtených hodnotách
+a stránky po 10 řádcích. Hledání není globální databázový filtr: pro audit
+zůstávají dostupné původní serverové filtry a stránkování. Každý řádek má
+rozbalovací úplný záznam, včetně všech polí, přesných čísel a nezkrácených ID.
+Chybějící hodnoty se nezaměňují za nulu. Procenta v přehledu jsou zaokrouhlena,
+původní hodnoty jsou vždy v detailu.
+
+Rozložení používá zmenšitelné sloupce, vodorovné posouvání uvnitř tabulek,
+zalamovatelné štítky a mobilní navigaci. Formuláře zachovávají stejné akce,
+povinné důvody, role a potvrzení HALT/RESUME. Změna rozhraní nemění obchodování.
