@@ -1110,6 +1110,8 @@ test("every dynamic CI metadata guard rejects drift from trusted configuration",
 test("serialized gate executions revalidate and publish one exact-attempt marker", async () => {
   const autonomy = require("./agent-autonomy.cjs");
   const workflow = fs.readFileSync(".github/workflows/agent-verified-gate.yml", "utf8");
+  const gateJob = workflow.slice(workflow.indexOf("\n  gate:"), workflow.indexOf("\n  merge:"));
+  const pullRequestPermission = gateJob.match(/pull-requests: (\w+)/)?.[1];
   assert.match(workflow, /concurrency:\n  group: agent-verified-gate-\$\{\{ github\.repository \}\}-\$\{\{ inputs\.pr_number \}\}-\$\{\{ inputs\.head_sha \}\}-\$\{\{ inputs\.spec_hash \}\}\n  cancel-in-progress: false/);
   const section = workflow.slice(workflow.indexOf("          script: |") + "          script: |".length, workflow.indexOf("\n  merge:"));
   const source = section.split("\n").filter(line => line.startsWith("            ")).map(line => line.slice(12)).join("\n");
@@ -1128,7 +1130,11 @@ test("serialized gate executions revalidate and publish one exact-attempt marker
     issues: {
       get: async () => ({data: {state: "open", title: "t", body: "b", labels: ["type:implementation", "agent:verified"]}}),
       listComments() {},
-      createComment: async args => { markerWrites++; comments.push(trusted(args.body)); },
+      createComment: async args => {
+        // The issue-comment endpoint targets a PR here and needs PR write scope.
+        assert.equal(pullRequestPermission, "write", "gate cannot publish its PR evidence with read-only permission");
+        markerWrites++; comments.push(trusted(args.body));
+      },
     },
     repos: {
       getBranch: async () => ({data: {commit: {sha: "e".repeat(40)}}}),
