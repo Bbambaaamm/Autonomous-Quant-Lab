@@ -40,7 +40,7 @@ def generate(candidate, trusted, output, scope, source_sha, evidence, metadata_s
         raise ValueError("DIRTY_FORMAT_CHECKOUT")
     if not isinstance(scope, list) or not scope or any(not isinstance(p, str) for p in scope):
         raise ValueError("INVALID_FORMAT_SCOPE")
-    paths = sorted({p for p in scope if p.startswith("backend/") and p.endswith(".py")})
+    paths = sorted({p for p in scope if p.startswith("backend/") and p.endswith((".py", ".pyi"))})
     if not paths:
         raise ValueError("NO_PYTHON_FORMAT_TARGET")
     # Load policy only from the trusted checkout, never from the candidate PR.
@@ -137,7 +137,9 @@ def generate_snapshot(snapshot, trusted, output, scope, source_sha, evidence):
         raise ValueError("SOURCE_SHA_MISMATCH")
     if not isinstance(scope, list) or any(not isinstance(p, str) for p in scope):
         raise ValueError("INVALID_FORMAT_SCOPE")
-    expected = sorted({p for p in scope if p.startswith("backend/") and p.endswith(".py")})
+    expected = sorted(
+        {p for p in scope if p.startswith("backend/") and p.endswith((".py", ".pyi"))}
+    )
     files = data.get("files")
     if not isinstance(files, list) or sorted(f.get("path", "") for f in files) != expected:
         raise ValueError("FORMAT_SNAPSHOT_SCOPE_MISMATCH")
@@ -146,7 +148,7 @@ def generate_snapshot(snapshot, trusted, output, scope, source_sha, evidence):
         total = 0
         for entry in files:
             name = entry["path"]
-            if not re.fullmatch(r"backend/[A-Za-z0-9_./-]+\.py", name) or any(
+            if not re.fullmatch(r"backend/[A-Za-z0-9_./-]+\.pyi?", name) or any(
                 part in ("", ".", "..", ".git") for part in name.split("/")
             ):
                 raise ValueError("INVALID_FORMAT_PATH")

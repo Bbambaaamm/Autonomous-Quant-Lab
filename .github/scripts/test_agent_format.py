@@ -203,6 +203,21 @@ class FormatTests(unittest.TestCase):
                     self.from_snapshot(data)
                 self.assertFalse(self.output.exists())
 
+    def test_snapshot_formats_stub_with_unchanged_ast(self):
+        self.target = "backend/tests/types.pyi"
+        self.original = "def example(value:int)->str: ...\n"
+        self.write(self.target, self.original)
+        self.commit()
+        result = self.from_snapshot(self.snapshot_data())
+        self.assertEqual(result["paths"], [self.target])
+        subprocess.run(
+            ["git", "apply", "--check", "-"],
+            input=result["patch"].encode(),
+            cwd=self.candidate,
+            check=True,
+        )
+        self.assertIn("value: int", result["patch"])
+
     def test_snapshot_rejects_traversal_even_if_in_scope(self):
         data = self.snapshot_data()
         data["files"][0]["path"] = "backend/../../escape.py"

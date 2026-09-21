@@ -1771,3 +1771,20 @@ test("deterministic formatting is credential-free and joins the validated publis
   assert.match(section("trusted-publish"),/needs\.seal-patch\.result == 'success'/);
   assert.match(section("fail-closed-finalizer"),/deterministic-format/);
 });
+
+
+test("deterministic format scope supports stubs and excludes removed paths", () => {
+  assert.deepEqual(pipeline.deterministicFormatScope([
+    {filename:"backend/tests/deleted.py",status:"removed"},
+    {filename:"backend/tests/current.py",status:"modified"},
+    {filename:"backend/tests/types.pyi",status:"added"},
+    {filename:"docs/readme.md",status:"modified"},
+  ]),["backend/tests/current.py","backend/tests/types.pyi"]);
+  assert.deepEqual(pipeline.deterministicFormatScope([{filename:"backend/gone.py",status:"removed"}]),[]);
+  assert.deepEqual(pipeline.deterministicFormatScope([{filename:"backend/test.py",status:"modified"},{filename:"backend/notebook.ipynb",status:"added"}]),[]);
+  const workflow=fs.readFileSync(".github/workflows/agent-ci-fixer.yml","utf8");
+  const formatter=workflow.split("\n  deterministic-format:\n")[1].split("\n  prepare-generation-context:")[0];
+  assert.doesNotMatch(formatter,/needs\.classify\.outputs\.fix_scope/);
+  assert.match(formatter,/needs\.classify\.outputs\.format_scope/);
+  assert.match(workflow,/formatScope\.length>0&&p\.pureRuffFormatFailure/);
+});
