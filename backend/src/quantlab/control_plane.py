@@ -30,8 +30,13 @@ class ControlPlaneRegistryService:
     def register_instrument(self, instrument: Instrument) -> InstrumentRecord:
         if not instrument.instrument_id.strip() or not instrument.symbol.strip():
             raise ValueError("Instrument identity a symbol jsou povinné")
-        if instrument.exchange != "XNYS" or instrument.calendar != "XNYS":
-            raise ValueError("Phase 6 control plane podporuje pouze XNYS")
+        if (
+            instrument.exchange not in {"XNYS", "XNAS", "XASE", "ARCX", "BATS"}
+            or instrument.calendar != "XNYS"
+        ):
+            raise ValueError(
+                "Registr podporuje pouze konfigurované americké akciové burzy a kalendář XNYS"
+            )
         if instrument.currency != "USD" or instrument.asset_type is not AssetType.EQUITY:
             raise ValueError("Phase 6 control plane podporuje pouze USD equities")
         if instrument.active_to is not None and instrument.active_to <= instrument.active_from:

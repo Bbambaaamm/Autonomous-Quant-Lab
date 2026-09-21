@@ -43,6 +43,8 @@ from quantlab.phase4 import ReconciliationService, TradingCycleRecord, TradingCy
 
 
 class JobType(StrEnum):
+    SYNC_MARKET_IDENTITIES = "SYNC_MARKET_IDENTITIES"
+    SYNC_MARKET_PRICE_TASK = "SYNC_MARKET_PRICE_TASK"
     SYNC_MARKET_CATALOG = "SYNC_MARKET_CATALOG"
     RUN_PAPER_CYCLE = "RUN_PAPER_CYCLE"
     RUN_PAPER_DEPLOYMENT = "RUN_PAPER_DEPLOYMENT"
@@ -395,7 +397,11 @@ class AutomationRepository:
         config = config or {}
         validate_payload(config)
         ZoneInfo(timezone)
-        if job_type == JobType.SYNC_MARKET_CATALOG and (config or strategy_id is not None):
+        if job_type in {
+            JobType.SYNC_MARKET_CATALOG,
+            JobType.SYNC_MARKET_PRICE_TASK,
+            JobType.SYNC_MARKET_IDENTITIES,
+        } and (config or strategy_id is not None):
             raise ValueError("Katalog nepřijímá strategy_id ani vlastní konfiguraci")
         if job_type == JobType.RUN_PAPER_CYCLE and not strategy_id:
             raise ValueError("Paper cycle vyžaduje strategy_id")
@@ -1177,6 +1183,33 @@ class JobExecutor:
         ):
             raise PermanentJobError("JobRun obsahuje neplatnou execution identitu")
         validate_payload(payload)
+        if job_type == JobType.SYNC_MARKET_IDENTITIES:
+            if payload or strategy_id is not None:
+                raise PermanentJobError("Adresář identit nepřijímá vlastní konfiguraci")
+            from quantlab.asset_directory import AssetDirectoryService, fetch_assets
+            from quantlab.config import get_settings
+
+            body = fetch_assets(get_settings())
+            AssetDirectoryService(lambda: Session(self.repository.engine)).sync(
+                body,
+                actor="scheduled-worker",
+                reason=f"Denní adresář: {run.id}",
+                received_at=self.clock(),
+            )
+            return {"outcome": "MARKET_IDENTITIES_RECEIVED", "trading_cycle_id": None}
+        if job_type == JobType.SYNC_MARKET_PRICE_TASK:
+            if payload or strategy_id is not None:
+                raise PermanentJobError("Datová fronta nepřijímá vlastní konfiguraci")
+            from quantlab.config import get_settings
+            from quantlab.market_pipeline import MarketPipeline
+            from quantlab.provider_factory import build_market_data_provider
+
+            return MarketPipeline(lambda: Session(self.repository.engine)).step(
+                lambda instrument: build_market_data_provider(
+                    get_settings(), self.repository.engine, instrument=instrument, request_budget=12
+                ),
+                clock=self.clock,
+            )
         if job_type == JobType.SYNC_MARKET_CATALOG:
             if payload or strategy_id is not None:
                 raise PermanentJobError("Katalog nepřijímá vlastní konfiguraci")

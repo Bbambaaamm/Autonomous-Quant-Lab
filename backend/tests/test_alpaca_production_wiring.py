@@ -82,7 +82,14 @@ def test_alpaca_event_worker_fails_after_clean_stream_exhaustion(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     engine = type("Engine", (), {"dispose": lambda self: None})()
-    service = type("Service", (), {"corporate_action_events": lambda self, provider: ()})()
+    service = type(
+        "Service",
+        (),
+        {
+            "corporate_action_events": lambda self, provider: (),
+            "record_corporate_action_event": lambda self, event: None,
+        },
+    )()
     stream = type("Stream", (), {"run": lambda self, cursor: None})()
     monkeypatch.setattr(
         event_worker,

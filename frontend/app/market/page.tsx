@@ -1,3 +1,4 @@
+import { MarketPipelinePanel, type Pipeline } from "@/components/market-pipeline-panel";
 import Link from "next/link";
 import { api } from "@/lib/api";
 import { session } from "@/lib/auth";
@@ -11,17 +12,22 @@ type Coverage = {
   items: { symbol: string; name: string; exchange: string; security_type: string }[];
   exchanges: { exchange: string; count: number }[]; limitations: string[];
 };
-export default async function Market({ searchParams }: { searchParams: Promise<{ q?: string; page?: string }> }) {
+export default async function Market({ searchParams }: { searchParams: Promise<{ q?: string; page?: string; price_q?: string; price_rank?: string; price_page?: string }> }) {
   const params = await searchParams;
   const q = (typeof params.q === "string" ? params.q : "").slice(0, 100);
   const requested = Number(params.page ?? 1);
   const page = Number.isSafeInteger(requested) && requested > 0 && requested < 1000000 ? requested : 1;
-  const [data, user] = await Promise.all([
-    api<Coverage>(`/operator/market-coverage?q=${encodeURIComponent(q)}&offset=${(page - 1) * 50}&limit=50`), session(),
+  const priceQuery = (typeof params.price_q === "string" ? params.price_q : "").slice(0,100);
+  const priceRank = ["symbol", "momentum", "trend", "mean_reversion"].includes(params.price_rank ?? "") ? params.price_rank! : "symbol";
+  const priceRequested = Number(params.price_page ?? 1);
+  const pricePage = Number.isSafeInteger(priceRequested) && priceRequested > 0 && priceRequested < 1000000 ? priceRequested : 1;
+  const [data, user, pipeline] = await Promise.all([
+    api<Coverage>(`/operator/market-coverage?q=${encodeURIComponent(q)}&offset=${(page - 1) * 50}&limit=50`), session(), api<Pipeline>(`/operator/market-pipeline?${new URLSearchParams({q:priceQuery,rank:priceRank,offset:String((pricePage - 1)*50),limit:"50"})}`),
   ]);
   const pageLink = (n: number) => `/market?${new URLSearchParams({ q, page: String(n) })}`;
   return <>
     <h1>Pokrytí trhu</h1>
+    <MarketPipelinePanel data={pipeline} admin={user?.role === "ADMIN"} />
     <p className="muted">Cílem je globální sledování. První dostupnou vrstvou je referenční katalog amerických burzovních cenných papírů.</p>
     <div className="grid">
       <section className="card"><h2>Instrumenty v katalogu</h2><strong>{data.snapshot?.listing_count.toLocaleString("cs-CZ") ?? "Dosud nenačteno"}</strong><p>Počet záznamů ve zdroji, nikoli počet instrumentů s cenovými daty.</p></section>

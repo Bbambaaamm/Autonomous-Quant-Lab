@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 
+from quantlab.asset_directory import AssetDirectoryService, fetch_assets
 from quantlab.automation import (
     MANAGED_JOB_TYPES,
     AutomationRepository,
@@ -34,6 +35,7 @@ from quantlab.domain import AuditEventType
 from quantlab.market_catalog import CatalogError, MarketCatalogService
 from quantlab.market_data import AssetType, DatasetInvalid, Instrument, XNYSCalendar
 from quantlab.market_data_service import DatasetSnapshotService, PersistentMarketDataService
+from quantlab.market_pipeline import MarketPipeline
 from quantlab.multi_asset import STRATEGY_REGISTRY
 from quantlab.operator_read_model import OperatorReadModel
 from quantlab.persistence import (
@@ -1696,3 +1698,116 @@ def operator_market_catalog_schedule(body: ReasonedMutation, request: Request) -
         _correlation(request),
     )
     return {"job_id": job.id, "enabled": job.enabled}
+
+
+@app.get("/operator/market-pipeline", response_model=OperatorDocument)
+def operator_market_pipeline(
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    q: str = Query("", max_length=100),
+    rank: str = Query("symbol", pattern="^(symbol|momentum|trend|mean_reversion)$"),
+) -> dict[str, object]:
+    result = MarketPipeline(session_factory).read(limit, offset, q, rank)
+    result["identity_directory"] = AssetDirectoryService(session_factory).latest(datetime.now(UTC))
+    result["configured_provider"] = settings.market_data_provider
+    result["feed"] = settings.alpaca_feed
+    result["latest_session"] = XNYSCalendar().latest_completed_session(datetime.now(UTC))
+    result["credentials_configured"] = bool(settings.alpaca_key_id and settings.alpaca_secret_key)
+    return result
+
+
+@app.post("/operator/market-pipeline/identities", response_model=OperatorDocument)
+def operator_asset_directory(body: ReasonedMutation, request: Request) -> dict[str, object]:
+    try:
+        response = fetch_assets(settings)
+        identity = AssetDirectoryService(session_factory).sync(
+            response,
+            actor=current_principal(request).actor_id,
+            reason=body.reason,
+            received_at=datetime.now(UTC),
+        )
+    except CatalogError as exc:
+        raise HTTPException(502, str(exc)) from exc
+    return {"snapshot_id": identity}
+
+
+class MarketBatchCreate(ReasonedMutation):
+    start: date
+    end: date
+
+
+@app.post("/operator/market-pipeline/batches", response_model=OperatorDocument)
+def operator_market_batch(body: MarketBatchCreate, request: Request) -> dict[str, object]:
+    if settings.market_data_provider != "alpaca":
+        raise HTTPException(409, "Široký sběr vyžaduje konfiguraci poskytovatele Alpaca")
+    now = datetime.now(UTC)
+    snapshot = AssetDirectoryService(session_factory).latest(now)["snapshot_id"]
+    if snapshot is None:
+        raise HTTPException(409, "Nejdříve načtěte adresář identit")
+    try:
+        batch_id = MarketPipeline(session_factory).create(
+            snapshot,
+            body.start,
+            body.end,
+            f"alpaca:{settings.alpaca_feed}",
+            current_principal(request).actor_id,
+            body.reason,
+            now,
+        )
+        job = automation_repository.create_job(
+            job_id="market-price-queue",
+            job_type=JobType.SYNC_MARKET_PRICE_TASK,
+            account_id="paper-main",
+            schedule_type=ScheduleType.INTERVAL,
+            interval_seconds=5,
+            next_run_at=now,
+            max_attempts=3,
+            config={},
+        )
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    automation_repository.create_job(
+        job_id="market-identities-daily",
+        job_type=JobType.SYNC_MARKET_IDENTITIES,
+        account_id="paper-main",
+        schedule_type=ScheduleType.DAILY,
+        daily_time="00:30",
+        timezone="UTC",
+        next_run_at=now + timedelta(days=1),
+        max_attempts=3,
+        config={},
+    )
+    return {"batch_id": batch_id, "queue_enabled": job.enabled}
+
+
+class MarketJobControl(ReasonedMutation):
+    job_id: str
+    enabled: bool
+
+
+@app.post("/operator/market-pipeline/control", response_model=OperatorDocument)
+def operator_market_job_control(body: MarketJobControl, request: Request) -> dict[str, object]:
+    allowed = {
+        "market-catalog-daily": JobType.SYNC_MARKET_CATALOG,
+        "market-identities-daily": JobType.SYNC_MARKET_IDENTITIES,
+        "market-price-queue": JobType.SYNC_MARKET_PRICE_TASK,
+    }
+    if body.job_id not in allowed:
+        raise HTTPException(422, "Tato akce ovládá pouze sběr tržních dat")
+    with session_factory() as session, session.begin():
+        job = session.get(ScheduledJob, body.job_id)
+        if job is None:
+            raise HTTPException(404, "Datová úloha dosud není založena")
+        if job.job_type != allowed[body.job_id]:
+            raise HTTPException(409, "Identita úlohy neodpovídá datovému sběru")
+        job.enabled = body.enabled
+        job.updated_at = datetime.now(UTC)
+    _audit_control_mutation(
+        "CONTROL_MARKET_JOB_ENABLED" if body.enabled else "CONTROL_MARKET_JOB_DISABLED",
+        "scheduled_job",
+        body.job_id,
+        _actor(request),
+        body.reason,
+        _correlation(request),
+    )
+    return {"job_id": body.job_id, "enabled": body.enabled}
