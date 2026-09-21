@@ -130,7 +130,15 @@ body cannot rebind an already authorized PR.
 
 Issue #100 changes the normal operating contract to **one explicit human authorization at the concrete Issue level**. The trusted authorization marker is bound to the canonical Issue title, body and single `type:implementation` classification. Closing, reopening, or changing approval-relevant Issue data invalidates autonomous progress and requires fresh human authorization.
 
-Verification is automatic for the exact current PR head. It requires the Issue to be open with current authorization, one active durable Issue ↔ PR link, an open non-draft default-base PR that is not behind `main`, a coherent non-escalated lifecycle, the **newest** authoritative completed CI run for that PR/SHA with all nine required jobs green, and an independent Codex `PASS` for the same SHA. A successful verifier records exact `agent-verified:v2` evidence and invokes `agent-verified-gate`, which revalidates these facts before publishing the trusted required status. The merge controller then performs another full TOCTOU re-evaluation and merges with the expected exact head SHA. If `main` moves, the branch is reconciled without force-push and all SHA-bound evidence is regenerated.
+Verification is automatic for the exact current PR head. It requires the Issue to be open with current authorization, one active durable Issue ↔ PR link, an open non-draft default-base PR that is not behind `main`, a coherent non-escalated lifecycle, the **newest unfiltered** authoritative CI run for that PR/SHA to be completed successfully with all nine required jobs green, and an independent Codex `PASS` bound to that run ID and numeric run attempt. Any queued or in-progress matching run blocks selection until all attempts settle; a newer failed or cancelled attempt shadows older green runs.
+
+The authoritative review format is `agent-codex-review:v3`, bound to the exact repository, Issue, PR, head SHA, authorization specification hash, CI run ID, CI run attempt, and `PASS`/`BLOCK` result. Exactly one trusted marker may exist for that complete binding: duplicate PASS markers and PASS/BLOCK conflicts fail closed. Legacy v2 and SHA-only review markers are audit history only and never satisfy the current strict consumer contract. The sole authoritative CI identity is the immutable workflow ID `331418792` and path `.github/workflows/ci.yml` pinned in trusted default-branch configuration. Helpers default omitted binding fields to this configured identity; explicit IDs or paths must match it and cannot select another authority. Reviewer, verifier, gate, and merge additionally fetch current GitHub workflow metadata and require its ID, path, and active state to agree; a candidate-controlled workflow with the display name `CI` is never authoritative, and ID/path drift fails closed. Settled exact-head runs are ordered by `run_started_at`, never by completion (`updated_at`) order. The timestamps must be present and ordered as `created_at <= run_started_at <= updated_at`; a rerun must have a start later than its creation. Missing or malformed timestamps, duplicate run IDs, and tied latest start times fail closed. An older overlapping run that finishes last cannot hide a later-started failure; a rerun of an older run can supersede a later-ID run only with a demonstrably later attempt start.
+
+The reviewer prepares one exact CI run ID and attempt, passes that binding into its prompt and output schema, and checks the returned binding when recording the result. If the selected attempt changes during the model review, the old result cannot be rebound to the replacement run. Before each PR label, Issue label, or verification-marker write, the verifier reloads CI jobs and the selected attempt, then authorization, linkage, lifecycle (including escalation), PR/Issue state, current-main ancestry, and the independent review. Verification label changes target only the addition of `agent:verified` and removal of `agent:pr`, with another full check between them; concurrent escalation and unrelated labels cannot be overwritten by a stale full-label replacement. The original Issue and specification remain pinned across all writes.
+
+A successful verifier records `agent-verified:v2` evidence with the same CI run ID **and attempt** and invokes `agent-verified-gate`, which revalidates both evidence records and all mutable authority before publishing the trusted required status. Before publishing that status, the gate also records exactly one trusted `agent-verified-gate-evidence:v1` marker bound to the repository, Issue, PR, head, specification, authoritative CI run ID, run attempt, and PASS result. Auto-merge requires both the unchanged required status context and that unique exact-attempt gate record; stale, malformed, duplicate, or conflicting records fail closed. The merge controller independently selects the newest unfiltered exact-head CI run and performs another full TOCTOU re-evaluation before merging with the expected exact head SHA. A same-SHA rerun therefore requires fresh review, verification, and gate evidence. If `main` moves, the branch is reconciled without force-push and all bound evidence is regenerated.
+
+Reusable gate executions share a concurrency group keyed by repository, PR, head SHA, and specification hash, with `cancel-in-progress: false`. After being admitted, each execution re-fetches current authority and exact CI/review/verification evidence, including its final TOCTOU check. It writes a gate marker only when the current exact binding is missing; a later serialized execution observes the existing marker and does not duplicate it. Ambiguous or conflicting records continue to fail closed.
 
 ### Human acknowledgement and native PR approval
 
@@ -318,3 +326,66 @@ The fixer job-level guard treats an explicit reusable `review-block` invocation 
 regardless of the caller's inherited event context. Direct `workflow_run` entry remains limited to
 failed authoritative CI, while `workflow_dispatch` is limited to an explicit failed-CI replay; the
 inner trusted invocation decision and exact linkage, lifecycle, SHA, and CI checks remain mandatory.
+
+## Issue #123 Reviewer evidence credential boundary
+
+The independent Reviewer remains read-only with respect to repository state. Its model job receives
+only `actions: read`, `checks: read`, `contents: read`, `issues: read`, and `pull-requests: read`.
+The job-scoped `${{ github.token }}` is exposed as `GH_TOKEN` only on the `Independent bounded review`
+step so the model can inspect exact workflow/check/Issue/PR metadata for the bound SHA. This token
+is evidence access, not mutation authority; it is never replaced by `AGENT_PUBLISH_TOKEN`, never
+made available to repository execution, and does not weaken exact-SHA, lifecycle, linkage, or
+fail-closed BLOCK semantics. Every checkout in the model job explicitly disables credential
+persistence. Before model invocation, a trusted collector validates the repository,
+Issue, PR, head/base/source SHAs, reviewer run/attempt and newest authoritative CI
+with every required job. It seals bounded scope, governance, CI evidence and prompt
+files with SHA-256 hashes, uploaded under an immutable reviewer-run/attempt name.
+The model job verifies the seal and checks source, authority and CI freshness both
+before and after review. The separate recorder validates the seal and reviewed CI
+identity again immediately before publishing the v3 marker. Conflicting PASS/BLOCK
+results remain visible and fail downstream validation.
+
+This preflight establishes only that the bounded CI evidence was successfully and freshly verified
+for review. It does **not** establish staging, canary, production, or other operational acceptance,
+and it does not reinterpret the separate Issue #126 acceptance requirements.
+`OPENAI_API_KEY` remains separate, and no repository code executes in the credential-bearing model
+step.
+
+### Base-bound Builder publication and control-plane maintenance
+
+Builder branch identity is deterministic for one authorized base:
+`agent/issue-${ISSUE}-${SPEC:0:12}-${BASE:0:12}`. Retries of the same
+Issue/spec/base reuse the same identity. After `main` advances and the Issue is
+reauthorized, the new base changes the branch identity, so a retired branch from an
+older base cannot collide with the new sealed candidate.
+
+Protected `.github` and agent-pipeline changes use the two-workflow control-plane
+maintenance path; they never require disabling or weakening `Protect main`. The
+human request binds the exact Issue, PR and head SHA. Its actor must have
+`write`, `maintain`, or `admin` permission. That actor identity is carried into the
+trusted follower, and authority is freshly revalidated before authorization-sensitive
+gate writes and immediately before the irreversible exact-head merge.
+
+Recovery, gate, and merge also re-read the live `Protect main` ruleset and bind its
+entire fingerprint to the collected evidence. The current branch policy requires
+eight CI contexts bound to GitHub Actions integration `15368`, strict freshness,
+PR/deletion/non-fast-forward protection, no bypass actors and CodeQL. The owner
+removed `agent-verified-gate` as a required branch check; this integration does not
+restore it. Internal automation still verifies its own review and gate evidence.
+Manual PR merges use GitHub's current required checks.
+
+`AGENT_PUBLISH_TOKEN` performs only the exact-head merge after fresh guards pass.
+The maintenance runtime transports an immutable recovery receipt between jobs and
+verifies both objects' audit comment identities before gate or merge writes.
+
+### Integration of remaining maintenance PRs
+
+PRs #119, #125, #127, #131, #135, #136, #141 and #143 are integrated together on top
+of merged dashboard PR #144. #131 retains its implementation already adopted by
+#134/#138; #141 retains the more complete exact-CI implementation from #143; #136
+uses #135's newer sealed collector. #125's read-only metadata credential remains
+confined to the model step. #119 contributes base-bound builder publication, and
+#127 supplies the shared maintenance runtime and immutable recovery receipts.
+Tests that extracted the removed inline controller are superseded by executable
+controller/runtime tests covering authority, ruleset, CI, recovery and write-boundary
+changes. The authoritative application CI workflow is unchanged from merged main.

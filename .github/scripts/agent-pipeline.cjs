@@ -1,5 +1,9 @@
 "use strict";
 
+const AGENT_CONFIG = require("../agent-pipeline.json");
+const TRUSTED_CI_WORKFLOW_ID = Number(AGENT_CONFIG.v2.authoritativeCiWorkflowId);
+const TRUSTED_CI_WORKFLOW_PATH = AGENT_CONFIG.v2.authoritativeCiWorkflowPath;
+
 const STATES = ["agent:ready", "agent:running", "agent:pr", "agent:needs-human", "agent:verified"];
 const EPIC_LABELS = new Set(["type:epic", "type:roadmap", "type:capability"]);
 const ALLOWED = new Set([
@@ -129,16 +133,27 @@ function reviewSatisfied({ reviewDecision, reviews = [], acknowledgements = [], 
   return nativeExactShaApproval || hasExactShaReviewAcknowledgement(acknowledgements, headSha);
 }
 
-function parseTrustedMarker(comments, kind, headSha) {
-  const prefix = `<!-- ${kind}:v2 sha=${headSha} `;
-  const matches = comments.filter((comment) => comment.user?.login === "github-actions[bot]")
-    .flatMap((comment) => (comment.body || "").split("\n"))
-    .filter((line) => line.startsWith(prefix) && line.endsWith(" -->"));
-  return matches.length === 1 ? matches[0] : null;
+function parseTrustedMarker(comments, kind, binding) {
+  if (typeof binding === "string") { // Legacy parser retained only for non-strict callers.
+    const prefix = `<!-- ${kind}:v2 sha=${binding} `;
+    const matches = trustedCommentLines(comments).filter((line) => line.startsWith(prefix) && line.endsWith(" -->"));
+    return matches.length === 1 ? matches[0] : null;
+  }
+  const { repo, issueNumber, prNumber, headSha, specHash, ciRunId, ciRunAttempt } = binding || {};
+  if (!Number.isSafeInteger(Number(ciRunId)) || Number(ciRunId) < 1 ||
+      !Number.isSafeInteger(Number(ciRunAttempt)) || Number(ciRunAttempt) < 1) return null;
+  const marker = new RegExp(`^<!-- ${kind}:v3 repo=${escapeRegex(repo)} issue=${Number(issueNumber)} pr=${Number(prNumber)} sha=${escapeRegex(headSha)} spec=${escapeRegex(specHash)} ci=${Number(ciRunId)} attempt=${Number(ciRunAttempt)} result=(PASS|BLOCK) -->$`);
+  const matches = trustedCommentLines(comments).map((line) => ({ line, match: marker.exec(line) })).filter(({ match }) => match);
+  if (matches.length > 1) return { ambiguous: true };
+  return matches.length === 1 ? { marker: matches[0].line, result: matches[0].match[1] } : null;
 }
 
-function independentReviewSatisfied(comments, headSha) {
-  return parseTrustedMarker(comments, "agent-codex-review", headSha)?.includes(" result=PASS ") === true;
+function escapeRegex(value) {
+  return String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function independentReviewSatisfied(comments, binding) {
+  return parseTrustedMarker(comments, "agent-codex-review", binding)?.result === "PASS";
 }
 
 const FAILURE_CLASSES = ["lint-format", "typecheck", "unit-test", "api-test", "integration-postgres",
@@ -202,8 +217,19 @@ function fixerInvocationDecision({ eventName, mode, prNumber, headSha, reviewBlo
   return { ok: false, reason: "INVALID_INVOCATION_MODE" };
 }
 
-function authoritativeCiIdentity(run, { prNumber, headSha, conclusion }) {
-  return !!run && run.name === "CI" && run.event === "pull_request" && run.status === "completed" &&
+function trustedCiBinding(workflowId, workflowPath) {
+  if (!Number.isSafeInteger(TRUSTED_CI_WORKFLOW_ID) || TRUSTED_CI_WORKFLOW_ID < 1 ||
+      typeof TRUSTED_CI_WORKFLOW_PATH !== "string" || !TRUSTED_CI_WORKFLOW_PATH) return null;
+  const effectiveId = workflowId === undefined ? TRUSTED_CI_WORKFLOW_ID : Number(workflowId);
+  const effectivePath = workflowPath === undefined ? TRUSTED_CI_WORKFLOW_PATH : workflowPath;
+  return effectiveId === TRUSTED_CI_WORKFLOW_ID && effectivePath === TRUSTED_CI_WORKFLOW_PATH
+    ? { workflowId: effectiveId, workflowPath: effectivePath } : null;
+}
+
+function authoritativeCiIdentity(run, { workflowId, workflowPath, prNumber, headSha, conclusion } = {}) {
+  const binding = trustedCiBinding(workflowId, workflowPath);
+  return !!run && !!binding && Number(run.workflow_id) === binding.workflowId &&
+    run.path === binding.workflowPath && run.event === "pull_request" && run.status === "completed" &&
     run.conclusion === conclusion && run.head_sha === headSha && run.pull_requests?.length === 1 &&
     run.pull_requests[0].number === Number(prNumber);
 }
@@ -587,17 +613,35 @@ function successfulRequiredJobs(jobs, requiredNames, headSha) {
   return requiredNames.every((name) => latest.get(name)?.conclusion === "success");
 }
 
-function newestAuthoritativeCiRun(runs, { workflowName, headSha, prNumber }) {
-  return runs
-    .filter((run) => run.name === workflowName && run.event === "pull_request" &&
-      run.status === "completed" && run.head_sha === headSha &&
-      run.pull_requests?.length === 1 && run.pull_requests[0].number === prNumber)
-    .sort((left, right) => right.id - left.id)[0] ?? null;
+function newestAuthoritativeCiRun(runs, { workflowId, workflowPath, headSha, prNumber } = {}) {
+  const binding = trustedCiBinding(workflowId, workflowPath);
+  if (!binding) return null;
+  const candidates = runs
+    .filter((run) => Number(run.workflow_id) === binding.workflowId && run.path === binding.workflowPath && run.event === "pull_request" &&
+      run.head_sha === headSha &&
+      run.pull_requests?.length === 1 && run.pull_requests[0].number === prNumber);
+  const timestamp = (value) => typeof value === "string" &&
+    /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/.test(value) ? Date.parse(value) : NaN;
+  // Completion order is not attempt order. Wait for every matching run to settle:
+  // queued reruns can still expose the previous attempt's start timestamp.
+  if (candidates.some((run) => run.status !== "completed" ||
+        !Number.isSafeInteger(Number(run.id)) || Number(run.id) < 1 ||
+        !Number.isSafeInteger(Number(run.run_attempt)) || Number(run.run_attempt) < 1 ||
+        ![run.created_at, run.run_started_at, run.updated_at].every((value) => Number.isFinite(timestamp(value))) ||
+        timestamp(run.created_at) > timestamp(run.run_started_at) ||
+        timestamp(run.run_started_at) > timestamp(run.updated_at) ||
+        (Number(run.run_attempt) > 1 && timestamp(run.run_started_at) <= timestamp(run.created_at)))) return null;
+  if (new Set(candidates.map((run) => Number(run.id))).size !== candidates.length) return null;
+  candidates.sort((left, right) => timestamp(right.run_started_at) - timestamp(left.run_started_at));
+  // IDs and attempt counters from different runs cannot resolve a start-time tie.
+  if (candidates.length > 1 &&
+      timestamp(candidates[0].run_started_at) === timestamp(candidates[1].run_started_at)) return null;
+  return candidates[0] ?? null;
 }
 
 function authoritativeCiRunCandidates(runs, binding) {
   const newest = newestAuthoritativeCiRun(runs, binding);
-  return newest?.conclusion === "success" ? [newest] : [];
+  return newest?.status === "completed" && newest.conclusion === "success" ? [newest] : [];
 }
 
 function verificationTriggerDecision({ workflowRun, workflowCallInputs = {} }) {
