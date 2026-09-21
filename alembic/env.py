@@ -2,8 +2,10 @@ import logging
 import os
 from logging.config import fileConfig
 
+import quantlab.asset_directory
 import quantlab.automation
 import quantlab.market_catalog
+import quantlab.market_pipeline
 import quantlab.phase4
 import quantlab.phase7  # noqa: F401
 from quantlab.persistence import Base

@@ -90,3 +90,63 @@ nejde o měření na produkčním PostgreSQL ani o dobu stahování cen.
 Lokální úplný migrační řetězec nelze ověřit na SQLite: starší migrace
 20260811_06 vyžaduje ALTER foreign key, který SQLite nepodporuje.
 PostgreSQL regresní test nové evidence je připraven pro existující PostgreSQL CI.
+
+## Cenová fronta a identity poskytovatele
+
+Po referenčním katalogu lze na `/market` načíst adresář aktivních US equity
+instrumentů z **paper** endpointu Alpaca. Adresář vyžaduje existující serverové
+přístupové údaje. Jeho dostupnost nepotvrzuje oprávnění k historickým cenám,
+konsolidovanému SIP feedu ani globálním burzám. Fronta používá nakonfigurovaný
+feed; žádné předplatné nezakládá. IEX není konsolidovaný objem celého trhu.
+
+Identita je UUID poskytovatele, nikoli ticker. Každá přijatá verze je neměnná,
+s UTC časem přijetí a hashem obsahu. Změna tickeru nebo kolize s existujícím
+kanonickým instrumentem se zastaví pro vyřešení; nepřepisuje historii pilotu.
+Adresář aktivních titulů není důkaz historického složení trhu ani kompletní
+evidence IPO/delistingu. Datum přijetí se nevydává za datum IPO.
+
+Správce založí dávku s obdobím nejvýše 730 dní, končícím uzavřenou seancí.
+Založí se úlohy `market-price-queue` a `market-identities-daily`. Vypnutí/zapnutí
+existujících úloh je na `/operations`; opětovné založení je samo nezapne.
+Worker zpracovává po jednom instrumentu, s nejvýše 12 HTTP požadavky a časovým
+rozpočtem 45 sekund na instanci poskytovatele. Jednotlivé požadavky mají vlastní
+timeout. Úloha má tři pokusy, prodlevy 5/10/15 minut a obnovitelný desetiminutový
+pronájem. Opakování po pádu nevytváří jiný kanonický instrument.
+
+Při HTTP 401/403 se čekající úlohy stejného feedu zablokují, aby tisíce titulů
+neopakovaly neplatné přihlášení. Po opravě přístupu načtěte nový adresář a založte
+novou dávku. Staré blokované úlohy zůstávají jako evidence. Automatická návazná
+dávka zatím nepřekročí existující blokaci přístupu; provoz vyžaduje kontrolu správce.
+Při chybějící historické evidenci přijetí dividend/splitů se zobrazí samostatná
+blokace dat. Žádné historické znalosti se nevyrábějí zpětně.
+
+Po dokončení a nové uzavřené seanci vznikne další dávka, pokud je adresář čerstvý.
+Existující ceny se znovu načítají od první chybějící seance s přesahem pěti seancí
+pro revize. Čtení i výpočty respektují čas skutečného přijetí. Historie má omezené
+okno a fronta nevytváří další dávky přes nedokončenou práci.
+
+Český přehled má serverové hledání, stránkování a řazení podle technických
+ukazatelů. Jmenovatel pokrytí je počet požadovaných obchodních seancí, ne počet
+vrácených řádků. Pro výpočet je nutných alespoň 127 cen a úplné poslední okno.
+Ukazatele jsou **diagnostika neupravených cen**, nikoli investiční signály nebo
+splnění podmínek výzkumu. Chybějící hodnoty jsou „Neověřeno“, nikdy nula.
+Úspěšně zpracovaný titul nemusí mít úplnou historii. Počet titulů dávky se nesmí
+zaměnit s počtem referenčního katalogu nebo s celosvětovým pokrytím.
+
+### Co tato implementace ještě nedokládá
+
+- skutečná oprávnění a dostupnost historických cen konkrétního serverového účtu;
+- historické členství celého trhu a kompletní corporate-action knowledge;
+- validovaný screening z upravených cen, benchmark a nedotčené OOS;
+- poskytovatele, licence, měny a kalendáře dalších světových regionů;
+- výkonnost celé dávky na produkčním serveru.
+
+Tyto položky zůstávají v #164 otevřené. Cenová fronta nepoužívá placené LLM API,
+nemění schválená nasazení a nevytváří objednávky.
+
+Fronta má minimální interval pět sekund; její vlastní rozpočet je nejvýše 12
+požadavků na úkol. Jde o rozpočet této fronty, nikoli o měřič celkového účtu
+(sdílené feedy a jiné procesy mohou přidávat další požadavky). Před hromadným
+provozem je nutné potvrdit limity konkrétního účtu. Uvedené US burzy používají
+konfigurovaný kalendář XNYS; plná nezávislá evidence historických odchylek
+kalendářů je dalším omezením mimo současnou diagnostiku.

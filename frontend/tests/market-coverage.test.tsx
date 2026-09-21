@@ -1,6 +1,7 @@
 import { afterEach, expect, it, vi } from "vitest";
 import { cleanup, render, screen } from "@testing-library/react";
 const fixtures = vi.hoisted(() => ({ api: vi.fn(), session: vi.fn() }));
+vi.mock("../components/market-pipeline-panel", () => ({ MarketPipelinePanel: () => <div>Datová fronta</div> }));
 vi.mock("../lib/api", () => ({ api: fixtures.api }));
 vi.mock("../lib/auth", () => ({ session: fixtures.session }));
 vi.mock("../components/mutation-form", () => ({ MutationForm: ({ title }: {title: string}) => <section>{title}</section> }));

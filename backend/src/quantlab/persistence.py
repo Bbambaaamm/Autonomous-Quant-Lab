@@ -432,7 +432,9 @@ def _sqlite_fk(dbapi_connection: Any, _: Any) -> None:
 
 def create_test_schema(engine: Engine) -> None:
     """Izolovaný helper; runtime PostgreSQL bootstrap vždy používá Alembic."""
+    import quantlab.asset_directory  # noqa: F401
     import quantlab.market_catalog  # noqa: F401
+    import quantlab.market_pipeline  # noqa: F401
     import quantlab.phase7  # noqa: F401
 
     Base.metadata.create_all(engine)

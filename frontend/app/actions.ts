@@ -121,3 +121,10 @@ export async function marketCatalogAction(_previous: ActionState, form: FormData
 export async function marketCatalogScheduleAction(_previous: ActionState, form: FormData): Promise<ActionState> {
     return result(() => mutate("/operator/market-coverage/schedule", { reason: value(form, "reason") }), "Denní úloha je evidována. Její zapnutí a průběh ověřte na stránce Provoz.");
 }
+
+export async function marketIdentitiesAction(_previous: ActionState, form: FormData): Promise<ActionState> {
+    return result(() => mutate("/operator/market-pipeline/identities", { reason: value(form, "reason") }), "Adresář identit poskytovatele byl ověřen a uložen.");
+}
+export async function marketBatchAction(_previous: ActionState, form: FormData): Promise<ActionState> {
+    return result(() => mutate("/operator/market-pipeline/batches", { start: value(form, "start"), end: value(form, "end"), reason: value(form, "reason") }), "Dávka je připravena. Stav fronty ověřte níže a zapnutí workeru v Provozu.");
+}

@@ -1,0 +1,29 @@
+import Link from "next/link";
+import { MutationForm } from "@/components/mutation-form";
+import { marketBatchAction, marketIdentitiesAction } from "@/app/actions";
+import { dateText } from "@/lib/display";
+export type Pipeline = {
+  batch: null | { id: string; start: string; end: string; provider: string };
+  counts: Record<string, number>; total: number; matched: number; query: string; rank: string; limit: number; offset: number; latest_session: string;
+  identity_directory: { snapshot_id: string | null; received_at: string | null };
+  configured_provider: string; feed: string; credentials_configured: boolean;
+  items: {symbol: string; state: string; bars: number; coverage: string | null; momentum: string | null; trend: string | null; mean_reversion: string | null; detail: string | null}[];
+};
+const labels: Record<string, string> = { DATA_BLOCKED: "Chybí ověřená evidence dat", PENDING: "Čeká", RUNNING: "Stahování", RETRY: "Čeká na opakování", DONE: "Zpracováno", FAILED: "Vyčerpány pokusy", BLOCKED: "Konflikt identity nebo konfigurace", ACCESS_BLOCKED: "Chybí přístup ke zdroji", UNSUPPORTED_VENUE: "Nepodporovaná burza" };
+function percentage(value: string | null) { return value === null ? "Neověřeno" : `${(Number(value) * 100).toLocaleString("cs-CZ", { maximumFractionDigits: 2 })} %`; }
+export function MarketPipelinePanel({ data, admin }: {data: Pipeline; admin: boolean}) {
+  const page = Math.floor(data.offset / data.limit) + 1;
+  const href = (n: number) => `/market?${new URLSearchParams({ price_q: data.query, price_rank: data.rank, price_page: String(n) })}`;
+  const start = new Date(`${data.latest_session}T00:00:00Z`); start.setUTCDate(start.getUTCDate() - 400);
+  return <>
+    <section className="card"><h2>Cenová data a technický přehled</h2><p>Zdroj: {data.configured_provider} · feed {data.feed}. Přístupové údaje: {data.credentials_configured ? "nastavené; oprávnění ověří požadavek" : "nenastavené"}.</p><p>Adresář identit: {data.identity_directory.received_at ? dateText(data.identity_directory.received_at) : "Dosud nenačtený"}. Poslední uzavřená seance: {dateText(data.latest_session)}.</p>
+      <p>Feed IEX neobsahuje celý objem amerického trhu. Technické ukazatele níže používají neupravené ceny; splity a dividendy je mohou ovlivnit. Nejde o validované investiční doporučení ani schválení strategie.</p>
+      {data.batch ? <><p>Rozsah dávky: {dateText(data.batch.start)} až {dateText(data.batch.end)} · {data.total.toLocaleString("cs-CZ")} titulů v poslední dávce</p><div className="grid">{Object.entries(data.counts).map(([state, count]) => <p key={state}><strong>{labels[state] ?? state}</strong><br />{count.toLocaleString("cs-CZ")}</p>)}</div></> : <p>Dosud není založená dávka cenových dat.</p>}
+      <form method="get"><label>Hledat symbol v cenové dávce<input name="price_q" defaultValue={data.query} maxLength={100} /></label><label>Řazení<select name="price_rank" defaultValue={data.rank}><option value="symbol">Symbol</option><option value="momentum">Změna za 126 seancí</option><option value="trend">Trend 20/100</option><option value="mean_reversion">Odchylka od průměru</option></select></label><button type="submit">Zobrazit výběr</button></form>
+      <p>{data.matched.toLocaleString("cs-CZ")} výsledků · strana {page}</p>
+      <div style={{ overflowX: "auto" }}><table><thead><tr><th>Symbol</th><th>Stav</th><th>Počet seancí</th><th>Pokrytí období</th><th>Změna za 126 seancí</th><th>Trend 20/100</th><th>Odchylka od průměru</th></tr></thead><tbody>{data.items.map(row => <tr key={row.symbol}><td>{row.symbol}</td><td style={{whiteSpace:"normal"}}>{labels[row.state] ?? row.state}{row.detail && <small style={{display:"block",maxWidth:320}}>{row.detail === "RAW_PRICE_DIAGNOSTIC_ONLY" ? "Pouze diagnostika neupravených cen" : row.detail === "INSUFFICIENT_HISTORY_OR_GAPS" ? "Krátká nebo neúplná historie" : row.detail}</small>}</td><td>{row.bars}</td><td>{percentage(row.coverage)}</td><td>{percentage(row.momentum)}</td><td>{percentage(row.trend)}</td><td>{percentage(row.mean_reversion)}</td></tr>)}</tbody></table></div><p>Úspěšné zpracování samo nezaručuje úplnou historii.</p><nav aria-label="Stránkování cenových dat">{page > 1 && <Link href={href(page - 1)}>← Předchozí </Link>}{data.offset + data.limit < data.matched && <Link href={href(page + 1)}> Další →</Link>}</nav>
+    </section>
+    {admin && <div className="grid"><MutationForm action={marketIdentitiesAction} title="1. Ověřit a načíst identity poskytovatele" submit="Načíst identity"><p>Jeden požadavek do adresáře Alpaca. Přístupové údaje zůstávají na serveru.</p><label>Důvod<textarea name="reason" required minLength={3} defaultValue="Příprava širokého sledování trhu" /></label></MutationForm>
+    <MutationForm action={marketBatchAction} title="2. Spustit průběžný sběr cen" submit="Připravit sběr"><p>Fronta postupně zpracuje instrumenty, obnoví přerušenou práci a zaznamená chyby. Po dokončení pokračuje dalšími uzavřenými seancemi. Zapnutí a vypnutí jsou v Provozu.</p><label>Historie od<input type="date" name="start" required defaultValue={start.toISOString().slice(0,10)} /></label><label>Do uzavřené seance<input type="date" name="end" required defaultValue={data.latest_session} max={data.latest_session} /></label><label>Důvod<textarea name="reason" required minLength={3} defaultValue="Sběr cen pro přehled celého dostupného trhu" /></label></MutationForm></div>}
+  </>;
+}
