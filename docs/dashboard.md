@@ -33,3 +33,9 @@ porovnáním normalizují do UTC; hodnota bez offsetu z pole označeného UTC se
 
 Kontroly: `npm run lint`, `npm run typecheck`, `npm test`, `npm run build`. Při 503 nebo síťové
 chybě stránka zobrazí unavailable stav; prázdná evidence se nikdy nenahrazuje nulami.
+
+Seznam strategií zobrazuje identitu implementace a odkaz na nastavení nasazení.
+Lookback a rebalance nejsou vlastnosti samotné registrace: detail zobrazuje uložené
+`parameters_json` každého deploymentu samostatně, bez doplnění výchozích hodnot.
+Globální data readiness zahrnuje všechny aktivní XNYS instrumenty, nikoli jen universe
+jednoho deploymentu; chybějící instrument proto není sám o sobě důkazem blokace jeho běhu.
