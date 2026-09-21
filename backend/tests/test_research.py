@@ -85,6 +85,11 @@ def test_us_exchange_calendar_rejects_sunday() -> None:
     assert calendar.is_session(date(2026, 9, 20)) is False
 
 
+def test_us_exchange_calendar_rejects_sunday_2025_01_05() -> None:
+    calendar=USExchangeCalendar(frozenset())
+    assert calendar.is_session(date(2025,1,5)) is False
+
+
 def test_split_and_walk_forward_boundaries() -> None:
     source = bars(20)
     split = chronological_split(source, 0.5, 0.25)
