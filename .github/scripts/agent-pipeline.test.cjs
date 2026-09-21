@@ -320,6 +320,25 @@ test("v2 classifier je jednoznačný a unsafe failures fail-closed", () => {
   assert.equal(pipeline.classifyCiFailure({ jobs: [job("api")], runHeadSha: sha, expectedHeadSha: "b".repeat(40), sourceRunId: 42, runAttempt: 1, config: classifierConfig, logExcerpt: "failure" }).disposition, "NO_WRITE");
 });
 
+test("classifier uses failed-step metadata instead of successful setup log keywords", () => {
+  const sha = "a".repeat(40);
+  const setupLog = "Run uv sync --locked --all-groups\nResolved dependencies\nRun uv run ruff format --check .\n1 file would be reformatted\nError: Process completed with exit code 1.";
+  const classify = (name, failedStep, logExcerpt = setupLog) => pipeline.classifyCiFailure({
+    jobs: [{id: 7, name, conclusion: "failure", steps: [
+      {name: "uv sync --locked --all-groups", conclusion: "success"},
+      {name: failedStep, conclusion: "failure"},
+    ]}], runHeadSha: sha, expectedHeadSha: sha, sourceRunId: 42,
+    runAttempt: 1, config: classifierConfig, logExcerpt,
+  });
+  assert.equal(classify("quality", "Run uv run ruff format --check .").failureClass, "lint-format");
+  assert.equal(classify("quality", "Run uv run ruff format --check .").disposition, "FIX");
+  assert.equal(classify("quality", "Run uv run mypy .").failureClass, "typecheck");
+  assert.equal(classify("quality", "Run uv sync --locked --all-groups").failureClass, "dependency-lock");
+  assert.equal(classify("quality", "Run uv sync --locked --all-groups").disposition, "NEEDS_HUMAN");
+  assert.equal(classify("security", "Run npm audit").disposition, "NEEDS_HUMAN");
+  assert.equal(classify("quality", "Unrecognized validation", "ruff format error").disposition, "NEEDS_HUMAN");
+});
+
 test("v2 classes, diagnostics and trusted command map are deterministic", () => {
   assert.deepEqual(pipeline.FAILURE_CLASSES, ["lint-format", "typecheck", "unit-test", "api-test", "integration-postgres", "frontend-test-build", "security", "container-build", "production-smoke", "dependency-lock", "infra-transient", "multiple-failures", "unknown"]);
   assert.equal(pipeline.normalizedFailureClass({ name: "quality", steps: [{ name: "mypy", conclusion: "failure" }] }), "typecheck");

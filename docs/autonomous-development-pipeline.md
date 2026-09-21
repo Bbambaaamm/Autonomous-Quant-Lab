@@ -226,6 +226,11 @@ broker/execution, or live-trading failures fail closed to maintainer interventio
 fix budget is two commits per linked PR; an exact `(source SHA, failure evidence)` marker makes
 retries idempotent. Exhaustion is not waived.
 
+Failure classes use the job name and only its failed-step names. Successful setup
+commands or incidental keywords in whole-job logs cannot classify a Ruff failure
+as a dependency failure. Bounded diagnostics still supply transient-error evidence
+and protected-invariant checks; unknown failed-step metadata remains fail-closed.
+
 The fixer is split into three trust domains: Codex patch generation has `OPENAI_API_KEY`, a
 read-only GitHub permission and no repository command execution; validation has neither model
 secret nor write credential and verifies checksums, paths, patch bounds and prescribed checks;
