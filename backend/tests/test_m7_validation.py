@@ -49,7 +49,10 @@ def _seed(tmp_path):
         "m7-provider",
         {
             "M7A": [daily_bar(day, Decimal(100 + index)) for index, day in enumerate(sessions)],
-            "M7B": [\n                daily_bar(day, Decimal(110 - index) + Decimal("0.5"))\n                for index, day in enumerate(sessions)\n            ],
+            "M7B": [
+                daily_bar(day, Decimal(110 - index) + Decimal("0.5"))
+                for index, day in enumerate(sessions)
+            ],
         },
         {"M7A": [split], "M7B": []},
     )
