@@ -424,3 +424,181 @@ def test_receipt_recheck_endpoint_requires_real_admin_role(tmp_path, monkeypatch
     assert api.post("/operator/market-pipeline/recheck", json=body).status_code == 409
     body["symbols"] = ["TEST"] * 51
     assert api.post("/operator/market-pipeline/recheck", json=body).status_code == 422
+
+
+def _empty_queue_env(tmp_path):
+    from sqlalchemy.orm import sessionmaker
+    from test_market_pipeline import END, NOW, START, assets
+
+    from quantlab.asset_directory import AssetDirectoryService
+    from quantlab.market_pipeline import MarketPipeline
+    from quantlab.phase4 import Phase4Repository
+
+    factory = sessionmaker(Phase4Repository(f"sqlite:///{tmp_path / 'empty-queue.db'}").engine)
+    snapshot = AssetDirectoryService(factory).sync(
+        assets(), actor="test", reason="Queue fixture", received_at=NOW
+    )
+    pipeline = MarketPipeline(factory)
+    batch = pipeline.create(snapshot, START, END, "alpaca:iex", "test", "Empty queue", NOW)
+    return factory, pipeline, batch
+
+
+def test_empty_prices_remain_counted_without_inventing_actions_or_signal(tmp_path):
+    import json
+
+    from sqlalchemy import func, select
+    from test_market_pipeline import NOW, Provider
+
+    from quantlab.market_pipeline import MarketTask
+    from quantlab.market_screening import MarketScreening, MarketScreenRun
+    from quantlab.persistence import MarketDataIngestionRecord, MarketObservationRecord
+
+    factory, pipeline, batch = _empty_queue_env(tmp_path)
+
+    class Empty(Provider):
+        def historical_daily(self, *args):
+            return []
+
+        def corporate_actions(self, *args):
+            pytest.fail("No prices must not pretend to verify corporate actions")
+
+    for _ in range(2):
+        pipeline.step(lambda _: Empty(), clock=lambda: NOW)
+    report = pipeline.read(state="NO_PRICE_DATA")
+    assert report["total"] == report["matched"] == 2
+    assert report["counts"] == {"NO_PRICE_DATA": 2}
+    assert report["coverage_summary"]["downloaded"] == 0
+    assert all(r["bars"] == 0 and r["coverage"] == 0 for r in report["items"])
+    assert all(r["momentum"] is None for r in report["items"])
+    with factory() as session:
+        assert session.scalar(select(func.count()).select_from(MarketObservationRecord)) == 0
+        tasks = list(session.scalars(select(MarketTask)))
+        for task in tasks:
+            evidence = json.loads(task.evidence_json)
+            assert not evidence["eligible_for_promotion"]
+            assert not evidence["screening"]["eligible"]
+            assert not evidence["screening"]["research_eligible"]
+            assert "NO_PRICE_DATA" in evidence["screening"]["reasons"]
+            receipt = evidence["price_receipt"]
+            ingest = session.get(MarketDataIngestionRecord, receipt["ingestion_id"])
+            assert ingest.status == "SUCCEEDED" and ingest.row_count == 0
+            assert receipt["returned_bars"] == 0
+            assert task.attempts == 1
+    run = MarketScreening(factory).finalize(batch, NOW)
+    with factory() as session:
+        saved = session.get(MarketScreenRun, run)
+        assert saved.total == 2 and saved.eligible == 0
+
+
+def test_due_retry_is_not_starved_by_older_pending_backfill(tmp_path):
+    from datetime import timedelta
+
+    from test_market_pipeline import NOW, Provider
+
+    from quantlab.market_data import ProviderUnavailable
+
+    _, pipeline, _ = _empty_queue_env(tmp_path)
+    calls = []
+
+    class Failing(Provider):
+        def historical_daily(self, symbol, start, end):
+            calls.append(symbol)
+            raise ProviderUnavailable("fixture outage")
+
+    class Recovered(Provider):
+        def historical_daily(self, symbol, start, end):
+            calls.append(symbol)
+            return super().historical_daily(symbol, start, end)
+
+    pipeline.step(lambda _: Failing(), clock=lambda: NOW)
+    assert pipeline.read()["counts"] == {"RETRY": 1, "PENDING": 1}
+    pipeline.step(lambda _: Recovered(), clock=lambda: NOW + timedelta(minutes=6))
+    assert calls[0] == calls[1]
+    assert pipeline.read()["counts"] == {"DONE": 1, "PENDING": 1}
+    pipeline.step(lambda _: Recovered(), clock=lambda: NOW + timedelta(minutes=6))
+    assert calls[-1] != calls[0]
+    assert pipeline.read()["counts"] == {"DONE": 2}
+
+
+def test_retry_backoff_and_attempt_limit_still_apply(tmp_path):
+    from datetime import timedelta
+
+    from sqlalchemy import select
+    from test_market_pipeline import NOW, Provider
+
+    from quantlab.market_data import ProviderUnavailable
+    from quantlab.market_pipeline import MarketTask
+
+    factory, pipeline, _ = _empty_queue_env(tmp_path)
+    calls = []
+
+    class Failing(Provider):
+        def historical_daily(self, symbol, start, end):
+            calls.append(symbol)
+            raise ProviderUnavailable("fixture outage")
+
+    pipeline.step(lambda _: Failing(), clock=lambda: NOW)
+    pipeline.step(lambda _: Failing(), clock=lambda: NOW + timedelta(seconds=1))
+    assert calls[0] != calls[1]  # Not due yet: first retry cannot bypass backoff.
+    for minutes in (6, 6, 17, 17):
+        pipeline.step(
+            lambda _: Failing(), clock=lambda minutes=minutes: NOW + timedelta(minutes=minutes)
+        )
+    assert pipeline.read()["counts"] == {"FAILED": 2}
+    with factory() as session:
+        assert all(t.attempts == 3 for t in session.scalars(select(MarketTask)))
+
+
+def test_empty_increment_does_not_erase_or_reapprove_cached_prices(tmp_path):
+    from datetime import timedelta
+
+    from sqlalchemy import func, select
+    from test_market_pipeline import NOW, Provider
+
+    from quantlab.market_pipeline import MarketTask
+    from quantlab.persistence import MarketObservationRecord
+
+    factory, pipeline, _ = _empty_queue_env(tmp_path)
+    pipeline.step(lambda _: Provider(), clock=lambda: NOW)
+    with factory() as session, session.begin():
+        task = session.scalar(select(MarketTask).where(MarketTask.state == "DONE"))
+        task.state = "RETRY"
+        task.retry_at = NOW
+        expected_bars, symbol = task.bars, task.symbol
+        original_count = session.scalar(select(func.count()).select_from(MarketObservationRecord))
+
+    class Empty(Provider):
+        def historical_daily(self, *args):
+            return []
+
+        def corporate_actions(self, *args):
+            pytest.fail("Empty incremental response cannot prove fresh actions")
+
+    pipeline.step(lambda _: Empty(), clock=lambda: NOW + timedelta(minutes=1))
+    row = pipeline.read(query=symbol)["items"][0]
+    assert row["state"] == "RETRY" and row["bars"] == expected_bars
+    assert row["momentum"] is None
+    with factory() as session:
+        assert (
+            session.scalar(select(func.count()).select_from(MarketObservationRecord))
+            == original_count
+        )
+
+
+def test_no_price_data_is_reconsidered_in_next_daily_batch(tmp_path):
+    from datetime import timedelta
+
+    from test_market_pipeline import NOW, Provider
+
+    _, pipeline, _ = _empty_queue_env(tmp_path)
+
+    class Empty(Provider):
+        def historical_daily(self, *args):
+            return []
+
+    for _ in range(2):
+        pipeline.step(lambda _: Empty(), clock=lambda: NOW)
+    result = pipeline.step(lambda _: Empty(), clock=lambda: NOW + timedelta(days=1))
+    assert result["outcome"] == "MARKET_BATCH_CREATED"
+    assert pipeline.read()["counts"] == {"PENDING": 2}
+    assert pipeline.read()["total"] == 2

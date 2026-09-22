@@ -65,7 +65,7 @@ class ReceivedData:
         self.bars = provider.historical_daily(symbol, start, end)
         self.actions = (
             provider.corporate_actions(symbol, action_start or start, end)
-            if self.metadata.supports_actions
+            if self.metadata.supports_actions and self.bars
             else []
         )
 
@@ -255,7 +255,15 @@ class MarketPipeline:
                         (MarketTask.state == "RUNNING") & (MarketTask.lease_until <= now),
                     ),
                 )
-                .order_by(MarketTask.retry_at, MarketTask.task_id)
+                .order_by(
+                    case(
+                        (MarketTask.state == "RUNNING", 0),
+                        (MarketTask.state == "RETRY", 1),
+                        else_=2,
+                    ),
+                    MarketTask.retry_at,
+                    MarketTask.task_id,
+                )
                 .with_for_update(skip_locked=True)
                 .limit(1)
             )
@@ -316,9 +324,10 @@ class MarketPipeline:
                 action_start=start,
                 raw_only=isinstance(provider, AlpacaProvider),
             )
+            price_received_at = require_utc(clock())
             stage = "uložení cen"
             outcome = PersistentMarketDataService(self.sessions).ingest(
-                received, instrument, fetch_start, end, require_utc(clock())
+                received, instrument, fetch_start, end, price_received_at
             )
             if outcome.status != "SUCCEEDED":
                 detail = "Poskytovatel nevrátil platná data; detail je v evidenci importu"
@@ -327,63 +336,92 @@ class MarketPipeline:
                 evidence = self.screen(
                     instrument.instrument_id, expected_provider, start, end, require_utc(clock())
                 )
-                stage = "ověření corporate actions a screening"
-                inventory_id = None
-                inventory_received_at = None
-                if isinstance(provider, AlpacaProvider):
-                    rows = provider.current_action_inventory(instrument.symbol)
-                    inventory_received_at = require_utc(clock())
-                    payload = {
-                        "source": "alpaca_rest_current_inventory",
-                        "normalization_version": NORMALIZATION_VERSION,
-                        "symbol": instrument.symbol,
-                        "instrument_id": instrument.instrument_id,
-                        "request_start": "1970-01-01",
-                        "request_end": "9999-12-31",
-                        "data_quality": "all",
-                        "rows": rows,
-                    }
-                    digest = identity(payload)
-                    inventory_id = identity(
-                        {"task": task_id, "received_at": inventory_received_at, "content": digest}
+                if not received.bars:
+                    no_prices = evidence["bars"] == 0
+                    state = "NO_PRICE_DATA" if no_prices else "RETRY"
+                    if no_prices:
+                        evidence["screening"]["reasons"].insert(0, "NO_PRICE_DATA")
+                    detail = (
+                        "Zdroj nevrátil ceny pro požadované období a feed"
+                        if no_prices
+                        else "Zdroj nevrátil požadovaný přírůstek; dříve uložené ceny zůstávají"
                     )
-                    with self.sessions() as session, session.begin():
-                        _lock(session, f"market-actions:{inventory_id}")
-                        if session.get(MarketActionReceipt, inventory_id) is None:
-                            session.add(
-                                MarketActionReceipt(
-                                    receipt_id=inventory_id,
-                                    task_id=task_id,
-                                    received_at=inventory_received_at,
-                                    content_hash=digest,
-                                    payload_json=canonical(payload),
-                                )
-                            )
-                    evidence["current_action_receipt_id"] = inventory_id
-                    actions = provider.normalize_current_actions(
-                        instrument.symbol, rows, start, end, inventory_received_at
+                    evidence.update(
+                        momentum=None,
+                        trend=None,
+                        mean_reversion=None,
+                        reason="NO_PRICE_DATA" if no_prices else "EMPTY_INCREMENTAL_RESPONSE",
+                        price_receipt={
+                            "ingestion_id": outcome.ingestion_id,
+                            "provider": expected_provider,
+                            "requested_start": fetch_start,
+                            "requested_end": end,
+                            "received_at": price_received_at,
+                            "returned_bars": 0,
+                        },
                     )
-                    readiness = None
                 else:
-                    actions = received.actions
-                    readiness = PersistentMarketDataService(
-                        self.sessions, clock=clock
-                    ).verify_corporate_action_readiness(
-                        received, instrument, start, end, require_utc(clock())
+                    stage = "ověření corporate actions a screening"
+                    inventory_id = None
+                    inventory_received_at = None
+                    if isinstance(provider, AlpacaProvider):
+                        rows = provider.current_action_inventory(instrument.symbol)
+                        inventory_received_at = require_utc(clock())
+                        payload = {
+                            "source": "alpaca_rest_current_inventory",
+                            "normalization_version": NORMALIZATION_VERSION,
+                            "symbol": instrument.symbol,
+                            "instrument_id": instrument.instrument_id,
+                            "request_start": "1970-01-01",
+                            "request_end": "9999-12-31",
+                            "data_quality": "all",
+                            "rows": rows,
+                        }
+                        digest = identity(payload)
+                        inventory_id = identity(
+                            {
+                                "task": task_id,
+                                "received_at": inventory_received_at,
+                                "content": digest,
+                            }
+                        )
+                        with self.sessions() as session, session.begin():
+                            _lock(session, f"market-actions:{inventory_id}")
+                            if session.get(MarketActionReceipt, inventory_id) is None:
+                                session.add(
+                                    MarketActionReceipt(
+                                        receipt_id=inventory_id,
+                                        task_id=task_id,
+                                        received_at=inventory_received_at,
+                                        content_hash=digest,
+                                        payload_json=canonical(payload),
+                                    )
+                                )
+                        evidence["current_action_receipt_id"] = inventory_id
+                        actions = provider.normalize_current_actions(
+                            instrument.symbol, rows, start, end, inventory_received_at
+                        )
+                        readiness = None
+                    else:
+                        actions = received.actions
+                        readiness = PersistentMarketDataService(
+                            self.sessions, clock=clock
+                        ).verify_corporate_action_readiness(
+                            received, instrument, start, end, require_utc(clock())
+                        )
+                    cutoff = require_utc(clock())
+                    evidence = self.screen(
+                        instrument.instrument_id,
+                        expected_provider,
+                        start,
+                        end,
+                        cutoff,
+                        actions=actions,
+                        readiness_id=readiness,
+                        inventory_id=inventory_id,
+                        inventory_received_at=inventory_received_at,
                     )
-                cutoff = require_utc(clock())
-                evidence = self.screen(
-                    instrument.instrument_id,
-                    expected_provider,
-                    start,
-                    end,
-                    cutoff,
-                    actions=actions,
-                    readiness_id=readiness,
-                    inventory_id=inventory_id,
-                    inventory_received_at=inventory_received_at,
-                )
-                state, detail = "DONE", str(evidence["reason"])
+                    state, detail = "DONE", str(evidence["reason"])
         except DatasetInvalid as exc:
             state = "DATA_BLOCKED"
             detail = (
@@ -624,6 +662,7 @@ class MarketPipeline:
                 "FAILED",
                 "BLOCKED",
                 "DATA_BLOCKED",
+                "NO_PRICE_DATA",
                 "ACCESS_BLOCKED",
                 "UNSUPPORTED_VENUE",
             }

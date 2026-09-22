@@ -740,3 +740,72 @@ def test_current_buyer_exception_requires_unambiguous_documented_terms(fault):
             date(2026, 9, 21),
             datetime(2026, 9, 22, tzinfo=UTC),
         )
+
+
+@pytest.mark.parametrize("empty", [None, []])
+def test_terminal_empty_single_symbol_bars_are_not_transport_failure(empty):
+    provider = AlpacaProvider(
+        "fixture-key",
+        "fixture-secret",
+        lambda _: (),
+        {"AAPL": "asset"},
+        lambda *args: (
+            200,
+            {},
+            json.dumps(
+                {
+                    "symbol": "AAPL",
+                    "bars": empty,
+                    "next_page_token": None,
+                }
+            ).encode(),
+        ),
+    )
+    assert provider.historical_daily("AAPL", date(2026, 1, 2), date(2026, 9, 21)) == []
+
+
+@pytest.mark.parametrize("fault", ["missing_bars", "missing_token", "foreign", "object", "more"])
+def test_null_history_requires_complete_matching_envelope(fault):
+    body = {"symbol": "AAPL", "bars": None, "next_page_token": None}
+    if fault == "missing_bars":
+        del body["bars"]
+    elif fault == "missing_token":
+        del body["next_page_token"]
+    elif fault == "foreign":
+        body["symbol"] = "OTHER"
+    elif fault == "object":
+        body["bars"] = {}
+    else:
+        body["next_page_token"] = "next"
+    provider = AlpacaProvider(
+        "key",
+        "secret",
+        lambda _: (),
+        {"AAPL": "asset"},
+        lambda *args: (200, {}, json.dumps(body).encode()),
+    )
+    with pytest.raises(InvalidProviderResponse):
+        provider.historical_daily("AAPL", date(2026, 1, 2), date(2026, 9, 21))
+
+
+def test_null_after_partial_page_cannot_silently_erase_or_complete_history():
+    pages = iter(
+        [
+            {
+                "bars": [
+                    {"t": "2026-01-02T05:00:00Z", "o": 10, "h": 10, "l": 10, "c": 10, "v": 20}
+                ],
+                "next_page_token": "next",
+            },
+            {"symbol": "AAPL", "bars": None, "next_page_token": None},
+        ]
+    )
+    provider = AlpacaProvider(
+        "key",
+        "secret",
+        lambda _: (),
+        {"AAPL": "asset"},
+        lambda *args: (200, {}, json.dumps(next(pages)).encode()),
+    )
+    with pytest.raises(InvalidProviderResponse):
+        provider.historical_daily("AAPL", date(2026, 1, 2), date(2026, 9, 21))

@@ -484,13 +484,34 @@ class AlpacaProvider:
             raise InvalidProviderResponse("Alpaca JSON nemá objektový kořen")
         return cast(dict[str, Any], payload)
 
-    def _get_all(self, path: str, query: dict[str, str], collection: str) -> list[Any]:
+    def _get_all(
+        self,
+        path: str,
+        query: dict[str, str],
+        collection: str,
+        *,
+        empty_symbol: str | None = None,
+    ) -> list[Any]:
         """Vyčerpá stránkování jednoduché list kolekce (např. OHLCV bars)."""
         rows: list[Any] = []
         tokens: set[str] = set()
         while True:
             payload = self._get(path, query)
             page = payload.get(collection)
+            # Observed single-symbol empty response: explicit null bars, matching
+            # symbol and terminal page. Missing/wrong/mid-pagination data stays invalid.
+            if (
+                collection == "bars"
+                and empty_symbol is not None
+                and "bars" in payload
+                and page is None
+                and payload.get("symbol") == empty_symbol
+                and "next_page_token" in payload
+                and payload["next_page_token"] is None
+                and not rows
+                and not tokens
+            ):
+                return []
             if not isinstance(page, list):
                 raise InvalidProviderResponse(f"Alpaca odpověď neobsahuje {collection}")
             rows.extend(page)
@@ -548,6 +569,7 @@ class AlpacaProvider:
                 "feed": self._feed,
             },
             "bars",
+            empty_symbol=provider_symbol,
         )
         try:
             bars = [

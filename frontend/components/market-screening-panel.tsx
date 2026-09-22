@@ -7,6 +7,7 @@ export type Screening = {
   items: { symbol: string; eligible: boolean; momentum: string | null; trend: string | null; mean_reversion: string | null; reasons: string[] }[];
 };
 const reasons: Record<string, string> = {
+  NO_PRICE_DATA: "Zdroj nevrátil ceny pro toto období",
   ACTIONS_NOT_VERIFIED: "Neověřené dividendy a splity", SHORT_HISTORY: "Krátká historie", LOW_COVERAGE: "Neúplné období", RECENT_GAPS: "Chybí některá z posledních seancí", INVALID_ADJUSTED_PRICE: "Neplatná upravená cena", LOW_PRICE: "Cena pod limitem", LOW_FEED_LIQUIDITY: "Objem daného feedu pod limitem", SCREENING_NOT_VERIFIED: "Starší import bez ověřeného screeningu", DATA_BLOCKED: "Chybí evidence corporate actions", ACCESS_BLOCKED: "Nepřístupný datový zdroj", FAILED: "Import selhal", BLOCKED: "Konflikt identity", UNSUPPORTED_VENUE: "Nepodporovaná burza",
 };
 const percent = (value: string | null) => value === null ? "—" : `${(Number(value) * 100).toLocaleString("cs-CZ", { maximumFractionDigits: 2 })} %`;

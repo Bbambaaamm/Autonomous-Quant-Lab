@@ -27,3 +27,10 @@ it("distinguishes price coverage from verified corporate actions", () => {
  render(<MarketPipelinePanel data={data} admin={false}/>);
  expect(screen.getByText(/Ani 100 % nepotvrzuje úplnost událostí/)).toBeInTheDocument();
 });
+
+it("labels missing feed prices and preserves this filter across pages", () => {
+ render(<MarketPipelinePanel data={{...data,state:"NO_PRICE_DATA",counts:{NO_PRICE_DATA:1},items:[{...data.items[0],state:"NO_PRICE_DATA",bars:0,coverage:"0",detail:"Zdroj nevrátil ceny pro požadované období a feed"}]}} admin={false}/>);
+ expect(screen.getByRole("combobox",{name:"Stav zpracování"})).toHaveValue("NO_PRICE_DATA");
+ expect(screen.getByText("Zdroj nevrátil ceny pro požadované období a feed")).toBeInTheDocument();
+ expect(screen.getByRole("link",{name:/Další/})).toHaveAttribute("href","/market?price_q=IBM+%26&price_rank=trend&price_page=3&price_state=NO_PRICE_DATA");
+});
