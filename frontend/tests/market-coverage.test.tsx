@@ -1,3 +1,4 @@
+vi.mock("../components/market-screening-panel", () => ({ MarketScreeningPanel: () => null }));
 import { afterEach, expect, it, vi } from "vitest";
 import { cleanup, render, screen } from "@testing-library/react";
 const fixtures = vi.hoisted(() => ({ api: vi.fn(), session: vi.fn() }));

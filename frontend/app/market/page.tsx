@@ -1,3 +1,4 @@
+import { MarketScreeningPanel, type Screening } from "@/components/market-screening-panel";
 import { MarketPipelinePanel, type Pipeline } from "@/components/market-pipeline-panel";
 import Link from "next/link";
 import { api } from "@/lib/api";
@@ -12,7 +13,7 @@ type Coverage = {
   items: { symbol: string; name: string; exchange: string; security_type: string }[];
   exchanges: { exchange: string; count: number }[]; limitations: string[];
 };
-export default async function Market({ searchParams }: { searchParams: Promise<{ q?: string; page?: string; price_q?: string; price_rank?: string; price_page?: string }> }) {
+export default async function Market({ searchParams }: { searchParams: Promise<{ q?: string; page?: string; price_q?: string; price_rank?: string; price_page?: string; screen_q?: string; screen_rank?: string; screen_page?: string }> }) {
   const params = await searchParams;
   const q = (typeof params.q === "string" ? params.q : "").slice(0, 100);
   const requested = Number(params.page ?? 1);
@@ -21,18 +22,24 @@ export default async function Market({ searchParams }: { searchParams: Promise<{
   const priceRank = ["symbol", "momentum", "trend", "mean_reversion"].includes(params.price_rank ?? "") ? params.price_rank! : "symbol";
   const priceRequested = Number(params.price_page ?? 1);
   const pricePage = Number.isSafeInteger(priceRequested) && priceRequested > 0 && priceRequested < 1000000 ? priceRequested : 1;
-  const [data, user, pipeline] = await Promise.all([
+  const screenQuery = (typeof params.screen_q === "string" ? params.screen_q : "").slice(0,100);
+  const screenRank = ["momentum", "trend", "mean_reversion"].includes(params.screen_rank ?? "") ? params.screen_rank! : "momentum";
+  const screenRequested = Number(params.screen_page ?? 1);
+  const screenPage = Number.isSafeInteger(screenRequested) && screenRequested > 0 && screenRequested < 1000000 ? screenRequested : 1;
+  const [data, user, pipeline, screening] = await Promise.all([
     api<Coverage>(`/operator/market-coverage?q=${encodeURIComponent(q)}&offset=${(page - 1) * 50}&limit=50`), session(), api<Pipeline>(`/operator/market-pipeline?${new URLSearchParams({q:priceQuery,rank:priceRank,offset:String((pricePage - 1)*50),limit:"50"})}`),
+    api<Screening>(`/operator/market-screening?${new URLSearchParams({q:screenQuery,rank:screenRank,offset:String((screenPage-1)*50),limit:"50"})}`),
   ]);
   const pageLink = (n: number) => `/market?${new URLSearchParams({ q, page: String(n) })}`;
   return <>
     <h1>Pokrytí trhu</h1>
+    <MarketScreeningPanel data={screening} query={screenQuery} rank={screenRank} page={screenPage} />
     <MarketPipelinePanel data={pipeline} admin={user?.role === "ADMIN"} />
     <p className="muted">Cílem je globální sledování. První dostupnou vrstvou je referenční katalog amerických burzovních cenných papírů.</p>
     <div className="grid">
       <section className="card"><h2>Instrumenty v katalogu</h2><strong>{data.snapshot?.listing_count.toLocaleString("cs-CZ") ?? "Dosud nenačteno"}</strong><p>Počet záznamů ve zdroji, nikoli počet instrumentů s cenovými daty.</p></section>
       <section className="card"><h2>Poslední přijetí katalogu</h2><strong>{data.snapshot ? dateText(data.snapshot.received_at) : "Dosud neproběhlo"}</strong><p>{data.status === "STALE" ? "Přijetí katalogu nebo datum zdrojového souboru je starší než tři dny." : data.status === "RECEIVED" ? "Oba zdrojové soubory byly přijaty a zkontrolovány." : "Správce může načíst katalog níže."}</p></section>
-      <section className="card"><h2>Pokrytí cen a historie</h2><strong>Dosud neověřeno</strong><p>Načtení katalogu nespouští stahování cen ani objednávky.</p></section>
+      <section className="card"><h2>Pokrytí cen a historie</h2><strong>{pipeline.coverage_summary ? `${pipeline.coverage_summary.downloaded.toLocaleString("cs-CZ")} titulů s cenami` : "Dosud neověřeno"}</strong><p>Počet se vztahuje k poslední cenové dávce. Neprokazuje úplnost referenčního katalogu ani pokrytí globálních trhů.</p></section>
     </div>
     <section className="card"><h2>Rozsah a zbývající kroky</h2><ul>{data.limitations.map(text => <li key={text}>{text}</li>)}</ul><Link href="/data">Otevřít aktuálně registrované instrumenty a tržní data →</Link></section>
     {data.exchanges.length > 0 && <section className="card"><h2>Burzy v přijatém katalogu</h2><div className="grid">{data.exchanges.map(row => <p key={row.exchange}><strong>{row.exchange}</strong><br />{row.count.toLocaleString("cs-CZ")} záznamů</p>)}</div></section>}

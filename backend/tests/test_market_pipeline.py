@@ -310,3 +310,82 @@ def test_market_job_control_cannot_change_trading_jobs(tmp_path, monkeypatch):
         ).status_code
         == 403
     )
+
+
+def test_old_access_failure_does_not_block_recovered_batch(env):
+    factory, pipeline, _ = env
+    pipeline.step(
+        lambda _: (_ for _ in ()).throw(RuntimeError("MARKET_DATA_ACCESS_DENIED")),
+        clock=lambda: NOW,
+    )
+    later = NOW + timedelta(minutes=1)
+    snapshot = AssetDirectoryService(factory).sync(
+        assets(), actor="test", reason="Credentials recovered", received_at=later
+    )
+    pipeline.create(snapshot, START, END, "alpaca:iex", "test", "Recovery batch", later)
+    pipeline.step(lambda _: Provider(), clock=lambda: later)
+    pipeline.step(lambda _: Provider(), clock=lambda: later)
+    tomorrow = NOW + timedelta(days=1)
+    assert pipeline.refresh(tomorrow) == "MARKET_BATCH_CREATED"
+    assert pipeline.read()["counts"] == {"PENDING": 2}
+
+
+def test_screening_snapshot_preserves_failed_instruments_and_denominator(env):
+    from quantlab.market_screening import MarketScreening
+
+    factory, pipeline, batch = env
+    screens = MarketScreening(factory)
+    assert screens.finalize(batch, NOW) is None
+    pipeline.step(lambda _: Provider(), clock=lambda: NOW)
+    pipeline.step(lambda _: Provider(), clock=lambda: NOW)
+    run = screens.finalize(batch, NOW)
+    assert run == screens.finalize(batch, NOW + timedelta(seconds=1))
+    report = screens.read(limit=1, query="TESTA")
+    assert report["run"]["total"] == 2
+    assert report["matched"] == 1
+    assert report["run"]["eligible"] == 0
+    assert report["items"][0]["reasons"] == ["LOW_FEED_LIQUIDITY"]
+    # Replaying a mutable task must not change the historical selection.
+    with factory() as session, session.begin():
+        task = session.scalar(select(MarketTask).where(MarketTask.batch_id == batch))
+        task.evidence_json = None
+    assert screens.read(limit=1, query="TESTA") == report
+
+
+def test_directory_change_history_never_invents_ipo_or_delisting(env):
+    factory, _, _ = env
+    service = AssetDirectoryService(factory)
+    body = json.loads(assets(("BEFORE", "REMOVED")))
+    t1 = NOW + timedelta(minutes=1)
+    t2 = NOW + timedelta(minutes=2)
+    service.sync(json.dumps(body).encode(), actor="test", reason="History start", received_at=t1)
+    body.pop()
+    body[0]["symbol"] = "AFTER"
+    service.sync(json.dumps(body).encode(), actor="test", reason="History change", received_at=t2)
+    assert service.latest(t1)["total"] == 2
+    changes = service.latest(t2)["changes"]
+    assert changes["symbol_or_venue_changed"] == 1
+    assert changes["no_longer_present"] == 1
+    assert changes["first_seen"] == 0
+
+
+def test_screening_streams_multiple_pages_including_all_unsupported_assets(tmp_path):
+    from quantlab.market_screening import MarketScreening
+
+    factory = sessionmaker(Phase4Repository(f"sqlite:///{tmp_path / 'stream.db'}").engine)
+    snapshot = AssetDirectoryService(factory).sync(
+        assets(tuple(f"T{i:04}" for i in range(205)), exchange="UNKNOWN"),
+        actor="test",
+        reason="Large universe",
+        received_at=NOW,
+    )
+    batch = MarketPipeline(factory).create(
+        snapshot, START, END, "alpaca:iex", "test", "Stream all", NOW
+    )
+    screening = MarketScreening(factory)
+    assert screening.finalize(batch, NOW)
+    data = screening.read(limit=200, offset=200)
+    assert data["run"]["total"] == 205
+    assert data["run"]["eligible"] == 0
+    assert len(data["items"]) == 5
+    assert data["items"][-1]["symbol"] == "T0204"

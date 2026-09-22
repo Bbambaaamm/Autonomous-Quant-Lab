@@ -150,3 +150,52 @@ požadavků na úkol. Jde o rozpočet této fronty, nikoli o měřič celkového
 provozem je nutné potvrdit limity konkrétního účtu. Uvedené US burzy používají
 konfigurovaný kalendář XNYS; plná nezávislá evidence historických odchylek
 kalendářů je dalším omezením mimo současnou diagnostiku.
+
+## Aktuální screening a ověření 22. 9. 2026
+
+Živě potvrzené automatické nasazení #166 a opakovaný katalogový běh v 01:00 UTC.
+Adresář Alpaca vrátil 14 346 aktivních identit. Dávka 17. 8. 2025–21. 9. 2026
+obsahuje všechny: 13 197 na konfigurovaných burzách a 1 149 s nepodporovanou burzou.
+Číslo se liší od referenčních 13 224 položek; adresáře nejsou totožné množiny.
+První cenové úlohy skončily opakováním bez nového úspěšného importu. Cenová fronta
+byla administrátorsky pozastavena do vyřešení příčiny; katalog a identity zůstaly
+zapnuté. Dostupný adresář není důkaz dostupného cenového zdroje.
+
+Nová verze přidává oddělený screening `us-current-universe-1`. Pravidla jsou
+verzovaná před výpočtem: 127 seancí, minimální pokrytí 98 %, žádná mezera v posledních
+127 seancích, poslední raw cena alespoň 5 USD a průměrný dolarový objem posledních
+20 seancí alespoň 1 milion USD **na konkrétním feedu**. Nejde o slib výnosu ani
+ověřený investiční model. IEX se nevydává za konsolidovanou likviditu.
+
+Po stažení musí být corporate actions ověřeny pro celé požadované období,
+včetně inkrementálních běhů. Screening používá existující kauzální úpravu cen
+pouze akcemi známými a účinnými k času výpočtu. Uchovává policy hash, receipt cutoff,
+observation IDs, action evidence a důvody vyřazení. Momentum, trend a mean reversion
+mají samostatné pořadí a stabilní tie-break. Raw diagnostika je nadále oddělená.
+
+Po dokončení všech úkolů worker automaticky uloží immutable výběr včetně
+neúspěšných a nepodporovaných titulů; filtr nesnižuje jmenovatel. PostgreSQL triggery
+zakazují změny i mazání výběru. GET `/operator/market-screening` je stránkovaný;
+český dashboard rozlišuje chybějící výsledek a dokončený výběr bez kandidátů.
+Migrace `20260922_01` odmítne downgrade, pokud by odstranil existující výběry.
+
+Evidence zachycuje postupný sběr: jednotlivé instrumenty mají vlastní receipt cutoff,
+nejde o jediný synchronní historický snapshot trhu. Výběr je jen aktuální screening;
+`research_eligible=false`. Neopravňuje k historickému backtestu s dnešním složením
+trhu ani nemění schválený paper deployment. M7 vyžaduje samostatné společné PIT
+podmínky, předem stanovený benchmark/rozpočet a nedotčený OOS. Žádný takový skutečný
+víceinstrumentový experiment zatím nebyl doložen.
+
+Nové čtení adresářů porovnává dvě poslední immutable verze známé k zadanému času:
+nově zjištěné UUID, chybějící UUID a změny symbolu/burzy. Nepřítomnost se nevydává
+za potvrzený delisting a první pozorování za IPO. Kanonická historie pilotu se
+nepřepisuje. Pro potvrzené IPO/delisting a globální burzy stále chybí doložený zdroj.
+
+Oprava obnovování fronty: stará ACCESS_BLOCKED dávka už nezastaví další den po
+úspěšném obnovení přístupu a dokončení nové dávky. Blokace nejnovější dávky zůstává
+účinná. Přesnější chyby obsahují jen fázi a typ chyby, nikdy raw provider odpověď,
+URL ani přístupové údaje. Rutinní sběr a screening nevolají LLM API.
+
+Uzavření výběru čte evidence po 100 řádcích; nedrží celou historii všech titulů
+v paměti. Otisk obsahu je SHA-256 seřazených kanonických JSON řádků oddělených LF.
+Druhý průchod ověřuje stejný otisk při ukládání; změna evidence zruší transakci.

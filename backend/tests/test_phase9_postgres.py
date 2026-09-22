@@ -211,7 +211,16 @@ def test_postgres_asset_directory_and_batch_are_immutable():
                 "Immutable batch",
                 now,
             )
+            from quantlab.market_screening import MarketScreening
+
+            with sessions() as session, session.begin():
+                session.execute(
+                    text("UPDATE market_tasks SET state='FAILED' WHERE batch_id=:id"), {"id": batch}
+                )
+            screen_id = MarketScreening(sessions).finalize(batch, now)
             for statement, identity in (
+                ("UPDATE market_screen_runs SET eligible=999 WHERE run_id=:id", screen_id),
+                ("DELETE FROM market_screen_items WHERE run_id=:id", screen_id),
                 (
                     "UPDATE asset_directory_snapshots SET actor='changed' WHERE snapshot_id=:id",
                     snapshot,

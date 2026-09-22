@@ -5,7 +5,8 @@ import { dateText } from "@/lib/display";
 export type Pipeline = {
   batch: null | { id: string; start: string; end: string; provider: string };
   counts: Record<string, number>; total: number; matched: number; query: string; rank: string; limit: number; offset: number; latest_session: string;
-  identity_directory: { snapshot_id: string | null; received_at: string | null };
+  identity_directory: { snapshot_id: string | null; received_at: string | null; total?: number; changes?: null | { first_seen: number; no_longer_present: number; symbol_or_venue_changed: number } };
+  coverage_summary?: {downloaded: number; complete_period: number; period_end: string};
   configured_provider: string; feed: string; credentials_configured: boolean;
   items: {symbol: string; state: string; bars: number; coverage: string | null; momentum: string | null; trend: string | null; mean_reversion: string | null; detail: string | null}[];
 };
@@ -17,6 +18,8 @@ export function MarketPipelinePanel({ data, admin }: {data: Pipeline; admin: boo
   const start = new Date(`${data.latest_session}T00:00:00Z`); start.setUTCDate(start.getUTCDate() - 400);
   return <>
     <section className="card"><h2>Cenová data a technický přehled</h2><p>Zdroj: {data.configured_provider} · feed {data.feed}. Přístupové údaje: {data.credentials_configured ? "nastavené; oprávnění ověří požadavek" : "nenastavené"}.</p><p>Adresář identit: {data.identity_directory.received_at ? dateText(data.identity_directory.received_at) : "Dosud nenačtený"}. Poslední uzavřená seance: {dateText(data.latest_session)}.</p>
+      {data.identity_directory.changes && <p>Změny proti předchozímu adresáři: {data.identity_directory.changes.first_seen} nově zjištěných · {data.identity_directory.changes.no_longer_present} již neuvedených · {data.identity_directory.changes.symbol_or_venue_changed} změn symbolu nebo burzy. Datum zjištění není datum IPO ani potvrzený delisting.</p>}
+      {data.coverage_summary && <p><strong>{data.coverage_summary.downloaded.toLocaleString("cs-CZ")} titulů s uloženými cenami · {data.coverage_summary.complete_period.toLocaleString("cs-CZ")} s úplným požadovaným obdobím</strong> · z celkem {data.total.toLocaleString("cs-CZ")}. Úplnost platí do {dateText(data.coverage_summary.period_end)}.</p>}
       <p>Feed IEX neobsahuje celý objem amerického trhu. Technické ukazatele níže používají neupravené ceny; splity a dividendy je mohou ovlivnit. Nejde o validované investiční doporučení ani schválení strategie.</p>
       {data.batch ? <><p>Rozsah dávky: {dateText(data.batch.start)} až {dateText(data.batch.end)} · {data.total.toLocaleString("cs-CZ")} titulů v poslední dávce</p><div className="grid">{Object.entries(data.counts).map(([state, count]) => <p key={state}><strong>{labels[state] ?? state}</strong><br />{count.toLocaleString("cs-CZ")}</p>)}</div></> : <p>Dosud není založená dávka cenových dat.</p>}
       <form method="get"><label>Hledat symbol v cenové dávce<input name="price_q" defaultValue={data.query} maxLength={100} /></label><label>Řazení<select name="price_rank" defaultValue={data.rank}><option value="symbol">Symbol</option><option value="momentum">Změna za 126 seancí</option><option value="trend">Trend 20/100</option><option value="mean_reversion">Odchylka od průměru</option></select></label><button type="submit">Zobrazit výběr</button></form>
