@@ -3,10 +3,9 @@ from datetime import UTC, date, datetime
 from decimal import Decimal
 
 import pytest
-from sqlalchemy import select
+from phase6_audit_helpers import CALENDAR, MappingProvider, daily_bar
 from sqlalchemy.orm import sessionmaker
 
-from phase6_audit_helpers import CALENDAR, MappingProvider, daily_bar
 from quantlab.market_data import (
     AssetType,
     CorporateAction,
