@@ -90,7 +90,6 @@ def parse_assets(body: bytes) -> list[dict[str, str]]:
                     "exchange": exchange,
                     "status": row["status"],
                     "payload_json": json.dumps(row, sort_keys=True),
-
                 }
             )
         return output
@@ -104,7 +103,10 @@ def fetch_assets(settings: Settings) -> bytes:
         raise CatalogError("Na serveru chybí přístupové údaje Alpaca")
     combined: list[dict[str, Any]] = []
     for status, url in ASSET_URLS.items():
-        request = urllib.request.Request(
+        if url not in ASSET_URLS.values():
+            raise CatalogError("Adresář identit používá nepovolený endpoint")
+        # The exact HTTPS URL is selected exclusively from the module-level allowlist.
+        request = urllib.request.Request(  # noqa: S310
             url,
             method="GET",
             headers={
