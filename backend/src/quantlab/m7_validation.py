@@ -1,37 +1,47 @@
-"""Read-only reproducible M7 validation for issue #164.
+"""Authoritative M7 replay for issue #164.
 
-The validation intentionally measures PRICE returns. Cash distributions are ignored
-consistently for strategy and benchmark because historical announcement knowledge
-is unavailable. Any split/symbol/lifecycle event inside the interval fails closed.
+The validator never invents a universe. It reuses one already approved PAPER
+deployment, its immutable Phase 6 snapshot, persisted PIT memberships, immutable
+corporate actions, original experiment budget, and chronological split. It is
+read-only and compares a current-code replay with the persisted OOS result before
+running a predeclared equal-weight benchmark on the same evidence.
 """
-
 from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import datetime
 from decimal import Decimal
-from typing import Any
+from typing import Any, Callable
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from quantlab.domain import require_utc
-from quantlab.market_data import Observation, XNYSCalendar
+from quantlab.market_data import CorporateAction, CorporateActionKind
 from quantlab.market_data_service import _database_utc, _observation
-from quantlab.market_pipeline import MarketActionReceipt, MarketBatch, MarketTask
 from quantlab.multi_asset import (
-    CrossSectionalMomentumStrategy,
     ObservationKnowledgeMode,
     RebalanceFrequency,
     StrategyContext,
     TargetPortfolio,
     run_multi_asset,
 )
-from quantlab.persistence import MarketObservationRecord
-from quantlab.phase6_runtime import multi_asset_metrics
+from quantlab.persistence import (
+    DatasetSnapshotRecord,
+    ExperimentRecord,
+    InstrumentRecord,
+    MarketObservationRecord,
+    StrategyDeploymentRecord,
+    UniverseDefinitionRecord,
+    UniverseMembershipRecord,
+)
+from quantlab.phase6_runtime import (
+    Phase6ExperimentRequest,
+    Phase6ExperimentRunner,
+    multi_asset_metrics,
+)
 from quantlab.universe import (
     PointInTimeUniverse,
     UniverseDefinition,
@@ -39,31 +49,8 @@ from quantlab.universe import (
     UniverseMembership,
 )
 
-UNIVERSE_ID = "m7-broad-etf-price-return-v1"
-SYMBOLS = ("DIA", "IWM", "QQQ", "SPY")
-START = date(2025, 8, 18)
-END = date(2026, 9, 21)
-INITIAL_CASH = Decimal("100000")
-COMMISSION_BPS = Decimal("1")
-SPLIT = (Decimal("0.60"), Decimal("0.20"), Decimal("0.20"))
-PARAMETER_BUDGET = (
-    {"lookback": 63, "top_n": 1},
-    {"lookback": 63, "top_n": 2},
-    {"lookback": 126, "top_n": 1},
-    {"lookback": 126, "top_n": 2},
-)
-MEMBERSHIP_EVIDENCE = {
-    "DIA": (
-        "1998-01-14",
-        "https://www.ssga.com/us/en/institutional/etfs/state-street-spdr-dow-jones-industrial-average-etf-trust-dia",
-    ),
-    "IWM": ("2000-05-22", "https://www.ishares.com/us/products/239710/"),
-    "QQQ": ("1999-03-10", "https://www.invesco.com/qqq-etf/en/home.html"),
-    "SPY": (
-        "1993-01-22",
-        "https://www.ssga.com/us/en/institutional/etfs/state-street-spdr-sp-500-etf-trust-spy",
-    ),
-}
+SCHEMA_VERSION = 2
+BENCHMARK_ID = "equal-weight-monthly-same-pit-universe-v1"
 
 
 def canonical(value: object) -> str:
@@ -76,7 +63,7 @@ def digest(value: object) -> str:
 
 @dataclass(frozen=True)
 class EqualWeightMonthly:
-    name: str = "equal_weight_monthly_price_return"
+    name: str = BENCHMARK_ID
     version: str = "1.0.0"
     rebalance_frequency: RebalanceFrequency = RebalanceFrequency.MONTHLY
 
@@ -86,11 +73,11 @@ class EqualWeightMonthly:
 
     def generate_targets(self, context: StrategyContext) -> TargetPortfolio:
         members = tuple(sorted(context.eligible_instruments))
-        weight = Decimal("1") / len(members) if members else Decimal("0")
+        weight = Decimal("1") / len(members) if members else Decimal(0)
         return TargetPortfolio(tuple((item, weight) for item in members), "equal weight")
 
 
-def _metric_dict(metrics: Any) -> dict[str, object]:
+def _metrics(metrics: Any) -> dict[str, object]:
     return {
         "total_return": str(metrics.total_return),
         "annualized_return": str(metrics.annualized_return),
@@ -104,281 +91,333 @@ def _metric_dict(metrics: Any) -> dict[str, object]:
     }
 
 
-def _receipt_rows(
-    receipt: MarketActionReceipt, task: MarketTask, batch: MarketBatch
-) -> list[list[Any]]:
-    if hashlib.sha256(receipt.payload_json.encode()).hexdigest() != receipt.content_hash:
-        raise ValueError("ACTION_RECEIPT_HASH_MISMATCH")
-    payload = json.loads(receipt.payload_json)
-    expected = {
-        "source": "alpaca_rest_current_inventory",
-        "symbol": task.symbol,
-        "instrument_id": task.instrument_id,
-        "request_start": "1970-01-01",
-        "request_end": "9999-12-31",
-        "data_quality": "all",
-    }
-    if not isinstance(payload, dict) or any(payload.get(k) != v for k, v in expected.items()):
-        raise ValueError("ACTION_RECEIPT_SCOPE_MISMATCH")
-    rows = payload.get("rows")
-    if not isinstance(rows, list):
-        raise ValueError("ACTION_RECEIPT_INVALID")
-    for entry in rows:
-        if not isinstance(entry, list) or len(entry) != 2 or not isinstance(entry[1], dict):
-            raise ValueError("ACTION_RECEIPT_INVALID")
-        kind, row = entry
-        raw = row.get("ex_date") or row.get("effective_date") or row.get("process_date")
-        if raw is None:
-            raise ValueError("ACTION_RECEIPT_DATE_MISSING")
-        day = date.fromisoformat(str(raw))
-        if batch.start <= day <= batch.end and kind != "cash_dividends":
-            raise ValueError(f"PRICE_RETURN_DISCONTINUITY:{kind}")
-    return rows
-
-
-def _memberships(tasks: dict[str, MarketTask]) -> list[UniverseMembership]:
-    result = []
-    for symbol in SYMBOLS:
-        raw, _ = MEMBERSHIP_EVIDENCE[symbol]
-        when = datetime.combine(date.fromisoformat(raw), datetime.min.time(), UTC)
-        result.append(
-            UniverseMembership(UNIVERSE_ID, tasks[symbol].instrument_id, when, None, when)
+def _request(experiment: ExperimentRecord, current_code_sha: str) -> Phase6ExperimentRequest:
+    try:
+        config = json.loads(experiment.config_json)
+        strategy = config["strategy"]
+        parameters = config["parameters"]
+        if not isinstance(strategy, list) or len(strategy) != 2:
+            raise TypeError
+        if not isinstance(parameters, list) or not parameters:
+            raise TypeError
+        return Phase6ExperimentRequest(
+            snapshot_id=str(config["snapshot_id"]),
+            strategy_name=str(strategy[0]),
+            strategy_version=str(strategy[1]),
+            parameter_configs=tuple(dict(item) for item in parameters),
+            train_fraction=Decimal(str(config["train_fraction"])),
+            validation_fraction=Decimal(str(config["validation_fraction"])),
+            initial_cash=Decimal(str(config["initial_cash"])),
+            commission_bps=Decimal(str(config["commission_bps"])),
+            seed=int(config["seed"]),
+            code_sha=current_code_sha,
         )
-    return result
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise ValueError("M7_EXPERIMENT_CONFIG_INVALID") from exc
 
 
-def _authoritative_observations(
-    session: Session, tasks: dict[str, MarketTask], provider: str, as_of: datetime
-) -> tuple[Observation, ...]:
-    instrument_ids = [tasks[s].instrument_id for s in SYMBOLS]
+def _persisted_signature(experiment: ExperimentRecord) -> dict[str, object]:
+    try:
+        result = json.loads(experiment.result_json)
+        selected = json.loads(experiment.selected_parameters_json or "{}")
+        metrics = result["metrics"]
+        return {
+            "selected_parameters": selected,
+            "oos": {
+                "total_return": str(metrics["total_return"]),
+                "annualized_return": str(metrics["annualized_return"]),
+                "volatility": str(metrics["volatility"]),
+                "sharpe": str(metrics["sharpe"]),
+                "max_drawdown": str(metrics["max_drawdown"]),
+                "turnover": str(metrics["turnover"]),
+                "time_weighted_exposure": str(metrics["time_weighted_exposure"]),
+                "trade_count": int(metrics["trade_count"]),
+                "total_costs": str(metrics["total_costs"]),
+            },
+            "equity": [[str(when), str(value)] for when, value in result["equity"]],
+            "returns": [str(value) for value in result["returns"]],
+            "sessions": [str(value) for value in result["sessions"]],
+        }
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise ValueError("M7_PERSISTED_RESULT_INVALID") from exc
+
+
+def _replay_signature(replay: Any) -> dict[str, object]:
+    return {
+        "selected_parameters": replay.selected_parameters,
+        "oos": _metrics(replay.oos),
+        "equity": [[str(when), str(value)] for when, value in replay.oos_equity],
+        "returns": [str(value) for value in replay.oos_returns],
+        "sessions": [str(value) for value in replay.oos_sessions],
+    }
+
+
+def _load_snapshot(
+    session: Session, snapshot: DatasetSnapshotRecord
+) -> tuple[
+    dict[str, Any],
+    tuple[Any, ...],
+    tuple[CorporateAction, ...],
+    PointInTimeUniverse,
+    dict[str, str],
+]:
+    try:
+        manifest = json.loads(snapshot.manifest_json)
+    except json.JSONDecodeError as exc:
+        raise ValueError("M7_SNAPSHOT_MANIFEST_INVALID") from exc
+    if not isinstance(manifest, dict) or manifest.get("schema_version") != "4":
+        raise ValueError("M7_SNAPSHOT_MANIFEST_UNSUPPORTED")
+    entries = manifest.get("observations")
+    action_entries = manifest.get("corporate_actions")
+    membership_entries = manifest.get("universe_memberships")
+    if not isinstance(entries, list) or not entries:
+        raise ValueError("M7_OBSERVATION_MANIFEST_EMPTY")
+    if not isinstance(action_entries, list):
+        raise ValueError("M7_ACTION_MANIFEST_INVALID")
+    if not isinstance(membership_entries, list) or len(membership_entries) < 2:
+        raise ValueError("M7_REQUIRES_MULTI_INSTRUMENT_PIT_UNIVERSE")
+
+    immutable = {
+        "observations": entries,
+        "corporate_actions": action_entries,
+        "universe_memberships": membership_entries,
+    }
+    if digest(immutable) != snapshot.content_hash:
+        raise ValueError("M7_SNAPSHOT_CONTENT_HASH_MISMATCH")
+
+    parsed_entries: list[tuple[str, int, str]] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            raise ValueError("M7_OBSERVATION_MANIFEST_INVALID")
+        identity, revision, source_hash = entry.get("id"), entry.get("revision"), entry.get("hash")
+        if (
+            not isinstance(identity, str)
+            or not isinstance(revision, int)
+            or isinstance(revision, bool)
+            or revision <= 0
+            or not isinstance(source_hash, str)
+        ):
+            raise ValueError("M7_OBSERVATION_MANIFEST_INVALID")
+        parsed_entries.append((identity, revision, source_hash))
+    if len({item[0] for item in parsed_entries}) != len(parsed_entries):
+        raise ValueError("M7_OBSERVATION_MANIFEST_INVALID")
     rows = tuple(
         session.scalars(
-            select(MarketObservationRecord)
-            .where(
-                MarketObservationRecord.instrument_id.in_(instrument_ids),
-                MarketObservationRecord.provider == provider,
-                MarketObservationRecord.timeframe == "1d",
-                MarketObservationRecord.session_date
-                >= datetime.combine(START, datetime.min.time(), UTC),
-                MarketObservationRecord.session_date
-                <= datetime.combine(END, datetime.min.time(), UTC),
-                MarketObservationRecord.observed_at <= as_of,
-                MarketObservationRecord.timestamp <= as_of,
-            )
-            .order_by(
-                MarketObservationRecord.instrument_id,
-                MarketObservationRecord.session_date,
-                MarketObservationRecord.observed_at,
-                MarketObservationRecord.revision,
+            select(MarketObservationRecord).where(
+                MarketObservationRecord.observation_id.in_([item[0] for item in parsed_entries])
             )
         )
     )
-    latest: dict[tuple[str, date], MarketObservationRecord] = {}
-    for row in rows:
-        latest[(row.instrument_id, row.session_date.date())] = row
-    calendar = XNYSCalendar()
-    expected = calendar.sessions_between(START, END)
-    for task in tasks.values():
-        missing = [day for day in expected if (task.instrument_id, day) not in latest]
-        if missing:
-            raise ValueError(f"MISSING_COMMON_HISTORY:{task.symbol}:{len(missing)}")
-    return tuple(
-        _observation(latest[(tasks[symbol].instrument_id, day)])
-        for day in expected
-        for symbol in SYMBOLS
-    )
+    by_id = {row.observation_id: row for row in rows}
+    if set(by_id) != {item[0] for item in parsed_entries}:
+        raise ValueError("M7_OBSERVATION_MISSING")
+    if any(
+        by_id[identity].revision != revision or by_id[identity].source_hash != source_hash
+        for identity, revision, source_hash in parsed_entries
+    ):
+        raise ValueError("M7_OBSERVATION_REVISION_MISMATCH")
+    observations = tuple(_observation(by_id[identity]) for identity, _, _ in parsed_entries)
 
-
-def _evaluate(
-    observations: tuple[Observation, ...],
-    universe: PointInTimeUniverse,
-    strategy: Any,
-    evaluation_times: list[datetime],
-) -> tuple[dict[str, object], Any]:
-    result = run_multi_asset(
-        [row for row in observations if row.timestamp <= evaluation_times[-1]],
-        universe,
-        strategy,
-        INITIAL_CASH,
-        COMMISSION_BPS,
-        currencies={m.instrument_id: "USD" for m in universe._memberships},
-        corporate_actions=(),
-        evaluation_start=evaluation_times[0],
-        observation_knowledge_mode=ObservationKnowledgeMode.SNAPSHOT_PINNED,
-    )
-    return _metric_dict(multi_asset_metrics(result, INITIAL_CASH)), result
-
-
-def run_m7_validation(
-    sessions: Callable[[], Session], *, batch_id: str, as_of: datetime, code_sha: str
-) -> dict[str, object]:
-    cutoff = require_utc(as_of)
-    if len(code_sha) != 40 or any(c not in "0123456789abcdef" for c in code_sha):
-        raise ValueError("INVALID_CODE_SHA")
-    with sessions() as session:
-        batch = session.get(MarketBatch, batch_id)
-        if (
-            batch is None
-            or batch.provider != "alpaca:iex"
-            or batch.start != date(2025, 8, 17)
-            or batch.end != END
-        ):
-            raise ValueError("UNEXPECTED_BATCH")
-        task_rows = tuple(
-            session.scalars(
-                select(MarketTask).where(
-                    MarketTask.batch_id == batch_id,
-                    MarketTask.symbol.in_(SYMBOLS),
+    definition = session.get(UniverseDefinitionRecord, snapshot.universe_id)
+    if definition is None or definition.kind != UniverseKind.POINT_IN_TIME_MEMBERSHIP:
+        raise ValueError("M7_REQUIRES_PERSISTED_PIT_UNIVERSE")
+    memberships: list[UniverseMembership] = []
+    for entry in membership_entries:
+        if not isinstance(entry, dict):
+            raise ValueError("M7_MEMBERSHIP_MANIFEST_INVALID")
+        try:
+            memberships.append(
+                UniverseMembership(
+                    snapshot.universe_id,
+                    str(entry["instrument_id"]),
+                    require_utc(datetime.fromisoformat(str(entry["valid_from"]))),
+                    require_utc(datetime.fromisoformat(str(entry["valid_to"])))
+                    if entry.get("valid_to")
+                    else None,
+                    require_utc(datetime.fromisoformat(str(entry["known_at"]))),
                 )
             )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError("M7_MEMBERSHIP_MANIFEST_INVALID") from exc
+    persisted = tuple(
+        session.scalars(
+            select(UniverseMembershipRecord).where(
+                UniverseMembershipRecord.universe_id == snapshot.universe_id
+            )
         )
-        tasks = {task.symbol: task for task in task_rows}
-        if set(tasks) != set(SYMBOLS) or any(
-            task.state != "DONE" or task.coverage != 1 for task in tasks.values()
-        ):
-            raise ValueError("M7_TASKS_NOT_READY")
-        receipts: dict[str, MarketActionReceipt] = {}
-        receipt_evidence = {}
-        for symbol, task in tasks.items():
-            evidence = json.loads(task.evidence_json or "{}")
-            screening = evidence.get("screening")
-            receipt_id = (
-                screening.get("current_action_receipt_id") if isinstance(screening, dict) else None
-            )
-            receipt = (
-                session.get(MarketActionReceipt, receipt_id)
-                if isinstance(receipt_id, str)
-                else None
-            )
-            if (
-                receipt is None
-                or receipt.task_id != task.task_id
-                or _database_utc(receipt.received_at) > cutoff
-            ):
-                raise ValueError("M7_ACTION_RECEIPT_NOT_READY")
-            rows = _receipt_rows(receipt, task, batch)
-            receipts[symbol] = receipt
-            receipt_evidence[symbol] = {
-                "receipt_id": receipt.receipt_id,
-                "content_hash": receipt.content_hash,
-                "received_at": _database_utc(receipt.received_at).isoformat(),
-                "in_interval_kinds": sorted(
-                    {
-                        kind
-                        for kind, item in rows
-                        if batch.start
-                        <= date.fromisoformat(
-                            str(
-                                item.get("ex_date")
-                                or item.get("effective_date")
-                                or item.get("process_date")
-                            )
-                        )
-                        <= batch.end
-                    }
-                ),
-            }
-        observations = _authoritative_observations(session, tasks, batch.provider, cutoff)
-
-    memberships = _memberships(tasks)
+    )
+    persisted_keys = {
+        (
+            row.instrument_id,
+            _database_utc(row.valid_from),
+            _database_utc(row.valid_to) if row.valid_to is not None else None,
+            _database_utc(row.known_at),
+        )
+        for row in persisted
+    }
+    if any(
+        (item.instrument_id, item.valid_from, item.valid_to, item.known_at) not in persisted_keys
+        for item in memberships
+    ):
+        raise ValueError("M7_MEMBERSHIP_NOT_PERSISTED")
     universe = PointInTimeUniverse(
         UniverseDefinition(
-            UNIVERSE_ID,
-            "Broad US ETF price-return validation",
-            UniverseKind.POINT_IN_TIME_MEMBERSHIP,
+            definition.universe_id,
+            definition.name,
+            UniverseKind(definition.kind),
+            _database_utc(definition.created_at),
         ),
         memberships,
     )
-    times = sorted({row.timestamp for row in observations})
-    train_end = int(len(times) * float(SPLIT[0]))
-    validation_end = train_end + int(len(times) * float(SPLIT[1]))
-    if train_end < 127 or validation_end >= len(times):
-        raise ValueError("INSUFFICIENT_M7_HISTORY")
-    train_times = times[:train_end]
-    validation_times = times[train_end:validation_end]
-    oos_times = times[validation_end:]
 
-    scored = []
-    evaluations = {}
-    for config in PARAMETER_BUDGET:
-        strategy = CrossSectionalMomentumStrategy(
-            lookback=int(config["lookback"]), top_n=int(config["top_n"])
+    actions: list[CorporateAction] = []
+    for entry in action_entries:
+        if not isinstance(entry, dict):
+            raise ValueError("M7_ACTION_MANIFEST_INVALID")
+        try:
+            actions.append(
+                CorporateAction(
+                    action_id=str(entry["action_id"]),
+                    instrument_id=str(entry["instrument_id"]),
+                    kind=CorporateActionKind(str(entry["kind"])),
+                    effective_at=require_utc(datetime.fromisoformat(str(entry["effective_at"]))),
+                    known_at=require_utc(datetime.fromisoformat(str(entry["known_at"]))),
+                    value=Decimal(str(entry["value"])) if entry.get("value") is not None else None,
+                    new_symbol=str(entry["new_symbol"]) if entry.get("new_symbol") is not None else None,
+                )
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError("M7_ACTION_MANIFEST_INVALID") from exc
+
+    instrument_ids = {row.instrument_id for row in observations}
+    currencies = {
+        row.instrument_id: row.currency
+        for row in session.scalars(
+            select(InstrumentRecord).where(InstrumentRecord.instrument_id.in_(instrument_ids))
         )
-        train_metrics, _ = _evaluate(observations, universe, strategy, train_times)
-        validation_metrics, _ = _evaluate(observations, universe, strategy, validation_times)
-        key = canonical(config)
-        evaluations[key] = {"train": train_metrics, "validation": validation_metrics}
-        scored.append((Decimal(str(validation_metrics["sharpe"])), key, config))
-    _, _, selected = max(scored, key=lambda item: (item[0], item[1]))
-    selected_strategy = CrossSectionalMomentumStrategy(
-        lookback=int(selected["lookback"]), top_n=int(selected["top_n"])
-    )
-    oos_metrics, oos_result = _evaluate(observations, universe, selected_strategy, oos_times)
-    benchmark_metrics, benchmark_result = _evaluate(
-        observations, universe, EqualWeightMonthly(), oos_times
-    )
-    observation_manifest = [
-        {"id": row.observation_id, "revision": row.revision, "hash": row.source_hash}
-        for row in observations
-    ]
-    membership_manifest = [
-        {
-            "symbol": symbol,
-            "instrument_id": tasks[symbol].instrument_id,
-            "valid_from": membership.valid_from.isoformat(),
-            "known_at": membership.known_at.isoformat(),
-            "source": MEMBERSHIP_EVIDENCE[symbol][1],
-        }
-        for symbol, membership in zip(SYMBOLS, memberships, strict=True)
-    ]
-    inputs = {
-        "batch_id": batch_id,
-        "as_of": cutoff.isoformat(),
-        "provider": "alpaca:iex",
-        "period": [START.isoformat(), END.isoformat()],
-        "return_basis": "RAW_PRICE_RETURN_DIVIDENDS_IGNORED",
-        "commission_bps": str(COMMISSION_BPS),
-        "initial_cash": str(INITIAL_CASH),
-        "split": [str(x) for x in SPLIT],
-        "parameter_budget": list(PARAMETER_BUDGET),
-        "memberships": membership_manifest,
-        "action_receipts": receipt_evidence,
-        "observation_hash": digest(observation_manifest),
-        "observation_count": len(observation_manifest),
-        "code_sha": code_sha,
     }
-    report = {
-        "schema_version": 1,
-        "experiment_id": digest(inputs),
-        "inputs": inputs,
-        "selected_parameters": selected,
-        "pre_oos_evaluations": evaluations,
-        "oos": {
-            "strategy": oos_metrics,
-            "benchmark_equal_weight_monthly": benchmark_metrics,
-            "sessions": len(oos_times),
-            "strategy_fills": len(oos_result.fills),
-            "benchmark_fills": len(benchmark_result.fills),
+    if set(currencies) != instrument_ids:
+        raise ValueError("M7_INSTRUMENT_METADATA_MISSING")
+    return manifest, observations, tuple(actions), universe, currencies
+
+
+def _select_deployment(session: Session, deployment_id: str | None) -> StrategyDeploymentRecord:
+    if deployment_id is not None:
+        deployment = session.get(StrategyDeploymentRecord, deployment_id)
+    else:
+        deployment = session.scalar(
+            select(StrategyDeploymentRecord)
+            .where(
+                StrategyDeploymentRecord.paper_account_id == "paper-main",
+                StrategyDeploymentRecord.status == "APPROVED",
+            )
+            .order_by(
+                StrategyDeploymentRecord.approved_at.desc(),
+                StrategyDeploymentRecord.created_at.desc(),
+            )
+            .limit(1)
+        )
+    if deployment is None or deployment.status != "APPROVED":
+        raise ValueError("M7_APPROVED_DEPLOYMENT_NOT_FOUND")
+    return deployment
+
+
+def run_m7_validation(
+    sessions: Callable[[], Session], *, deployment_id: str | None = None
+) -> dict[str, object]:
+    current_code_sha = Phase6ExperimentRunner._code_sha(None)
+    with sessions() as session:
+        deployment = _select_deployment(session, deployment_id)
+        experiment = session.get(ExperimentRecord, deployment.experiment_id)
+        snapshot = session.get(DatasetSnapshotRecord, deployment.snapshot_id)
+        if (
+            experiment is None
+            or experiment.status != "COMPLETED"
+            or snapshot is None
+            or snapshot.status != "VALID"
+            or experiment.snapshot_id != snapshot.snapshot_id
+        ):
+            raise ValueError("M7_LINEAGE_NOT_READY")
+        request = _request(experiment, current_code_sha)
+        if request.snapshot_id != snapshot.snapshot_id:
+            raise ValueError("M7_LINEAGE_MISMATCH")
+        manifest, observations, actions, universe, currencies = _load_snapshot(session, snapshot)
+        persisted = _persisted_signature(experiment)
+        original_code_sha = experiment.code_sha
+
+    replay = Phase6ExperimentRunner(sessions).replay(request)
+    replay_signature = _replay_signature(replay)
+    if canonical(replay_signature) != canonical(persisted):
+        raise ValueError("M7_REPLAY_MISMATCH")
+    oos_times = list(replay.oos_sessions)
+    if len(oos_times) < 2:
+        raise ValueError("M7_OOS_TOO_SHORT")
+
+    benchmark = run_multi_asset(
+        [row for row in observations if row.timestamp <= oos_times[-1]],
+        universe,
+        EqualWeightMonthly(),
+        request.initial_cash,
+        request.commission_bps,
+        currencies=currencies,
+        corporate_actions=actions,
+        evaluation_start=oos_times[0],
+        observation_knowledge_mode=ObservationKnowledgeMode.SNAPSHOT_PINNED,
+    )
+    benchmark_metrics = multi_asset_metrics(benchmark, request.initial_cash)
+
+    report: dict[str, object] = {
+        "schema_version": SCHEMA_VERSION,
+        "deployment_id": deployment.deployment_id,
+        "experiment_id": experiment.id,
+        "experiment_original_code_sha": original_code_sha,
+        "validator_code_sha": current_code_sha,
+        "snapshot": {
+            "snapshot_id": snapshot.snapshot_id,
+            "content_hash": snapshot.content_hash,
+            "provider": snapshot.provider,
+            "as_of": _database_utc(snapshot.as_of).isoformat(),
+            "universe_id": snapshot.universe_id,
+            "manifest_schema_version": manifest["schema_version"],
+            "observation_count": len(manifest["observations"]),
+            "membership_count": len(manifest["universe_memberships"]),
+            "corporate_action_count": len(manifest["corporate_actions"]),
+            "immutable_reference_verified": True,
+        },
+        "precommitted_experiment": {
+            "strategy": [request.strategy_name, request.strategy_version],
+            "parameter_budget": list(request.parameter_configs),
+            "train_fraction": str(request.train_fraction),
+            "validation_fraction": str(request.validation_fraction),
+            "initial_cash": str(request.initial_cash),
+            "commission_bps": str(request.commission_bps),
+            "seed": request.seed,
+        },
+        "replay": {
+            "matches_persisted_oos": True,
+            "selected_parameters": replay.selected_parameters,
+            "train": _metrics(replay.train),
+            "validation": _metrics(replay.validation),
+            "oos": _metrics(replay.oos),
+            "oos_sessions": len(oos_times),
+        },
+        "benchmark": {
+            "id": BENCHMARK_ID,
+            "oos": _metrics(benchmark_metrics),
+            "fills": len(benchmark.fills),
         },
         "guards": {
+            "persisted_pit_universe_only": True,
+            "no_backdated_membership_created": True,
+            "immutable_snapshot_reference_verified": True,
+            "validator_sha_from_runtime": True,
+            "causal_adjusted_signal_prices": True,
+            "raw_prices_for_fills": True,
             "oos_used_for_selection": False,
-            "only_cash_dividends_in_interval": True,
-            "corporate_actions_applied": False,
             "paper_deployment_modified": False,
+            "research_promotion_modified": False,
             "live_trading_used": False,
-            "research_promotion_allowed": False,
         },
-        "limitations": [
-            "Price-return validation intentionally ignores cash distributions.",
-            (
-                "Current REST receipts prove no split/symbol/lifecycle discontinuity "
-                "in the interval but do not backdate dividend announcement knowledge."
-            ),
-            (
-                "This M7 validation is infrastructure evidence, not investment approval "
-                "or whole-market historical membership."
-            ),
-        ],
     }
     report["report_hash"] = digest(report)
     return report
