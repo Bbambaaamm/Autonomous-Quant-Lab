@@ -244,4 +244,4 @@ class AssetDirectoryService:
                 "active": active,
                 "inactive": inactive,
                 "changes": changes,
-            }
+            }\n
