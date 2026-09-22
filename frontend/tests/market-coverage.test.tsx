@@ -11,11 +11,13 @@ import Market from "../app/market/page";
 afterEach(() => { cleanup(); vi.clearAllMocks(); });
 it("searches the server and shows unknown price coverage separately from directory counts", async () => {
   fixtures.session.mockResolvedValue({ role: "VIEWER" });
-  fixtures.api.mockResolvedValue({ status: "RECEIVED", total: 110, offset: 50, limit: 50, snapshot: { listing_count: 13000, received_at: "2026-09-21T20:00:00Z", test_count: 5 }, items: [{symbol: "IBM", name: "IBM company", exchange: "NYSE", security_type: "OTHER_LISTED_SECURITY"}], exchanges: [], limitations: ["Globální data nejsou pokryta."] });
+  fixtures.api.mockResolvedValue({ status: "RECEIVED", total: 110, offset: 50, limit: 50, snapshot: { listing_count: 13000, received_at: "2026-09-21T20:00:00Z", test_count: 5 }, items: [{symbol: "IBM", name: "IBM company", exchange: "NYSE", security_type: "OTHER_LISTED_SECURITY"}], exchanges: [], limitations: ["Globální data nejsou pokryta."], zero_cost_policy: { policy_version: "zero-cost-first-1", verified_on: "2026-09-22", monthly_data_budget_usd: 0, paid_subscription_required: false, sources: [{ id: "alpaca-basic", cost: "FREE", configured: true, role: "PRIMARY_US", scope: "US stocks and ETFs", history: "since 2016", request_limit: "200 historical requests/min", feed: "iex", broad_automatic_use: true, limitations: ["IEX only"] }], coverage: { us_prices: "ACTIVE_FREE", global_prices: "PARTIAL_FREE_SOURCES_ONLY" } } });
   render(await Market({ searchParams: Promise.resolve({ q: "IBM &", page: "2" }) }));
   expect(fixtures.api).toHaveBeenCalledWith("/operator/market-coverage?q=IBM%20%26&offset=50&limit=50");
   expect(screen.getByText("Dosud neověřeno")).toBeInTheDocument();
   expect(screen.getByText("IBM company")).toBeInTheDocument();
+  expect(screen.getByText(/Rozpočet na datová předplatná: 0 USD/)).toBeInTheDocument();
+  expect(screen.getByText("alpaca-basic")).toBeInTheDocument();
   expect(screen.queryByText("Aktualizace referenčního katalogu")).not.toBeInTheDocument();
   expect(screen.getByRole("link", { name: /Další strana/ })).toHaveAttribute("href", "/market?q=IBM+%26&page=3");
 });

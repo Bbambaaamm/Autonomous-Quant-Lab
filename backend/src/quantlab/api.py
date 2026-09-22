@@ -32,6 +32,7 @@ from quantlab.config import get_settings
 from quantlab.control_plane import ControlPlaneRegistryService
 from quantlab.demo import run_demo
 from quantlab.domain import AuditEventType
+from quantlab.free_sources import zero_cost_source_matrix
 from quantlab.market_catalog import CatalogError, MarketCatalogService
 from quantlab.market_data import AssetType, DatasetInvalid, Instrument, XNYSCalendar
 from quantlab.market_data_service import DatasetSnapshotService, PersistentMarketDataService
@@ -1659,9 +1660,11 @@ def operator_market_coverage(
     offset: int = Query(0, ge=0),
     limit: int = Query(50, ge=1, le=200),
 ) -> dict[str, object]:
-    return MarketCatalogService(session_factory).read(
+    result = MarketCatalogService(session_factory).read(
         datetime.now(UTC), query=q, offset=offset, limit=limit
     )
+    result["zero_cost_policy"] = zero_cost_source_matrix(settings)
+    return result
 
 
 @app.post("/operator/market-coverage/sync", response_model=OperatorDocument)

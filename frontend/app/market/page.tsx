@@ -12,6 +12,12 @@ type Coverage = {
   snapshot: null | { received_at: string; listing_count: number; test_count: number };
   items: { symbol: string; name: string; exchange: string; security_type: string }[];
   exchanges: { exchange: string; count: number }[]; limitations: string[];
+  zero_cost_policy: {
+    policy_version: string; verified_on: string; monthly_data_budget_usd: number;
+    paid_subscription_required: boolean;
+    sources: { id: string; cost: string; configured: boolean; role: string; scope: string; history: string; request_limit: string; feed: string; broad_automatic_use: boolean; limitations: string[] }[];
+    coverage: Record<string, string | boolean>;
+  };
 };
 export default async function Market({ searchParams }: { searchParams: Promise<{ q?: string; page?: string; price_q?: string; price_rank?: string; price_page?: string; price_state?: string; screen_q?: string; screen_rank?: string; screen_page?: string }> }) {
   const params = await searchParams;
@@ -37,6 +43,13 @@ export default async function Market({ searchParams }: { searchParams: Promise<{
     <MarketScreeningPanel data={screening} query={screenQuery} rank={screenRank} page={screenPage} />
     <MarketPipelinePanel data={pipeline} admin={user?.role === "ADMIN"} />
     <p className="muted">Cílem je globální sledování. První dostupnou vrstvou je referenční katalog amerických burzovních cenných papírů.</p>
+    <section className="card"><h2>Zero-cost-first zdroje</h2>
+      <p><strong>Rozpočet na datová předplatná: {data.zero_cost_policy.monthly_data_budget_usd} USD / měsíc.</strong> Placený zdroj není podmínkou současného PAPER provozu.</p>
+      <p>Matice je capability evidence, ne tvrzení, že každý uvedený zdroj pokrývá celý svět. Široké automatické použití je povoleno jen tam, kde je zdroj skutečně nakonfigurovaný a rozsah doložený.</p>
+      <div style={{overflowX:"auto"}}><table><thead><tr><th>Zdroj</th><th>Role</th><th>Rozsah</th><th>Limit</th><th>Stav</th></tr></thead><tbody>
+        {data.zero_cost_policy.sources.map(source => <tr key={source.id}><td>{source.id}</td><td>{source.role}</td><td style={{whiteSpace:"normal",minWidth:220}}>{source.scope}<small style={{display:"block"}}>{source.feed} · {source.history}</small></td><td>{source.request_limit}</td><td>{source.configured ? "Nakonfigurováno" : source.broad_automatic_use ? "Připraveno" : "Doplňkový / neověřený široký rozsah"}<small style={{display:"block",maxWidth:360}}>{source.limitations.join(" · ")}</small></td></tr>)}
+      </tbody></table></div>
+    </section>
     <div className="grid">
       <section className="card"><h2>Instrumenty v katalogu</h2><strong>{data.snapshot?.listing_count.toLocaleString("cs-CZ") ?? "Dosud nenačteno"}</strong><p>Počet záznamů ve zdroji, nikoli počet instrumentů s cenovými daty.</p></section>
       <section className="card"><h2>Poslední přijetí katalogu</h2><strong>{data.snapshot ? dateText(data.snapshot.received_at) : "Dosud neproběhlo"}</strong><p>{data.status === "STALE" ? "Přijetí katalogu nebo datum zdrojového souboru je starší než tři dny." : data.status === "RECEIVED" ? "Oba zdrojové soubory byly přijaty a zkontrolovány." : "Správce může načíst katalog níže."}</p></section>
