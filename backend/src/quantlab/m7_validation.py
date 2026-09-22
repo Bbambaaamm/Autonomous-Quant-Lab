@@ -6,6 +6,7 @@ corporate actions, original experiment budget, and chronological split. It is
 read-only and compares a current-code replay with the persisted OOS result before
 running a predeclared equal-weight benchmark on the same evidence.
 """
+
 from __future__ import annotations
 
 import hashlib
