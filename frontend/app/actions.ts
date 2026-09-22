@@ -16,7 +16,7 @@ function utcValue(form: FormData, key: string): string {
 function segment(value: string): string {
     return encodeURIComponent(value);
 }
-async function mutate(path: string, body: Record<string, unknown>): Promise<void> {
+async function mutate<T = void>(path: string, body: Record<string, unknown>, readResponse = false): Promise<T> {
     if (!path.startsWith("/operator/"))
         throw new Error("Mutation není v operator allowlistu");
     await assertSameOrigin();
@@ -34,6 +34,7 @@ async function mutate(path: string, body: Record<string, unknown>): Promise<void
         const detail = typeof payload?.detail === "string" ? payload.detail : payload?.detail ? JSON.stringify(payload.detail) : `HTTP ${response.status}`;
         throw new Error(detail);
     }
+    const payload = (readResponse ? await response.json() : undefined) as T;
     revalidatePath("/");
     revalidatePath("/data");
     revalidatePath("/market");
@@ -42,6 +43,7 @@ async function mutate(path: string, body: Record<string, unknown>): Promise<void
     revalidatePath("/operations");
     revalidatePath("/paper");
     revalidatePath("/risk");
+    return payload;
 }
 async function result(work: () => Promise<void>, success: string): Promise<ActionState> {
     try {
@@ -131,4 +133,13 @@ export async function marketBatchAction(_previous: ActionState, form: FormData):
 
 export async function marketJobControlAction(_previous: ActionState, form: FormData): Promise<ActionState> {
     return result(() => mutate("/operator/market-pipeline/control", { job_id: value(form, "job_id"), enabled: value(form, "enabled") === "true", reason: value(form, "reason") }), "Nastavení datové úlohy bylo uloženo. Rozpracovaný požadavek může ještě doběhnout.");
+}
+
+export async function marketProbeAction(_previous: ActionState, form: FormData): Promise<ActionState> {
+    try {
+        const data = await mutate<{ checks: { name: string; http_status: number | null; result: string; elapsed_ms: number }[] }>("/operator/market-pipeline/probe", { reason: value(form, "reason") }, true);
+        return { success: data.checks.map(check => `${check.name}: ${check.result}${check.http_status === null ? "" : ` (HTTP ${check.http_status})`} · ${check.elapsed_ms} ms`).join(". ") };
+    } catch (error) {
+        return { error: error instanceof Error ? error.message : "Kontrola zdroje se nezdařila" };
+    }
 }

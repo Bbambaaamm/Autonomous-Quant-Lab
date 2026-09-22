@@ -1822,3 +1822,21 @@ def operator_market_screening(
     rank: str = Query("momentum", pattern="^(momentum|trend|mean_reversion)$"),
 ) -> dict[str, object]:
     return MarketScreening(session_factory).read(limit, offset, q, rank)
+
+
+@app.post("/operator/market-pipeline/probe", response_model=OperatorDocument)
+def operator_market_probe(body: ReasonedMutation, request: Request) -> dict[str, object]:
+    from quantlab.market_probe import probe_market_source
+
+    _audit_control_mutation(
+        "CONTROL_MARKET_SOURCE_PROBE",
+        "market_data",
+        "alpaca",
+        _actor(request),
+        body.reason,
+        _correlation(request),
+    )
+    try:
+        return probe_market_source(settings, datetime.now(UTC))
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc

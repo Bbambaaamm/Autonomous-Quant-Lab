@@ -1,7 +1,7 @@
 import { afterEach, expect, it, vi } from "vitest";
 import { cleanup, render, screen } from "@testing-library/react";
 vi.mock("../components/mutation-form", () => ({ MutationForm: ({ title }: {title:string}) => <section>{title}</section> }));
-vi.mock("../app/actions", () => ({ marketBatchAction: vi.fn(), marketIdentitiesAction: vi.fn() }));
+vi.mock("../app/actions", () => ({ marketBatchAction: vi.fn(), marketIdentitiesAction: vi.fn(), marketProbeAction: vi.fn() }));
 import { MarketPipelinePanel, type Pipeline } from "../components/market-pipeline-panel";
 afterEach(cleanup);
 const data: Pipeline = {batch:{id:"test",start:"2026-01-02",end:"2026-09-18",provider:"alpaca:iex"},counts:{DATA_BLOCKED:1},total:120,matched:120,query:"IBM &",rank:"trend",limit:50,offset:50,latest_session:"2026-09-18",identity_directory:{snapshot_id:"id",received_at:"2026-09-21T12:00:00Z"},configured_provider:"alpaca",feed:"iex",credentials_configured:true,items:[{symbol:"IBM",state:"DATA_BLOCKED",bars:0,coverage:null,momentum:null,trend:null,mean_reversion:null,detail:"Chybí historická evidence přijetí dividend nebo splitů"}]};
