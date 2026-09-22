@@ -199,3 +199,15 @@ URL ani přístupové údaje. Rutinní sběr a screening nevolají LLM API.
 Uzavření výběru čte evidence po 100 řádcích; nedrží celou historii všech titulů
 v paměti. Otisk obsahu je SHA-256 seřazených kanonických JSON řádků oddělených LF.
 Druhý průchod ověřuje stejný otisk při ukládání; změna evidence zruší transakci.
+
+### Jednorázová diagnostika zdroje
+
+Správce může na Pokrytí trhu spustit „Ověřit spojení“. POST
+`/operator/market-pipeline/probe` je auditovaný, vyžaduje ADMIN a důvod. Provede
+pouze dva GET požadavky pro IBM: jednu denní cenu a jednu stránku corporate actions,
+každý s limitem jednoho výsledku a timeoutem nejvýše pět sekund. Vrací jen HTTP stav,
+latenci a pevně definovanou klasifikaci DNS/TLS/timeoutu. Nevrací klíče, hlavičky,
+raw odpověď ani text výjimky. Nemění účet, data ani plánování.
+
+Kontrola běží z backendu. Úspěch neprokazuje síťovou dostupnost ze samostatného
+workeru, oprávnění k jinému feedu, úplnou historii nebo správnost corporate actions.
