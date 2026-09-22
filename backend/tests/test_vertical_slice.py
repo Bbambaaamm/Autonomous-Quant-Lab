@@ -132,3 +132,176 @@ def test_research_api_persists_experiment_and_exposes_report() -> None:
     assert report.status_code == 200
     assert report.json()["id"] == experiment_id
     assert "Research report" in report.json()["report"]
+
+
+def _receipt_payload(rows, symbol="FULT", instrument_id="asset-test"):
+    import hashlib
+    import json
+
+    payload = {
+        "source": "alpaca_rest_current_inventory",
+        "symbol": symbol,
+        "instrument_id": instrument_id,
+        "request_start": "1970-01-01",
+        "request_end": "9999-12-31",
+        "data_quality": "all",
+        "rows": rows,
+    }
+    raw = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return raw, hashlib.sha256(raw.encode()).hexdigest()
+
+
+@pytest.mark.parametrize(
+    "kind,label",
+    [
+        ("stock_dividends", "akciová dividenda"),
+        ("spin_offs", "spin-off"),
+        ("unit_splits", "unit split"),
+        ("stock_mergers", "fúze s akciovým"),
+        ("provider-secret-token", "jiný dosud nepodporovaný typ"),
+    ],
+)
+def test_market_blockage_explains_unsupported_inventory_without_echoing_provider(kind, label):
+    from quantlab.market_diagnostics import inventory_blockage
+
+    raw, digest = _receipt_payload([[kind, {"id": "ca1", "ex_date": "2026-08-10"}]])
+    message = inventory_blockage(
+        raw,
+        digest,
+        symbol="FULT",
+        instrument_id="asset-test",
+        start=date(2025, 8, 17),
+        end=date(2026, 9, 21),
+    )
+    assert label in message and "2026-08-10" in message
+    assert "provider-secret-token" not in message
+
+
+@pytest.mark.parametrize(
+    "fault,expected",
+    [
+        ("hash", "otisk"),
+        ("scope", "neodpovídá"),
+        ("missing_date", "chybí"),
+        ("invalid_date", "neplatné datum"),
+        ("duplicate", "duplicitní"),
+        ("malformed", "nelze ověřit"),
+        ("too_large", "limit"),
+    ],
+)
+def test_market_blockage_rejects_unverifiable_receipts(fault, expected):
+    from quantlab.market_diagnostics import MAX_RECEIPT_CHARS, inventory_blockage
+
+    row = {"id": "ca1", "ex_date": "2026-08-10"}
+    if fault == "missing_date":
+        row.pop("ex_date")
+    if fault == "invalid_date":
+        row["ex_date"] = "provider-secret-token"
+    rows = [["cash_dividends", row]]
+    if fault == "duplicate":
+        rows = rows * 2
+    raw, digest = _receipt_payload(rows)
+    if fault == "hash":
+        digest = "0" * 64
+    if fault == "malformed":
+        raw = "not-json-provider-secret-token"
+    if fault == "too_large":
+        raw = "x" * (MAX_RECEIPT_CHARS + 1)
+    message = inventory_blockage(
+        raw,
+        digest,
+        symbol="OTHER" if fault == "scope" else "FULT",
+        instrument_id="asset-test",
+        start=date(2025, 8, 17),
+        end=date(2026, 9, 21),
+    )
+    assert expected in message
+    assert "provider-secret-token" not in message
+
+
+@pytest.mark.parametrize(
+    "kind,day",
+    [
+        ("cash_dividends", "2026-08-10"),
+        ("stock_dividends", "2020-01-01"),
+        ("stock_dividends", "2027-01-01"),
+    ],
+)
+def test_market_blockage_does_not_invent_a_cause_or_clear_existing_state(kind, day):
+    from quantlab.market_diagnostics import inventory_blockage
+
+    raw, digest = _receipt_payload([[kind, {"id": "ca1", "ex_date": day}]])
+    assert (
+        inventory_blockage(
+            raw,
+            digest,
+            symbol="FULT",
+            instrument_id="asset-test",
+            start=date(2025, 8, 17),
+            end=date(2026, 9, 21),
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize("fault", ["none", "foreign_task", "future", "hash", "missing", "large"])
+def test_market_pipeline_read_explains_old_blockage_without_mutating_data(tmp_path, fault):
+    import json
+    from datetime import timedelta
+
+    from sqlalchemy import select
+    from sqlalchemy.orm import sessionmaker
+    from test_market_pipeline import END, NOW, START, assets
+
+    from quantlab.asset_directory import AssetDirectoryService
+    from quantlab.market_pipeline import MarketActionReceipt, MarketPipeline, MarketTask
+    from quantlab.phase4 import Phase4Repository
+
+    factory = sessionmaker(Phase4Repository(f"sqlite:///{tmp_path / 'receipt.db'}").engine)
+    directory = AssetDirectoryService(factory).sync(
+        assets(), actor="test", reason="Diagnostic fixture", received_at=NOW
+    )
+    pipeline = MarketPipeline(factory)
+    pipeline.create(directory, START, END, "alpaca:iex", "test", "Diagnostic test", NOW)
+    receipt_id = "a" * 64
+    original = "Zdroj neposkytl požadovanou validní evidenci tržních dat"
+    with factory() as session, session.begin():
+        tasks = list(session.scalars(select(MarketTask).order_by(MarketTask.task_id)))
+        task = tasks[0]
+        task.state, task.detail, task.bars = "DATA_BLOCKED", original, 275
+        task.coverage = Decimal(1)
+        task.evidence_json = json.dumps({"current_action_receipt_id": receipt_id})
+        raw, digest = _receipt_payload(
+            [["stock_dividends", {"id": "ca1", "ex_date": "2026-08-10"}]],
+            symbol=task.symbol,
+            instrument_id=task.instrument_id,
+        )
+        task_id, symbol = task.task_id, task.symbol
+        if fault != "missing":
+            session.add(
+                MarketActionReceipt(
+                    receipt_id=receipt_id,
+                    task_id=tasks[1].task_id if fault == "foreign_task" else task_id,
+                    received_at=datetime.now(UTC) + timedelta(days=1) if fault == "future" else NOW,
+                    content_hash="0" * 64 if fault == "hash" else digest,
+                    payload_json="x" * 262145 if fault == "large" else raw,
+                )
+            )
+    result = pipeline.read(query=symbol, state="DATA_BLOCKED")
+    assert result["total"] == 2 and result["matched"] == 1
+    item = result["items"][0]
+    assert item["state"] == "DATA_BLOCKED" and item["bars"] == 275
+    assert item["coverage"] == 1
+    assert ("akciová dividenda" in item["detail"]) is (fault == "none")
+    with factory() as session:
+        persisted = session.get(MarketTask, task_id)
+        assert persisted.detail == original and persisted.state == "DATA_BLOCKED"
+        assert persisted.bars == 275 and persisted.attempts == 0
+        assert json.loads(persisted.evidence_json) == {"current_action_receipt_id": receipt_id}
+        receipt = session.get(MarketActionReceipt, receipt_id)
+        if fault == "missing":
+            assert receipt is None
+        else:
+            assert receipt.payload_json == ("x" * 262145 if fault == "large" else raw)
+    assert pipeline.read(limit=1, offset=1, state="DATA_BLOCKED")["items"] == []
+    assert pipeline.read(state="PENDING")["matched"] == 1

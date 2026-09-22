@@ -41,6 +41,7 @@ from quantlab.market_data import (
     XNYSCalendar,
 )
 from quantlab.market_data_service import PersistentMarketDataService, _lock, _observation
+from quantlab.market_diagnostics import blockage_detail
 from quantlab.market_screening import MarketScreening, canonical, evaluate_screen, identity
 from quantlab.persistence import Base, InstrumentRecord, MarketObservationRecord
 
@@ -688,7 +689,7 @@ class MarketPipeline:
                         "momentum": row.momentum,
                         "trend": row.trend,
                         "mean_reversion": row.mean_reversion,
-                        "detail": row.detail,
+                        "detail": blockage_detail(session, row, batch),
                     }
                     for row in rows
                 ],
