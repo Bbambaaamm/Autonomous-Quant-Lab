@@ -283,7 +283,7 @@ def _load_snapshot(
                     effective_at=require_utc(datetime.fromisoformat(str(entry["effective_at"]))),
                     known_at=require_utc(datetime.fromisoformat(str(entry["known_at"]))),
                     value=Decimal(str(entry["value"])) if entry.get("value") is not None else None,
-                    new_symbol=str(entry["new_symbol"]) if entry.get("new_symbol") is not None else None,
+                    new_symbol=str(entry["new_symbol"])\n                    if entry.get("new_symbol") is not None\n                    else None,
                 )
             )
         except (KeyError, TypeError, ValueError) as exc:
