@@ -270,3 +270,24 @@ to samo neověřuje celý historický rozsah ani worker.
 
 Diagnostika fronty rozlišuje známé vyčerpání lokálního rozpočtu a HTTP 5xx zdroje.
 Neznámé texty výjimek se nadále nezobrazují.
+
+## Active / inactive lifecycle evidence — M2
+
+Adresář Alpaca se načítá ve dvou explicitních pohledech: `status=active` a
+`status=inactive`. Oba odpovědní payloady se před uložením spojí a celý výsledný
+snapshot je opět immutable s vlastním receipt time a content hashem. Každý řádek
+uchovává provider UUID, symbol, burzu a providerový lifecycle status.
+
+Opakované snapshoty rozlišují první/poslední pozorování UUID, změnu symbolu/burzy a
+přechody `active → inactive` / `inactive → active`. Jde o **čas zjištění změny
+providerového statusu**, nikoli automaticky o datum IPO, delistingu nebo ekonomickou
+účinnost corporate action. Dashboard tuto hranici výslovně uvádí.
+
+Původní active-only snapshoty jsou při migraci `20260922_04` označeny `active`,
+protože právě takový byl původní dotaz provideru. Downgrade se odmítne, jakmile
+databáze obsahuje skutečnou inactive evidenci, aby lifecycle informace nešla tiše
+zahodit.
+
+Inactive reference zůstávají v adresáři pro historickou/lifecycle dohledatelnost.
+Jejich přítomnost sama nedokládá úplnost všech historicky zaniklých US titulů před
+prvním sběrem a není náhradou přesného IPO/delisting master source.
