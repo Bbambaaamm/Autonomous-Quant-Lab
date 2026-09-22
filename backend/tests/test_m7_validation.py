@@ -6,7 +6,13 @@ import pytest
 from phase6_audit_helpers import CALENDAR, MappingProvider, daily_bar
 from sqlalchemy.orm import sessionmaker
 
-from quantlab.m7_validation import EqualWeightMonthly, _request, run_m7_validation
+from quantlab.m7_validation import (
+    EqualWeightMonthly,
+    _request,
+    _select_deployment,
+    digest,
+    run_m7_validation,
+)
 from quantlab.market_data import (
     AssetType,
     CorporateAction,
@@ -24,7 +30,11 @@ from quantlab.persistence import (
     UniverseMembershipRecord,
 )
 from quantlab.phase4 import Phase4Repository
-from quantlab.phase6_runtime import Phase6ExperimentRequest, Phase6ExperimentRunner
+from quantlab.phase6_runtime import (
+    DeploymentService,
+    Phase6ExperimentRequest,
+    Phase6ExperimentRunner,
+)
 
 
 def _seed(tmp_path):
@@ -125,24 +135,16 @@ def _seed(tmp_path):
     )
     experiment = Phase6ExperimentRunner(factory).run(request)
     with factory() as db, db.begin():
-        db.add(
-            StrategyDeploymentRecord(
-                deployment_id="m7-approved",
-                created_at=cutoff,
-                approved_at=cutoff,
-                status="APPROVED",
-                strategy_name="multi_asset_trend",
-                strategy_version="1.0.0",
-                parameters_json=experiment.selected_parameters_json or "{}",
-                universe_id=universe_id,
-                paper_account_id="paper-main",
-                experiment_id=experiment.id,
-                snapshot_id=snapshot.snapshot_id,
-                currency="USD",
-                timeframe="1d",
-            )
-        )
-    return factory, experiment, snapshot
+        persisted = db.get(ExperimentRecord, experiment.id)
+        persisted.decision = "PAPER_CANDIDATE"
+    deployments = DeploymentService(factory)
+    deployment = deployments.create(
+        experiment.id,
+        "paper-main",
+        created_at=cutoff,
+    )
+    deployments.approve(deployment.deployment_id, cutoff)
+    return factory, experiment, snapshot, deployment.deployment_id
 
 
 def test_equal_weight_benchmark_is_deterministic():
@@ -158,7 +160,7 @@ def test_equal_weight_benchmark_is_deterministic():
 
 
 def test_runtime_sha_replaces_caller_or_historical_sha(tmp_path, monkeypatch):
-    factory, experiment, _ = _seed(tmp_path)
+    factory, experiment, _, deployment_id = _seed(tmp_path)
     monkeypatch.setattr(
         Phase6ExperimentRunner,
         "_code_sha",
@@ -168,37 +170,37 @@ def test_runtime_sha_replaces_caller_or_historical_sha(tmp_path, monkeypatch):
         persisted = db.get(ExperimentRecord, experiment.id)
         request = _request(persisted, "b" * 40)
     assert request.code_sha == "b" * 40
-    report = run_m7_validation(factory, deployment_id="m7-approved")
+    report = run_m7_validation(factory, deployment_id=deployment_id)
     assert report["validator_code_sha"] == "b" * 40
     assert report["experiment_original_code_sha"] == "a" * 40
 
 
 def test_static_or_backdated_ad_hoc_universe_cannot_pass_m7(tmp_path):
-    factory, _, snapshot = _seed(tmp_path)
+    factory, _, snapshot, deployment_id = _seed(tmp_path)
     with factory() as db, db.begin():
         universe = db.get(UniverseDefinitionRecord, "m7-pit")
         universe.kind = "STATIC"
     with pytest.raises(ValueError, match="M7_REQUIRES_PERSISTED_PIT_UNIVERSE"):
-        run_m7_validation(factory, deployment_id="m7-approved")
+        run_m7_validation(factory, deployment_id=deployment_id)
     with factory() as db:
         assert db.get(DatasetSnapshotRecord, snapshot.snapshot_id) is not None
 
 
 def test_snapshot_manifest_tamper_fails_closed(tmp_path):
-    factory, _, snapshot = _seed(tmp_path)
+    factory, _, snapshot, deployment_id = _seed(tmp_path)
     with factory() as db, db.begin():
         row = db.get(DatasetSnapshotRecord, snapshot.snapshot_id)
         manifest = json.loads(row.manifest_json)
         manifest["observations"] = manifest["observations"][:-1]
         row.manifest_json = json.dumps(manifest, sort_keys=True, separators=(",", ":"))
     with pytest.raises(ValueError, match="M7_SNAPSHOT_CONTENT_HASH_MISMATCH"):
-        run_m7_validation(factory, deployment_id="m7-approved")
+        run_m7_validation(factory, deployment_id=deployment_id)
 
 
 def test_replay_is_persisted_and_benchmark_receives_corporate_actions(tmp_path, monkeypatch):
     import quantlab.m7_validation as module
 
-    factory, experiment, _ = _seed(tmp_path)
+    factory, experiment, _, deployment_id = _seed(tmp_path)
     original = module.run_multi_asset
     captured = []
 
@@ -207,7 +209,7 @@ def test_replay_is_persisted_and_benchmark_receives_corporate_actions(tmp_path, 
         return original(*args, **kwargs)
 
     monkeypatch.setattr(module, "run_multi_asset", wrapped)
-    report = run_m7_validation(factory, deployment_id="m7-approved")
+    report = run_m7_validation(factory, deployment_id=deployment_id)
     assert report["experiment_id"] == experiment.id
     assert report["replay"]["matches_persisted_oos"] is True
     assert report["guards"]["causal_adjusted_signal_prices"] is True
@@ -216,15 +218,109 @@ def test_replay_is_persisted_and_benchmark_receives_corporate_actions(tmp_path, 
 
 
 def test_validator_is_read_only_for_deployment_and_experiment(tmp_path):
-    factory, experiment, _ = _seed(tmp_path)
+    factory, experiment, _, deployment_id = _seed(tmp_path)
     before = None
     with factory() as db:
-        deployment = db.get(StrategyDeploymentRecord, "m7-approved")
-        before = (deployment.status, deployment.approved_at, experiment.decision)
-    first = run_m7_validation(factory, deployment_id="m7-approved")
-    second = run_m7_validation(factory, deployment_id="m7-approved")
+        deployment = db.get(StrategyDeploymentRecord, deployment_id)
+        persisted = db.get(ExperimentRecord, experiment.id)
+        before = (deployment.status, deployment.approved_at, persisted.decision)
+    first = run_m7_validation(factory, deployment_id=deployment_id)
+    second = run_m7_validation(factory, deployment_id=deployment_id)
     assert first["report_hash"] == second["report_hash"]
     with factory() as db:
-        deployment = db.get(StrategyDeploymentRecord, "m7-approved")
+        deployment = db.get(StrategyDeploymentRecord, deployment_id)
         persisted = db.get(ExperimentRecord, experiment.id)
         assert (deployment.status, deployment.approved_at, persisted.decision) == before
+
+
+
+def test_manual_approved_row_without_runtime_evidence_is_rejected(tmp_path):
+    factory, experiment, snapshot, _ = _seed(tmp_path)
+    with factory() as db, db.begin():
+        db.add(
+            StrategyDeploymentRecord(
+                deployment_id="manual-approved",
+                created_at=snapshot.as_of,
+                approved_at=snapshot.as_of,
+                status="APPROVED",
+                strategy_name=experiment.strategy_name,
+                strategy_version=experiment.strategy_version,
+                parameters_json=experiment.selected_parameters_json or "{}",
+                universe_id=snapshot.universe_id,
+                paper_account_id="paper-main",
+                experiment_id=experiment.id,
+                snapshot_id=snapshot.snapshot_id,
+                currency="USD",
+                timeframe="1d",
+            )
+        )
+    with pytest.raises(ValueError, match="RUNTIME_CONFIG"):
+        run_m7_validation(factory, deployment_id="manual-approved")
+
+
+def test_deployment_selection_has_stable_unique_tie_break(tmp_path):
+    factory, experiment, snapshot, deployment_id = _seed(tmp_path)
+    with factory() as db, db.begin():
+        original = db.get(StrategyDeploymentRecord, deployment_id)
+        clone = StrategyDeploymentRecord(
+            deployment_id="f" * 64,
+            created_at=original.created_at,
+            approved_at=original.approved_at,
+            status="APPROVED",
+            strategy_name=original.strategy_name,
+            strategy_version=original.strategy_version,
+            parameters_json=original.parameters_json,
+            universe_id=original.universe_id,
+            paper_account_id=original.paper_account_id,
+            experiment_id=experiment.id,
+            snapshot_id=snapshot.snapshot_id,
+            currency=original.currency,
+            timeframe=original.timeframe,
+            runtime_manifest_json=original.runtime_manifest_json,
+            runtime_manifest_hash=original.runtime_manifest_hash,
+            runtime_manifest_version=original.runtime_manifest_version,
+        )
+        db.add(clone)
+    with factory() as db:
+        assert _select_deployment(db, None).deployment_id == "f" * 64
+
+
+def test_single_observed_instrument_cannot_be_reported_as_multi_asset(tmp_path):
+    factory, _, snapshot, deployment_id = _seed(tmp_path)
+    with factory() as db, db.begin():
+        row = db.get(DatasetSnapshotRecord, snapshot.snapshot_id)
+        manifest = json.loads(row.manifest_json)
+        first_id = manifest["universe_memberships"][0]["instrument_id"]
+        manifest["observations"] = [
+            item
+            for item in manifest["observations"]
+            if db.get(MarketObservationRecord, item["id"]) is None
+        ]
+        observed = []
+        for item in json.loads(row.manifest_json)["observations"]:
+            observation = db.scalar(
+                select(MarketObservationRecord).where(
+                    MarketObservationRecord.observation_id == item["id"]
+                )
+            )
+            if observation.instrument_id == first_id:
+                observed.append(item)
+        manifest["observations"] = observed
+        immutable = {
+            "observations": manifest["observations"],
+            "corporate_actions": manifest["corporate_actions"],
+            "universe_memberships": manifest["universe_memberships"],
+        }
+        row.manifest_json = json.dumps(manifest, sort_keys=True, separators=(",", ":"))
+        row.content_hash = digest(immutable)
+    with pytest.raises(ValueError, match="M7_REQUIRES_MULTI_INSTRUMENT_PIT_UNIVERSE"):
+        run_m7_validation(factory, deployment_id=deployment_id)
+
+
+def test_loaded_observation_payload_is_rehashed(tmp_path):
+    factory, _, _, deployment_id = _seed(tmp_path)
+    with factory() as db, db.begin():
+        observation = db.scalar(select(MarketObservationRecord))
+        observation.high = str(Decimal(observation.high) + Decimal("1"))
+    with pytest.raises(ValueError, match="M7_OBSERVATION_PAYLOAD_HASH_MISMATCH"):
+        run_m7_validation(factory, deployment_id=deployment_id)
