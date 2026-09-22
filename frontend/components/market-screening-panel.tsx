@@ -15,7 +15,7 @@ export function MarketScreeningPanel({ data, query, rank, page }: { data: Screen
   return <section className="card" aria-labelledby="screening-title">
     <h2 id="screening-title">Výběr kandidátů podle ověřených dat</h2>
     <p>Pravidla {data.policy.version}: alespoň {data.policy.minimum_sessions} seancí, pokrytí {percent(data.policy.minimum_coverage)}, cena od {data.policy.minimum_price_usd} USD a průměrný denní objem za posledních 20 seancí od {Number(data.policy.minimum_feed_dollar_volume_20).toLocaleString("cs-CZ")} USD.</p>
-    <p>Objem platí pouze pro použitý feed. Výpočty používají upravené ceny a doložené dividendy a splity. Výběr není schválení strategie ani objednávka; dnešní katalog nedokládá historické složení trhu.</p>
+    <p>Objem platí pouze pro použitý feed. Výpočty používají upravené ceny a uložený stav dividend a splitů s časem skutečného přijetí. Jde o aktuální výběr: dnes přijatá událost není důkazem, že byla známá v minulosti. Výběr není schválení strategie ani objednávka; dnešní katalog nedokládá historické složení trhu.</p>
     {!data.run ? <p>Výběr se automaticky uloží po dokončení celé cenové dávky. Dosud není k dispozici dokončený výběr.</p> : <>
       <p><strong>{data.run.eligible.toLocaleString("cs-CZ")} způsobilých z {data.run.total.toLocaleString("cs-CZ")}</strong> · uloženo {dateText(data.run.created_at)}. Vyřazené tituly zůstávají v celkovém počtu.</p>
       <details><summary>Původ výsledku</summary><p style={{overflowWrap:"anywhere"}}>Verze výběru: {data.run.id}<br />Cenová dávka: {data.run.batch_id}<br />Otisk obsahu: {data.run.content_hash}</p></details>

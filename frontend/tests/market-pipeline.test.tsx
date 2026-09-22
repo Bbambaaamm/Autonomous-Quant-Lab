@@ -17,3 +17,8 @@ it("offers admin acquisition controls without secrets", () => {
  expect(screen.getByText("1. Ověřit a načíst identity poskytovatele")).toBeInTheDocument();
  expect(screen.getByText("2. Spustit průběžný sběr cen")).toBeInTheDocument();
 });
+it("keeps the processing-state filter across pages", () => {
+ render(<MarketPipelinePanel data={{...data,state:"DONE"}} admin={false}/>);
+ expect(screen.getByRole("combobox",{name:"Stav zpracování"})).toHaveValue("DONE");
+ expect(screen.getByRole("link",{name:/Další/})).toHaveAttribute("href","/market?price_q=IBM+%26&price_rank=trend&price_page=3&price_state=DONE");
+});

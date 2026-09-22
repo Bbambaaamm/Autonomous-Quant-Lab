@@ -1,5 +1,27 @@
 # Pokrytí trhu — issue #164
 
+## Aktuální ceny a čas přijetí událostí (22. 9. 2026)
+
+Cenová fronta ukládá surové ceny nezávisle na úspěchu kontroly dividend a splitů.
+Alpaca REST inventář se načítá se všemi stránkami a všemi typy událostí. Jeho
+původní řádky, rozsah dotazu, instrument, hash a skutečný čas přijetí se ukládají
+do neměnné tabulky `market_action_receipts`. Neúplné stránkování není přijatý
+inventář. Nepodporovaná či vadná relevantní událost zabrání způsobilosti, ale
+již uložené ceny a skutečný počet stažených seancí zůstanou zachovány.
+
+Pravidla `us-current-universe-2` dovolují použít tento inventář pro **aktuální**
+screening. Všechny jeho události mají `known_at` rovný skutečnému přijetí; záznam
+nelze použít před tímto časem. Evidence výběru rozlišuje `REST_CURRENT_SNAPSHOT`
+od historické readiness. Do SSE historie, historické readiness ani projekce
+pilotních corporate actions tento sběr nezapisuje. Výběr zůstává
+`research_eligible=false`: dnešní informace se nevydávají za tehdejší znalost.
+Původní přísná cesta výzkumného importu a tvorby datasetů zůstává samostatná.
+
+Změna odstraňuje závislost plošného aktuálního sběru na načítání celé SSE historie
+při každém instrumentu. Nemění limity požadavků, rozsah feedu, zapnutí automatizace
+ani pravidla obchodování. Globální zdroj a historické složení trhu jsou stále
+samostatné nedokončené podmínky #164.
+
 ## Stav implementace
 
 První doručená část je referenční katalog, nikoli dokončení globálního sledování.

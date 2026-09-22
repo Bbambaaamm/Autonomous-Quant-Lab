@@ -13,13 +13,14 @@ type Coverage = {
   items: { symbol: string; name: string; exchange: string; security_type: string }[];
   exchanges: { exchange: string; count: number }[]; limitations: string[];
 };
-export default async function Market({ searchParams }: { searchParams: Promise<{ q?: string; page?: string; price_q?: string; price_rank?: string; price_page?: string; screen_q?: string; screen_rank?: string; screen_page?: string }> }) {
+export default async function Market({ searchParams }: { searchParams: Promise<{ q?: string; page?: string; price_q?: string; price_rank?: string; price_page?: string; price_state?: string; screen_q?: string; screen_rank?: string; screen_page?: string }> }) {
   const params = await searchParams;
   const q = (typeof params.q === "string" ? params.q : "").slice(0, 100);
   const requested = Number(params.page ?? 1);
   const page = Number.isSafeInteger(requested) && requested > 0 && requested < 1000000 ? requested : 1;
   const priceQuery = (typeof params.price_q === "string" ? params.price_q : "").slice(0,100);
   const priceRank = ["symbol", "momentum", "trend", "mean_reversion"].includes(params.price_rank ?? "") ? params.price_rank! : "symbol";
+  const priceState = ["PENDING", "RUNNING", "RETRY", "DONE", "FAILED", "BLOCKED", "DATA_BLOCKED", "ACCESS_BLOCKED", "UNSUPPORTED_VENUE"].includes(params.price_state ?? "") ? params.price_state! : "";
   const priceRequested = Number(params.price_page ?? 1);
   const pricePage = Number.isSafeInteger(priceRequested) && priceRequested > 0 && priceRequested < 1000000 ? priceRequested : 1;
   const screenQuery = (typeof params.screen_q === "string" ? params.screen_q : "").slice(0,100);
@@ -27,7 +28,7 @@ export default async function Market({ searchParams }: { searchParams: Promise<{
   const screenRequested = Number(params.screen_page ?? 1);
   const screenPage = Number.isSafeInteger(screenRequested) && screenRequested > 0 && screenRequested < 1000000 ? screenRequested : 1;
   const [data, user, pipeline, screening] = await Promise.all([
-    api<Coverage>(`/operator/market-coverage?q=${encodeURIComponent(q)}&offset=${(page - 1) * 50}&limit=50`), session(), api<Pipeline>(`/operator/market-pipeline?${new URLSearchParams({q:priceQuery,rank:priceRank,offset:String((pricePage - 1)*50),limit:"50"})}`),
+    api<Coverage>(`/operator/market-coverage?q=${encodeURIComponent(q)}&offset=${(page - 1) * 50}&limit=50`), session(), api<Pipeline>(`/operator/market-pipeline?${new URLSearchParams({q:priceQuery,rank:priceRank,state:priceState,offset:String((pricePage - 1)*50),limit:"50"})}`),
     api<Screening>(`/operator/market-screening?${new URLSearchParams({q:screenQuery,rank:screenRank,offset:String((screenPage-1)*50),limit:"50"})}`),
   ]);
   const pageLink = (n: number) => `/market?${new URLSearchParams({ q, page: String(n) })}`;

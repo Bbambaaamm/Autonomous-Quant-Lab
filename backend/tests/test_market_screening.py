@@ -73,3 +73,31 @@ def test_absent_action_evidence_and_low_liquidity_exclude():
     report = evaluate_screen(rows, [], DAYS, NOW, None)
     assert set(report["reasons"]) == {"ACTIONS_NOT_VERIFIED", "LOW_FEED_LIQUIDITY"}
     assert report["trend"] is None
+
+
+def test_current_inventory_never_becomes_historical_readiness_or_future_knowledge():
+    report = evaluate_screen(
+        observations(),
+        [],
+        DAYS,
+        NOW,
+        None,
+        inventory_id="current-rest-receipt",
+        inventory_received_at=NOW,
+    )
+    assert report["eligible"]
+    assert report["research_eligible"] is False
+    assert report["action_readiness_id"] is None
+    assert report["action_evidence_source"] == "REST_CURRENT_SNAPSHOT"
+    future = evaluate_screen(
+        observations(),
+        [],
+        DAYS,
+        NOW,
+        None,
+        inventory_id="current-rest-receipt",
+        inventory_received_at=NOW + timedelta(seconds=1),
+    )
+    assert not future["eligible"]
+    assert future["current_action_receipt_id"] is None
+    assert "ACTIONS_NOT_VERIFIED" in future["reasons"]

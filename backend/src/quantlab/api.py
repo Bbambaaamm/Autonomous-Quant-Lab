@@ -1710,8 +1710,12 @@ def operator_market_pipeline(
     offset: int = Query(0, ge=0),
     q: str = Query("", max_length=100),
     rank: str = Query("symbol", pattern="^(symbol|momentum|trend|mean_reversion)$"),
+    state: str = Query(
+        "",
+        pattern="^(|PENDING|RUNNING|RETRY|DONE|FAILED|BLOCKED|DATA_BLOCKED|ACCESS_BLOCKED|UNSUPPORTED_VENUE)$",
+    ),
 ) -> dict[str, object]:
-    result = MarketPipeline(session_factory).read(limit, offset, q, rank)
+    result = MarketPipeline(session_factory).read(limit, offset, q, rank, state)
     result["identity_directory"] = AssetDirectoryService(session_factory).latest(datetime.now(UTC))
     result["configured_provider"] = settings.market_data_provider
     result["feed"] = settings.alpaca_feed

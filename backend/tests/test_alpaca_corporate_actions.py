@@ -22,6 +22,32 @@ from quantlab.market_data import (
 Transport = Callable[[str, dict[str, str], float], tuple[int, dict[str, str], bytes]]
 
 
+def test_current_inventory_consumes_all_pages_without_fabricating_past_knowledge():
+    calls = []
+    provider = AlpacaProvider(
+        "key",
+        "secret",
+        lambda _: pytest.fail("Must not load historical SSE"),
+        {"AAPL": "asset"},
+        _transport(
+            {
+                None: _response({"forward_splits": [_split()]}, "next"),
+                "next": _response({"cash_dividends": [_cash_dividend()]}),
+            },
+            calls,
+        ),
+        timeout=1,
+    )
+    rows = provider.current_action_inventory("AAPL")
+    received = datetime(2026, 9, 22, 12, tzinfo=UTC)
+    actions = provider.normalize_current_actions(
+        "AAPL", rows, date(2026, 1, 1), date(2026, 9, 21), received
+    )
+    assert len(calls) == len(actions) == 2
+    assert all(a.known_at == received for a in actions)
+    assert all(a.effective_at < a.known_at for a in actions)
+
+
 def _split(action_id: str = "ca-1", *, new_rate: int | str = 4) -> dict[str, Any]:
     return {
         "id": action_id,

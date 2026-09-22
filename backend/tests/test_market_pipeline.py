@@ -72,6 +72,12 @@ def test_entire_directory_enqueued_and_processed_without_orders(env):
     data = pipeline.read()
     assert data["counts"] == {"DONE": 1, "PENDING": 1}
     item = next(row for row in data["items"] if row["state"] == "DONE")
+    filtered = pipeline.read(state="DONE")
+    assert filtered["total"] == 2
+    assert filtered["matched"] == 1
+    assert all(row["state"] == "DONE" for row in filtered["items"])
+    with pytest.raises(ValueError):
+        pipeline.read(state="UNKNOWN")
     assert item["coverage"] == Decimal(1)
     assert item["momentum"] == Decimal(0)
     pipeline.step(lambda _: Provider(), clock=lambda: NOW)
@@ -91,6 +97,76 @@ def test_future_observations_do_not_leak(env):
     report = pipeline.screen(instrument_id, "alpaca:iex", START, END, NOW - timedelta(seconds=1))
     assert report["bars"] == 0
     assert report["momentum"] is None
+
+
+def current_provider(instrument, groups=None, *, fail_actions=False):
+    from quantlab.market_data import AlpacaProvider
+
+    def transport(url, headers, timeout):
+        if "/bars?" in url:
+            body = {
+                "bars": [
+                    {"t": f"{day}T04:00:00Z", "o": 100, "h": 100, "l": 100, "c": 100, "v": 20000}
+                    for day in XNYSCalendar().sessions_between(START, END)
+                ]
+            }
+        else:
+            if fail_actions:
+                return 503, {}, b"{}"
+            body = {"corporate_actions": groups or {}}
+        return 200, {}, json.dumps(body).encode()
+
+    return AlpacaProvider(
+        "synthetic-key",
+        "synthetic-secret",
+        lambda _: pytest.fail("Current inventory must not load historical SSE events"),
+        {instrument.symbol: instrument.instrument_id},
+        transport,
+    )
+
+
+def test_current_receipt_allows_current_screen_but_creates_no_historical_proof(env):
+    from quantlab.market_pipeline import MarketActionReceipt
+    from quantlab.persistence import CorporateActionReadinessRecord, CorporateActionRecord
+
+    factory, pipeline, _ = env
+    groups = {"cash_dividends": [{"id": "dividend", "ex_date": "2026-08-10", "rate": "1"}]}
+    pipeline.step(lambda instrument: current_provider(instrument, groups), clock=lambda: NOW)
+    with factory() as session:
+        task = session.scalar(select(MarketTask).where(MarketTask.state == "DONE"))
+        report = json.loads(task.evidence_json)["screening"]
+        assert report["eligible"]
+        assert report["research_eligible"] is False
+        assert report["action_readiness_id"] is None
+        receipt = session.get(MarketActionReceipt, report["current_action_receipt_id"])
+        assert json.loads(receipt.payload_json)["rows"][0][1]["id"] == "dividend"
+        assert datetime.fromisoformat(report["actions"][0]["known_at"]) == NOW
+        assert session.scalar(select(CorporateActionReadinessRecord)) is None
+        assert session.scalar(select(CorporateActionRecord)) is None
+
+
+@pytest.mark.parametrize("failure", ["unsupported", "offline", "duplicate"])
+def test_prices_survive_action_failure_without_screening_eligibility(env, failure):
+    from quantlab.market_pipeline import MarketActionReceipt
+
+    factory, pipeline, _ = env
+    row = {"id": "action", "ex_date": "2026-08-10", "rate": "1"}
+    groups = (
+        {"stock_dividends": [row]} if failure == "unsupported" else {"cash_dividends": [row, row]}
+    )
+    pipeline.step(
+        lambda instrument: current_provider(instrument, groups, fail_actions=failure == "offline"),
+        clock=lambda: NOW,
+    )
+    with factory() as session:
+        task = session.scalar(select(MarketTask).where(MarketTask.bars > 0))
+        assert task is not None
+        assert task.state in {"DATA_BLOCKED", "RETRY"}
+        report = json.loads(task.evidence_json)
+        assert not report["screening"]["eligible"]
+        assert report["bars"] == len(XNYSCalendar().sessions_between(START, END))
+        if failure != "offline":
+            assert session.get(MarketActionReceipt, report["current_action_receipt_id"]) is not None
 
 
 def test_partial_bars_cannot_get_a_signal(env):
