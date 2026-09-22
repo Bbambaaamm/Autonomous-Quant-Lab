@@ -389,3 +389,28 @@ def test_screening_streams_multiple_pages_including_all_unsupported_assets(tmp_p
     assert data["run"]["eligible"] == 0
     assert len(data["items"]) == 5
     assert data["items"][-1]["symbol"] == "T0204"
+
+
+@pytest.mark.parametrize(
+    "message,expected",
+    [
+        ("MARKET_REQUEST_BUDGET_EXHAUSTED", "Vyčerpán limit požadavků nebo 45 sekund"),
+        ("Dočasná chyba Alpaca provideru", "Poskytovatel vrátil HTTP 5xx"),
+        ("private-secret", "Dočasná chyba"),
+    ],
+)
+def test_retry_distinguishes_budget_and_provider_failure_without_raw_messages(
+    env, message, expected
+):
+    from quantlab.market_data import ProviderUnavailable
+
+    _, pipeline, _ = env
+
+    class Failure(Provider):
+        def historical_daily(self, *args):
+            raise ProviderUnavailable(message)
+
+    pipeline.step(lambda _: Failure(), clock=lambda: NOW)
+    item = next(row for row in pipeline.read()["items"] if row["state"] == "RETRY")
+    assert item["detail"].startswith(expected)
+    assert "private-secret" not in item["detail"]

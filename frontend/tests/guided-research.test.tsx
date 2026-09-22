@@ -4,7 +4,7 @@ vi.mock("next/cache", () => ({ revalidatePath: vi.fn() }));
 vi.mock("../lib/auth", () => ({ assertSameOrigin: vi.fn(), requireSession: vi.fn(async () => ({ role: "ADMIN" })), backendToken: vi.fn(() => "synthetic-test-token") }));
 import { ResearchForm, type ResearchOptions } from "../components/research-form";
 import { TradingDiagnostics } from "../components/trading-diagnostics";
-import { experimentAction } from "../app/actions";
+import { experimentAction, ingestionAction, snapshotAction } from "../app/actions";
 import { decimalText } from "../lib/display";
 const options: ResearchOptions = { code_sha: "a".repeat(40), strategies: [{ name: "multi_asset_mean_reversion", version: "1.0.0", defaults: { lookback: 20, threshold: "0.95", rebalance_frequency: "WEEKLY" } }, { name: "multi_asset_trend", version: "1.0.0", defaults: { fast: 20, slow: 100, rebalance_frequency: "MONTHLY" } }] };
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
@@ -45,4 +45,17 @@ it("normalizes zero without rounding tiny nonzero exposure", () => {
     expect(decimalText("0E-8")).toBe("0");
     expect(decimalText("1E-400")).toBe("1E-400");
     expect(decimalText(null)).toBe("Neuvedeno");
+});
+
+it("lets the backend choose its configured import and dataset provider", async () => {
+    const fetcher = vi.fn(async () => ({ ok: true }));
+    vi.stubGlobal("fetch", fetcher);
+    const form = new FormData();
+    for (const [key, val] of Object.entries({ instrument_id: "alpaca-test", universe_id: "market-test", start: "2026-01-01", end: "2026-09-21", as_of: "2026-09-22T05:00", minimum_coverage: "0.98", reason: "Test configured source" })) form.set(key, val);
+    expect((await ingestionAction({}, form)).success).toBeDefined();
+    expect((await snapshotAction({}, form)).success).toBeDefined();
+    for (const call of fetcher.mock.calls) {
+        const body = JSON.parse((call as unknown as [string, { body: string }])[1].body);
+        expect(body).not.toHaveProperty("provider");
+    }
 });

@@ -311,12 +311,16 @@ class MarketPipeline:
             )
         except Exception as exc:
             # Raw exception/provider body may contain credentials; do not propagate it to UI.
+            safe_reason = {
+                "MARKET_REQUEST_BUDGET_EXHAUSTED": "Vyčerpán limit požadavků nebo 45 sekund",
+                "Dočasná chyba Alpaca provideru": "Poskytovatel vrátil HTTP 5xx",
+            }.get(str(exc), "Dočasná chyba")
             state, detail = (
                 ("ACCESS_BLOCKED", "Datový účet nemá platný přístup")
                 if str(exc) == "MARKET_DATA_ACCESS_DENIED"
                 else (
                     "RETRY",
-                    f"Dočasná chyba: {stage} "
+                    f"{safe_reason}: {stage} "
                     f"({type(exc).__name__[:40]}; {type(exc.__cause__).__name__[:40]})",
                 )
             )
