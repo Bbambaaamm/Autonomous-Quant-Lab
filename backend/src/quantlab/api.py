@@ -1712,7 +1712,7 @@ def operator_market_pipeline(
     rank: str = Query("symbol", pattern="^(symbol|momentum|trend|mean_reversion)$"),
     state: str = Query(
         "",
-        pattern="^(|PENDING|RUNNING|RETRY|DONE|FAILED|BLOCKED|DATA_BLOCKED|ACCESS_BLOCKED|UNSUPPORTED_VENUE)$",
+        pattern="^(|PENDING|RUNNING|RETRY|DONE|FAILED|BLOCKED|DATA_BLOCKED|NO_PRICE_DATA|ACCESS_BLOCKED|UNSUPPORTED_VENUE)$",
     ),
 ) -> dict[str, object]:
     result = MarketPipeline(session_factory).read(limit, offset, q, rank, state)

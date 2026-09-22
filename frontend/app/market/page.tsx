@@ -20,7 +20,7 @@ export default async function Market({ searchParams }: { searchParams: Promise<{
   const page = Number.isSafeInteger(requested) && requested > 0 && requested < 1000000 ? requested : 1;
   const priceQuery = (typeof params.price_q === "string" ? params.price_q : "").slice(0,100);
   const priceRank = ["symbol", "momentum", "trend", "mean_reversion"].includes(params.price_rank ?? "") ? params.price_rank! : "symbol";
-  const priceState = ["PENDING", "RUNNING", "RETRY", "DONE", "FAILED", "BLOCKED", "DATA_BLOCKED", "ACCESS_BLOCKED", "UNSUPPORTED_VENUE"].includes(params.price_state ?? "") ? params.price_state! : "";
+  const priceState = ["PENDING", "RUNNING", "RETRY", "DONE", "FAILED", "BLOCKED", "DATA_BLOCKED", "NO_PRICE_DATA", "ACCESS_BLOCKED", "UNSUPPORTED_VENUE"].includes(params.price_state ?? "") ? params.price_state! : "";
   const priceRequested = Number(params.price_page ?? 1);
   const pricePage = Number.isSafeInteger(priceRequested) && priceRequested > 0 && priceRequested < 1000000 ? priceRequested : 1;
   const screenQuery = (typeof params.screen_q === "string" ? params.screen_q : "").slice(0,100);
