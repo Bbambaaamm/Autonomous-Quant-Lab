@@ -1,5 +1,29 @@
 # Pokrytí trhu — issue #164
 
+## Zero-cost-first politika pro PAPER (22. 9. 2026)
+
+Do explicitního rozhodnutí uživatele je rozpočet na nová datová předplatná **0 USD/měsíc**.
+Placený zdroj není podmínkou současného PAPER provozu a #164 nesmí automaticky nakoupit
+žádnou službu. Aktivní americká vrstva používá existující bezplatný Alpaca Basic/IEX účet.
+
+Doplňkové bezplatné zdroje se používají pouze v rozsahu, který umíme doložit. Stooq zůstává
+sekundární EOD zdroj jednotlivých mapovaných symbolů; nemá v projektu corporate-actions
+adaptér a před plošnou automatizací je nutné doložit podmínky a kompletní rozsah. Twelve Data
+Basic a Alpha Vantage Free jsou kandidáti pro doplňkové ověření po založení bezplatného API
+klíče; jejich free limity se nesmějí vydávat za úplné globální pokrytí.
+
+API `/operator/market-coverage` vrací `zero_cost_policy` s verzovanou maticí zdrojů,
+nulovým rozpočtem, stavem konfigurace a explicitními mezerami. Dashboard tuto matici
+zobrazuje. Přidání zdroje do matice samo nepovoluje jeho široký automatický sběr.
+
+Ověřené veřejné limity k tomuto datu:
+- Alpaca Basic: zdarma, US stocks/ETFs, historie od 2016, 200 historických požadavků/min,
+  free realtime feed IEX.
+- Twelve Data Basic: zdarma, 8 API kreditů/min a 800/den; globální trial symboly nejsou
+  důkazem úplného světového katalogu.
+- Alpha Vantage standard free: 25 požadavků/den pro většinu datasetů.
+
+
 ## Aktuální ceny a čas přijetí událostí (22. 9. 2026)
 
 Cenová fronta ukládá surové ceny nezávisle na úspěchu kontroly dividend a splitů.
