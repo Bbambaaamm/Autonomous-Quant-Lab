@@ -25,6 +25,7 @@ from quantlab.market_data import CorporateAction, CorporateActionKind
 from quantlab.market_data_service import _database_utc, _observation
 from quantlab.multi_asset import (
     ObservationKnowledgeMode,
+    PortfolioStrategy,
     RebalanceFrequency,
     StrategyContext,
     TargetPortfolio,
@@ -64,7 +65,7 @@ def digest(value: object) -> str:
 
 
 @dataclass(frozen=True)
-class EqualWeightMonthly:
+class EqualWeightMonthly(PortfolioStrategy):
     name: str = BENCHMARK_ID
     version: str = "1.0.0"
     rebalance_frequency: RebalanceFrequency = RebalanceFrequency.MONTHLY
