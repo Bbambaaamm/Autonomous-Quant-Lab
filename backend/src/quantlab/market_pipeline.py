@@ -115,7 +115,7 @@ class MarketTask(Base):
     __tablename__ = "market_tasks"
     task_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     batch_id: Mapped[str] = mapped_column(
-        ForeignKey("market_batches.batch_id", ondelete="RESTRICT"), index=True)
+        ForeignKey("market_batches.batch_id", ondelete="RESTRICT"), index=True
     )
     asset_id: Mapped[str] = mapped_column(String(36))
     instrument_id: Mapped[str] = mapped_column(String(64))
