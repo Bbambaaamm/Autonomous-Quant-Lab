@@ -184,13 +184,13 @@ def test_postgres_asset_directory_and_batch_are_immutable():
     import os
     from datetime import UTC, date, datetime
 
-    from sqlalchemy import create_engine, text
+    from sqlalchemy import create_engine, select, text
     from sqlalchemy.exc import DBAPIError
     from sqlalchemy.orm import sessionmaker
     from test_market_pipeline import assets
 
     from quantlab.asset_directory import AssetDirectoryService
-    from quantlab.market_pipeline import MarketPipeline
+    from quantlab.market_pipeline import MarketActionReceipt, MarketPipeline, MarketTask
 
     engine = create_engine(os.environ["DATABASE_URL"])
     with engine.connect() as connection:
@@ -214,11 +214,27 @@ def test_postgres_asset_directory_and_batch_are_immutable():
             from quantlab.market_screening import MarketScreening
 
             with sessions() as session, session.begin():
+                task = session.scalar(select(MarketTask).where(MarketTask.batch_id == batch))
+                receipt_id = uuid4().hex
+                session.add(
+                    MarketActionReceipt(
+                        receipt_id=receipt_id,
+                        task_id=task.task_id,
+                        received_at=now,
+                        content_hash="a" * 64,
+                        payload_json='{"rows":[]}',
+                    )
+                )
                 session.execute(
                     text("UPDATE market_tasks SET state='FAILED' WHERE batch_id=:id"), {"id": batch}
                 )
             screen_id = MarketScreening(sessions).finalize(batch, now)
             for statement, identity in (
+                (
+                    "UPDATE market_action_receipts SET payload_json='{}' WHERE receipt_id=:id",
+                    receipt_id,
+                ),
+                ("DELETE FROM market_action_receipts WHERE receipt_id=:id", receipt_id),
                 ("UPDATE market_screen_runs SET eligible=999 WHERE run_id=:id", screen_id),
                 ("DELETE FROM market_screen_items WHERE run_id=:id", screen_id),
                 (

@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
@@ -30,6 +31,7 @@ from quantlab.asset_directory import VENUES, AssetDirectoryEntry, AssetDirectory
 from quantlab.control_plane import ControlPlaneRegistryService
 from quantlab.domain import require_utc
 from quantlab.market_data import (
+    AlpacaProvider,
     AssetType,
     CorporateAction,
     DatasetInvalid,
@@ -39,7 +41,7 @@ from quantlab.market_data import (
     XNYSCalendar,
 )
 from quantlab.market_data_service import PersistentMarketDataService, _lock, _observation
-from quantlab.market_screening import MarketScreening, evaluate_screen
+from quantlab.market_screening import MarketScreening, canonical, evaluate_screen, identity
 from quantlab.persistence import Base, InstrumentRecord, MarketObservationRecord
 
 
@@ -51,8 +53,12 @@ class ReceivedData:
         start: date,
         end: date,
         action_start: date | None = None,
+        *,
+        raw_only: bool = False,
     ) -> None:
-        self.metadata = provider.metadata
+        self.metadata = (
+            replace(provider.metadata, supports_actions=False) if raw_only else provider.metadata
+        )
         self.provider = provider
         self.bars = provider.historical_daily(symbol, start, end)
         self.actions = (
@@ -107,6 +113,19 @@ class MarketTask(Base):
     trend: Mapped[Decimal | None] = mapped_column(Numeric(30, 12))
     mean_reversion: Mapped[Decimal | None] = mapped_column(Numeric(30, 12))
     evidence_json: Mapped[str | None] = mapped_column(Text)
+
+
+class MarketActionReceipt(Base):
+    """Immutable current REST facts, never historical research readiness or SSE events."""
+
+    __tablename__ = "market_action_receipts"
+    receipt_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    task_id: Mapped[str] = mapped_column(
+        ForeignKey("market_tasks.task_id", ondelete="RESTRICT"), index=True
+    )
+    received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    content_hash: Mapped[str] = mapped_column(String(64))
+    payload_json: Mapped[str] = mapped_column(Text)
 
 
 def _utc(value: datetime) -> datetime:
@@ -270,9 +289,14 @@ class MarketPipeline:
             fetch_start = self.incremental_start(
                 instrument.instrument_id, expected_provider, start, end, now
             )
-            stage = "stažení cen a corporate actions"
+            stage = "stažení cen"
             received = ReceivedData(
-                provider, instrument.symbol, fetch_start, end, action_start=start
+                provider,
+                instrument.symbol,
+                fetch_start,
+                end,
+                action_start=start,
+                raw_only=isinstance(provider, AlpacaProvider),
             )
             stage = "uložení cen"
             outcome = PersistentMarketDataService(self.sessions).ingest(
@@ -281,20 +305,64 @@ class MarketPipeline:
             if outcome.status != "SUCCEEDED":
                 detail = "Poskytovatel nevrátil platná data; detail je v evidenci importu"
             else:
-                stage = "ověření corporate actions a screening"
-                service = PersistentMarketDataService(self.sessions, clock=clock)
-                cutoff = require_utc(clock())
-                readiness = service.verify_corporate_action_readiness(
-                    received, instrument, start, end, cutoff
+                # Persist price diagnostics even if action acquisition/validation later fails.
+                evidence = self.screen(
+                    instrument.instrument_id, expected_provider, start, end, require_utc(clock())
                 )
+                stage = "ověření corporate actions a screening"
+                inventory_id = None
+                inventory_received_at = None
+                if isinstance(provider, AlpacaProvider):
+                    rows = provider.current_action_inventory(instrument.symbol)
+                    inventory_received_at = require_utc(clock())
+                    payload = {
+                        "source": "alpaca_rest_current_inventory",
+                        "symbol": instrument.symbol,
+                        "instrument_id": instrument.instrument_id,
+                        "request_start": "1970-01-01",
+                        "request_end": "9999-12-31",
+                        "data_quality": "all",
+                        "rows": rows,
+                    }
+                    digest = identity(payload)
+                    inventory_id = identity(
+                        {"task": task_id, "received_at": inventory_received_at, "content": digest}
+                    )
+                    with self.sessions() as session, session.begin():
+                        _lock(session, f"market-actions:{inventory_id}")
+                        if session.get(MarketActionReceipt, inventory_id) is None:
+                            session.add(
+                                MarketActionReceipt(
+                                    receipt_id=inventory_id,
+                                    task_id=task_id,
+                                    received_at=inventory_received_at,
+                                    content_hash=digest,
+                                    payload_json=canonical(payload),
+                                )
+                            )
+                    evidence["current_action_receipt_id"] = inventory_id
+                    actions = provider.normalize_current_actions(
+                        instrument.symbol, rows, start, end, inventory_received_at
+                    )
+                    readiness = None
+                else:
+                    actions = received.actions
+                    readiness = PersistentMarketDataService(
+                        self.sessions, clock=clock
+                    ).verify_corporate_action_readiness(
+                        received, instrument, start, end, require_utc(clock())
+                    )
+                cutoff = require_utc(clock())
                 evidence = self.screen(
                     instrument.instrument_id,
                     expected_provider,
                     start,
                     end,
                     cutoff,
-                    actions=received.actions,
+                    actions=actions,
                     readiness_id=readiness,
+                    inventory_id=inventory_id,
+                    inventory_received_at=inventory_received_at,
                 )
                 state, detail = "DONE", str(evidence["reason"])
         except DatasetInvalid as exc:
@@ -396,6 +464,8 @@ class MarketPipeline:
         *,
         actions: list[CorporateAction] | None = None,
         readiness_id: str | None = None,
+        inventory_id: str | None = None,
+        inventory_received_at: datetime | None = None,
     ) -> dict[str, Any]:
         """Current technical diagnostics on raw closes, not research eligibility/alpha."""
         cutoff = require_utc(as_of)
@@ -459,6 +529,8 @@ class MarketPipeline:
                     expected,
                     cutoff,
                     readiness_id,
+                    inventory_id=inventory_id,
+                    inventory_received_at=inventory_received_at,
                 ),
             }
 
@@ -511,13 +583,31 @@ class MarketPipeline:
         return "MARKET_BATCH_CREATED"
 
     def read(
-        self, limit: int = 50, offset: int = 0, query: str = "", rank: str = "symbol"
+        self,
+        limit: int = 50,
+        offset: int = 0,
+        query: str = "",
+        rank: str = "symbol",
+        state: str = "",
     ) -> dict[str, Any]:
         if (
             not 1 <= limit <= 200
             or offset < 0
             or len(query) > 100
             or rank not in {"symbol", "momentum", "trend", "mean_reversion"}
+            or state
+            not in {
+                "",
+                "PENDING",
+                "RUNNING",
+                "RETRY",
+                "DONE",
+                "FAILED",
+                "BLOCKED",
+                "DATA_BLOCKED",
+                "ACCESS_BLOCKED",
+                "UNSUPPORTED_VENUE",
+            }
         ):
             raise ValueError("Neplatný filtr přehledu")
         with self.sessions() as session:
@@ -533,6 +623,7 @@ class MarketPipeline:
                     "matched": 0,
                     "query": query,
                     "rank": rank,
+                    "state": state,
                     "limit": limit,
                     "offset": offset,
                 }
@@ -551,6 +642,8 @@ class MarketPipeline:
                 ).where(MarketTask.batch_id == batch.batch_id)
             ).one()
             filters = [MarketTask.batch_id == batch.batch_id]
+            if state:
+                filters.append(MarketTask.state == state)
             if query.strip():
                 filters.append(MarketTask.symbol.icontains(query.strip(), autoescape=True))
             ordering = (
@@ -583,6 +676,7 @@ class MarketPipeline:
                 "matched": matched,
                 "query": query,
                 "rank": rank,
+                "state": state,
                 "offset": offset,
                 "limit": limit,
                 "items": [

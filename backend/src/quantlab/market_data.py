@@ -590,12 +590,12 @@ class AlpacaProvider:
         collection: str,
         row: dict[str, Any],
         instrument_id: str,
-        evidence: CorporateActionEvent,
+        known_at: datetime,
+        payload_hash: str,
     ) -> CorporateAction:
         provider_action_id = str(row["id"])
         action_id = corporate_action_logical_id("alpaca", provider_action_id)
-        known_at = cast(datetime, evidence.received_at)
-        payload_hash = evidence.payload_hash
+        known_at = require_utc(known_at)
         if collection in {"forward_splits", "reverse_splits"}:
             old_rate = Decimal(str(row["old_rate"]))
             new_rate = Decimal(str(row["new_rate"]))
@@ -703,7 +703,11 @@ class AlpacaProvider:
                     # Takové hodnotě nesmíme přiřadit starší known_at; raději fail closed.
                     raise DatasetInvalid("CORPORATE_ACTION_KNOWLEDGE_UNAVAILABLE")
                 action = self._normalize_action(
-                    collection, row, self._instrument_ids[normalized], evidence
+                    collection,
+                    row,
+                    self._instrument_ids[normalized],
+                    cast(datetime, evidence.received_at),
+                    evidence.payload_hash,
                 )
                 if start <= action.effective_at.date() <= end:
                     result.append(action)
@@ -722,6 +726,48 @@ class AlpacaProvider:
             raise
         except (KeyError, TypeError, ValueError, InvalidOperation) as exc:
             raise InvalidProviderResponse("Alpaca vrátila neplatnou corporate action") from exc
+        return sorted(result, key=lambda item: (item.effective_at, item.action_id))
+
+    def current_action_inventory(self, symbol: str) -> list[tuple[str, dict[str, Any]]]:
+        """Complete REST inventory, independent of historical SSE knowledge evidence."""
+        return self._get_corporate_action_rows(self.resolve(symbol)["provider_symbol"])
+
+    def normalize_current_actions(
+        self,
+        symbol: str,
+        rows: list[tuple[str, dict[str, Any]]],
+        start: date,
+        end: date,
+        received_at: datetime,
+    ) -> list[CorporateAction]:
+        """Current facts become known only when received; never synthesize an SSE event."""
+        received_at = require_utc(received_at)
+        instrument_id = self._instrument_ids[self.resolve(symbol)["provider_symbol"]]
+        result = []
+        seen: set[str] = set()
+        try:
+            for collection, row in rows:
+                action_id = row["id"]
+                if not isinstance(action_id, str) or not action_id or action_id in seen:
+                    raise InvalidProviderResponse("Neplatná nebo duplicitní identita události")
+                seen.add(action_id)
+                if not start <= self._scope_date(row) <= end:
+                    continue
+                if collection not in self._supported_collections:
+                    raise DatasetInvalid("CORPORATE_ACTIONS_UNSUPPORTED")
+                result.append(
+                    self._normalize_action(
+                        collection,
+                        row,
+                        instrument_id,
+                        received_at,
+                        canonical_corporate_action_payload_hash(row),
+                    )
+                )
+        except DatasetInvalid:
+            raise
+        except (KeyError, TypeError, ValueError, InvalidOperation) as exc:
+            raise InvalidProviderResponse("Neplatná aktuální evidence událostí") from exc
         return sorted(result, key=lambda item: (item.effective_at, item.action_id))
 
 

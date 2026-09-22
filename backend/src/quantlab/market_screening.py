@@ -18,7 +18,7 @@ from quantlab.market_data_service import _lock
 from quantlab.persistence import Base
 
 POLICY: dict[str, Any] = {
-    "version": "us-current-universe-1",
+    "version": "us-current-universe-2",
     "minimum_sessions": 127,
     "minimum_coverage": "0.98",
     "minimum_price_usd": "5",
@@ -26,6 +26,7 @@ POLICY: dict[str, Any] = {
     "volume_scope": "configured_feed_only",
     "price_basis": "causal_adjusted_close",
     "research_eligible": False,
+    "action_evidence": "historical_readiness_or_current_rest_receipt",
 }
 
 
@@ -43,6 +44,9 @@ def evaluate_screen(
     expected: Sequence[date],
     as_of: datetime,
     readiness_id: str | None,
+    *,
+    inventory_id: str | None = None,
+    inventory_received_at: datetime | None = None,
 ) -> dict[str, Any]:
     cutoff = require_utc(as_of)
     known = [o for o in observations if o.observed_at <= cutoff and o.timestamp <= cutoff]
@@ -55,7 +59,12 @@ def evaluate_screen(
     ordered = [by_day[d] for d in expected if d in by_day]
     coverage = Decimal(len(ordered)) / len(expected) if expected else Decimal(0)
     reasons = []
-    if not readiness_id:
+    current_inventory = bool(
+        inventory_id
+        and inventory_received_at is not None
+        and require_utc(inventory_received_at) <= cutoff
+    )
+    if not readiness_id and not current_inventory:
         reasons.append("ACTIONS_NOT_VERIFIED")
     if len(ordered) < POLICY["minimum_sessions"]:
         reasons.append("SHORT_HISTORY")
@@ -99,6 +108,13 @@ def evaluate_screen(
         else None,
         "observation_ids": [o.observation_id for o in ordered],
         "action_readiness_id": readiness_id,
+        "current_action_receipt_id": inventory_id if current_inventory else None,
+        "current_action_received_at": inventory_received_at if current_inventory else None,
+        "action_evidence_source": "REST_CURRENT_SNAPSHOT"
+        if current_inventory
+        else "HISTORICAL_READINESS"
+        if readiness_id
+        else None,
         "actions": [
             {"id": a.action_id, "payload_hash": a.payload_hash, "known_at": a.known_at}
             for a in actions
