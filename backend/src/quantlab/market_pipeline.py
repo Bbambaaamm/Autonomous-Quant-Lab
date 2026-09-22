@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
@@ -44,6 +45,8 @@ from quantlab.persistence import Base, InstrumentRecord, MarketObservationRecord
 
 
 class ReceivedData:
+    """Cache prices now; fetch action evidence only after prices have been persisted."""
+
     def __init__(
         self,
         provider: MarketDataProvider,
@@ -55,11 +58,10 @@ class ReceivedData:
         self.metadata = provider.metadata
         self.provider = provider
         self.bars = provider.historical_daily(symbol, start, end)
-        self.actions = (
-            provider.corporate_actions(symbol, action_start or start, end)
-            if self.metadata.supports_actions
-            else []
-        )
+        self.actions: list[CorporateAction] | None = None
+        self.symbol = symbol
+        self.action_start = action_start or start
+        self.end = end
 
     def resolve(self, symbol: str) -> dict[str, str]:
         return self.provider.resolve(symbol)
@@ -68,7 +70,31 @@ class ReceivedData:
         return self.bars
 
     def corporate_actions(self, symbol: str, start: date, end: date) -> list[CorporateAction]:
+        if self.actions is None:
+            self.actions = self.provider.corporate_actions(self.symbol, self.action_start, self.end)
         return self.actions
+
+
+class _PriceOnlyReceipt:
+    """Price persistence view, explicitly incapable of proving action completeness.
+
+    Keep the original feed/version lineage: the price payload is unchanged. Only the
+    full ReceivedData provider may be used by verify_corporate_action_readiness().
+    This view is confined to acquisition; no execution or research gate uses it.
+    """
+
+    def __init__(self, received: ReceivedData) -> None:
+        self.metadata = replace(received.metadata, supports_actions=False)
+        self.received = received
+
+    def resolve(self, symbol: str) -> dict[str, str]:
+        return self.received.resolve(symbol)
+
+    def historical_daily(self, symbol: str, start: date, end: date) -> list[ProviderBar]:
+        return self.received.historical_daily(symbol, start, end)
+
+    def corporate_actions(self, symbol: str, start: date, end: date) -> list[CorporateAction]:
+        raise DatasetInvalid("CORPORATE_ACTIONS_UNSUPPORTED")
 
 
 class MarketBatch(Base):
@@ -89,7 +115,7 @@ class MarketTask(Base):
     __tablename__ = "market_tasks"
     task_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     batch_id: Mapped[str] = mapped_column(
-        ForeignKey("market_batches.batch_id", ondelete="RESTRICT"), index=True
+        ForeignKey("market_batches.batch_id", ondelete="RESTRICT"), index=True)
     )
     asset_id: Mapped[str] = mapped_column(String(36))
     instrument_id: Mapped[str] = mapped_column(String(64))
@@ -270,20 +296,31 @@ class MarketPipeline:
             fetch_start = self.incremental_start(
                 instrument.instrument_id, expected_provider, start, end, now
             )
-            stage = "stažení cen a corporate actions"
+            stage = "stažení cen"
             received = ReceivedData(
                 provider, instrument.symbol, fetch_start, end, action_start=start
             )
             stage = "uložení cen"
             outcome = PersistentMarketDataService(self.sessions).ingest(
-                received, instrument, fetch_start, end, require_utc(clock())
+                _PriceOnlyReceipt(received), instrument, fetch_start, end, require_utc(clock())
             )
             if outcome.status != "SUCCEEDED":
                 detail = "Poskytovatel nevrátil platná data; detail je v evidenci importu"
             else:
+                cutoff = require_utc(clock())
+                # Preserve actual price coverage even if the separate action gate fails.
+                # No rank or adjusted screening is granted by this raw-price receipt.
+                evidence = self.screen(
+                    instrument.instrument_id, expected_provider, start, end, cutoff
+                )
+                evidence.update(
+                    momentum=None,
+                    trend=None,
+                    mean_reversion=None,
+                    reason="CORPORATE_ACTIONS_NOT_VERIFIED",
+                )
                 stage = "ověření corporate actions a screening"
                 service = PersistentMarketDataService(self.sessions, clock=clock)
-                cutoff = require_utc(clock())
                 readiness = service.verify_corporate_action_readiness(
                     received, instrument, start, end, cutoff
                 )
