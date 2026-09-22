@@ -6,6 +6,7 @@ import quantlab.asset_directory
 import quantlab.automation
 import quantlab.market_catalog
 import quantlab.market_pipeline
+import quantlab.market_screening
 import quantlab.phase4
 import quantlab.phase7  # noqa: F401
 from quantlab.persistence import Base

@@ -435,6 +435,7 @@ def create_test_schema(engine: Engine) -> None:
     import quantlab.asset_directory  # noqa: F401
     import quantlab.market_catalog  # noqa: F401
     import quantlab.market_pipeline  # noqa: F401
+    import quantlab.market_screening  # noqa: F401
     import quantlab.phase7  # noqa: F401
 
     Base.metadata.create_all(engine)

@@ -36,6 +36,7 @@ from quantlab.market_catalog import CatalogError, MarketCatalogService
 from quantlab.market_data import AssetType, DatasetInvalid, Instrument, XNYSCalendar
 from quantlab.market_data_service import DatasetSnapshotService, PersistentMarketDataService
 from quantlab.market_pipeline import MarketPipeline
+from quantlab.market_screening import MarketScreening
 from quantlab.multi_asset import STRATEGY_REGISTRY
 from quantlab.operator_read_model import OperatorReadModel
 from quantlab.persistence import (
@@ -1811,3 +1812,13 @@ def operator_market_job_control(body: MarketJobControl, request: Request) -> dic
         _correlation(request),
     )
     return {"job_id": body.job_id, "enabled": body.enabled}
+
+
+@app.get("/operator/market-screening", response_model=OperatorDocument)
+def operator_market_screening(
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    q: str = Query("", max_length=100),
+    rank: str = Query("momentum", pattern="^(momentum|trend|mean_reversion)$"),
+) -> dict[str, object]:
+    return MarketScreening(session_factory).read(limit, offset, q, rank)

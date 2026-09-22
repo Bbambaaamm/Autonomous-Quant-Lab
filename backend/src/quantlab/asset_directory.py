@@ -11,7 +11,7 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import DateTime, ForeignKey, String, Text, select
+from sqlalchemy import DateTime, ForeignKey, String, Text, func, select
 from sqlalchemy.orm import Mapped, Session, mapped_column
 
 from quantlab.config import Settings
@@ -155,4 +155,46 @@ class AssetDirectoryService:
             )
             if row is None:
                 return {"snapshot_id": None, "received_at": None}
-            return {"snapshot_id": row.snapshot_id, "received_at": row.received_at}
+            total = session.scalar(
+                select(func.count())
+                .select_from(AssetDirectoryEntry)
+                .where(AssetDirectoryEntry.snapshot_id == row.snapshot_id)
+            )
+            previous = session.scalar(
+                select(AssetDirectorySnapshot)
+                .where(AssetDirectorySnapshot.received_at < row.received_at)
+                .order_by(AssetDirectorySnapshot.received_at.desc())
+                .limit(1)
+            )
+            changes = None
+            if previous is not None:
+                current = {
+                    r.asset_id: (r.symbol, r.exchange)
+                    for r in session.scalars(
+                        select(AssetDirectoryEntry).where(
+                            AssetDirectoryEntry.snapshot_id == row.snapshot_id
+                        )
+                    )
+                }
+                before = {
+                    r.asset_id: (r.symbol, r.exchange)
+                    for r in session.scalars(
+                        select(AssetDirectoryEntry).where(
+                            AssetDirectoryEntry.snapshot_id == previous.snapshot_id
+                        )
+                    )
+                }
+                changes = {
+                    "first_seen": len(current.keys() - before.keys()),
+                    "no_longer_present": len(before.keys() - current.keys()),
+                    "symbol_or_venue_changed": sum(
+                        current[k] != before[k] for k in current.keys() & before.keys()
+                    ),
+                    "previous_received_at": previous.received_at,
+                }
+            return {
+                "snapshot_id": row.snapshot_id,
+                "received_at": row.received_at,
+                "total": total,
+                "changes": changes,
+            }

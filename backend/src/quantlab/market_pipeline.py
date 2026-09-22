@@ -18,6 +18,7 @@ from sqlalchemy import (
     Numeric,
     String,
     Text,
+    case,
     func,
     or_,
     select,
@@ -37,17 +38,27 @@ from quantlab.market_data import (
     ProviderBar,
     XNYSCalendar,
 )
-from quantlab.market_data_service import PersistentMarketDataService, _lock
+from quantlab.market_data_service import PersistentMarketDataService, _lock, _observation
+from quantlab.market_screening import MarketScreening, evaluate_screen
 from quantlab.persistence import Base, InstrumentRecord, MarketObservationRecord
 
 
 class ReceivedData:
-    def __init__(self, provider: MarketDataProvider, symbol: str, start: date, end: date) -> None:
+    def __init__(
+        self,
+        provider: MarketDataProvider,
+        symbol: str,
+        start: date,
+        end: date,
+        action_start: date | None = None,
+    ) -> None:
         self.metadata = provider.metadata
         self.provider = provider
         self.bars = provider.historical_daily(symbol, start, end)
         self.actions = (
-            provider.corporate_actions(symbol, start, end) if self.metadata.supports_actions else []
+            provider.corporate_actions(symbol, action_start or start, end)
+            if self.metadata.supports_actions
+            else []
         )
 
     def resolve(self, symbol: str) -> dict[str, str]:
@@ -212,6 +223,8 @@ class MarketPipeline:
                 .limit(1)
             )
             if task is None:
+                # Release expired-lease updates before another service writes a snapshot.
+                session.commit()
                 return {"outcome": self.refresh(now), "trading_cycle_id": None}
             task.state = "RUNNING"
             task.attempts += 1
@@ -244,26 +257,44 @@ class MarketPipeline:
                 batch.provider,
             )
         state, detail, evidence = "RETRY", "Sběr se nezdařil", None
+        stage = "registrace instrumentu"
         try:
             try:
                 ControlPlaneRegistryService(self.sessions).register_instrument(instrument)
             except DatasetInvalid as exc:
                 raise ValueError("Konflikt kanonické identity") from exc
+            stage = "příprava poskytovatele"
             provider = provider_factory(instrument)
             if provider.metadata.persistent_name != expected_provider:
                 raise ValueError("Provider se liší od neměnné definice dávky")
             fetch_start = self.incremental_start(
                 instrument.instrument_id, expected_provider, start, end, now
             )
-            received = ReceivedData(provider, instrument.symbol, fetch_start, end)
+            stage = "stažení cen a corporate actions"
+            received = ReceivedData(
+                provider, instrument.symbol, fetch_start, end, action_start=start
+            )
+            stage = "uložení cen"
             outcome = PersistentMarketDataService(self.sessions).ingest(
                 received, instrument, fetch_start, end, require_utc(clock())
             )
             if outcome.status != "SUCCEEDED":
                 detail = "Poskytovatel nevrátil platná data; detail je v evidenci importu"
             else:
+                stage = "ověření corporate actions a screening"
+                service = PersistentMarketDataService(self.sessions, clock=clock)
+                cutoff = require_utc(clock())
+                readiness = service.verify_corporate_action_readiness(
+                    received, instrument, start, end, cutoff
+                )
                 evidence = self.screen(
-                    instrument.instrument_id, expected_provider, start, end, require_utc(clock())
+                    instrument.instrument_id,
+                    expected_provider,
+                    start,
+                    end,
+                    cutoff,
+                    actions=received.actions,
+                    readiness_id=readiness,
                 )
                 state, detail = "DONE", str(evidence["reason"])
         except DatasetInvalid as exc:
@@ -283,7 +314,11 @@ class MarketPipeline:
             state, detail = (
                 ("ACCESS_BLOCKED", "Datový účet nemá platný přístup")
                 if str(exc) == "MARKET_DATA_ACCESS_DENIED"
-                else ("RETRY", "Zdroj nebo databáze nejsou dostupné")
+                else (
+                    "RETRY",
+                    f"Dočasná chyba: {stage} "
+                    f"({type(exc).__name__[:40]}; {type(exc.__cause__).__name__[:40]})",
+                )
             )
         with self.sessions() as session, session.begin():
             task = session.scalar(
@@ -348,7 +383,15 @@ class MarketPipeline:
         return expected[max(0, first_missing - 5)]
 
     def screen(
-        self, instrument_id: str, provider: str, start: date, end: date, as_of: datetime
+        self,
+        instrument_id: str,
+        provider: str,
+        start: date,
+        end: date,
+        as_of: datetime,
+        *,
+        actions: list[CorporateAction] | None = None,
+        readiness_id: str | None = None,
     ) -> dict[str, Any]:
         """Current technical diagnostics on raw closes, not research eligibility/alpha."""
         cutoff = require_utc(as_of)
@@ -406,6 +449,13 @@ class MarketPipeline:
                     "Feed volume is not necessarily whole-market volume",
                 ],
                 "observation_ids": [row.observation_id for row in ordered],
+                "screening": evaluate_screen(
+                    [_observation(row) for row in ordered],
+                    actions or [],
+                    expected,
+                    cutoff,
+                    readiness_id,
+                ),
             }
 
     def refresh(self, now: datetime) -> str:
@@ -414,7 +464,7 @@ class MarketPipeline:
             active = session.scalar(
                 select(func.count())
                 .select_from(MarketTask)
-                .where(MarketTask.state.in_(("PENDING", "RETRY", "RUNNING", "ACCESS_BLOCKED")))
+                .where(MarketTask.state.in_(("PENDING", "RETRY", "RUNNING")))
             )
             latest = session.scalar(
                 select(MarketBatch).order_by(MarketBatch.created_at.desc()).limit(1)
@@ -425,13 +475,26 @@ class MarketPipeline:
                 .order_by(AssetDirectorySnapshot.received_at.desc())
                 .limit(1)
             )
-            end = XNYSCalendar().latest_completed_session(now)
-            if active or latest is None or snapshot is None or latest.end >= end:
+            if active or latest is None:
                 return "NO_PENDING_MARKET_DATA"
-            if now - _utc(snapshot.received_at) > timedelta(days=3):
-                return "MARKET_IDENTITIES_STALE"
-            snapshot_id, provider = snapshot.snapshot_id, latest.provider
+            blocked = session.scalar(
+                select(func.count())
+                .select_from(MarketTask)
+                .where(MarketTask.batch_id == latest.batch_id, MarketTask.state == "ACCESS_BLOCKED")
+            )
+            latest_id = latest.batch_id
+            end = XNYSCalendar().latest_completed_session(now)
+            status = "MARKET_BATCH_CREATED"
+            if blocked or snapshot is None or latest.end >= end:
+                status = "NO_PENDING_MARKET_DATA"
+            elif now - _utc(snapshot.received_at) > timedelta(days=3):
+                status = "MARKET_IDENTITIES_STALE"
+            snapshot_id = snapshot.snapshot_id if snapshot is not None else ""
+            provider = latest.provider
             start = max(latest.start, end - timedelta(days=500))
+        MarketScreening(self.sessions).finalize(latest_id, now)
+        if status != "MARKET_BATCH_CREATED":
+            return status
         self.create(
             snapshot_id,
             start,
@@ -477,6 +540,12 @@ class MarketPipeline:
                     .group_by(MarketTask.state)
                 )
             }
+            downloaded, complete = session.execute(
+                select(
+                    func.sum(case((MarketTask.bars > 0, 1), else_=0)),
+                    func.sum(case((MarketTask.coverage == 1, 1), else_=0)),
+                ).where(MarketTask.batch_id == batch.batch_id)
+            ).one()
             filters = [MarketTask.batch_id == batch.batch_id]
             if query.strip():
                 filters.append(MarketTask.symbol.icontains(query.strip(), autoescape=True))
@@ -501,6 +570,11 @@ class MarketPipeline:
                     "provider": batch.provider,
                 },
                 "counts": counts,
+                "coverage_summary": {
+                    "downloaded": int(downloaded or 0),
+                    "complete_period": int(complete or 0),
+                    "period_end": batch.end,
+                },
                 "total": sum(counts.values()),
                 "matched": matched,
                 "query": query,
