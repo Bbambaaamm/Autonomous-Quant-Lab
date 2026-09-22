@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from quantlab.current_actions import economic_date, stock_dividend_factor, unchanged_acquirer
 from quantlab.market_data import AlpacaProvider, DatasetInvalid, InvalidProviderResponse
 
 if TYPE_CHECKING:
@@ -82,11 +83,30 @@ def inventory_blockage(
                 return "Uložený inventář obsahuje chybějící nebo duplicitní identitu události."
             seen.add(action_id)
             try:
-                day = AlpacaProvider._scope_date(row)
+                day = economic_date(row)
             except DatasetInvalid:
-                return "Uložené události chybí ex_date i process_date; rozsah nelze ověřit."
+                return (
+                    "Uložené události chybí ex_date, effective_date i process_date; "
+                    "rozsah nelze ověřit."
+                )
             except InvalidProviderResponse:
                 return "Uložená událost obsahuje neplatné datum; rozsah nelze ověřit."
+            if start <= day <= end and collection == "stock_dividends":
+                try:
+                    stock_dividend_factor(row, symbol)
+                except (DatasetInvalid, InvalidProviderResponse):
+                    return f"Událost akciová dividenda ({day}) nemá ověřený poměr nebo identitu."
+                return f"Událost akciová dividenda ({day}) vyžaduje přehodnocení novým zpracováním."
+            if start <= day <= end:
+                try:
+                    buyer = unchanged_acquirer(collection, row, symbol)
+                except (DatasetInvalid, InvalidProviderResponse):
+                    buyer = False
+                if buyer:
+                    return (
+                        f"Událost fúze ({day}) se týká kupujícího; "
+                        "lze přehodnotit uložený inventář."
+                    )
             if start <= day <= end and collection not in AlpacaProvider._supported_collections:
                 label = TYPE_LABELS.get(collection, "jiný dosud nepodporovaný typ")
                 return (

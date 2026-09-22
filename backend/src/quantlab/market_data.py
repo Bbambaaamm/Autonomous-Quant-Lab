@@ -585,8 +585,9 @@ class AlpacaProvider:
         except ValueError as exc:
             raise InvalidProviderResponse("Alpaca corporate action má neplatné datum") from exc
 
+    @classmethod
     def _normalize_action(
-        self,
+        cls,
         collection: str,
         row: dict[str, Any],
         instrument_id: str,
@@ -610,7 +611,7 @@ class AlpacaProvider:
                 action_id,
                 instrument_id,
                 CorporateActionKind.SPLIT,
-                self._midnight(str(row["ex_date"])),
+                cls._midnight(str(row["ex_date"])),
                 known_at,
                 new_rate / old_rate,
                 None,
@@ -625,7 +626,7 @@ class AlpacaProvider:
                 action_id,
                 instrument_id,
                 CorporateActionKind.CASH_DIVIDEND,
-                self._midnight(str(row["ex_date"])),
+                cls._midnight(str(row["ex_date"])),
                 known_at,
                 rate,
                 None,
@@ -637,7 +638,7 @@ class AlpacaProvider:
                 action_id,
                 instrument_id,
                 CorporateActionKind.SYMBOL_CHANGE,
-                self._midnight(str(row["process_date"])),
+                cls._midnight(str(row["process_date"])),
                 known_at,
                 None,
                 str(row["new_symbol"]),
@@ -649,7 +650,7 @@ class AlpacaProvider:
                 action_id,
                 instrument_id,
                 CorporateActionKind.DELISTING,
-                self._midnight(str(row["process_date"])),
+                cls._midnight(str(row["process_date"])),
                 known_at,
                 None,
                 None,
@@ -740,10 +741,32 @@ class AlpacaProvider:
         end: date,
         received_at: datetime,
     ) -> list[CorporateAction]:
-        """Current facts become known only when received; never synthesize an SSE event."""
+        normalized = self.resolve(symbol)["provider_symbol"]
+        return self.normalize_current_rows(
+            normalized, self._instrument_ids[normalized], rows, start, end, received_at
+        )
+
+    @classmethod
+    def normalize_current_rows(
+        cls,
+        symbol: str,
+        instrument_id: str,
+        rows: list[tuple[str, dict[str, Any]]],
+        start: date,
+        end: date,
+        received_at: datetime,
+    ) -> list[CorporateAction]:
+        """Pure normalization of a full receipt; no provider or broker connection."""
+        from quantlab.current_actions import (
+            economic_date,
+            stock_dividend_factor,
+            unchanged_acquirer,
+        )
+
         received_at = require_utc(received_at)
-        instrument_id = self._instrument_ids[self.resolve(symbol)["provider_symbol"]]
-        result = []
+        if start > end:
+            raise ValueError("Neplatný interval")
+        result: list[CorporateAction] = []
         seen: set[str] = set()
         try:
             for collection, row in rows:
@@ -751,12 +774,29 @@ class AlpacaProvider:
                 if not isinstance(action_id, str) or not action_id or action_id in seen:
                     raise InvalidProviderResponse("Neplatná nebo duplicitní identita události")
                 seen.add(action_id)
-                if not start <= self._scope_date(row) <= end:
+                if not start <= economic_date(row) <= end:
                     continue
-                if collection not in self._supported_collections:
+                if unchanged_acquirer(collection, row, symbol):
+                    continue
+                if collection == "stock_dividends":
+                    result.append(
+                        CorporateAction(
+                            corporate_action_logical_id("alpaca", action_id),
+                            instrument_id,
+                            CorporateActionKind.SPLIT,
+                            cls._midnight(str(row["ex_date"])),
+                            received_at,
+                            stock_dividend_factor(row, symbol),
+                            None,
+                            action_id,
+                            canonical_corporate_action_payload_hash(row),
+                        )
+                    )
+                    continue
+                if collection not in cls._supported_collections:
                     raise DatasetInvalid("CORPORATE_ACTIONS_UNSUPPORTED")
                 result.append(
-                    self._normalize_action(
+                    cls._normalize_action(
                         collection,
                         row,
                         instrument_id,

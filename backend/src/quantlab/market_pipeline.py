@@ -29,6 +29,7 @@ from sqlalchemy.orm import Mapped, Session, mapped_column
 
 from quantlab.asset_directory import VENUES, AssetDirectoryEntry, AssetDirectorySnapshot
 from quantlab.control_plane import ControlPlaneRegistryService
+from quantlab.current_actions import NORMALIZATION_VERSION
 from quantlab.domain import require_utc
 from quantlab.market_data import (
     AlpacaProvider,
@@ -125,6 +126,22 @@ class MarketActionReceipt(Base):
         ForeignKey("market_tasks.task_id", ondelete="RESTRICT"), index=True
     )
     received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    content_hash: Mapped[str] = mapped_column(String(64))
+    payload_json: Mapped[str] = mapped_column(Text)
+
+
+class MarketActionReview(Base):
+    """Append-only evidence for current-receipt re-evaluation; not research readiness."""
+
+    __tablename__ = "market_action_reviews"
+    review_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    task_id: Mapped[str] = mapped_column(
+        ForeignKey("market_tasks.task_id", ondelete="RESTRICT"), index=True
+    )
+    receipt_id: Mapped[str] = mapped_column(
+        ForeignKey("market_action_receipts.receipt_id", ondelete="RESTRICT")
+    )
+    reviewed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     content_hash: Mapped[str] = mapped_column(String(64))
     payload_json: Mapped[str] = mapped_column(Text)
 
@@ -318,6 +335,7 @@ class MarketPipeline:
                     inventory_received_at = require_utc(clock())
                     payload = {
                         "source": "alpaca_rest_current_inventory",
+                        "normalization_version": NORMALIZATION_VERSION,
                         "symbol": instrument.symbol,
                         "instrument_id": instrument.instrument_id,
                         "request_start": "1970-01-01",
