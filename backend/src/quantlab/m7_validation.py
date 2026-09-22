@@ -40,11 +40,15 @@ from quantlab.persistence import (
     UniverseDefinitionRecord,
     UniverseMembershipRecord,
 )
+from quantlab.phase4 import PaperAccountRecord
 from quantlab.phase6_runtime import (
+    DeploymentService,
     Phase6ExperimentRequest,
     Phase6ExperimentRunner,
     multi_asset_metrics,
+    normalize_strategy_config,
 )
+from quantlab.runtime_identity import components_from_manifest
 from quantlab.universe import (
     PointInTimeUniverse,
     UniverseDefinition,
@@ -155,6 +159,30 @@ def _replay_signature(replay: Any) -> dict[str, object]:
     }
 
 
+def _observation_payload_hash(row: MarketObservationRecord) -> str:
+    try:
+        payload = "|".join(
+            map(
+                str,
+                (
+                    row.instrument_id,
+                    row.provider,
+                    row.timeframe,
+                    row.session_date.date(),
+                    Decimal(row.open),
+                    Decimal(row.high),
+                    Decimal(row.low),
+                    Decimal(row.close),
+                    Decimal(row.volume),
+                    row.source_id,
+                ),
+            )
+        )
+    except (TypeError, ValueError) as exc:
+        raise ValueError("M7_OBSERVATION_PAYLOAD_INVALID") from exc
+    return hashlib.sha256(payload.encode()).hexdigest()
+
+
 def _load_snapshot(
     session: Session, snapshot: DatasetSnapshotRecord
 ) -> tuple[
@@ -177,8 +205,8 @@ def _load_snapshot(
         raise ValueError("M7_OBSERVATION_MANIFEST_EMPTY")
     if not isinstance(action_entries, list):
         raise ValueError("M7_ACTION_MANIFEST_INVALID")
-    if not isinstance(membership_entries, list) or len(membership_entries) < 2:
-        raise ValueError("M7_REQUIRES_MULTI_INSTRUMENT_PIT_UNIVERSE")
+    if not isinstance(membership_entries, list) or not membership_entries:
+        raise ValueError("M7_MEMBERSHIP_MANIFEST_INVALID")
 
     immutable = {
         "observations": entries,
@@ -214,12 +242,16 @@ def _load_snapshot(
     by_id = {row.observation_id: row for row in rows}
     if set(by_id) != {item[0] for item in parsed_entries}:
         raise ValueError("M7_OBSERVATION_MISSING")
-    if any(
-        by_id[identity].revision != revision or by_id[identity].source_hash != source_hash
-        for identity, revision, source_hash in parsed_entries
-    ):
-        raise ValueError("M7_OBSERVATION_REVISION_MISMATCH")
+    for identity, revision, source_hash in parsed_entries:
+        row = by_id[identity]
+        if row.revision != revision or row.source_hash != source_hash:
+            raise ValueError("M7_OBSERVATION_REVISION_MISMATCH")
+        recomputed = _observation_payload_hash(row)
+        if row.source_hash != recomputed or row.observation_id != recomputed:
+            raise ValueError("M7_OBSERVATION_PAYLOAD_HASH_MISMATCH")
     observations = tuple(_observation(by_id[identity]) for identity, _, _ in parsed_entries)
+    if len({row.instrument_id for row in observations}) < 2:
+        raise ValueError("M7_REQUIRES_MULTI_INSTRUMENT_PIT_UNIVERSE")
 
     definition = session.get(UniverseDefinitionRecord, snapshot.universe_id)
     if definition is None or definition.kind != UniverseKind.POINT_IN_TIME_MEMBERSHIP:
@@ -319,6 +351,7 @@ def _select_deployment(session: Session, deployment_id: str | None) -> StrategyD
             .order_by(
                 StrategyDeploymentRecord.approved_at.desc(),
                 StrategyDeploymentRecord.created_at.desc(),
+                StrategyDeploymentRecord.deployment_id.desc(),
             )
             .limit(1)
         )
@@ -327,22 +360,69 @@ def _select_deployment(session: Session, deployment_id: str | None) -> StrategyD
     return deployment
 
 
+def _validate_approved_deployment(
+    session: Session, deployment: StrategyDeploymentRecord
+) -> tuple[ExperimentRecord, DatasetSnapshotRecord]:
+    if (
+        deployment.approved_at is None
+        or deployment.paper_account_id != "paper-main"
+        or deployment.currency != "USD"
+        or deployment.timeframe != "1d"
+    ):
+        raise ValueError("M7_DEPLOYMENT_NOT_EXECUTION_READY")
+    runtime_manifest = DeploymentService._validated_runtime_manifest(deployment)
+    experiment = session.get(ExperimentRecord, deployment.experiment_id)
+    if experiment is None or experiment.decision != "PAPER_CANDIDATE":
+        raise ValueError("M7_DEPLOYMENT_EXPERIMENT_NOT_PAPER_CANDIDATE")
+    snapshot, strategy, selected_parameters = DeploymentService.validate_experiment(
+        session, experiment
+    )
+    artifact = runtime_manifest.get("artifact")
+    if (
+        not isinstance(artifact, dict)
+        or artifact.get("experiment_code_sha") != experiment.code_sha
+    ):
+        raise ValueError("M7_DEPLOYMENT_RUNTIME_ARTIFACT_MISMATCH")
+    if (
+        experiment.snapshot_id != deployment.snapshot_id
+        or snapshot.snapshot_id != deployment.snapshot_id
+        or deployment.universe_id != snapshot.universe_id
+        or deployment.strategy_name != experiment.strategy_name
+        or deployment.strategy_version != experiment.strategy_version
+        or strategy.strategy_name != deployment.strategy_name
+        or strategy.strategy_version != deployment.strategy_version
+    ):
+        raise ValueError("M7_DEPLOYMENT_LINEAGE_MISMATCH")
+    account = session.get(PaperAccountRecord, deployment.paper_account_id)
+    if account is None or account.base_currency != deployment.currency:
+        raise ValueError("M7_DEPLOYMENT_ACCOUNT_MISMATCH")
+    if snapshot.timeframe != deployment.timeframe:
+        raise ValueError("M7_DEPLOYMENT_TIMEFRAME_MISMATCH")
+    persisted_parameters = normalize_strategy_config(
+        deployment.strategy_name,
+        deployment.strategy_version,
+        DeploymentService._evidence(
+            deployment.parameters_json, "deployment parameters"
+        ),
+    )
+    if persisted_parameters != selected_parameters:
+        raise ValueError("M7_DEPLOYMENT_PARAMETERS_MISMATCH")
+    approved_instruments = set(DeploymentService._deployment_universe_instruments(snapshot))
+    runtime_instruments = components_from_manifest(
+        runtime_manifest
+    ).risk.instrument_allowlist
+    if not approved_instruments <= runtime_instruments:
+        raise ValueError("M7_DEPLOYMENT_RISK_ALLOWLIST_MISMATCH")
+    return experiment, snapshot
+
+
 def run_m7_validation(
     sessions: Callable[[], Session], *, deployment_id: str | None = None
 ) -> dict[str, object]:
     current_code_sha = Phase6ExperimentRunner._code_sha(None)
     with sessions() as session:
         deployment = _select_deployment(session, deployment_id)
-        experiment = session.get(ExperimentRecord, deployment.experiment_id)
-        snapshot = session.get(DatasetSnapshotRecord, deployment.snapshot_id)
-        if (
-            experiment is None
-            or experiment.status != "COMPLETED"
-            or snapshot is None
-            or snapshot.status != "VALID"
-            or experiment.snapshot_id != snapshot.snapshot_id
-        ):
-            raise ValueError("M7_LINEAGE_NOT_READY")
+        experiment, snapshot = _validate_approved_deployment(session, deployment)
         request = _request(experiment, current_code_sha)
         if request.snapshot_id != snapshot.snapshot_id:
             raise ValueError("M7_LINEAGE_MISMATCH")
@@ -357,6 +437,14 @@ def run_m7_validation(
     oos_times = list(replay.oos_sessions)
     if len(oos_times) < 2:
         raise ValueError("M7_OOS_TOO_SHORT")
+    oos_instruments = {
+        row.instrument_id
+        for row in observations
+        if oos_times[0] <= row.timestamp <= oos_times[-1]
+        and row.instrument_id in universe.eligible(row.timestamp)
+    }
+    if len(oos_instruments) < 2:
+        raise ValueError("M7_REQUIRES_MULTI_INSTRUMENT_OOS")
 
     benchmark = run_multi_asset(
         [row for row in observations if row.timestamp <= oos_times[-1]],
