@@ -11,7 +11,12 @@ from sqlalchemy.orm import sessionmaker
 from test_market_pipeline import END, NOW, START, Provider, assets
 
 from quantlab.asset_directory import AssetDirectoryService
-from quantlab.market_data import DatasetInvalid, ProviderRateLimited, ProviderUnavailable, XNYSCalendar
+from quantlab.market_data import (
+    DatasetInvalid,
+    ProviderRateLimited,
+    ProviderUnavailable,
+    XNYSCalendar,
+)
 from quantlab.market_pipeline import MarketPipeline, MarketTask, ReceivedData, _PriceOnlyReceipt
 from quantlab.market_screening import MarketScreening, MarketScreenItem, MarketScreenRun
 from quantlab.persistence import (
@@ -213,6 +218,8 @@ def test_finished_price_only_batch_keeps_every_member_ineligible(env):
         run = session.get(MarketScreenRun, run_id)
         assert run.total == 2
         assert run.eligible == 0
-        items = list(session.scalars(select(MarketScreenItem).where(MarketScreenItem.run_id == run_id)))
+        items = list(
+            session.scalars(select(MarketScreenItem).where(MarketScreenItem.run_id == run_id))
+        )
         assert len(items) == 2
         assert all(item.eligible == 0 for item in items)
