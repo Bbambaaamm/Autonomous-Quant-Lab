@@ -221,3 +221,6 @@ použije persistentní identitu nakonfigurovaného feedu (např. alpaca:iex); ex
 provider zůstává podporovaný pro historické uložené zdroje. RBAC a kontroly kvality
 se nemění. Krátká diagnostika IBM na serveru vrátila HTTP 200 pro ceny i události;
 to samo neověřuje celý historický rozsah ani worker.
+
+Diagnostika fronty rozlišuje známé vyčerpání lokálního rozpočtu a HTTP 5xx zdroje.
+Neznámé texty výjimek se nadále nezobrazují.
