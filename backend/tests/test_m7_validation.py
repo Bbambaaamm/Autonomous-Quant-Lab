@@ -4,6 +4,7 @@ from decimal import Decimal
 
 import pytest
 from phase6_audit_helpers import CALENDAR, MappingProvider, daily_bar
+from sqlalchemy import select
 from sqlalchemy.orm import sessionmaker
 
 from quantlab.m7_validation import (
@@ -24,6 +25,7 @@ from quantlab.multi_asset import StrategyContext
 from quantlab.persistence import (
     DatasetSnapshotRecord,
     ExperimentRecord,
+    MarketObservationRecord,
     StrategyDeploymentRecord,
     StrategyRecord,
     UniverseDefinitionRecord,
@@ -291,19 +293,14 @@ def test_single_observed_instrument_cannot_be_reported_as_multi_asset(tmp_path):
         row = db.get(DatasetSnapshotRecord, snapshot.snapshot_id)
         manifest = json.loads(row.manifest_json)
         first_id = manifest["universe_memberships"][0]["instrument_id"]
-        manifest["observations"] = [
-            item
-            for item in manifest["observations"]
-            if db.get(MarketObservationRecord, item["id"]) is None
-        ]
         observed = []
-        for item in json.loads(row.manifest_json)["observations"]:
+        for item in manifest["observations"]:
             observation = db.scalar(
                 select(MarketObservationRecord).where(
                     MarketObservationRecord.observation_id == item["id"]
                 )
             )
-            if observation.instrument_id == first_id:
+            if observation is not None and observation.instrument_id == first_id:
                 observed.append(item)
         manifest["observations"] = observed
         immutable = {
