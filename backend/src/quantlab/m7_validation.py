@@ -378,10 +378,7 @@ def _validate_approved_deployment(
         session, experiment
     )
     artifact = runtime_manifest.get("artifact")
-    if (
-        not isinstance(artifact, dict)
-        or artifact.get("experiment_code_sha") != experiment.code_sha
-    ):
+    if not isinstance(artifact, dict) or artifact.get("experiment_code_sha") != experiment.code_sha:
         raise ValueError("M7_DEPLOYMENT_RUNTIME_ARTIFACT_MISMATCH")
     if (
         experiment.snapshot_id != deployment.snapshot_id
@@ -401,16 +398,12 @@ def _validate_approved_deployment(
     persisted_parameters = normalize_strategy_config(
         deployment.strategy_name,
         deployment.strategy_version,
-        DeploymentService._evidence(
-            deployment.parameters_json, "deployment parameters"
-        ),
+        DeploymentService._evidence(deployment.parameters_json, "deployment parameters"),
     )
     if persisted_parameters != selected_parameters:
         raise ValueError("M7_DEPLOYMENT_PARAMETERS_MISMATCH")
     approved_instruments = set(DeploymentService._deployment_universe_instruments(snapshot))
-    runtime_instruments = components_from_manifest(
-        runtime_manifest
-    ).risk.instrument_allowlist
+    runtime_instruments = components_from_manifest(runtime_manifest).risk.instrument_allowlist
     if not approved_instruments <= runtime_instruments:
         raise ValueError("M7_DEPLOYMENT_RISK_ALLOWLIST_MISMATCH")
     return experiment, snapshot
