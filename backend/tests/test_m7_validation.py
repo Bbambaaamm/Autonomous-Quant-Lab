@@ -235,7 +235,6 @@ def test_validator_is_read_only_for_deployment_and_experiment(tmp_path):
         assert (deployment.status, deployment.approved_at, persisted.decision) == before
 
 
-
 def test_manual_approved_row_without_runtime_evidence_is_rejected(tmp_path):
     factory, experiment, snapshot, _ = _seed(tmp_path)
     with factory() as db, db.begin():
