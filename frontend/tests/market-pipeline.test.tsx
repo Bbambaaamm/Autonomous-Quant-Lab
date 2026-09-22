@@ -22,3 +22,8 @@ it("keeps the processing-state filter across pages", () => {
  expect(screen.getByRole("combobox",{name:"Stav zpracování"})).toHaveValue("DONE");
  expect(screen.getByRole("link",{name:/Další/})).toHaveAttribute("href","/market?price_q=IBM+%26&price_rank=trend&price_page=3&price_state=DONE");
 });
+
+it("distinguishes price coverage from verified corporate actions", () => {
+ render(<MarketPipelinePanel data={data} admin={false}/>);
+ expect(screen.getByText(/Ani 100 % nepotvrzuje úplnost událostí/)).toBeInTheDocument();
+});
