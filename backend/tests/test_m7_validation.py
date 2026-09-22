@@ -6,6 +6,7 @@ import pytest
 from phase6_audit_helpers import CALENDAR, MappingProvider, daily_bar
 from sqlalchemy.orm import sessionmaker
 
+from quantlab.m7_validation import EqualWeightMonthly, _request, run_m7_validation
 from quantlab.market_data import (
     AssetType,
     CorporateAction,
@@ -13,7 +14,6 @@ from quantlab.market_data import (
     Instrument,
 )
 from quantlab.market_data_service import DatasetSnapshotService, PersistentMarketDataService
-from quantlab.m7_validation import EqualWeightMonthly, _request, run_m7_validation
 from quantlab.multi_asset import StrategyContext
 from quantlab.persistence import (
     DatasetSnapshotRecord,
