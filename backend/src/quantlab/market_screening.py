@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
@@ -152,33 +152,50 @@ class MarketScreening:
             batch = session.get(MarketBatch, batch_id)
             if batch is None or _utc(batch.created_at) > now:
                 raise ValueError("Dávka není dostupná k zadanému času")
-            tasks = list(
-                session.scalars(
-                    select(MarketTask)
-                    .where(MarketTask.batch_id == batch_id)
-                    .order_by(MarketTask.asset_id)
+            active = session.scalar(
+                select(func.count())
+                .select_from(MarketTask)
+                .where(
+                    MarketTask.batch_id == batch_id,
+                    MarketTask.state.in_(("PENDING", "RUNNING", "RETRY")),
                 )
             )
-            if not tasks or any(t.state in {"PENDING", "RUNNING", "RETRY"} for t in tasks):
+            if active:
                 return None
-            items = []
-            for task in tasks:
-                evidence = json.loads(task.evidence_json or "{}")
-                screened = evidence.get("screening")
-                if screened is None or screened.get("policy_hash") != identity(POLICY):
-                    screened = {
-                        "eligible": False,
-                        "reasons": [
-                            task.state if task.state != "DONE" else "SCREENING_NOT_VERIFIED"
-                        ],
-                        "research_eligible": False,
-                    }
-                if "as_of" in screened and datetime.fromisoformat(screened["as_of"]) > now:
-                    raise ValueError("Evidence screeningu pochází z budoucnosti")
-                items.append(
-                    {"asset_id": task.asset_id, "symbol": task.symbol, "evidence": screened}
+            query = (
+                select(
+                    MarketTask.asset_id,
+                    MarketTask.symbol,
+                    MarketTask.state,
+                    MarketTask.evidence_json,
                 )
-            digest = identity(items)
+                .where(MarketTask.batch_id == batch_id)
+                .order_by(MarketTask.asset_id)
+                .execution_options(yield_per=100)
+            )
+
+            def items() -> Iterator[dict[str, Any]]:
+                for asset_id, symbol, state, evidence_json in session.execute(query):
+                    screened = json.loads(evidence_json or "{}").get("screening")
+                    if screened is None or screened.get("policy_hash") != identity(POLICY):
+                        screened = {
+                            "eligible": False,
+                            "reasons": [state if state != "DONE" else "SCREENING_NOT_VERIFIED"],
+                            "research_eligible": False,
+                        }
+                    if "as_of" in screened and datetime.fromisoformat(screened["as_of"]) > now:
+                        raise ValueError("Evidence screeningu pochází z budoucnosti")
+                    yield {"asset_id": asset_id, "symbol": symbol, "evidence": screened}
+
+            content = hashlib.sha256()
+            total = eligible_count = 0
+            for item in items():
+                content.update(canonical(item).encode() + b"\n")
+                total += 1
+                eligible_count += int(bool(item["evidence"]["eligible"]))
+            if not total:
+                return None
+            digest = content.hexdigest()
             run_id = identity({"batch": batch_id, "policy": POLICY, "content": digest})
             session.add(
                 MarketScreenRun(
@@ -187,12 +204,14 @@ class MarketScreening:
                     created_at=now,
                     policy_json=canonical(POLICY),
                     content_hash=digest,
-                    total=len(tasks),
-                    eligible=sum(bool(i["evidence"]["eligible"]) for i in items),
+                    total=total,
+                    eligible=eligible_count,
                 )
             )
             session.flush()
-            for item in items:
+            verification = hashlib.sha256()
+            for index, item in enumerate(items(), 1):
+                verification.update(canonical(item).encode() + b"\n")
                 evidence = item["evidence"]
                 eligible = bool(evidence["eligible"])
                 session.add(
@@ -207,6 +226,10 @@ class MarketScreening:
                         evidence_json=canonical(evidence),
                     )
                 )
+                if index % 100 == 0:
+                    session.flush()
+            if verification.hexdigest() != digest:
+                raise ValueError("Evidence se během uzavírání dávky změnila")
             return run_id
 
     def read(

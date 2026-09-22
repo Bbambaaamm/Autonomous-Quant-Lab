@@ -367,3 +367,25 @@ def test_directory_change_history_never_invents_ipo_or_delisting(env):
     assert changes["symbol_or_venue_changed"] == 1
     assert changes["no_longer_present"] == 1
     assert changes["first_seen"] == 0
+
+
+def test_screening_streams_multiple_pages_including_all_unsupported_assets(tmp_path):
+    from quantlab.market_screening import MarketScreening
+
+    factory = sessionmaker(Phase4Repository(f"sqlite:///{tmp_path / 'stream.db'}").engine)
+    snapshot = AssetDirectoryService(factory).sync(
+        assets(tuple(f"T{i:04}" for i in range(205)), exchange="UNKNOWN"),
+        actor="test",
+        reason="Large universe",
+        received_at=NOW,
+    )
+    batch = MarketPipeline(factory).create(
+        snapshot, START, END, "alpaca:iex", "test", "Stream all", NOW
+    )
+    screening = MarketScreening(factory)
+    assert screening.finalize(batch, NOW)
+    data = screening.read(limit=200, offset=200)
+    assert data["run"]["total"] == 205
+    assert data["run"]["eligible"] == 0
+    assert len(data["items"]) == 5
+    assert data["items"][-1]["symbol"] == "T0204"

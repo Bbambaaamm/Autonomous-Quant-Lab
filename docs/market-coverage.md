@@ -195,3 +195,7 @@ Oprava obnovování fronty: stará ACCESS_BLOCKED dávka už nezastaví další 
 úspěšném obnovení přístupu a dokončení nové dávky. Blokace nejnovější dávky zůstává
 účinná. Přesnější chyby obsahují jen fázi a typ chyby, nikdy raw provider odpověď,
 URL ani přístupové údaje. Rutinní sběr a screening nevolají LLM API.
+
+Uzavření výběru čte evidence po 100 řádcích; nedrží celou historii všech titulů
+v paměti. Otisk obsahu je SHA-256 seřazených kanonických JSON řádků oddělených LF.
+Druhý průchod ověřuje stejný otisk při ukládání; změna evidence zruší transakci.
