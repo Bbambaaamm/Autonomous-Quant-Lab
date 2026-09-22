@@ -491,6 +491,7 @@ def test_retry_distinguishes_budget_and_provider_failure_without_raw_messages(
     assert item["detail"].startswith(expected)
     assert "private-secret" not in item["detail"]
 
+
 def test_directory_keeps_active_and_inactive_reference_assets(tmp_path):
     factory = sessionmaker(Phase4Repository(f"sqlite:///{tmp_path / 'lifecycle.db'}").engine)
     identity_a = str(uuid4())
