@@ -24,8 +24,8 @@ def test_vertical_slice_executes_on_next_bar_with_adverse_slippage() -> None:
     assert first.timestamp == datetime(2025, 1, 9, 21, tzinfo=UTC)
     assert first.price > Decimal("106")
     assert first.commission > Decimal("1")
-    assert result.fills[-1].price < Decimal("92")  # Sell slippage zhoršuje cenu.
     assert result.final_value > Decimal("0")
+    assert result.fills[-1].price < Decimal("92")  # Sell slippage zhoršuje cenu.
 
 
 def test_future_change_does_not_change_earlier_signal() -> None:
@@ -305,3 +305,122 @@ def test_market_pipeline_read_explains_old_blockage_without_mutating_data(tmp_pa
             assert receipt.payload_json == ("x" * 262145 if fault == "large" else raw)
     assert pipeline.read(limit=1, offset=1, state="DATA_BLOCKED")["items"] == []
     assert pipeline.read(state="PENDING")["matched"] == 1
+
+
+@pytest.mark.parametrize("fault", ["none", "hash", "future", "foreign_task", "unsupported"])
+def test_current_receipt_recovery_is_atomic_audited_and_never_changes_prices(tmp_path, fault):
+    import json
+    from datetime import timedelta
+
+    from sqlalchemy import select
+    from sqlalchemy.orm import sessionmaker
+    from test_market_pipeline import END, NOW, START, assets, current_provider
+
+    from quantlab.asset_directory import AssetDirectoryService
+    from quantlab.current_action_recovery import recheck_current_receipts
+    from quantlab.market_pipeline import (
+        MarketActionReceipt,
+        MarketActionReview,
+        MarketPipeline,
+        MarketTask,
+    )
+    from quantlab.market_screening import canonical, identity
+    from quantlab.persistence import CorporateActionReadinessRecord, MarketObservationRecord
+    from quantlab.phase4 import Phase4Repository
+
+    factory = sessionmaker(Phase4Repository(f"sqlite:///{tmp_path / 'review.db'}").engine)
+    directory = AssetDirectoryService(factory).sync(
+        assets(), actor="test", reason="Review fixture", received_at=NOW
+    )
+    pipeline = MarketPipeline(factory)
+    batch = pipeline.create(directory, START, END, "alpaca:iex", "test", "Review batch", NOW)
+    pipeline.step(
+        lambda inst: current_provider(
+            inst,
+            {
+                "stock_dividends": [
+                    {
+                        "id": "div-1",
+                        "symbol": inst.symbol,
+                        "ex_date": "2026-08-10",
+                        "rate": "0.05",
+                    }
+                ]
+            },
+        ),
+        clock=lambda: NOW,
+    )
+    with factory() as session, session.begin():
+        task = session.scalar(select(MarketTask).where(MarketTask.state == "DONE"))
+        assert task is not None
+        receipt = session.scalar(
+            select(MarketActionReceipt).where(MarketActionReceipt.task_id == task.task_id)
+        )
+        old = json.loads(task.evidence_json)
+        old["current_action_receipt_id"] = receipt.receipt_id
+        old["screening"]["eligible"] = False
+        task.state, task.detail = "DATA_BLOCKED", "Legacy unsupported event"
+        task.evidence_json = canonical(old)
+        symbol, task_id = task.symbol, task.task_id
+        if fault == "hash":
+            receipt.content_hash = "0" * 64
+        if fault == "future":
+            receipt.received_at = NOW + timedelta(days=2)
+        if fault == "foreign_task":
+            receipt.task_id = session.scalar(
+                select(MarketTask.task_id).where(MarketTask.task_id != task_id)
+            )
+        if fault == "unsupported":
+            payload = json.loads(receipt.payload_json)
+            payload["rows"][0][0] = "unit_splits"
+            receipt.payload_json, receipt.content_hash = canonical(payload), identity(payload)
+        raw_before, hash_before = receipt.payload_json, receipt.content_hash
+        attempts, bars_before = task.attempts, task.bars
+        prices_before = list(session.scalars(select(MarketObservationRecord.observation_id)))
+    result = recheck_current_receipts(
+        factory,
+        batch,
+        [symbol],
+        "test-admin",
+        "Review after parser update",
+        NOW + timedelta(hours=1),
+    )
+    assert result["resolved"] == (1 if fault == "none" else 0)
+    with factory() as session:
+        task = session.get(MarketTask, task_id)
+        assert task.state == ("DONE" if fault == "none" else "DATA_BLOCKED")
+        assert task.attempts == attempts and task.bars == bars_before
+        assert (
+            list(session.scalars(select(MarketObservationRecord.observation_id))) == prices_before
+        )
+        receipt = session.scalar(select(MarketActionReceipt))
+        assert receipt.payload_json == raw_before and receipt.content_hash == hash_before
+        assert session.scalar(select(CorporateActionReadinessRecord)) is None
+        reviews = list(session.scalars(select(MarketActionReview)))
+        assert len(reviews) == (1 if fault == "none" else 0)
+        if reviews:
+            audit = json.loads(reviews[0].payload_json)
+            assert identity(audit) == reviews[0].content_hash
+            assert audit["previous_state"] == "DATA_BLOCKED" and audit["next_state"] == "DONE"
+            assert audit["previous_evidence"] == old
+            assert audit["next_evidence"]["screening"]["research_eligible"] is False
+            assert audit["next_evidence"]["as_of"] == str(NOW)
+    again = recheck_current_receipts(
+        factory, batch, [symbol], "test-admin", "Repeated review", NOW + timedelta(hours=1)
+    )
+    assert again["resolved"] == 0
+
+
+def test_receipt_recheck_endpoint_requires_real_admin_role(tmp_path, monkeypatch):
+    from test_phase8_api import client
+
+    from quantlab import api as module
+
+    api = client(tmp_path, monkeypatch)
+    api.headers["Authorization"] = f"Bearer {module.settings.api_viewer_token}"
+    body = {"batch_id": "a" * 64, "symbols": ["TEST"], "reason": "Unauthorized review"}
+    assert api.post("/operator/market-pipeline/recheck", json=body).status_code == 403
+    api.headers["Authorization"] = f"Bearer {module.settings.api_admin_token}"
+    assert api.post("/operator/market-pipeline/recheck", json=body).status_code == 409
+    body["symbols"] = ["TEST"] * 51
+    assert api.post("/operator/market-pipeline/recheck", json=body).status_code == 422

@@ -1847,3 +1847,36 @@ def operator_market_probe(body: ReasonedMutation, request: Request) -> dict[str,
         return probe_market_source(settings, datetime.now(UTC))
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
+
+
+class CurrentReceiptReviewRequest(ReasonedMutation):
+    batch_id: str = Field(pattern="^[a-f0-9]{64}$")
+    symbols: list[str] = Field(min_length=1, max_length=50)
+
+
+@app.post("/operator/market-pipeline/recheck", response_model=OperatorDocument)
+def operator_market_recheck(
+    body: CurrentReceiptReviewRequest, request: Request
+) -> dict[str, object]:
+    from quantlab.current_action_recovery import recheck_current_receipts
+
+    try:
+        result = recheck_current_receipts(
+            session_factory,
+            body.batch_id,
+            body.symbols,
+            current_principal(request).actor_id,
+            body.reason,
+            datetime.now(UTC),
+        )
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    _audit_control_mutation(
+        "CONTROL_MARKET_RECEIPTS_REVIEWED",
+        "market_batch",
+        body.batch_id,
+        _actor(request),
+        body.reason,
+        _correlation(request),
+    )
+    return result

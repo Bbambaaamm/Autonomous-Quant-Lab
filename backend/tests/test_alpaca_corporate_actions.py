@@ -628,3 +628,115 @@ def test_alpaca_sse_reconnect_uses_last_event_id_and_skips_inclusive_replay() ->
     assert stored[1].received_at == datetime(2026, 8, 29, 18, tzinfo=UTC)
     assert "Last-Event-Id" not in headers_seen[0]
     assert headers_seen[1]["Last-Event-Id"] == "e-1"
+
+
+def test_current_stock_dividend_is_extra_shares_and_preserves_receipt_time():
+    at = datetime(2026, 9, 22, 12, tzinfo=UTC)
+    row = {"id": "stock-div-1", "symbol": "TEST", "ex_date": "2026-07-01", "rate": "0.05"}
+    actions = AlpacaProvider.normalize_current_rows(
+        "TEST",
+        "asset",
+        [("stock_dividends", row)],
+        date(2026, 1, 1),
+        date(2026, 9, 21),
+        at,
+    )
+    assert len(actions) == 1
+    assert actions[0].kind.value == "SPLIT"
+    assert actions[0].value == Decimal("1.05")
+    assert actions[0].known_at == at
+    assert actions[0].effective_at == datetime(2026, 7, 1, tzinfo=UTC)
+    assert actions[0].payload_hash == canonical_corporate_action_payload_hash(row)
+    from datetime import timedelta
+    from types import SimpleNamespace
+
+    from quantlab.market_data import causal_adjusted_close
+
+    bar = SimpleNamespace(
+        close=Decimal("105"),
+        instrument_id="asset",
+        timestamp=datetime(2026, 6, 30, tzinfo=UTC),
+        session_date=date(2026, 6, 30),
+    )
+    assert causal_adjusted_close([bar], actions, at - timedelta(seconds=1))[bar.session_date] == 105
+    assert causal_adjusted_close([bar], actions, at)[bar.session_date] == 100
+
+
+@pytest.mark.parametrize("bad", ["0", "-1", "NaN", "Infinity", "secret-invalid", None])
+def test_current_stock_dividend_rejects_bad_ratios(bad):
+    row = {"id": "stock-div-1", "symbol": "TEST", "ex_date": "2026-07-01", "rate": bad}
+    with pytest.raises(InvalidProviderResponse):
+        AlpacaProvider.normalize_current_rows(
+            "TEST",
+            "asset",
+            [("stock_dividends", row)],
+            date(2026, 1, 1),
+            date(2026, 9, 21),
+            datetime(2026, 9, 22, tzinfo=UTC),
+        )
+
+
+@pytest.mark.parametrize("kind", ["cash_mergers", "stock_mergers", "stock_and_cash_mergers"])
+def test_current_merger_distinguishes_existing_buyer_shares_from_target_conversion(kind):
+    row = {
+        "id": "merge-1",
+        "acquirer_symbol": "BUYER",
+        "acquiree_symbol": "TARGET",
+        "acquirer_rate": "0.75",
+        "acquiree_rate": "1",
+        "rate": "20",
+        "cash_rate": "5",
+        "effective_date": "2026-07-01",
+        "process_date": "2026-07-20",
+        "currency": "USD",
+    }
+    at = datetime(2026, 9, 22, tzinfo=UTC)
+    assert (
+        AlpacaProvider.normalize_current_rows(
+            "BUYER",
+            "buyer-id",
+            [(kind, row)],
+            date(2026, 7, 1),
+            date(2026, 7, 10),
+            at,
+        )
+        == []
+    )
+    with pytest.raises(DatasetInvalid, match="CORPORATE_ACTIONS_UNSUPPORTED"):
+        AlpacaProvider.normalize_current_rows(
+            "TARGET",
+            "target-id",
+            [(kind, row)],
+            date(2026, 7, 1),
+            date(2026, 7, 10),
+            at,
+        )
+
+
+@pytest.mark.parametrize("fault", ["foreign", "same_symbol", "missing_target", "missing_ratio"])
+def test_current_buyer_exception_requires_unambiguous_documented_terms(fault):
+    row = {
+        "id": "merge-1",
+        "acquirer_symbol": "BUYER",
+        "acquiree_symbol": "TARGET",
+        "acquirer_rate": "0.75",
+        "acquiree_rate": "1",
+        "effective_date": "2026-07-01",
+    }
+    if fault == "foreign":
+        row["currency"] = "EUR"
+    if fault == "same_symbol":
+        row["acquiree_symbol"] = "BUYER"
+    if fault == "missing_target":
+        row.pop("acquiree_symbol")
+    if fault == "missing_ratio":
+        row.pop("acquirer_rate")
+    with pytest.raises((DatasetInvalid, InvalidProviderResponse)):
+        AlpacaProvider.normalize_current_rows(
+            "BUYER",
+            "buyer-id",
+            [("stock_mergers", row)],
+            date(2026, 1, 1),
+            date(2026, 9, 21),
+            datetime(2026, 9, 22, tzinfo=UTC),
+        )

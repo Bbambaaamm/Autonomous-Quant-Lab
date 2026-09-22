@@ -190,7 +190,12 @@ def test_postgres_asset_directory_and_batch_are_immutable():
     from test_market_pipeline import assets
 
     from quantlab.asset_directory import AssetDirectoryService
-    from quantlab.market_pipeline import MarketActionReceipt, MarketPipeline, MarketTask
+    from quantlab.market_pipeline import (
+        MarketActionReceipt,
+        MarketActionReview,
+        MarketPipeline,
+        MarketTask,
+    )
 
     engine = create_engine(os.environ["DATABASE_URL"])
     with engine.connect() as connection:
@@ -225,11 +230,28 @@ def test_postgres_asset_directory_and_batch_are_immutable():
                         payload_json='{"rows":[]}',
                     )
                 )
+                session.flush()
+                review_id = uuid4().hex
+                session.add(
+                    MarketActionReview(
+                        review_id=review_id,
+                        task_id=task.task_id,
+                        receipt_id=receipt_id,
+                        reviewed_at=now,
+                        content_hash="b" * 64,
+                        payload_json='{"review":"test"}',
+                    )
+                )
                 session.execute(
                     text("UPDATE market_tasks SET state='FAILED' WHERE batch_id=:id"), {"id": batch}
                 )
             screen_id = MarketScreening(sessions).finalize(batch, now)
             for statement, identity in (
+                (
+                    "UPDATE market_action_reviews SET payload_json='{}' WHERE review_id=:id",
+                    review_id,
+                ),
+                ("DELETE FROM market_action_reviews WHERE review_id=:id", review_id),
                 (
                     "UPDATE market_action_receipts SET payload_json='{}' WHERE receipt_id=:id",
                     receipt_id,
