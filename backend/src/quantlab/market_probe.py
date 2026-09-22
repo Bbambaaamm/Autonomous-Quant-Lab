@@ -12,7 +12,7 @@ from urllib.parse import urlencode
 
 from quantlab.config import Settings
 from quantlab.domain import require_utc
-from quantlab.market_data import XNYSCalendar
+from quantlab.market_data import AlpacaProvider, XNYSCalendar
 from quantlab.provider_factory import alpaca_rest_transport
 
 
@@ -41,6 +41,17 @@ def probe_market_source(settings: Settings, now: datetime) -> dict[str, Any]:
             "Corporate actions IBM",
             "/v1/corporate-actions",
             {"symbols": "IBM", "start": str(end), "end": str(end), "limit": "1"},
+        ),
+        (
+            "Corporate actions IBM — celý rozsah fronty",
+            "/v1/corporate-actions",
+            {
+                "symbols": "IBM",
+                "start": "1970-01-01",
+                "end": AlpacaProvider._corporate_actions_inventory_end,
+                "data_quality": "all",
+                "limit": "1",
+            },
         ),
     ]
     headers = {

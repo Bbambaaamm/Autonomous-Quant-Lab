@@ -204,10 +204,20 @@ Druhý průchod ověřuje stejný otisk při ukládání; změna evidence zruš�
 
 Správce může na Pokrytí trhu spustit „Ověřit spojení“. POST
 `/operator/market-pipeline/probe` je auditovaný, vyžaduje ADMIN a důvod. Provede
-pouze dva GET požadavky pro IBM: jednu denní cenu a jednu stránku corporate actions,
+pouze tři GET požadavky pro IBM: jednu denní cenu a dvě stránky corporate actions
+(krátké období a celý rozsah fronty 1970–9999 s data_quality=all),
 každý s limitem jednoho výsledku a timeoutem nejvýše pět sekund. Vrací jen HTTP stav,
 latenci a pevně definovanou klasifikaci DNS/TLS/timeoutu. Nevrací klíče, hlavičky,
 raw odpověď ani text výjimky. Nemění účet, data ani plánování.
 
 Kontrola běží z backendu. Úspěch neprokazuje síťovou dostupnost ze samostatného
 workeru, oprávnění k jinému feedu, úplnou historii nebo správnost corporate actions.
+
+### Oprava ručního importu při změně zdroje
+
+Živá kontrola prokázala, že ruční formulář posílal natvrdo Stooq i při konfiguraci
+Alpaca. Import nyní ponechá volbu serveru. Uložení datasetu bez explicitního provideru
+použije persistentní identitu nakonfigurovaného feedu (např. alpaca:iex); explicitní
+provider zůstává podporovaný pro historické uložené zdroje. RBAC a kontroly kvality
+se nemění. Krátká diagnostika IBM na serveru vrátila HTTP 200 pro ceny i události;
+to samo neověřuje celý historický rozsah ani worker.

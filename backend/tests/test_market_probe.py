@@ -31,7 +31,7 @@ def test_probe_is_bounded_and_never_returns_headers_or_payloads(monkeypatch):
 
     monkeypatch.setattr("quantlab.market_probe.alpaca_rest_transport", transport)
     result = probe_market_source(settings(), NOW)
-    assert result["requests"] == 2
+    assert result["requests"] == 3
     assert all(c["http_status"] == 403 for c in result["checks"])
     assert all(timeout <= 5 for _, timeout in calls)
     assert all(url.startswith("https://data.alpaca.markets/") for url, _ in calls)
@@ -75,3 +75,19 @@ def test_probe_requires_admin(tmp_path, monkeypatch):
         api.post("/operator/market-pipeline/probe", json={"reason": "Check connection"}).status_code
         == 403
     )
+
+
+def test_probe_compares_short_and_full_inventory_ranges(monkeypatch):
+    from urllib.parse import parse_qs, urlsplit
+
+    calls = []
+
+    def transport(url, headers, timeout):
+        query = parse_qs(urlsplit(url).query)
+        calls.append(query)
+        return (500 if query.get("end") == ["9999-12-31"] else 200), {}, b"{}"
+
+    monkeypatch.setattr("quantlab.market_probe.alpaca_rest_transport", transport)
+    result = probe_market_source(settings(), NOW)
+    assert [c["http_status"] for c in result["checks"]] == [200, 200, 500]
+    assert calls[2]["data_quality"] == ["all"]

@@ -219,7 +219,7 @@ class IngestionCreate(BaseModel):
 
 
 class SnapshotCreate(BaseModel):
-    provider: str = Field(min_length=1, max_length=40)
+    provider: str | None = Field(default=None, min_length=1, max_length=40)
     universe_id: str = Field(min_length=1, max_length=64)
     start: date
     end: date
@@ -666,7 +666,10 @@ def build_dataset(body: SnapshotCreate, request: Request) -> dict[str, object]:
     try:
         snapshot = dataset_snapshot_service.build(
             as_of=body.as_of,
-            provider=body.provider,
+            provider=body.provider
+            or build_market_data_provider(
+                settings, paper_repository.engine
+            ).metadata.persistent_name,
             universe_id=body.universe_id,
             start=body.start,
             end=body.end,

@@ -267,3 +267,47 @@ def test_guided_research_options_resolve_actual_runtime_revision(tmp_path, monke
     assert strategies["multi_asset_mean_reversion"]["defaults"]["threshold"] == "0.95"
     monkeypatch.setenv("QUANTLAB_CODE_SHA", "not-a-revision")
     assert api.get("/operator/research/options").json()["code_sha"] is None
+
+
+def test_data_forms_default_to_configured_provider_and_feed(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    monkeypatch.setenv("MARKET_DATA_PROVIDER", "alpaca")
+    monkeypatch.setenv("ALPACA_KEY_ID", "test-key")
+    monkeypatch.setenv("ALPACA_SECRET_KEY", "test-secret")
+    api = client(tmp_path, monkeypatch)
+    from quantlab import api as module
+    from quantlab.market_data import DatasetInvalid
+
+    response = api.post(
+        "/operator/market-data/ingestions",
+        json={
+            "instrument_id": "unknown",
+            "start": "2026-01-02",
+            "end": "2026-09-21",
+            "reason": "Test configured source",
+        },
+    )
+    assert response.status_code == 404  # Provider accepted; instrument does not exist.
+    monkeypatch.setattr(
+        module,
+        "build_market_data_provider",
+        lambda *args: SimpleNamespace(metadata=SimpleNamespace(persistent_name="alpaca:iex")),
+    )
+    providers = []
+
+    def capture(**kwargs):
+        providers.append(kwargs["provider"])
+        raise DatasetInvalid("No test dataset")
+
+    monkeypatch.setattr(module.dataset_snapshot_service, "build", capture)
+    body = {
+        "universe_id": "test",
+        "start": "2026-01-02",
+        "end": "2026-09-21",
+        "as_of": "2026-09-22T05:00:00Z",
+        "reason": "Test configured source",
+    }
+    assert api.post("/operator/datasets", json=body).status_code == 409
+    assert api.post("/operator/datasets", json={**body, "provider": "stooq"}).status_code == 409
+    assert providers == ["alpaca:iex", "stooq"]
