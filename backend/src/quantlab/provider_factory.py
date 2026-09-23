@@ -4,6 +4,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections.abc import Callable
 
 from sqlalchemy import select
 from sqlalchemy.engine import Engine
@@ -42,7 +43,7 @@ def _validate_alpaca_rest_url(url: str) -> None:
 class _AlpacaRedirectHandler(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[no-untyped-def]
         _validate_alpaca_rest_url(newurl)
-        return super().redirect_request(req, fp, code, msg, headers, newurl)
+        raise ProviderUnavailable("Alpaca REST redirect není povolen")
 
 
 def alpaca_rest_transport(
@@ -60,13 +61,31 @@ def alpaca_rest_transport(
         raise ProviderUnavailable("Alpaca REST není dostupné") from exc
 
 
+TransportTelemetrySink = Callable[[int, int], None]
+
+
 class _BudgetedAlpacaTransport:
     def __init__(self, request_budget: int | None) -> None:
         self.remaining = request_budget
         self.deadline = time.monotonic() + 45
         self.request_count = 0
         self.response_bytes = 0
+        self.telemetry_complete = True
         self.fail_on_access_denied = request_budget is not None
+        self._telemetry_sink: TransportTelemetrySink | None = None
+
+    def set_telemetry_sink(self, sink: TransportTelemetrySink) -> None:
+        self._telemetry_sink = sink
+
+    def _record(self, requests: int, response_bytes: int) -> None:
+        if self._telemetry_sink is not None:
+            try:
+                self._telemetry_sink(requests, response_bytes)
+            except Exception as exc:
+                self.telemetry_complete = False
+                raise ProviderUnavailable("MARKET_TELEMETRY_PERSIST_FAILED") from exc
+        self.request_count += requests
+        self.response_bytes += response_bytes
 
     def __call__(
         self, url: str, headers: dict[str, str], timeout: float
@@ -76,9 +95,11 @@ class _BudgetedAlpacaTransport:
                 raise ProviderUnavailable("MARKET_REQUEST_BUDGET_EXHAUSTED")
             self.remaining -= 1
             timeout = min(timeout, max(0.1, self.deadline - time.monotonic()))
-        self.request_count += 1
+        # Persist the request before sending it. Redirects are rejected by the
+        # transport, so this corresponds to exactly one outbound HTTP request.
+        self._record(1, 0)
         response = alpaca_rest_transport(url, headers, timeout)
-        self.response_bytes += len(response[2])
+        self._record(0, len(response[2]))
         if self.fail_on_access_denied and response[0] in {401, 403}:
             raise ProviderUnavailable("MARKET_DATA_ACCESS_DENIED")
         return response

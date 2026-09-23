@@ -316,3 +316,24 @@ zahodit.
 Inactive reference zůstávají v adresáři pro historickou/lifecycle dohledatelnost.
 Jejich přítomnost sama nedokládá úplnost všech historicky zaniklých US titulů před
 prvním sběrem a není náhradou přesného IPO/delisting master source.
+
+
+## Přesná provozní telemetry široké dávky
+
+Nové cenové dávky po migraci `20260923_01` nesou `telemetry_version=1` a při založení
+uloží velikost PostgreSQL databáze. Alpaca worker zapisuje durable request counter ještě
+před povoleným outbound HTTP pokusem; redirecty nejsou následovány, takže jeden budgetovaný
+pokus odpovídá nejvýše jednomu HTTP requestu. Po úplném přijetí odpovědi se samostatně
+přičtou přijaté bytes a průběžný Linux `ru_maxrss` high-water mark.
+
+Pokud worker zanikne během RUNNING lease a úloha je později reclaimována, task i výsledná
+dávka jsou označeny jako telemetry-incomplete. V takovém případě dashboard nezobrazuje
+neúplné síťové/RSS součty jako nuly. Starší dávky před migrací nedostávají zpětně
+vymyšlené request/RSS metriky vůbec.
+
+Při posledním terminálním tasku vznikne samostatný immutable `market_batch_metrics` řádek:
+completion time, wall-clock duration, task attempts, request/response metriky pouze při
+úplné telemetrii, DB size start/end/growth a peak RSS. PostgreSQL trigger zakazuje update
+i delete tohoto completion evidence a downgrade migrace odmítne ztrátu již zaznamenané
+telemetrie. Tato evidence neměří jiné procesy sdílející stejný Alpaca účet; je to přesné
+měření request pokusů vytvořených touto širokou cenovou dávkou.

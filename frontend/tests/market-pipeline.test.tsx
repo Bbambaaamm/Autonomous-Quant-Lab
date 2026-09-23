@@ -45,12 +45,19 @@ it("shows observed active/inactive lifecycle without inventing delisting dates",
 });
 
 
-it("shows exact completed batch telemetry and marks legacy telemetry", () => {
- render(<MarketPipelinePanel data={{...data,batch:{...data.batch!,completed_at:"2026-09-23T12:00:00Z",metrics:{telemetry_complete:false,duration_seconds:600,http_requests:1234,response_bytes:10485760,task_attempts:1300,peak_rss_kib:262144,database_bytes_at_start:524288000,database_bytes_at_end:536870912,database_growth_bytes:12582912,task_count:14373}}}} admin={false}/>);
+it("shows exact completed batch telemetry", () => {
+ render(<MarketPipelinePanel data={{...data,batch:{...data.batch!,completed_at:"2026-09-23T12:00:00Z",metrics:{telemetry_complete:true,duration_seconds:600,http_requests:1234,response_bytes:10485760,task_attempts:1300,peak_rss_kib:262144,database_bytes_at_start:524288000,database_bytes_at_end:536870912,database_growth_bytes:12582912,task_count:14373}}}} admin={false}/>);
  expect(screen.getByText(/Provozní měření dávky/)).toBeInTheDocument();
- expect(screen.getByText(/1.*234 HTTP požadavků/)).toBeInTheDocument();
+ expect(screen.getByText(/1.*234 HTTP pokusů/)).toBeInTheDocument();
  expect(screen.getByText(/10 MiB odpovědí/)).toBeInTheDocument();
  expect(screen.getByText(/peak RSS 256 MiB/)).toBeInTheDocument();
  expect(screen.getByText(/DB 512 MiB/)).toBeInTheDocument();
- expect(screen.getByText(/starší dávka nemá kompletní request telemetry/)).toBeInTheDocument();
+ expect(screen.getByText(/růst DB 12 MiB/)).toBeInTheDocument();
+});
+
+it("does not present incomplete transport telemetry as zero", () => {
+ render(<MarketPipelinePanel data={{...data,batch:{...data.batch!,completed_at:"2026-09-23T12:00:00Z",metrics:{telemetry_complete:false,duration_seconds:600,http_requests:null,response_bytes:null,task_attempts:1300,peak_rss_kib:null,database_bytes_at_start:524288000,database_bytes_at_end:536870912,database_growth_bytes:12582912,task_count:14373}}}} admin={false}/>);
+ expect(screen.getByText(/Síťové a RSS měření je neúplné/)).toBeInTheDocument();
+ expect(screen.queryByText(/HTTP pokusů/)).not.toBeInTheDocument();
+ expect(screen.queryByText(/peak RSS/)).not.toBeInTheDocument();
 });

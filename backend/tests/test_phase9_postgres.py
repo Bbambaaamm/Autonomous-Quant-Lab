@@ -245,6 +245,7 @@ def test_postgres_asset_directory_and_batch_are_immutable():
                 session.execute(
                     text("UPDATE market_tasks SET state='FAILED' WHERE batch_id=:id"), {"id": batch}
                 )
+            pipeline._record_batch_metrics(batch, now)
             screen_id = MarketScreening(sessions).finalize(batch, now)
             for statement, identity in (
                 (
@@ -259,6 +260,11 @@ def test_postgres_asset_directory_and_batch_are_immutable():
                 ("DELETE FROM market_action_receipts WHERE receipt_id=:id", receipt_id),
                 ("UPDATE market_screen_runs SET eligible=999 WHERE run_id=:id", screen_id),
                 ("DELETE FROM market_screen_items WHERE run_id=:id", screen_id),
+                (
+                    "UPDATE market_batch_metrics SET metrics_json='{}' WHERE batch_id=:id",
+                    batch,
+                ),
+                ("DELETE FROM market_batch_metrics WHERE batch_id=:id", batch),
                 (
                     "UPDATE asset_directory_snapshots SET actor='changed' WHERE snapshot_id=:id",
                     snapshot,

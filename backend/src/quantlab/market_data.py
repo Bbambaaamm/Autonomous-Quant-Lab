@@ -467,10 +467,17 @@ class AlpacaProvider:
             raise InvalidSymbol("Symbol není v explicitní Alpaca instrument mapě")
         return {"symbol": normalized, "provider_symbol": normalized}
 
-    def transport_metrics(self) -> dict[str, int]:
+    def set_transport_telemetry_sink(self, sink: Callable[[int, int], None]) -> None:
+        setter = getattr(self._transport, "set_telemetry_sink", None)
+        if not callable(setter):
+            raise RuntimeError("Alpaca transport nepodporuje persistentní telemetry sink")
+        setter(sink)
+
+    def transport_metrics(self) -> dict[str, int | bool]:
         return {
             "requests": int(getattr(self._transport, "request_count", 0)),
             "response_bytes": int(getattr(self._transport, "response_bytes", 0)),
+            "telemetry_complete": bool(getattr(self._transport, "telemetry_complete", False)),
         }
 
     def _get(self, path: str, query: dict[str, str]) -> dict[str, Any]:
