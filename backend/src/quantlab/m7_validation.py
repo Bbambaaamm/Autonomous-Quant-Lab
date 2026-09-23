@@ -11,9 +11,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
+import subprocess
 from collections.abc import Callable
-from dataclasses import dataclass
-from datetime import datetime
+from dataclasses import dataclass, replace
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
@@ -21,7 +23,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from quantlab.domain import require_utc
-from quantlab.market_data import CorporateAction, CorporateActionKind
+from quantlab.market_data import CorporateAction, CorporateActionKind, XNYSCalendar
 from quantlab.market_data_service import _database_utc, _observation
 from quantlab.multi_asset import (
     ObservationKnowledgeMode,
@@ -98,6 +100,36 @@ def _metrics(metrics: Any) -> dict[str, object]:
     }
 
 
+def _runtime_code_sha() -> str:
+    """Bind reports to a clean checkout when Git metadata is available."""
+    code_sha = Phase6ExperimentRunner._code_sha(None)
+    git = shutil.which("git")
+    if git is None:
+        return code_sha
+    probe = subprocess.run(
+        [git, "rev-parse", "--is-inside-work-tree"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if probe.returncode != 0 or probe.stdout.strip() != "true":
+        return code_sha
+    head = subprocess.run(
+        [git, "rev-parse", "HEAD"], capture_output=True, text=True, check=True
+    ).stdout.strip()
+    dirty = subprocess.run(
+        [git, "status", "--porcelain", "--untracked-files=no"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    if dirty:
+        raise ValueError("M7_VALIDATOR_CHECKOUT_DIRTY")
+    if head != code_sha:
+        raise ValueError("M7_VALIDATOR_SHA_MISMATCH")
+    return code_sha
+
+
 def _request(experiment: ExperimentRecord, current_code_sha: str) -> Phase6ExperimentRequest:
     try:
         config = json.loads(experiment.config_json)
@@ -121,6 +153,33 @@ def _request(experiment: ExperimentRecord, current_code_sha: str) -> Phase6Exper
         )
     except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
         raise ValueError("M7_EXPERIMENT_CONFIG_INVALID") from exc
+
+
+def _validate_experiment_identity(
+    experiment: ExperimentRecord, request: Phase6ExperimentRequest
+) -> None:
+    if not experiment.code_sha or request.code_sha != experiment.code_sha:
+        raise ValueError("M7_EXPERIMENT_CODE_SHA_MISMATCH")
+    normalized = tuple(
+        normalize_strategy_config(request.strategy_name, request.strategy_version, config)
+        for config in request.parameter_configs
+    )
+    payload = {
+        "snapshot_id": request.snapshot_id,
+        "strategy": [request.strategy_name, request.strategy_version],
+        "parameters": normalized,
+        "train_fraction": request.train_fraction,
+        "validation_fraction": request.validation_fraction,
+        "initial_cash": request.initial_cash,
+        "commission_bps": request.commission_bps,
+        "seed": request.seed,
+        "code_sha": request.code_sha,
+    }
+    expected = hashlib.sha256(
+        Phase6ExperimentRunner._canonical(payload).encode()
+    ).hexdigest()
+    if experiment.id != expected or experiment.idempotency_key != expected:
+        raise ValueError("M7_EXPERIMENT_IDENTITY_MISMATCH")
 
 
 def _persisted_signature(experiment: ExperimentRecord) -> dict[str, object]:
