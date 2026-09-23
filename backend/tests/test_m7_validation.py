@@ -358,6 +358,7 @@ def test_dirty_checkout_is_rejected_for_validator_sha(monkeypatch):
     import quantlab.m7_validation as module
 
     sha = "b" * 40
+    repository_root = module.Path(module.__file__).resolve().parents[3]
     monkeypatch.setattr(
         Phase6ExperimentRunner,
         "_code_sha",
@@ -370,12 +371,13 @@ def test_dirty_checkout_is_rejected_for_validator_sha(monkeypatch):
     def fake_run(args, **kwargs):
         calls.append((args, kwargs.get("cwd")))
         if args[1:] == ["rev-parse", "--show-toplevel"]:
-            return SimpleNamespace(returncode=0, stdout="/repo\n")
+            assert kwargs.get("cwd") == repository_root
+            return SimpleNamespace(returncode=0, stdout=str(repository_root) + "\n")
         if args[1:] == ["rev-parse", "HEAD"]:
-            assert kwargs.get("cwd") == "/repo"
+            assert kwargs.get("cwd") == repository_root
             return SimpleNamespace(returncode=0, stdout=sha + "\n")
         if args[1:4] == ["status", "--porcelain", "--untracked-files=all"]:
-            assert kwargs.get("cwd") == "/repo"
+            assert kwargs.get("cwd") == repository_root
             return SimpleNamespace(
                 returncode=0, stdout="?? backend/src/quantlab/untracked_runtime.py\n"
             )
@@ -383,6 +385,28 @@ def test_dirty_checkout_is_rejected_for_validator_sha(monkeypatch):
 
     monkeypatch.setattr(module.subprocess, "run", fake_run)
     with pytest.raises(ValueError, match="M7_VALIDATOR_CHECKOUT_DIRTY"):
+        _runtime_code_sha()
+
+
+def test_validator_rejects_git_root_that_does_not_contain_its_source(monkeypatch):
+    import quantlab.m7_validation as module
+
+    sha = "c" * 40
+    repository_root = module.Path(module.__file__).resolve().parents[3]
+    monkeypatch.setattr(
+        Phase6ExperimentRunner,
+        "_code_sha",
+        staticmethod(lambda explicit: sha),
+    )
+    monkeypatch.setattr(module.shutil, "which", lambda _: "/usr/bin/git")
+
+    def fake_run(args, **kwargs):
+        assert args[1:] == ["rev-parse", "--show-toplevel"]
+        assert kwargs.get("cwd") == repository_root
+        return SimpleNamespace(returncode=0, stdout="/unrelated/repository\n")
+
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+    with pytest.raises(ValueError, match="M7_VALIDATOR_REPOSITORY_MISMATCH"):
         _runtime_code_sha()
 
 
