@@ -561,12 +561,26 @@ def test_status_transition_is_observed_lifecycle_not_fabricated_delisting(tmp_pa
 def test_current_batch_excludes_inactive_lifecycle_evidence(tmp_path):
     factory = sessionmaker(Phase4Repository(f"sqlite:///{tmp_path / 'active-only.db'}").engine)
     active_id, inactive_id = str(uuid4()), str(uuid4())
-    body = json.dumps([
-        {"id": active_id, "symbol": "LIVE", "name": "Live", "exchange": "NASDAQ",
-         "class": "us_equity", "status": "active"},
-        {"id": inactive_id, "symbol": "OLD", "name": "Old", "exchange": "NYSE",
-         "class": "us_equity", "status": "inactive"},
-    ]).encode()
+    body = json.dumps(
+        [
+            {
+                "id": active_id,
+                "symbol": "LIVE",
+                "name": "Live",
+                "exchange": "NASDAQ",
+                "class": "us_equity",
+                "status": "active",
+            },
+            {
+                "id": inactive_id,
+                "symbol": "OLD",
+                "name": "Old",
+                "exchange": "NYSE",
+                "class": "us_equity",
+                "status": "inactive",
+            },
+        ]
+    ).encode()
     snapshot = AssetDirectoryService(factory).sync(
         body, actor="test", reason="Lifecycle denominator", received_at=NOW
     )
