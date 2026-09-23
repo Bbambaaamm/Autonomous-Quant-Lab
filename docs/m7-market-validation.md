@@ -75,3 +75,30 @@ latest approved deployment for `paper-main` is selected deterministically.
 Production verification must run twice against the same deployed state. Identical
 `report_hash` values establish deterministic replay. The report is infrastructure
 validation, not investment advice, a promotion decision or authorization for live trading.
+
+
+## Integrity prerequisites and failure modes
+
+The production acceptance run fails closed unless all of the following hold:
+
+- the runtime Git identity matches the validator SHA and the M7 runtime paths
+  (`backend/src`, `backend/bin`, and the M7 runner script) contain neither modified
+  nor untracked files;
+- the persisted experiment seed matches the precommitted config seed and the complete
+  canonical config still hashes to the persisted experiment id/idempotency key;
+- the snapshot manifest `logical_identity` exactly matches the persisted provider,
+  calendar, universe, start/end and `as_of` fields, and that logical identity plus
+  content hash recreates the persisted snapshot id;
+- every daily observation is pinned to the exchange-calendar close, is not observed
+  before that close, and both timestamp and knowledge time are at or before snapshot
+  `as_of`;
+- currency metadata exists for every immutable universe member, including members with
+  missing observations in a partial-coverage snapshot, and every member currency matches
+  the approved PAPER deployment/account currency.
+
+Representative fail-closed codes are
+`M7_VALIDATOR_CHECKOUT_DIRTY`, `M7_EXPERIMENT_SEED_MISMATCH`,
+`M7_EXPERIMENT_IDENTITY_MISMATCH`, `M7_SNAPSHOT_LOGICAL_IDENTITY_MISMATCH`,
+`M7_SNAPSHOT_ID_MISMATCH`, `M7_OBSERVATION_TIME_INCONSISTENT`, and
+`M7_INSTRUMENT_CURRENCY_MISMATCH`. None of these conditions may be waived by the
+validation command.
