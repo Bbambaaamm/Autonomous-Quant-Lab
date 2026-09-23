@@ -106,6 +106,7 @@ def _runtime_code_sha() -> str:
     """Bind reports to the validator's own verified clean repository."""
     source_root = Path(__file__).resolve().parents[3]
     git = shutil.which("git")
+    git_env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
     if git is None:
         raise ValueError("M7_VALIDATOR_REPOSITORY_UNVERIFIED")
     probe = subprocess.run(  # noqa: S603 - executable is resolved by shutil.which
@@ -114,6 +115,7 @@ def _runtime_code_sha() -> str:
         text=True,
         check=False,
         cwd=source_root,
+        env=git_env,
     )
     if probe.returncode != 0 or not probe.stdout.strip():
         raise ValueError("M7_VALIDATOR_REPOSITORY_UNVERIFIED")
@@ -126,6 +128,7 @@ def _runtime_code_sha() -> str:
         text=True,
         check=True,
         cwd=repository_root,
+        env=git_env,
     ).stdout.strip()
     head = Phase6ExperimentRunner._code_sha(head)
     configured_sha = os.environ.get("QUANTLAB_CODE_SHA")
@@ -146,6 +149,7 @@ def _runtime_code_sha() -> str:
         text=True,
         check=True,
         cwd=repository_root,
+        env=git_env,
     ).stdout.strip()
     if dirty:
         raise ValueError("M7_VALIDATOR_CHECKOUT_DIRTY")
