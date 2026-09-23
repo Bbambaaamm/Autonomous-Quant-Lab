@@ -106,7 +106,7 @@ def _runtime_code_sha() -> str:
     git = shutil.which("git")
     if git is None:
         return code_sha
-    probe = subprocess.run(
+    probe = subprocess.run(  # noqa: S603 - executable is resolved by shutil.which
         [git, "rev-parse", "--is-inside-work-tree"],
         capture_output=True,
         text=True,
@@ -114,10 +114,10 @@ def _runtime_code_sha() -> str:
     )
     if probe.returncode != 0 or probe.stdout.strip() != "true":
         return code_sha
-    head = subprocess.run(
+    head = subprocess.run(  # noqa: S603 - executable is resolved by shutil.which
         [git, "rev-parse", "HEAD"], capture_output=True, text=True, check=True
     ).stdout.strip()
-    dirty = subprocess.run(
+    dirty = subprocess.run(  # noqa: S603 - executable is resolved by shutil.which
         [git, "status", "--porcelain", "--untracked-files=no"],
         capture_output=True,
         text=True,
@@ -175,9 +175,7 @@ def _validate_experiment_identity(
         "seed": request.seed,
         "code_sha": request.code_sha,
     }
-    expected = hashlib.sha256(
-        Phase6ExperimentRunner._canonical(payload).encode()
-    ).hexdigest()
+    expected = hashlib.sha256(Phase6ExperimentRunner._canonical(payload).encode()).hexdigest()
     if experiment.id != expected or experiment.idempotency_key != expected:
         raise ValueError("M7_EXPERIMENT_IDENTITY_MISMATCH")
 
