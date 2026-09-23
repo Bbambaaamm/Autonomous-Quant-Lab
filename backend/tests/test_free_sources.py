@@ -26,12 +26,14 @@ def test_configured_alpaca_basic_is_active_free_us_source():
 def test_optional_free_sources_do_not_pretend_global_completion():
     policy = zero_cost_source_matrix(Settings())
     sources = {source["id"]: source for source in policy["sources"]}
+    assert sources["stooq"]["configured"] is False
     assert sources["stooq"]["broad_automatic_use"] is False
+    assert sources["stooq"]["feed"] == "free API key required"
     assert sources["twelve-data-basic"]["configured"] is False
     assert sources["alpha-vantage-free"]["configured"] is False
-    assert policy["coverage"]["global_catalog"] == "NOT_VERIFIED"
-    assert policy["coverage"]["global_prices"] == "PARTIAL_FREE_SOURCES_ONLY"
-    assert policy["coverage"]["historical_membership"] == "NOT_VERIFIED"
+    assert policy["coverage"]["global_catalog"] == "ZERO_COST_CREDENTIAL_REQUIRED"
+    assert policy["coverage"]["global_prices"] == "ZERO_COST_CREDENTIAL_REQUIRED"
+    assert policy["coverage"]["historical_membership"] == "OBSERVED_US_LIFECYCLE_ONLY"
 
 
 def test_policy_never_exposes_credentials():
