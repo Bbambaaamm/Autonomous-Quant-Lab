@@ -593,6 +593,28 @@ def test_current_batch_excludes_inactive_lifecycle_evidence(tmp_path):
     assert report["items"][0]["symbol"] == "LIVE"
 
 
+def test_parser_accepts_empty_inactive_name_but_active_still_requires_name():
+    base = {"exchange": "NASDAQ", "class": "us_equity"}
+    inactive = {
+        **base,
+        "id": str(uuid4()),
+        "symbol": "OLDNAMELESS",
+        "name": "",
+        "status": "inactive",
+    }
+    parsed = parse_assets(json.dumps([inactive]).encode())
+    assert parsed[0]["name"] == ""
+    active = {
+        **base,
+        "id": str(uuid4()),
+        "symbol": "LIVENAMELESS",
+        "name": "",
+        "status": "active",
+    }
+    with pytest.raises(CatalogError):
+        parse_assets(json.dumps([active]).encode())
+
+
 def test_parser_rejects_duplicate_active_symbol_but_allows_inactive_reuse():
     shared = "REUSE"
     active_a, active_b, inactive = str(uuid4()), str(uuid4()), str(uuid4())
