@@ -77,7 +77,8 @@ def parse_assets(body: bytes) -> list[dict[str, str]]:
                 or not isinstance(symbol, str)
                 or not 1 <= len(symbol) <= 32
                 or not isinstance(name, str)
-                or not 1 <= len(name) <= 255
+                or len(name) > 255
+                or (status == "active" and not name.strip())
                 or not isinstance(exchange, str)
                 or not 1 <= len(exchange) <= 32
                 or row["class"] != "us_equity"
