@@ -10,8 +10,8 @@ from typing import Any
 
 from quantlab.config import Settings
 
-POLICY_VERSION = "zero-cost-first-1"
-VERIFIED_ON = "2026-09-22"
+POLICY_VERSION = "zero-cost-first-2"
+VERIFIED_ON = "2026-09-23"
 
 
 def zero_cost_source_matrix(settings: Settings) -> dict[str, Any]:
@@ -42,18 +42,34 @@ def zero_cost_source_matrix(settings: Settings) -> dict[str, Any]:
                 ],
             },
             {
-                "id": "stooq",
+                "id": "stooq-per-symbol",
                 "cost": "FREE",
-                "configured": True,
+                "configured": settings.market_data_provider == "stooq",
                 "role": "SECONDARY_EOD_VALIDATION",
                 "scope": "daily prices for individually mapped symbols",
                 "history": "source-dependent",
                 "request_limit": "not asserted",
-                "feed": "daily",
+                "feed": "credential-free per-symbol adapter",
                 "broad_automatic_use": False,
                 "limitations": [
+                    "Current per-symbol adapter is not a global catalog",
                     "No corporate-actions adapter",
-                    "Bulk automation terms and complete exchange coverage not yet verified",
+                ],
+            },
+            {
+                "id": "stooq-bulk-world-candidate",
+                "cost": "FREE",
+                "configured": False,
+                "role": "UNVERIFIED_GLOBAL_CANDIDATE",
+                "scope": "bulk world history candidate",
+                "history": "not verified",
+                "request_limit": "not verified",
+                "feed": "authentication/integration not established",
+                "broad_automatic_use": False,
+                "limitations": [
+                    "Bulk-world endpoint returned HTTP 401 without API key (staging, 2026-09-23)",
+                    "Credentialed access and complete global coverage are not established",
+                    "Provider factory has no bulk-world integration",
                 ],
             },
             {
@@ -89,9 +105,9 @@ def zero_cost_source_matrix(settings: Settings) -> dict[str, Any]:
         ],
         "coverage": {
             "us_prices": "ACTIVE_FREE" if alpaca_ready else "FREE_SOURCE_NOT_CONFIGURED",
-            "global_prices": "PARTIAL_FREE_SOURCES_ONLY",
-            "global_catalog": "NOT_VERIFIED",
-            "historical_membership": "NOT_VERIFIED",
+            "global_prices": "NOT_VERIFIED_INTEGRATION_REQUIRED",
+            "global_catalog": "NOT_VERIFIED_INTEGRATION_REQUIRED",
+            "historical_membership": "OBSERVED_US_LIFECYCLE_ONLY",
             "corporate_actions": "PARTIAL_US_CURRENT_ONLY",
             "research_pit_ready": False,
         },
