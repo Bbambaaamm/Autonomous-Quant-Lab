@@ -359,10 +359,16 @@ def test_dirty_checkout_is_rejected_for_validator_sha(monkeypatch):
 
     sha = "b" * 40
     repository_root = module.Path(module.__file__).resolve().parents[3]
+    monkeypatch.delenv("QUANTLAB_CODE_SHA", raising=False)
+
+    def validate_explicit(explicit):
+        assert explicit == sha
+        return explicit
+
     monkeypatch.setattr(
         Phase6ExperimentRunner,
         "_code_sha",
-        staticmethod(lambda explicit: sha),
+        staticmethod(validate_explicit),
     )
     monkeypatch.setattr(module.shutil, "which", lambda _: "/usr/bin/git")
 
@@ -391,13 +397,7 @@ def test_dirty_checkout_is_rejected_for_validator_sha(monkeypatch):
 def test_validator_rejects_git_root_that_does_not_contain_its_source(monkeypatch):
     import quantlab.m7_validation as module
 
-    sha = "c" * 40
     repository_root = module.Path(module.__file__).resolve().parents[3]
-    monkeypatch.setattr(
-        Phase6ExperimentRunner,
-        "_code_sha",
-        staticmethod(lambda explicit: sha),
-    )
     monkeypatch.setattr(module.shutil, "which", lambda _: "/usr/bin/git")
 
     def fake_run(args, **kwargs):
@@ -407,6 +407,20 @@ def test_validator_rejects_git_root_that_does_not_contain_its_source(monkeypatch
 
     monkeypatch.setattr(module.subprocess, "run", fake_run)
     with pytest.raises(ValueError, match="M7_VALIDATOR_REPOSITORY_MISMATCH"):
+        _runtime_code_sha()
+
+
+def test_validator_fails_closed_when_source_repository_cannot_be_verified(monkeypatch):
+    import quantlab.m7_validation as module
+
+    repository_root = module.Path(module.__file__).resolve().parents[3]
+    monkeypatch.setattr(module.shutil, "which", lambda _: "/usr/bin/git")
+    monkeypatch.setattr(
+        module.subprocess,
+        "run",
+        lambda args, **kwargs: SimpleNamespace(returncode=128, stdout=""),
+    )
+    with pytest.raises(ValueError, match="M7_VALIDATOR_REPOSITORY_UNVERIFIED"):
         _runtime_code_sha()
 
 
@@ -506,10 +520,17 @@ def test_runtime_dirty_guard_is_root_anchored_even_from_subdirectory(monkeypatch
     import quantlab.m7_validation as module
 
     sha = "b" * 40
+    repository_root = module.Path(module.__file__).resolve().parents[3]
+    monkeypatch.delenv("QUANTLAB_CODE_SHA", raising=False)
+
+    def validate_explicit(explicit):
+        assert explicit == sha
+        return explicit
+
     monkeypatch.setattr(
         Phase6ExperimentRunner,
         "_code_sha",
-        staticmethod(lambda explicit: sha),
+        staticmethod(validate_explicit),
     )
     monkeypatch.setattr(module.shutil, "which", lambda _: "/usr/bin/git")
     calls = []
@@ -517,15 +538,16 @@ def test_runtime_dirty_guard_is_root_anchored_even_from_subdirectory(monkeypatch
     def fake_run(args, **kwargs):
         calls.append((args, kwargs.get("cwd")))
         if args[1:] == ["rev-parse", "--show-toplevel"]:
-            return SimpleNamespace(returncode=0, stdout="/repo\n")
+            assert kwargs.get("cwd") == repository_root
+            return SimpleNamespace(returncode=0, stdout=str(repository_root) + "\n")
         if args[1:] == ["rev-parse", "HEAD"]:
-            assert kwargs.get("cwd") == "/repo"
+            assert kwargs.get("cwd") == repository_root
             return SimpleNamespace(returncode=0, stdout=sha + "\n")
         if args[1:4] == ["status", "--porcelain", "--untracked-files=all"]:
-            assert kwargs.get("cwd") == "/repo"
+            assert kwargs.get("cwd") == repository_root
             return SimpleNamespace(returncode=0, stdout="")
         raise AssertionError(args)
 
     monkeypatch.setattr(module.subprocess, "run", fake_run)
     assert _runtime_code_sha() == sha
-    assert any(cwd == "/repo" for _, cwd in calls)
+    assert calls and all(cwd == repository_root for _, cwd in calls)
