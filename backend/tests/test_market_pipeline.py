@@ -556,3 +556,40 @@ def test_status_transition_is_observed_lifecycle_not_fabricated_delisting(tmp_pa
     assert latest["changes"]["became_inactive"] == 1
     assert latest["changes"]["became_active"] == 0
     assert "delisted_at" not in latest["changes"]
+
+
+def test_current_batch_excludes_inactive_lifecycle_evidence(tmp_path):
+    factory = sessionmaker(Phase4Repository(f"sqlite:///{tmp_path / 'active-only.db'}").engine)
+    active_id, inactive_id = str(uuid4()), str(uuid4())
+    body = json.dumps([
+        {"id": active_id, "symbol": "LIVE", "name": "Live", "exchange": "NASDAQ",
+         "class": "us_equity", "status": "active"},
+        {"id": inactive_id, "symbol": "OLD", "name": "Old", "exchange": "NYSE",
+         "class": "us_equity", "status": "inactive"},
+    ]).encode()
+    snapshot = AssetDirectoryService(factory).sync(
+        body, actor="test", reason="Lifecycle denominator", received_at=NOW
+    )
+    batch = MarketPipeline(factory).create(
+        snapshot, START, END, "alpaca:iex", "test", "Current active only", NOW
+    )
+    report = MarketPipeline(factory).read()
+    assert report["batch"]["id"] == batch
+    assert report["total"] == 1
+    assert report["items"][0]["symbol"] == "LIVE"
+
+
+def test_parser_rejects_duplicate_active_symbol_but_allows_inactive_reuse():
+    shared = "REUSE"
+    active_a, active_b, inactive = str(uuid4()), str(uuid4()), str(uuid4())
+    base = {"name": "Company", "exchange": "NASDAQ", "class": "us_equity"}
+    with pytest.raises(CatalogError):
+        parse_assets(json.dumps([
+            {**base, "id": active_a, "symbol": shared, "status": "active"},
+            {**base, "id": active_b, "symbol": shared, "status": "active"},
+        ]).encode())
+    parsed = parse_assets(json.dumps([
+        {**base, "id": inactive, "symbol": shared, "status": "inactive"},
+        {**base, "id": active_a, "symbol": shared, "status": "active"},
+    ]).encode())
+    assert [row["status"] for row in parsed] == ["inactive", "active"]
