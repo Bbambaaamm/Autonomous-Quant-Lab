@@ -34,3 +34,12 @@ it("labels missing feed prices and preserves this filter across pages", () => {
  expect(screen.getByText("Zdroj nevrátil ceny pro požadované období a feed")).toBeInTheDocument();
  expect(screen.getByRole("link",{name:/Další/})).toHaveAttribute("href","/market?price_q=IBM+%26&price_rank=trend&price_page=3&price_state=NO_PRICE_DATA");
 });
+
+
+it("shows observed active/inactive lifecycle without inventing delisting dates", () => {
+ render(<MarketPipelinePanel data={{...data,identity_directory:{...data.identity_directory,active:14000,inactive:321,changes:{first_seen:2,no_longer_present:1,symbol_or_venue_changed:3,status_changed:4,became_inactive:3,became_active:1}}}} admin={false}/>);
+ expect(screen.getByText(/Aktivní: 14.*000/)).toBeInTheDocument();
+ expect(screen.getByText(/neaktivní reference: 321/)).toBeInTheDocument();
+ expect(screen.getByText(/4 změn lifecycle statusu/)).toBeInTheDocument();
+ expect(screen.getByText(/Datum zjištění není datum IPO ani potvrzený delisting/)).toBeInTheDocument();
+});

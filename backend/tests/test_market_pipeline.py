@@ -490,3 +490,128 @@ def test_retry_distinguishes_budget_and_provider_failure_without_raw_messages(
     item = next(row for row in pipeline.read()["items"] if row["state"] == "RETRY")
     assert item["detail"].startswith(expected)
     assert "private-secret" not in item["detail"]
+
+
+def test_directory_keeps_active_and_inactive_reference_assets(tmp_path):
+    factory = sessionmaker(Phase4Repository(f"sqlite:///{tmp_path / 'lifecycle.db'}").engine)
+    identity_a = str(uuid4())
+    identity_b = str(uuid4())
+    body = json.dumps(
+        [
+            {
+                "id": identity_a,
+                "symbol": "LIVE",
+                "name": "Live company",
+                "exchange": "NASDAQ",
+                "class": "us_equity",
+                "status": "active",
+            },
+            {
+                "id": identity_b,
+                "symbol": "OLD",
+                "name": "Inactive company",
+                "exchange": "NYSE",
+                "class": "us_equity",
+                "status": "inactive",
+            },
+        ]
+    ).encode()
+    service = AssetDirectoryService(factory)
+    service.sync(body, actor="test", reason="Lifecycle catalog", received_at=NOW)
+    latest = service.latest(NOW)
+    assert latest["total"] == 2
+    assert latest["active"] == 1
+    assert latest["inactive"] == 1
+
+
+def test_status_transition_is_observed_lifecycle_not_fabricated_delisting(tmp_path):
+    factory = sessionmaker(Phase4Repository(f"sqlite:///{tmp_path / 'transition.db'}").engine)
+    identity = str(uuid4())
+    base = {
+        "id": identity,
+        "symbol": "LIFE",
+        "name": "Lifecycle company",
+        "exchange": "NASDAQ",
+        "class": "us_equity",
+        "status": "active",
+    }
+    service = AssetDirectoryService(factory)
+    service.sync(
+        json.dumps([base]).encode(),
+        actor="test",
+        reason="Observed active",
+        received_at=NOW,
+    )
+    later = NOW + timedelta(hours=1)
+    service.sync(
+        json.dumps([{**base, "status": "inactive"}]).encode(),
+        actor="test",
+        reason="Observed inactive",
+        received_at=later,
+    )
+    latest = service.latest(later)
+    assert latest["active"] == 0
+    assert latest["inactive"] == 1
+    assert latest["changes"]["status_changed"] == 1
+    assert latest["changes"]["became_inactive"] == 1
+    assert latest["changes"]["became_active"] == 0
+    assert "delisted_at" not in latest["changes"]
+
+
+def test_current_batch_excludes_inactive_lifecycle_evidence(tmp_path):
+    factory = sessionmaker(Phase4Repository(f"sqlite:///{tmp_path / 'active-only.db'}").engine)
+    active_id, inactive_id = str(uuid4()), str(uuid4())
+    body = json.dumps(
+        [
+            {
+                "id": active_id,
+                "symbol": "LIVE",
+                "name": "Live",
+                "exchange": "NASDAQ",
+                "class": "us_equity",
+                "status": "active",
+            },
+            {
+                "id": inactive_id,
+                "symbol": "OLD",
+                "name": "Old",
+                "exchange": "NYSE",
+                "class": "us_equity",
+                "status": "inactive",
+            },
+        ]
+    ).encode()
+    snapshot = AssetDirectoryService(factory).sync(
+        body, actor="test", reason="Lifecycle denominator", received_at=NOW
+    )
+    batch = MarketPipeline(factory).create(
+        snapshot, START, END, "alpaca:iex", "test", "Current active only", NOW
+    )
+    report = MarketPipeline(factory).read()
+    assert report["batch"]["id"] == batch
+    assert report["total"] == 1
+    assert report["items"][0]["symbol"] == "LIVE"
+
+
+def test_parser_rejects_duplicate_active_symbol_but_allows_inactive_reuse():
+    shared = "REUSE"
+    active_a, active_b, inactive = str(uuid4()), str(uuid4()), str(uuid4())
+    base = {"name": "Company", "exchange": "NASDAQ", "class": "us_equity"}
+    with pytest.raises(CatalogError):
+        parse_assets(
+            json.dumps(
+                [
+                    {**base, "id": active_a, "symbol": shared, "status": "active"},
+                    {**base, "id": active_b, "symbol": shared, "status": "active"},
+                ]
+            ).encode()
+        )
+    parsed = parse_assets(
+        json.dumps(
+            [
+                {**base, "id": inactive, "symbol": shared, "status": "inactive"},
+                {**base, "id": active_a, "symbol": shared, "status": "active"},
+            ]
+        ).encode()
+    )
+    assert [row["status"] for row in parsed] == ["inactive", "active"]
