@@ -1,7 +1,7 @@
 import json
 from datetime import UTC, date, datetime, timedelta
-from types import SimpleNamespace
 from decimal import Decimal
+from types import SimpleNamespace
 
 import pytest
 from phase6_audit_helpers import CALENDAR, MappingProvider, daily_bar
@@ -27,6 +27,7 @@ from quantlab.multi_asset import StrategyContext
 from quantlab.persistence import (
     DatasetSnapshotRecord,
     ExperimentRecord,
+    InstrumentRecord,
     MarketObservationRecord,
     StrategyDeploymentRecord,
     StrategyRecord,
