@@ -11,9 +11,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
+import subprocess
 from collections.abc import Callable
-from dataclasses import dataclass
-from datetime import datetime
+from dataclasses import dataclass, replace
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
@@ -21,7 +23,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from quantlab.domain import require_utc
-from quantlab.market_data import CorporateAction, CorporateActionKind
+from quantlab.market_data import CorporateAction, CorporateActionKind, XNYSCalendar
 from quantlab.market_data_service import _database_utc, _observation
 from quantlab.multi_asset import (
     ObservationKnowledgeMode,
@@ -98,6 +100,36 @@ def _metrics(metrics: Any) -> dict[str, object]:
     }
 
 
+def _runtime_code_sha() -> str:
+    """Bind reports to a clean checkout when Git metadata is available."""
+    code_sha = Phase6ExperimentRunner._code_sha(None)
+    git = shutil.which("git")
+    if git is None:
+        return code_sha
+    probe = subprocess.run(  # noqa: S603 - executable is resolved by shutil.which
+        [git, "rev-parse", "--is-inside-work-tree"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if probe.returncode != 0 or probe.stdout.strip() != "true":
+        return code_sha
+    head = subprocess.run(  # noqa: S603 - executable is resolved by shutil.which
+        [git, "rev-parse", "HEAD"], capture_output=True, text=True, check=True
+    ).stdout.strip()
+    dirty = subprocess.run(  # noqa: S603 - executable is resolved by shutil.which
+        [git, "status", "--porcelain", "--untracked-files=no"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    if dirty:
+        raise ValueError("M7_VALIDATOR_CHECKOUT_DIRTY")
+    if head != code_sha:
+        raise ValueError("M7_VALIDATOR_SHA_MISMATCH")
+    return code_sha
+
+
 def _request(experiment: ExperimentRecord, current_code_sha: str) -> Phase6ExperimentRequest:
     try:
         config = json.loads(experiment.config_json)
@@ -121,6 +153,31 @@ def _request(experiment: ExperimentRecord, current_code_sha: str) -> Phase6Exper
         )
     except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
         raise ValueError("M7_EXPERIMENT_CONFIG_INVALID") from exc
+
+
+def _validate_experiment_identity(
+    experiment: ExperimentRecord, request: Phase6ExperimentRequest
+) -> None:
+    if not experiment.code_sha or request.code_sha != experiment.code_sha:
+        raise ValueError("M7_EXPERIMENT_CODE_SHA_MISMATCH")
+    normalized = tuple(
+        normalize_strategy_config(request.strategy_name, request.strategy_version, config)
+        for config in request.parameter_configs
+    )
+    payload = {
+        "snapshot_id": request.snapshot_id,
+        "strategy": [request.strategy_name, request.strategy_version],
+        "parameters": normalized,
+        "train_fraction": request.train_fraction,
+        "validation_fraction": request.validation_fraction,
+        "initial_cash": request.initial_cash,
+        "commission_bps": request.commission_bps,
+        "seed": request.seed,
+        "code_sha": request.code_sha,
+    }
+    expected = hashlib.sha256(Phase6ExperimentRunner._canonical(payload).encode()).hexdigest()
+    if experiment.id != expected or experiment.idempotency_key != expected:
+        raise ValueError("M7_EXPERIMENT_IDENTITY_MISMATCH")
 
 
 def _persisted_signature(experiment: ExperimentRecord) -> dict[str, object]:
@@ -242,6 +299,10 @@ def _load_snapshot(
     by_id = {row.observation_id: row for row in rows}
     if set(by_id) != {item[0] for item in parsed_entries}:
         raise ValueError("M7_OBSERVATION_MISSING")
+    calendar = XNYSCalendar()
+    if snapshot.calendar_identity != calendar.identity or snapshot.timeframe != "1d":
+        raise ValueError("M7_SNAPSHOT_CALENDAR_MISMATCH")
+    cutoff = _database_utc(snapshot.as_of)
     for identity, revision, source_hash in parsed_entries:
         row = by_id[identity]
         if row.revision != revision or row.source_hash != source_hash:
@@ -249,6 +310,15 @@ def _load_snapshot(
         recomputed = _observation_payload_hash(row)
         if row.source_hash != recomputed or row.observation_id != recomputed:
             raise ValueError("M7_OBSERVATION_PAYLOAD_HASH_MISMATCH")
+        session_day = row.session_date.date()
+        if (
+            _database_utc(row.session_date)
+            != datetime.combine(session_day, datetime.min.time(), UTC)
+            or _database_utc(row.timestamp) != calendar.session_close(session_day)
+            or _database_utc(row.timestamp) > cutoff
+            or _database_utc(row.observed_at) > cutoff
+        ):
+            raise ValueError("M7_OBSERVATION_TIME_INCONSISTENT")
     observations = tuple(_observation(by_id[identity]) for identity, _, _ in parsed_entries)
     if len({row.instrument_id for row in observations}) < 2:
         raise ValueError("M7_REQUIRES_MULTI_INSTRUMENT_PIT_UNIVERSE")
@@ -335,6 +405,14 @@ def _load_snapshot(
     }
     if set(currencies) != instrument_ids:
         raise ValueError("M7_INSTRUMENT_METADATA_MISSING")
+    logical_identity = manifest.get("logical_identity")
+    if not isinstance(logical_identity, str) or not logical_identity:
+        raise ValueError("M7_SNAPSHOT_LOGICAL_IDENTITY_MISSING")
+    expected_snapshot_id = hashlib.sha256(
+        f"{logical_identity}|{snapshot.content_hash}".encode()
+    ).hexdigest()
+    if expected_snapshot_id != snapshot.snapshot_id:
+        raise ValueError("M7_SNAPSHOT_ID_MISMATCH")
     return manifest, observations, tuple(actions), universe, currencies
 
 
@@ -412,14 +490,20 @@ def _validate_approved_deployment(
 def run_m7_validation(
     sessions: Callable[[], Session], *, deployment_id: str | None = None
 ) -> dict[str, object]:
-    current_code_sha = Phase6ExperimentRunner._code_sha(None)
+    current_code_sha = _runtime_code_sha()
     with sessions() as session:
         deployment = _select_deployment(session, deployment_id)
         experiment, snapshot = _validate_approved_deployment(session, deployment)
-        request = _request(experiment, current_code_sha)
+        if not experiment.code_sha:
+            raise ValueError("M7_EXPERIMENT_CODE_SHA_MISSING")
+        original_request = _request(experiment, experiment.code_sha)
+        _validate_experiment_identity(experiment, original_request)
+        request = replace(original_request, code_sha=current_code_sha)
         if request.snapshot_id != snapshot.snapshot_id:
             raise ValueError("M7_LINEAGE_MISMATCH")
         manifest, observations, actions, universe, currencies = _load_snapshot(session, snapshot)
+        if any(currency != deployment.currency for currency in currencies.values()):
+            raise ValueError("M7_INSTRUMENT_CURRENCY_MISMATCH")
         persisted = _persisted_signature(experiment)
         original_code_sha = experiment.code_sha
 

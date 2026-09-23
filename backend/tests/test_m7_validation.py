@@ -1,6 +1,7 @@
 import json
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
+from types import SimpleNamespace
 
 import pytest
 from phase6_audit_helpers import CALENDAR, MappingProvider, daily_bar
@@ -10,6 +11,7 @@ from sqlalchemy.orm import sessionmaker
 from quantlab.m7_validation import (
     EqualWeightMonthly,
     _request,
+    _runtime_code_sha,
     _select_deployment,
     digest,
     run_m7_validation,
@@ -25,6 +27,7 @@ from quantlab.multi_asset import StrategyContext
 from quantlab.persistence import (
     DatasetSnapshotRecord,
     ExperimentRecord,
+    InstrumentRecord,
     MarketObservationRecord,
     StrategyDeploymentRecord,
     StrategyRecord,
@@ -162,12 +165,10 @@ def test_equal_weight_benchmark_is_deterministic():
 
 
 def test_runtime_sha_replaces_caller_or_historical_sha(tmp_path, monkeypatch):
+    import quantlab.m7_validation as module
+
     factory, experiment, _, deployment_id = _seed(tmp_path)
-    monkeypatch.setattr(
-        Phase6ExperimentRunner,
-        "_code_sha",
-        staticmethod(lambda explicit: "b" * 40 if explicit is None else explicit),
-    )
+    monkeypatch.setattr(module, "_runtime_code_sha", lambda: "b" * 40)
     with factory() as db:
         persisted = db.get(ExperimentRecord, experiment.id)
         request = _request(persisted, "b" * 40)
@@ -319,4 +320,71 @@ def test_loaded_observation_payload_is_rehashed(tmp_path):
         observation = db.scalar(select(MarketObservationRecord))
         observation.high = str(Decimal(observation.high) + Decimal("1"))
     with pytest.raises(ValueError, match="M7_OBSERVATION_PAYLOAD_HASH_MISMATCH"):
+        run_m7_validation(factory, deployment_id=deployment_id)
+
+
+def test_snapshot_id_is_revalidated_from_logical_identity(tmp_path):
+    factory, _, snapshot, deployment_id = _seed(tmp_path)
+    with factory() as db, db.begin():
+        row = db.get(DatasetSnapshotRecord, snapshot.snapshot_id)
+        manifest = json.loads(row.manifest_json)
+        manifest["logical_identity"] += "|tampered"
+        row.manifest_json = json.dumps(manifest, sort_keys=True, separators=(",", ":"))
+    with pytest.raises(ValueError, match="M7_SNAPSHOT_ID_MISMATCH"):
+        run_m7_validation(factory, deployment_id=deployment_id)
+
+
+def test_experiment_config_is_bound_to_persisted_identity(tmp_path):
+    factory, experiment, _, deployment_id = _seed(tmp_path)
+    with factory() as db, db.begin():
+        row = db.get(ExperimentRecord, experiment.id)
+        config = json.loads(row.config_json)
+        config["seed"] = int(config["seed"]) + 1
+        row.config_json = json.dumps(config, sort_keys=True, separators=(",", ":"))
+    with pytest.raises(ValueError, match="M7_EXPERIMENT_IDENTITY_MISMATCH"):
+        run_m7_validation(factory, deployment_id=deployment_id)
+
+
+def test_observation_knowledge_time_cannot_move_past_snapshot_cutoff(tmp_path):
+    factory, _, snapshot, deployment_id = _seed(tmp_path)
+    with factory() as db, db.begin():
+        observation = db.scalar(select(MarketObservationRecord))
+        observation.observed_at = snapshot.as_of + timedelta(seconds=1)
+    with pytest.raises(ValueError, match="M7_OBSERVATION_TIME_INCONSISTENT"):
+        run_m7_validation(factory, deployment_id=deployment_id)
+
+
+def test_dirty_checkout_is_rejected_for_validator_sha(monkeypatch):
+    import quantlab.m7_validation as module
+
+    sha = "b" * 40
+    monkeypatch.setattr(
+        Phase6ExperimentRunner,
+        "_code_sha",
+        staticmethod(lambda explicit: sha),
+    )
+    monkeypatch.setattr(module.shutil, "which", lambda _: "/usr/bin/git")
+
+    def fake_run(args, **kwargs):
+        if args[1:] == ["rev-parse", "--is-inside-work-tree"]:
+            return SimpleNamespace(returncode=0, stdout="true\n")
+        if args[1:] == ["rev-parse", "HEAD"]:
+            return SimpleNamespace(returncode=0, stdout=sha + "\n")
+        if args[1:] == ["status", "--porcelain", "--untracked-files=no"]:
+            return SimpleNamespace(
+                returncode=0, stdout=" M backend/src/quantlab/m7_validation.py\n"
+            )
+        raise AssertionError(args)
+
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+    with pytest.raises(ValueError, match="M7_VALIDATOR_CHECKOUT_DIRTY"):
+        _runtime_code_sha()
+
+
+def test_snapshot_instrument_currency_must_match_paper_account(tmp_path):
+    factory, _, _, deployment_id = _seed(tmp_path)
+    with factory() as db, db.begin():
+        instrument = db.scalar(select(InstrumentRecord))
+        instrument.currency = "EUR"
+    with pytest.raises(ValueError, match="M7_INSTRUMENT_CURRENCY_MISMATCH"):
         run_m7_validation(factory, deployment_id=deployment_id)
