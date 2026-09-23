@@ -521,7 +521,7 @@ def test_runtime_dirty_guard_is_root_anchored_even_from_subdirectory(monkeypatch
 
     sha = "b" * 40
     repository_root = module.Path(module.__file__).resolve().parents[3]
-    monkeypatch.delenv("QUANTLAB_CODE_SHA", raising=False)
+    monkeypatch.setenv("QUANTLAB_CODE_SHA", "")
     monkeypatch.setenv("GIT_DIR", "/unrelated/.git")
     monkeypatch.setenv("GIT_WORK_TREE", "/unrelated")
     monkeypatch.setenv("GIT_INDEX_FILE", "/unrelated/index")
