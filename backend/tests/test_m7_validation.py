@@ -370,7 +370,7 @@ def test_dirty_checkout_is_rejected_for_validator_sha(monkeypatch):
             return SimpleNamespace(returncode=0, stdout="true\n")
         if args[1:] == ["rev-parse", "HEAD"]:
             return SimpleNamespace(returncode=0, stdout=sha + "\n")
-        if args[1:5] == ["status", "--porcelain", "--untracked-files=all"]:
+        if args[1:4] == ["status", "--porcelain", "--untracked-files=all"]:
             return SimpleNamespace(
                 returncode=0, stdout="?? backend/src/quantlab/untracked_runtime.py\n"
             )
@@ -388,7 +388,6 @@ def test_snapshot_instrument_currency_must_match_paper_account(tmp_path):
         instrument.currency = "EUR"
     with pytest.raises(ValueError, match="M7_INSTRUMENT_CURRENCY_MISMATCH"):
         run_m7_validation(factory, deployment_id=deployment_id)
-
 
 
 def test_observation_cannot_be_known_before_daily_close(tmp_path):
@@ -444,7 +443,7 @@ def test_loader_keeps_currency_for_member_without_observation(tmp_path):
         }
         row.content_hash = digest(immutable)
         logical = manifest["logical_identity"]
-        row.snapshot_id = digest(f"{logical}|{row.content_hash}")
+        row.snapshot_id = module.hashlib.sha256(f"{logical}|{row.content_hash}".encode()).hexdigest()
         manifest["logical_identity"] = logical
         row.manifest_json = json.dumps(manifest, sort_keys=True, separators=(",", ":"))
         db.flush()
