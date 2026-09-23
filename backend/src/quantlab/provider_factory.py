@@ -60,6 +60,30 @@ def alpaca_rest_transport(
         raise ProviderUnavailable("Alpaca REST není dostupné") from exc
 
 
+class _BudgetedAlpacaTransport:
+    def __init__(self, request_budget: int | None) -> None:
+        self.remaining = request_budget
+        self.deadline = time.monotonic() + 45
+        self.request_count = 0
+        self.response_bytes = 0
+        self.fail_on_access_denied = request_budget is not None
+
+    def __call__(
+        self, url: str, headers: dict[str, str], timeout: float
+    ) -> tuple[int, dict[str, str], bytes]:
+        if self.remaining is not None:
+            if self.remaining <= 0 or time.monotonic() >= self.deadline:
+                raise ProviderUnavailable("MARKET_REQUEST_BUDGET_EXHAUSTED")
+            self.remaining -= 1
+            timeout = min(timeout, max(0.1, self.deadline - time.monotonic()))
+        self.request_count += 1
+        response = alpaca_rest_transport(url, headers, timeout)
+        self.response_bytes += len(response[2])
+        if self.fail_on_access_denied and response[0] in {401, 403}:
+            raise ProviderUnavailable("MARKET_DATA_ACCESS_DENIED")
+        return response
+
+
 def build_market_data_provider(
     settings: Settings,
     engine: Engine,
@@ -85,23 +109,7 @@ def build_market_data_provider(
         instrument_ids = {row.symbol.upper(): row.instrument_id for row in instruments}
     else:
         instrument_ids = {instrument.symbol.upper(): instrument.instrument_id}
-    remaining = request_budget
-    deadline = time.monotonic() + 45
-
-    def transport(
-        url: str, headers: dict[str, str], timeout: float
-    ) -> tuple[int, dict[str, str], bytes]:
-        nonlocal remaining
-        if remaining is not None:
-            if remaining <= 0 or time.monotonic() >= deadline:
-                raise ProviderUnavailable("MARKET_REQUEST_BUDGET_EXHAUSTED")
-            remaining -= 1
-            timeout = min(timeout, max(0.1, deadline - time.monotonic()))
-        response = alpaca_rest_transport(url, headers, timeout)
-        if request_budget is not None and response[0] in {401, 403}:
-            raise ProviderUnavailable("MARKET_DATA_ACCESS_DENIED")
-        return response
-
+    transport = _BudgetedAlpacaTransport(request_budget)
     service = PersistentMarketDataService(sessions)
     return AlpacaProvider(
         settings.alpaca_key_id,

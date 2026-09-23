@@ -29,6 +29,26 @@ Ověřené veřejné limity k tomuto datu:
   zůstává samostatnou credential-free funkcí.
 
 
+## Přesné provozní měření široké dávky
+
+Nově založené cenové dávky mají `telemetry_version=1`. Každá úloha kumuluje skutečný
+počet pokusů o HTTP přenos po průchodu lokálním request-budget guardem, velikost
+přijatých response bodies a Linux process high-water RSS (`ru_maxrss`). Retry stejné
+úlohy se přičítají; vyčerpání lokálního budgetu před síťovým voláním se jako HTTP
+požadavek nepočítá.
+
+Po přechodu celé dávky do terminálních stavů se jednou uloží completion evidence:
+celkový počet HTTP requestů, response bytes, počet task attempts, nejvyšší worker RSS,
+čas od vytvoření dávky do uzavření, velikost PostgreSQL databáze při startu a konci
+a její růst. Evidence se po prvním zápisu nepřepisuje. Starší dávky mají
+`telemetry_complete=false`, protože jejich síťové požadavky nelze zpětně přesně
+rekonstruovat; nuly se nesmějí vydávat za naměřený provoz.
+
+Dashboard zobrazuje metriky pouze tehdy, když existují. Databázová velikost je
+celková velikost databáze, zatímco `database_growth_bytes` zachycuje změnu během
+konkrétní dávky. Peak RSS je high-water procesu workeru pozorovaný během úloh dávky,
+nikoli součet paměti všech kontejnerů.
+
 ## Aktuální ceny a čas přijetí událostí (22. 9. 2026)
 
 Cenová fronta ukládá surové ceny nezávisle na úspěchu kontroly dividend a splitů.

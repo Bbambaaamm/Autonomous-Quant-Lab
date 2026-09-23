@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import resource
 from collections.abc import Callable
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
@@ -12,6 +13,7 @@ from typing import Any
 from uuid import uuid4
 
 from sqlalchemy import (
+    BigInteger,
     Date,
     DateTime,
     ForeignKey,
@@ -91,6 +93,10 @@ class MarketBatch(Base):
     provider: Mapped[str] = mapped_column(String(40))
     actor: Mapped[str] = mapped_column(String(128))
     reason: Mapped[str] = mapped_column(String(1000))
+    telemetry_version: Mapped[int | None] = mapped_column(Integer)
+    database_bytes_at_start: Mapped[int | None] = mapped_column(BigInteger)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    metrics_json: Mapped[str | None] = mapped_column(Text)
 
 
 class MarketTask(Base):
@@ -115,6 +121,9 @@ class MarketTask(Base):
     trend: Mapped[Decimal | None] = mapped_column(Numeric(30, 12))
     mean_reversion: Mapped[Decimal | None] = mapped_column(Numeric(30, 12))
     evidence_json: Mapped[str | None] = mapped_column(Text)
+    http_requests: Mapped[int] = mapped_column(Integer, default=0)
+    response_bytes: Mapped[int] = mapped_column(BigInteger, default=0)
+    peak_rss_kib: Mapped[int] = mapped_column(BigInteger, default=0)
 
 
 class MarketActionReceipt(Base):
@@ -195,6 +204,11 @@ class MarketPipeline:
             )
             if not rows:
                 raise ValueError("Adresář neobsahuje instrumenty")
+            database_bytes_at_start = None
+            if session.get_bind().dialect.name == "postgresql":
+                database_bytes_at_start = session.scalar(
+                    select(func.pg_database_size(func.current_database()))
+                )
             session.add(
                 MarketBatch(
                     batch_id=identity,
@@ -205,6 +219,10 @@ class MarketPipeline:
                     provider=provider,
                     actor=actor,
                     reason=reason,
+                    telemetry_version=1,
+                    database_bytes_at_start=database_bytes_at_start,
+                    completed_at=None,
+                    metrics_json=None,
                 )
             )
             session.flush()
@@ -303,6 +321,7 @@ class MarketPipeline:
                 batch.provider,
             )
         state, detail, evidence = "RETRY", "Sběr se nezdařil", None
+        provider: MarketDataProvider | None = None
         stage = "registrace instrumentu"
         try:
             try:
@@ -450,6 +469,12 @@ class MarketPipeline:
                     f"({type(exc).__name__[:40]}; {type(exc.__cause__).__name__[:40]})",
                 )
             )
+        transport_metrics = (
+            provider.transport_metrics()
+            if isinstance(provider, AlpacaProvider)
+            else {"requests": 0, "response_bytes": 0}
+        )
+        peak_rss_kib = int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
         with self.sessions() as session, session.begin():
             task = session.scalar(
                 select(MarketTask).where(MarketTask.task_id == task_id).with_for_update()
@@ -461,6 +486,9 @@ class MarketPipeline:
             task.lease_until = None
             task.lease_token = None
             task.detail = detail
+            task.http_requests += transport_metrics["requests"]
+            task.response_bytes += transport_metrics["response_bytes"]
+            task.peak_rss_kib = max(task.peak_rss_kib, peak_rss_kib)
             if state == "ACCESS_BLOCKED":
                 batches = select(MarketBatch.batch_id).where(
                     MarketBatch.provider == expected_provider
@@ -592,6 +620,63 @@ class MarketPipeline:
                 ),
             }
 
+    def _record_batch_metrics(self, batch_id: str, now: datetime) -> None:
+        completed_at = require_utc(now)
+        with self.sessions() as session, session.begin():
+            batch = session.scalar(
+                select(MarketBatch).where(MarketBatch.batch_id == batch_id).with_for_update()
+            )
+            if batch is None or batch.metrics_json is not None:
+                return
+            active = session.scalar(
+                select(func.count())
+                .select_from(MarketTask)
+                .where(
+                    MarketTask.batch_id == batch_id,
+                    MarketTask.state.in_(("PENDING", "RUNNING", "RETRY")),
+                )
+            )
+            if active:
+                return
+            requests, response_bytes, attempts, peak_rss_kib, task_count = session.execute(
+                select(
+                    func.coalesce(func.sum(MarketTask.http_requests), 0),
+                    func.coalesce(func.sum(MarketTask.response_bytes), 0),
+                    func.coalesce(func.sum(MarketTask.attempts), 0),
+                    func.coalesce(func.max(MarketTask.peak_rss_kib), 0),
+                    func.count(),
+                ).where(MarketTask.batch_id == batch_id)
+            ).one()
+            database_bytes = None
+            if session.get_bind().dialect.name == "postgresql":
+                database_bytes = session.scalar(
+                    select(func.pg_database_size(func.current_database()))
+                )
+            payload = {
+                "schema_version": 1,
+                "telemetry_complete": batch.telemetry_version == 1,
+                "completed_at": completed_at,
+                "duration_seconds": max(
+                    0.0, (completed_at - _utc(batch.created_at)).total_seconds()
+                ),
+                "http_requests": int(requests or 0),
+                "response_bytes": int(response_bytes or 0),
+                "task_attempts": int(attempts or 0),
+                "peak_rss_kib": int(peak_rss_kib or 0),
+                "database_bytes_at_start": batch.database_bytes_at_start,
+                "database_bytes_at_end": int(database_bytes)
+                if database_bytes is not None
+                else None,
+                "database_growth_bytes": (
+                    int(database_bytes) - int(batch.database_bytes_at_start)
+                    if database_bytes is not None and batch.database_bytes_at_start is not None
+                    else None
+                ),
+                "task_count": int(task_count or 0),
+            }
+            batch.completed_at = completed_at
+            batch.metrics_json = canonical(payload)
+
     def refresh(self, now: datetime) -> str:
         """Advance a finished universe to the next completed session; never grow backlog."""
         with self.sessions() as session:
@@ -627,6 +712,7 @@ class MarketPipeline:
             provider = latest.provider
             start = max(latest.start, end - timedelta(days=500))
         MarketScreening(self.sessions).finalize(latest_id, now)
+        self._record_batch_metrics(latest_id, now)
         if status != "MARKET_BATCH_CREATED":
             return status
         self.create(
@@ -724,6 +810,9 @@ class MarketPipeline:
                     "start": batch.start,
                     "end": batch.end,
                     "provider": batch.provider,
+                    "created_at": batch.created_at,
+                    "completed_at": batch.completed_at,
+                    "metrics": json.loads(batch.metrics_json) if batch.metrics_json else None,
                 },
                 "counts": counts,
                 "coverage_summary": {

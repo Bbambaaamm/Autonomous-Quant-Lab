@@ -467,6 +467,12 @@ class AlpacaProvider:
             raise InvalidSymbol("Symbol není v explicitní Alpaca instrument mapě")
         return {"symbol": normalized, "provider_symbol": normalized}
 
+    def transport_metrics(self) -> dict[str, int]:
+        return {
+            "requests": int(getattr(self._transport, "request_count", 0)),
+            "response_bytes": int(getattr(self._transport, "response_bytes", 0)),
+        }
+
     def _get(self, path: str, query: dict[str, str]) -> dict[str, Any]:
         url = f"{self._base_url}{path}?{urllib.parse.urlencode(query)}"
         status, _, body = self._transport(url, self._headers.copy(), self._timeout)
