@@ -443,7 +443,9 @@ def test_loader_keeps_currency_for_member_without_observation(tmp_path):
         }
         row.content_hash = digest(immutable)
         logical = manifest["logical_identity"]
-        row.snapshot_id = module.hashlib.sha256(\n            f"{logical}|{row.content_hash}".encode()\n        ).hexdigest()
+        row.snapshot_id = module.hashlib.sha256(
+            f"{logical}|{row.content_hash}".encode()
+        ).hexdigest()
         manifest["logical_identity"] = logical
         row.manifest_json = json.dumps(manifest, sort_keys=True, separators=(",", ":"))
         db.flush()
