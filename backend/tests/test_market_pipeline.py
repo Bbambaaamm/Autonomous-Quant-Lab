@@ -584,12 +584,20 @@ def test_parser_rejects_duplicate_active_symbol_but_allows_inactive_reuse():
     active_a, active_b, inactive = str(uuid4()), str(uuid4()), str(uuid4())
     base = {"name": "Company", "exchange": "NASDAQ", "class": "us_equity"}
     with pytest.raises(CatalogError):
-        parse_assets(json.dumps([
-            {**base, "id": active_a, "symbol": shared, "status": "active"},
-            {**base, "id": active_b, "symbol": shared, "status": "active"},
-        ]).encode())
-    parsed = parse_assets(json.dumps([
-        {**base, "id": inactive, "symbol": shared, "status": "inactive"},
-        {**base, "id": active_a, "symbol": shared, "status": "active"},
-    ]).encode())
+        parse_assets(
+            json.dumps(
+                [
+                    {**base, "id": active_a, "symbol": shared, "status": "active"},
+                    {**base, "id": active_b, "symbol": shared, "status": "active"},
+                ]
+            ).encode()
+        )
+    parsed = parse_assets(
+        json.dumps(
+            [
+                {**base, "id": inactive, "symbol": shared, "status": "inactive"},
+                {**base, "id": active_a, "symbol": shared, "status": "active"},
+            ]
+        ).encode()
+    )
     assert [row["status"] for row in parsed] == ["inactive", "active"]
