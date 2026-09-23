@@ -17,6 +17,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from decimal import Decimal
+from pathlib import Path
 from typing import Any
 
 from sqlalchemy import select
@@ -101,20 +102,24 @@ def _metrics(metrics: Any) -> dict[str, object]:
 
 
 def _runtime_code_sha() -> str:
-    """Bind reports to a clean checkout when Git metadata is available."""
+    """Bind reports to the validator's own clean repository, never caller cwd."""
     code_sha = Phase6ExperimentRunner._code_sha(None)
     git = shutil.which("git")
     if git is None:
         return code_sha
+    source_root = Path(__file__).resolve().parents[3]
     probe = subprocess.run(  # noqa: S603 - executable is resolved by shutil.which
         [git, "rev-parse", "--show-toplevel"],
         capture_output=True,
         text=True,
         check=False,
+        cwd=source_root,
     )
     if probe.returncode != 0 or not probe.stdout.strip():
         return code_sha
-    repository_root = probe.stdout.strip()
+    repository_root = Path(probe.stdout.strip()).resolve()
+    if repository_root != source_root:
+        raise ValueError("M7_VALIDATOR_REPOSITORY_MISMATCH")
     head = subprocess.run(  # noqa: S603 - executable is resolved by shutil.which
         [git, "rev-parse", "HEAD"],
         capture_output=True,
