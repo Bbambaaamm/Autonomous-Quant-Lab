@@ -58,7 +58,7 @@ def zero_cost_source_matrix(settings: Settings) -> dict[str, Any]:
             },
             {
                 "id": "stooq-bulk-world-candidate",
-                "cost": "FREE_CANDIDATE",
+                "cost": "FREE",
                 "configured": False,
                 "role": "UNVERIFIED_GLOBAL_CANDIDATE",
                 "scope": "bulk world history candidate",
