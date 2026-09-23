@@ -29,6 +29,26 @@ Ověřené veřejné limity k tomuto datu:
   zůstává samostatnou credential-free funkcí.
 
 
+## Přesné provozní měření široké dávky
+
+Nově založené cenové dávky mají `telemetry_version=1`. Každá úloha kumuluje skutečný
+počet pokusů o HTTP přenos po průchodu lokálním request-budget guardem, velikost
+přijatých response bodies a Linux process high-water RSS (`ru_maxrss`). Retry stejné
+úlohy se přičítají; vyčerpání lokálního budgetu před síťovým voláním se jako HTTP
+požadavek nepočítá.
+
+Po přechodu celé dávky do terminálních stavů se jednou uloží completion evidence:
+celkový počet HTTP requestů, response bytes, počet task attempts, nejvyšší worker RSS,
+čas od vytvoření dávky do uzavření, velikost PostgreSQL databáze při startu a konci
+a její růst. Evidence se po prvním zápisu nepřepisuje. Starší dávky mají
+`telemetry_complete=false`, protože jejich síťové požadavky nelze zpětně přesně
+rekonstruovat; nuly se nesmějí vydávat za naměřený provoz.
+
+Dashboard zobrazuje metriky pouze tehdy, když existují. Databázová velikost je
+celková velikost databáze, zatímco `database_growth_bytes` zachycuje změnu během
+konkrétní dávky. Peak RSS je high-water procesu workeru pozorovaný během úloh dávky,
+nikoli součet paměti všech kontejnerů.
+
 ## Aktuální ceny a čas přijetí událostí (22. 9. 2026)
 
 Cenová fronta ukládá surové ceny nezávisle na úspěchu kontroly dividend a splitů.
@@ -296,3 +316,24 @@ zahodit.
 Inactive reference zůstávají v adresáři pro historickou/lifecycle dohledatelnost.
 Jejich přítomnost sama nedokládá úplnost všech historicky zaniklých US titulů před
 prvním sběrem a není náhradou přesného IPO/delisting master source.
+
+
+## Přesná provozní telemetry široké dávky
+
+Nové cenové dávky po migraci `20260923_01` nesou `telemetry_version=1` a při založení
+uloží velikost PostgreSQL databáze. Alpaca worker zapisuje durable request counter ještě
+před povoleným outbound HTTP pokusem; redirecty nejsou následovány, takže jeden budgetovaný
+pokus odpovídá nejvýše jednomu HTTP requestu. Po úplném přijetí odpovědi se samostatně
+přičtou přijaté bytes a průběžný Linux `ru_maxrss` high-water mark.
+
+Pokud worker zanikne během RUNNING lease a úloha je později reclaimována, task i výsledná
+dávka jsou označeny jako telemetry-incomplete. V takovém případě dashboard nezobrazuje
+neúplné síťové/RSS součty jako nuly. Starší dávky před migrací nedostávají zpětně
+vymyšlené request/RSS metriky vůbec.
+
+Při posledním terminálním tasku vznikne samostatný immutable `market_batch_metrics` řádek:
+completion time, wall-clock duration, task attempts, request/response metriky pouze při
+úplné telemetrii, DB size start/end/growth a peak RSS. PostgreSQL trigger zakazuje update
+i delete tohoto completion evidence a downgrade migrace odmítne ztrátu již zaznamenané
+telemetrie. Tato evidence neměří jiné procesy sdílející stejný Alpaca účet; je to přesné
+měření request pokusů vytvořených touto širokou cenovou dávkou.

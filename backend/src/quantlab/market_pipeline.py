@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import resource
 from collections.abc import Callable
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
@@ -12,6 +13,8 @@ from typing import Any
 from uuid import uuid4
 
 from sqlalchemy import (
+    BigInteger,
+    Boolean,
     Date,
     DateTime,
     ForeignKey,
@@ -91,6 +94,18 @@ class MarketBatch(Base):
     provider: Mapped[str] = mapped_column(String(40))
     actor: Mapped[str] = mapped_column(String(128))
     reason: Mapped[str] = mapped_column(String(1000))
+    telemetry_version: Mapped[int | None] = mapped_column(Integer)
+    database_bytes_at_start: Mapped[int | None] = mapped_column(BigInteger)
+
+
+class MarketBatchMetric(Base):
+    __tablename__ = "market_batch_metrics"
+    batch_id: Mapped[str] = mapped_column(
+        ForeignKey("market_batches.batch_id", ondelete="RESTRICT"), primary_key=True
+    )
+    completed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    content_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    metrics_json: Mapped[str] = mapped_column(Text, nullable=False)
 
 
 class MarketTask(Base):
@@ -115,6 +130,10 @@ class MarketTask(Base):
     trend: Mapped[Decimal | None] = mapped_column(Numeric(30, 12))
     mean_reversion: Mapped[Decimal | None] = mapped_column(Numeric(30, 12))
     evidence_json: Mapped[str | None] = mapped_column(Text)
+    http_requests: Mapped[int] = mapped_column(Integer, default=0)
+    response_bytes: Mapped[int] = mapped_column(BigInteger, default=0)
+    peak_rss_kib: Mapped[int] = mapped_column(BigInteger, default=0)
+    telemetry_complete: Mapped[bool] = mapped_column(Boolean, default=True)
 
 
 class MarketActionReceipt(Base):
@@ -153,6 +172,26 @@ def _utc(value: datetime) -> datetime:
 class MarketPipeline:
     def __init__(self, sessions: Callable[[], Session]) -> None:
         self.sessions = sessions
+
+    def _persist_transport_delta(
+        self,
+        task_id: str,
+        lease_token: str,
+        request_delta: int,
+        response_bytes_delta: int,
+    ) -> None:
+        if request_delta < 0 or response_bytes_delta < 0:
+            raise ValueError("Telemetry delta nesmí být záporná")
+        peak_rss_kib = int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
+        with self.sessions() as session, session.begin():
+            task = session.scalar(
+                select(MarketTask).where(MarketTask.task_id == task_id).with_for_update()
+            )
+            if task is None or task.lease_token != lease_token or task.state != "RUNNING":
+                raise RuntimeError("MARKET_TELEMETRY_LEASE_LOST")
+            task.http_requests += request_delta
+            task.response_bytes += response_bytes_delta
+            task.peak_rss_kib = max(task.peak_rss_kib, peak_rss_kib)
 
     def create(
         self,
@@ -195,6 +234,11 @@ class MarketPipeline:
             )
             if not rows:
                 raise ValueError("Adresář neobsahuje instrumenty")
+            database_bytes_at_start = None
+            if session.get_bind().dialect.name == "postgresql":
+                database_bytes_at_start = session.scalar(
+                    select(func.pg_database_size(func.current_database()))
+                )
             session.add(
                 MarketBatch(
                     batch_id=identity,
@@ -205,6 +249,8 @@ class MarketPipeline:
                     provider=provider,
                     actor=actor,
                     reason=reason,
+                    telemetry_version=1,
+                    database_bytes_at_start=database_bytes_at_start,
                 )
             )
             session.flush()
@@ -243,7 +289,10 @@ class MarketPipeline:
                     MarketTask.attempts >= 3,
                 )
                 .values(
-                    state="FAILED", detail="Vyčerpány pokusy po přerušení procesu", lease_token=None
+                    state="FAILED",
+                    detail="Vyčerpány pokusy po přerušení procesu",
+                    lease_token=None,
+                    telemetry_complete=False,
                 )
             )
             task = session.scalar(
@@ -272,6 +321,10 @@ class MarketPipeline:
                 # Release expired-lease updates before another service writes a snapshot.
                 session.commit()
                 return {"outcome": self.refresh(now), "trading_cycle_id": None}
+            if task.state == "RUNNING":
+                # Reclaiming an expired lease means the prior process may have
+                # received bytes after its last durable telemetry write.
+                task.telemetry_complete = False
             task.state = "RUNNING"
             task.attempts += 1
             task.lease_until = now + timedelta(minutes=10)
@@ -296,13 +349,16 @@ class MarketPipeline:
                 first_day,
                 created_at=_utc(existing.created_at) if existing else _utc(snapshot.received_at),
             )
-            task_id, start, end, expected_provider = (
+            task_id, batch_id, start, end, expected_provider = (
                 task.task_id,
+                task.batch_id,
                 batch.start,
                 batch.end,
                 batch.provider,
             )
         state, detail, evidence = "RETRY", "Sběr se nezdařil", None
+        provider: MarketDataProvider | None = None
+        transport_sink_ready = False
         stage = "registrace instrumentu"
         try:
             try:
@@ -311,6 +367,18 @@ class MarketPipeline:
                 raise ValueError("Konflikt kanonické identity") from exc
             stage = "příprava poskytovatele"
             provider = provider_factory(instrument)
+            if isinstance(provider, AlpacaProvider):
+                try:
+                    provider.set_transport_telemetry_sink(
+                        lambda requests, response_bytes: self._persist_transport_delta(
+                            task_id, token, requests, response_bytes
+                        )
+                    )
+                    transport_sink_ready = True
+                except RuntimeError:
+                    # Synthetic/legacy transports can still process data, but
+                    # they cannot claim exact production telemetry.
+                    transport_sink_ready = False
             if provider.metadata.persistent_name != expected_provider:
                 raise ValueError("Provider se liší od neměnné definice dávky")
             fetch_start = self.incremental_start(
@@ -439,6 +507,7 @@ class MarketPipeline:
             # Raw exception/provider body may contain credentials; do not propagate it to UI.
             safe_reason = {
                 "MARKET_REQUEST_BUDGET_EXHAUSTED": "Vyčerpán limit požadavků nebo 45 sekund",
+                "MARKET_TELEMETRY_PERSIST_FAILED": "Nelze bezpečně uložit telemetry požadavku",
                 "Dočasná chyba Alpaca provideru": "Poskytovatel vrátil HTTP 5xx",
             }.get(str(exc), "Dočasná chyba")
             state, detail = (
@@ -450,12 +519,20 @@ class MarketPipeline:
                     f"({type(exc).__name__[:40]}; {type(exc.__cause__).__name__[:40]})",
                 )
             )
+        transport_complete = bool(
+            transport_sink_ready
+            and isinstance(provider, AlpacaProvider)
+            and provider.transport_metrics()["telemetry_complete"]
+        )
+        peak_rss_kib = int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
         with self.sessions() as session, session.begin():
             task = session.scalar(
                 select(MarketTask).where(MarketTask.task_id == task_id).with_for_update()
             )
             if task is None or task.lease_token != token:
                 return {"outcome": "MARKET_DATA_LEASE_LOST", "trading_cycle_id": None}
+            task.peak_rss_kib = max(task.peak_rss_kib, peak_rss_kib)
+            task.telemetry_complete = task.telemetry_complete and transport_complete
             task.state = "FAILED" if state == "RETRY" and task.attempts >= 3 else state
             task.retry_at = require_utc(clock()) + timedelta(minutes=task.attempts * 5)
             task.lease_until = None
@@ -479,6 +556,8 @@ class MarketPipeline:
                 task.trend = evidence["trend"]
                 task.mean_reversion = evidence["mean_reversion"]
                 task.evidence_json = json.dumps(evidence, default=str, sort_keys=True)
+        # Record terminal batch evidence immediately after the final task commit.
+        self._record_batch_metrics(batch_id, require_utc(clock()))
         return {"outcome": "MARKET_DATA_TASK_PROCESSED", "trading_cycle_id": None}
 
     def incremental_start(
@@ -592,6 +671,78 @@ class MarketPipeline:
                 ),
             }
 
+    def _record_batch_metrics(self, batch_id: str, now: datetime) -> None:
+        completed_at = require_utc(now)
+        with self.sessions() as session, session.begin():
+            _lock(session, f"market-batch-metrics:{batch_id}")
+            if session.get(MarketBatchMetric, batch_id) is not None:
+                return
+            batch = session.get(MarketBatch, batch_id)
+            if batch is None or batch.telemetry_version != 1:
+                return
+            active = session.scalar(
+                select(func.count())
+                .select_from(MarketTask)
+                .where(
+                    MarketTask.batch_id == batch_id,
+                    MarketTask.state.in_(("PENDING", "RUNNING", "RETRY")),
+                )
+            )
+            if active:
+                return
+            requests, response_bytes, attempts, peak_rss_kib, incomplete, task_count = (
+                session.execute(
+                    select(
+                        func.coalesce(func.sum(MarketTask.http_requests), 0),
+                        func.coalesce(func.sum(MarketTask.response_bytes), 0),
+                        func.coalesce(func.sum(MarketTask.attempts), 0),
+                        func.coalesce(func.max(MarketTask.peak_rss_kib), 0),
+                        func.coalesce(
+                            func.sum(case((MarketTask.telemetry_complete.is_(False), 1), else_=0)),
+                            0,
+                        ),
+                        func.count(),
+                    ).where(MarketTask.batch_id == batch_id)
+                ).one()
+            )
+            telemetry_complete = int(incomplete or 0) == 0
+            database_bytes = None
+            if session.get_bind().dialect.name == "postgresql":
+                database_bytes = session.scalar(
+                    select(func.pg_database_size(func.current_database()))
+                )
+            payload = {
+                "schema_version": 2,
+                "telemetry_complete": telemetry_complete,
+                "completed_at": completed_at,
+                "duration_seconds": max(
+                    0.0, (completed_at - _utc(batch.created_at)).total_seconds()
+                ),
+                "http_requests": int(requests or 0) if telemetry_complete else None,
+                "response_bytes": int(response_bytes or 0) if telemetry_complete else None,
+                "task_attempts": int(attempts or 0),
+                "peak_rss_kib": int(peak_rss_kib or 0) if telemetry_complete else None,
+                "database_bytes_at_start": batch.database_bytes_at_start,
+                "database_bytes_at_end": int(database_bytes)
+                if database_bytes is not None
+                else None,
+                "database_growth_bytes": (
+                    int(database_bytes) - int(batch.database_bytes_at_start)
+                    if database_bytes is not None and batch.database_bytes_at_start is not None
+                    else None
+                ),
+                "task_count": int(task_count or 0),
+            }
+            encoded = canonical(payload)
+            session.add(
+                MarketBatchMetric(
+                    batch_id=batch_id,
+                    completed_at=completed_at,
+                    content_hash=hashlib.sha256(encoded.encode()).hexdigest(),
+                    metrics_json=encoded,
+                )
+            )
+
     def refresh(self, now: datetime) -> str:
         """Advance a finished universe to the next completed session; never grow backlog."""
         with self.sessions() as session:
@@ -627,6 +778,7 @@ class MarketPipeline:
             provider = latest.provider
             start = max(latest.start, end - timedelta(days=500))
         MarketScreening(self.sessions).finalize(latest_id, now)
+        self._record_batch_metrics(latest_id, now)
         if status != "MARKET_BATCH_CREATED":
             return status
         self.create(
@@ -686,6 +838,7 @@ class MarketPipeline:
                     "limit": limit,
                     "offset": offset,
                 }
+            metric = session.get(MarketBatchMetric, batch.batch_id)
             counts = {
                 state: count
                 for state, count in session.execute(
@@ -724,6 +877,9 @@ class MarketPipeline:
                     "start": batch.start,
                     "end": batch.end,
                     "provider": batch.provider,
+                    "created_at": batch.created_at,
+                    "completed_at": metric.completed_at if metric else None,
+                    "metrics": json.loads(metric.metrics_json) if metric else None,
                 },
                 "counts": counts,
                 "coverage_summary": {
