@@ -118,7 +118,16 @@ def _runtime_code_sha() -> str:
         [git, "rev-parse", "HEAD"], capture_output=True, text=True, check=True
     ).stdout.strip()
     dirty = subprocess.run(  # noqa: S603 - executable is resolved by shutil.which
-        [git, "status", "--porcelain", "--untracked-files=no"],
+        [
+            git,
+            "status",
+            "--porcelain",
+            "--untracked-files=all",
+            "--",
+            "backend/src",
+            "backend/bin",
+            "scripts/run-m7-market-validation.py",
+        ],
         capture_output=True,
         text=True,
         check=True,
@@ -160,6 +169,8 @@ def _validate_experiment_identity(
 ) -> None:
     if not experiment.code_sha or request.code_sha != experiment.code_sha:
         raise ValueError("M7_EXPERIMENT_CODE_SHA_MISMATCH")
+    if experiment.seed != request.seed:
+        raise ValueError("M7_EXPERIMENT_SEED_MISMATCH")
     normalized = tuple(
         normalize_strategy_config(request.strategy_name, request.strategy_version, config)
         for config in request.parameter_configs
@@ -315,6 +326,7 @@ def _load_snapshot(
             _database_utc(row.session_date)
             != datetime.combine(session_day, datetime.min.time(), UTC)
             or _database_utc(row.timestamp) != calendar.session_close(session_day)
+            or _database_utc(row.observed_at) < _database_utc(row.timestamp)
             or _database_utc(row.timestamp) > cutoff
             or _database_utc(row.observed_at) > cutoff
         ):
@@ -396,7 +408,9 @@ def _load_snapshot(
         except (KeyError, TypeError, ValueError) as exc:
             raise ValueError("M7_ACTION_MANIFEST_INVALID") from exc
 
-    instrument_ids = {row.instrument_id for row in observations}
+    membership_ids = {item.instrument_id for item in memberships}
+    observation_ids = {row.instrument_id for row in observations}
+    instrument_ids = membership_ids | observation_ids
     currencies = {
         row.instrument_id: row.currency
         for row in session.scalars(
@@ -406,10 +420,15 @@ def _load_snapshot(
     if set(currencies) != instrument_ids:
         raise ValueError("M7_INSTRUMENT_METADATA_MISSING")
     logical_identity = manifest.get("logical_identity")
-    if not isinstance(logical_identity, str) or not logical_identity:
-        raise ValueError("M7_SNAPSHOT_LOGICAL_IDENTITY_MISSING")
+    expected_logical_identity = (
+        f"{snapshot.provider}|{snapshot.calendar_identity}|{snapshot.universe_id}|"
+        f"{_database_utc(snapshot.start_at).date()}|{_database_utc(snapshot.end_at).date()}|"
+        f"{_database_utc(snapshot.as_of).isoformat()}"
+    )
+    if logical_identity != expected_logical_identity:
+        raise ValueError("M7_SNAPSHOT_LOGICAL_IDENTITY_MISMATCH")
     expected_snapshot_id = hashlib.sha256(
-        f"{logical_identity}|{snapshot.content_hash}".encode()
+        f"{expected_logical_identity}|{snapshot.content_hash}".encode()
     ).hexdigest()
     if expected_snapshot_id != snapshot.snapshot_id:
         raise ValueError("M7_SNAPSHOT_ID_MISMATCH")
