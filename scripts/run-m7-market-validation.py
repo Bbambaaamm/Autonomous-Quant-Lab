@@ -4,7 +4,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-from datetime import datetime
 from pathlib import Path
 
 from dotenv import dotenv_values
@@ -17,9 +16,7 @@ from quantlab.m7_validation import run_m7_validation
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--batch-id", required=True)
-    parser.add_argument("--as-of", required=True)
-    parser.add_argument("--code-sha", required=True)
+    parser.add_argument("--deployment-id")
     parser.add_argument("--env-file")
     parser.add_argument("--db-host")
     args = parser.parse_args()
@@ -44,12 +41,7 @@ def main() -> int:
         return Session(engine)
 
     try:
-        report = run_m7_validation(
-            sessions,
-            batch_id=args.batch_id,
-            as_of=datetime.fromisoformat(args.as_of),
-            code_sha=args.code_sha,
-        )
+        report = run_m7_validation(sessions, deployment_id=args.deployment_id)
         print(json.dumps(report, sort_keys=True, separators=(",", ":"), default=str))
         return 0
     finally:
