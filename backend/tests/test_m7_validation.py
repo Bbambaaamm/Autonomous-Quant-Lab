@@ -370,9 +370,9 @@ def test_dirty_checkout_is_rejected_for_validator_sha(monkeypatch):
             return SimpleNamespace(returncode=0, stdout="true\n")
         if args[1:] == ["rev-parse", "HEAD"]:
             return SimpleNamespace(returncode=0, stdout=sha + "\n")
-        if args[1:] == ["status", "--porcelain", "--untracked-files=no"]:
+        if args[1:5] == ["status", "--porcelain", "--untracked-files=all"]:
             return SimpleNamespace(
-                returncode=0, stdout=" M backend/src/quantlab/m7_validation.py\n"
+                returncode=0, stdout="?? backend/src/quantlab/untracked_runtime.py\n"
             )
         raise AssertionError(args)
 
@@ -388,3 +388,65 @@ def test_snapshot_instrument_currency_must_match_paper_account(tmp_path):
         instrument.currency = "EUR"
     with pytest.raises(ValueError, match="M7_INSTRUMENT_CURRENCY_MISMATCH"):
         run_m7_validation(factory, deployment_id=deployment_id)
+
+
+
+def test_observation_cannot_be_known_before_daily_close(tmp_path):
+    factory, _, _, deployment_id = _seed(tmp_path)
+    with factory() as db, db.begin():
+        observation = db.scalar(select(MarketObservationRecord))
+        observation.observed_at = observation.timestamp - timedelta(seconds=1)
+    with pytest.raises(ValueError, match="M7_OBSERVATION_TIME_INCONSISTENT"):
+        run_m7_validation(factory, deployment_id=deployment_id)
+
+
+def test_snapshot_row_metadata_is_bound_to_logical_identity(tmp_path):
+    factory, _, snapshot, deployment_id = _seed(tmp_path)
+    with factory() as db, db.begin():
+        row = db.get(DatasetSnapshotRecord, snapshot.snapshot_id)
+        row.as_of = row.as_of + timedelta(seconds=1)
+    with pytest.raises(ValueError, match="M7_SNAPSHOT_LOGICAL_IDENTITY_MISMATCH"):
+        run_m7_validation(factory, deployment_id=deployment_id)
+
+
+def test_experiment_seed_column_must_match_precommitted_config(tmp_path):
+    factory, experiment, _, deployment_id = _seed(tmp_path)
+    with factory() as db, db.begin():
+        row = db.get(ExperimentRecord, experiment.id)
+        row.seed = int(row.seed) + 1
+    with pytest.raises(ValueError, match="M7_EXPERIMENT_SEED_MISMATCH"):
+        run_m7_validation(factory, deployment_id=deployment_id)
+
+
+def test_loader_keeps_currency_for_member_without_observation(tmp_path):
+    import quantlab.m7_validation as module
+
+    factory, _, snapshot, _ = _seed(tmp_path)
+    with factory() as db, db.begin():
+        instrument = db.get(InstrumentRecord, "m7-b")
+        instrument.currency = "EUR"
+        row = db.get(DatasetSnapshotRecord, snapshot.snapshot_id)
+        manifest = json.loads(row.manifest_json)
+        kept = []
+        for item in manifest["observations"]:
+            observation = db.scalar(
+                select(MarketObservationRecord).where(
+                    MarketObservationRecord.observation_id == item["id"]
+                )
+            )
+            if observation.instrument_id != "m7-b":
+                kept.append(item)
+        manifest["observations"] = kept
+        immutable = {
+            "observations": kept,
+            "corporate_actions": manifest["corporate_actions"],
+            "universe_memberships": manifest["universe_memberships"],
+        }
+        row.content_hash = digest(immutable)
+        logical = manifest["logical_identity"]
+        row.snapshot_id = digest(f"{logical}|{row.content_hash}")
+        manifest["logical_identity"] = logical
+        row.manifest_json = json.dumps(manifest, sort_keys=True, separators=(",", ":"))
+        db.flush()
+        _, _, _, _, currencies = module._load_snapshot(db, row)
+        assert currencies["m7-b"] == "EUR"
