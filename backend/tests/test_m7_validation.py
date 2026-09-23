@@ -376,6 +376,7 @@ def test_dirty_checkout_is_rejected_for_validator_sha(monkeypatch):
 
     def fake_run(args, **kwargs):
         calls.append((args, kwargs.get("cwd")))
+        assert not any(key.startswith("GIT_") for key in kwargs["env"])
         if args[1:] == ["rev-parse", "--show-toplevel"]:
             assert kwargs.get("cwd") == repository_root
             return SimpleNamespace(returncode=0, stdout=str(repository_root) + "\n")
@@ -521,6 +522,9 @@ def test_runtime_dirty_guard_is_root_anchored_even_from_subdirectory(monkeypatch
     sha = "b" * 40
     repository_root = module.Path(module.__file__).resolve().parents[3]
     monkeypatch.delenv("QUANTLAB_CODE_SHA", raising=False)
+    monkeypatch.setenv("GIT_DIR", "/unrelated/.git")
+    monkeypatch.setenv("GIT_WORK_TREE", "/unrelated")
+    monkeypatch.setenv("GIT_INDEX_FILE", "/unrelated/index")
 
     def validate_explicit(explicit):
         assert explicit == sha
