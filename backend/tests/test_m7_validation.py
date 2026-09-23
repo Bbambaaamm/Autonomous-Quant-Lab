@@ -370,7 +370,9 @@ def test_dirty_checkout_is_rejected_for_validator_sha(monkeypatch):
         if args[1:] == ["rev-parse", "HEAD"]:
             return SimpleNamespace(returncode=0, stdout=sha + "\n")
         if args[1:] == ["status", "--porcelain", "--untracked-files=no"]:
-            return SimpleNamespace(returncode=0, stdout=" M backend/src/quantlab/m7_validation.py\n")
+            return SimpleNamespace(
+                returncode=0, stdout=" M backend/src/quantlab/m7_validation.py\n"
+            )
         raise AssertionError(args)
 
     monkeypatch.setattr(module.subprocess, "run", fake_run)
