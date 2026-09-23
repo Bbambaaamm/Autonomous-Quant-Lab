@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
 import subprocess
 from collections.abc import Callable
@@ -102,12 +103,11 @@ def _metrics(metrics: Any) -> dict[str, object]:
 
 
 def _runtime_code_sha() -> str:
-    """Bind reports to the validator's own clean repository, never caller cwd."""
-    code_sha = Phase6ExperimentRunner._code_sha(None)
+    """Bind reports to the validator's own verified clean repository."""
+    source_root = Path(__file__).resolve().parents[3]
     git = shutil.which("git")
     if git is None:
-        return code_sha
-    source_root = Path(__file__).resolve().parents[3]
+        raise ValueError("M7_VALIDATOR_REPOSITORY_UNVERIFIED")
     probe = subprocess.run(  # noqa: S603 - executable is resolved by shutil.which
         [git, "rev-parse", "--show-toplevel"],
         capture_output=True,
@@ -116,7 +116,7 @@ def _runtime_code_sha() -> str:
         cwd=source_root,
     )
     if probe.returncode != 0 or not probe.stdout.strip():
-        return code_sha
+        raise ValueError("M7_VALIDATOR_REPOSITORY_UNVERIFIED")
     repository_root = Path(probe.stdout.strip()).resolve()
     if repository_root != source_root:
         raise ValueError("M7_VALIDATOR_REPOSITORY_MISMATCH")
@@ -127,6 +127,10 @@ def _runtime_code_sha() -> str:
         check=True,
         cwd=repository_root,
     ).stdout.strip()
+    head = Phase6ExperimentRunner._code_sha(head)
+    configured_sha = os.environ.get("QUANTLAB_CODE_SHA")
+    if configured_sha is not None and Phase6ExperimentRunner._code_sha(configured_sha) != head:
+        raise ValueError("M7_VALIDATOR_SHA_MISMATCH")
     dirty = subprocess.run(  # noqa: S603 - executable is resolved by shutil.which
         [
             git,
@@ -145,9 +149,7 @@ def _runtime_code_sha() -> str:
     ).stdout.strip()
     if dirty:
         raise ValueError("M7_VALIDATOR_CHECKOUT_DIRTY")
-    if head != code_sha:
-        raise ValueError("M7_VALIDATOR_SHA_MISMATCH")
-    return code_sha
+    return head
 
 
 def _request(experiment: ExperimentRecord, current_code_sha: str) -> Phase6ExperimentRequest:
