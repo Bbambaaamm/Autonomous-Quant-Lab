@@ -11,12 +11,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
 import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from decimal import Decimal
+from pathlib import Path
 from typing import Any
 
 from sqlalchemy import select
@@ -101,27 +103,37 @@ def _metrics(metrics: Any) -> dict[str, object]:
 
 
 def _runtime_code_sha() -> str:
-    """Bind reports to a clean checkout when Git metadata is available."""
-    code_sha = Phase6ExperimentRunner._code_sha(None)
+    """Bind reports to the validator's own verified clean repository."""
+    source_root = Path(__file__).resolve().parents[3]
     git = shutil.which("git")
+    git_env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
     if git is None:
-        return code_sha
+        raise ValueError("M7_VALIDATOR_REPOSITORY_UNVERIFIED")
     probe = subprocess.run(  # noqa: S603 - executable is resolved by shutil.which
         [git, "rev-parse", "--show-toplevel"],
         capture_output=True,
         text=True,
         check=False,
+        cwd=source_root,
+        env=git_env,
     )
     if probe.returncode != 0 or not probe.stdout.strip():
-        return code_sha
-    repository_root = probe.stdout.strip()
+        raise ValueError("M7_VALIDATOR_REPOSITORY_UNVERIFIED")
+    repository_root = Path(probe.stdout.strip()).resolve()
+    if repository_root != source_root:
+        raise ValueError("M7_VALIDATOR_REPOSITORY_MISMATCH")
     head = subprocess.run(  # noqa: S603 - executable is resolved by shutil.which
         [git, "rev-parse", "HEAD"],
         capture_output=True,
         text=True,
         check=True,
         cwd=repository_root,
+        env=git_env,
     ).stdout.strip()
+    head = Phase6ExperimentRunner._code_sha(head)
+    configured_sha = os.environ.get("QUANTLAB_CODE_SHA") or None
+    if configured_sha is not None and Phase6ExperimentRunner._code_sha(configured_sha) != head:
+        raise ValueError("M7_VALIDATOR_SHA_MISMATCH")
     dirty = subprocess.run(  # noqa: S603 - executable is resolved by shutil.which
         [
             git,
@@ -137,12 +149,11 @@ def _runtime_code_sha() -> str:
         text=True,
         check=True,
         cwd=repository_root,
+        env=git_env,
     ).stdout.strip()
     if dirty:
         raise ValueError("M7_VALIDATOR_CHECKOUT_DIRTY")
-    if head != code_sha:
-        raise ValueError("M7_VALIDATOR_SHA_MISMATCH")
-    return code_sha
+    return head
 
 
 def _request(experiment: ExperimentRecord, current_code_sha: str) -> Phase6ExperimentRequest:
