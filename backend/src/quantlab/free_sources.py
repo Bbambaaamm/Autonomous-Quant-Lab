@@ -52,7 +52,7 @@ def zero_cost_source_matrix(settings: Settings) -> dict[str, Any]:
                 "feed": "credential-free per-symbol adapter",
                 "broad_automatic_use": False,
                 "limitations": [
-                    "Current adapter maps the supported symbol scope explicitly; it is not a global catalog",
+                    "Current per-symbol adapter is not a global catalog",
                     "No corporate-actions adapter",
                 ],
             },
@@ -68,7 +68,7 @@ def zero_cost_source_matrix(settings: Settings) -> dict[str, Any]:
                 "broad_automatic_use": False,
                 "limitations": [
                     "Bulk-world endpoint returned HTTP 401 without API key (staging, 2026-09-23)",
-                    "A credential has not been tested and complete global coverage is not established",
+                    "Credentialed access and complete global coverage are not established",
                     "Provider factory has no bulk-world integration",
                 ],
             },
