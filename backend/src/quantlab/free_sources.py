@@ -52,8 +52,7 @@ def zero_cost_source_matrix(settings: Settings) -> dict[str, Any]:
                 "feed": "free API key required",
                 "broad_automatic_use": False,
                 "limitations": [
-                    "Staging bulk-world probe returned HTTP 401 without an API key "
-                    "on 2026-09-23",
+                    "Bulk-world endpoint returned HTTP 401 without API key (staging, 2026-09-23)",
                     "No corporate-actions adapter",
                     "Bulk automation terms and complete exchange coverage are not verified",
                 ],
