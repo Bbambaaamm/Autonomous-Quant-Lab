@@ -6,12 +6,12 @@ Do explicitního rozhodnutí uživatele je rozpočet na nová datová předplatn
 Placený zdroj není podmínkou současného PAPER provozu a #164 nesmí automaticky nakoupit
 žádnou službu. Aktivní americká vrstva používá existující bezplatný Alpaca Basic/IEX účet.
 
-Doplňkové bezplatné zdroje se používají pouze v rozsahu, který umíme doložit. Stooq je
-kandidát pro globální EOD data, ale živá kontrola ze staging serveru 23. 9. 2026 potvrdila,
-že bulk-world URL bez API klíče vrací HTTP 401. Proto není označen jako nakonfigurovaný ani
-povolený pro broad automation. Twelve Data Basic a Alpha Vantage Free jsou další kandidáti
-po založení bezplatného API klíče; jejich free limity se nesmějí vydávat za úplné globální
-pokrytí.
+Doplňkové bezplatné zdroje se používají pouze v rozsahu, který umíme doložit. Existující
+Stooq adaptér pro jednotlivé mapované symboly zůstává oddělený od kandidátního bulk-world
+zdroje. Živá kontrola ze staging serveru 23. 9. 2026 potvrdila u bulk-world URL bez klíče
+HTTP 401; to samo nedokládá, že autentizace zpřístupní kompletní globální katalog nebo ceny.
+Twelve Data Basic a Alpha Vantage Free jsou další kandidáti po založení bezplatného API
+klíče; jejich free limity se nesmějí vydávat za úplné globální pokrytí.
 
 API `/operator/market-coverage` vrací `zero_cost_policy` s verzovanou maticí zdrojů,
 nulovým rozpočtem, stavem konfigurace a explicitními mezerami. Dashboard tuto matici
@@ -23,9 +23,10 @@ Ověřené veřejné limity k tomuto datu:
 - Twelve Data Basic: zdarma, 8 API kreditů/min a 800/den; globální trial symboly nejsou
   důkazem úplného světového katalogu.
 - Alpha Vantage standard free: 25 požadavků/den pro většinu datasetů.
-- Stooq bulk-world: z `quantlab-staging-01` dne 23. 9. 2026 bez klíče HTTP 401; jednotlivé
-  active/inactive Alpaca endpointy naopak odpověděly HTTP 200. Překážka globálního EOD je
-  tedy konkrétní chybějící free credential, nikoli nefunkční síť stagingu.
+- Stooq bulk-world candidate: z `quantlab-staging-01` dne 23. 9. 2026 bez klíče HTTP 401.
+  Není implementovaný v provider factory a úplnost světových burz není ověřena; nelze tedy
+  tvrdit, že credential je jediná chybějící podmínka. Existující Stooq per-symbol adaptér
+  zůstává samostatnou credential-free funkcí.
 
 
 ## Aktuální ceny a čas přijetí událostí (22. 9. 2026)
