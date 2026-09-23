@@ -10,8 +10,8 @@ from typing import Any
 
 from quantlab.config import Settings
 
-POLICY_VERSION = "zero-cost-first-1"
-VERIFIED_ON = "2026-09-22"
+POLICY_VERSION = "zero-cost-first-2"
+VERIFIED_ON = "2026-09-23"
 
 
 def zero_cost_source_matrix(settings: Settings) -> dict[str, Any]:
@@ -44,16 +44,17 @@ def zero_cost_source_matrix(settings: Settings) -> dict[str, Any]:
             {
                 "id": "stooq",
                 "cost": "FREE",
-                "configured": True,
-                "role": "SECONDARY_EOD_VALIDATION",
-                "scope": "daily prices for individually mapped symbols",
+                "configured": False,
+                "role": "OPTIONAL_GLOBAL_EOD",
+                "scope": "international daily prices and bulk world history",
                 "history": "source-dependent",
-                "request_limit": "not asserted",
-                "feed": "daily",
+                "request_limit": "provider-enforced; exact quota not asserted",
+                "feed": "free API key required",
                 "broad_automatic_use": False,
                 "limitations": [
+                    "Staging probe of the bulk world ZIP returned HTTP 401 without an API key on 2026-09-23",
                     "No corporate-actions adapter",
-                    "Bulk automation terms and complete exchange coverage not yet verified",
+                    "Bulk automation terms and complete exchange coverage are not verified",
                 ],
             },
             {
@@ -89,9 +90,9 @@ def zero_cost_source_matrix(settings: Settings) -> dict[str, Any]:
         ],
         "coverage": {
             "us_prices": "ACTIVE_FREE" if alpaca_ready else "FREE_SOURCE_NOT_CONFIGURED",
-            "global_prices": "PARTIAL_FREE_SOURCES_ONLY",
-            "global_catalog": "NOT_VERIFIED",
-            "historical_membership": "NOT_VERIFIED",
+            "global_prices": "ZERO_COST_CREDENTIAL_REQUIRED",
+            "global_catalog": "ZERO_COST_CREDENTIAL_REQUIRED",
+            "historical_membership": "OBSERVED_US_LIFECYCLE_ONLY",
             "corporate_actions": "PARTIAL_US_CURRENT_ONLY",
             "research_pit_ready": False,
         },
