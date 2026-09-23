@@ -188,7 +188,8 @@ class MarketPipeline:
             rows = list(
                 session.scalars(
                     select(AssetDirectoryEntry).where(
-                        AssetDirectoryEntry.snapshot_id == snapshot_id
+                        AssetDirectoryEntry.snapshot_id == snapshot_id,
+                        AssetDirectoryEntry.status == "active",
                     )
                 )
             )
