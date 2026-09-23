@@ -107,15 +107,20 @@ def _runtime_code_sha() -> str:
     if git is None:
         return code_sha
     probe = subprocess.run(  # noqa: S603 - executable is resolved by shutil.which
-        [git, "rev-parse", "--is-inside-work-tree"],
+        [git, "rev-parse", "--show-toplevel"],
         capture_output=True,
         text=True,
         check=False,
     )
-    if probe.returncode != 0 or probe.stdout.strip() != "true":
+    if probe.returncode != 0 or not probe.stdout.strip():
         return code_sha
+    repository_root = probe.stdout.strip()
     head = subprocess.run(  # noqa: S603 - executable is resolved by shutil.which
-        [git, "rev-parse", "HEAD"], capture_output=True, text=True, check=True
+        [git, "rev-parse", "HEAD"],
+        capture_output=True,
+        text=True,
+        check=True,
+        cwd=repository_root,
     ).stdout.strip()
     dirty = subprocess.run(  # noqa: S603 - executable is resolved by shutil.which
         [
@@ -131,6 +136,7 @@ def _runtime_code_sha() -> str:
         capture_output=True,
         text=True,
         check=True,
+        cwd=repository_root,
     ).stdout.strip()
     if dirty:
         raise ValueError("M7_VALIDATOR_CHECKOUT_DIRTY")
@@ -144,9 +150,12 @@ def _request(experiment: ExperimentRecord, current_code_sha: str) -> Phase6Exper
         config = json.loads(experiment.config_json)
         strategy = config["strategy"]
         parameters = config["parameters"]
+        seed = config["seed"]
         if not isinstance(strategy, list) or len(strategy) != 2:
             raise TypeError
         if not isinstance(parameters, list) or not parameters:
+            raise TypeError
+        if isinstance(seed, bool) or not isinstance(seed, int):
             raise TypeError
         return Phase6ExperimentRequest(
             snapshot_id=str(config["snapshot_id"]),
@@ -157,7 +166,7 @@ def _request(experiment: ExperimentRecord, current_code_sha: str) -> Phase6Exper
             validation_fraction=Decimal(str(config["validation_fraction"])),
             initial_cash=Decimal(str(config["initial_cash"])),
             commission_bps=Decimal(str(config["commission_bps"])),
-            seed=int(config["seed"]),
+            seed=seed,
             code_sha=current_code_sha,
         )
     except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
@@ -420,9 +429,15 @@ def _load_snapshot(
     if set(currencies) != instrument_ids:
         raise ValueError("M7_INSTRUMENT_METADATA_MISSING")
     logical_identity = manifest.get("logical_identity")
+    snapshot_start = _database_utc(snapshot.start_at)
+    snapshot_end = _database_utc(snapshot.end_at)
+    if snapshot_start != datetime.combine(
+        snapshot_start.date(), datetime.min.time(), UTC
+    ) or snapshot_end != datetime.combine(snapshot_end.date(), datetime.min.time(), UTC):
+        raise ValueError("M7_SNAPSHOT_BOUNDARY_NOT_MIDNIGHT")
     expected_logical_identity = (
         f"{snapshot.provider}|{snapshot.calendar_identity}|{snapshot.universe_id}|"
-        f"{_database_utc(snapshot.start_at).date()}|{_database_utc(snapshot.end_at).date()}|"
+        f"{snapshot_start.date()}|{snapshot_end.date()}|"
         f"{_database_utc(snapshot.as_of).isoformat()}"
     )
     if logical_identity != expected_logical_identity:

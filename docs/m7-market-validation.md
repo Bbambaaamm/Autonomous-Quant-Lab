@@ -83,12 +83,15 @@ The production acceptance run fails closed unless all of the following hold:
 
 - the runtime Git identity matches the validator SHA and the M7 runtime paths
   (`backend/src`, `backend/bin`, and the M7 runner script) contain neither modified
-  nor untracked files;
-- the persisted experiment seed matches the precommitted config seed and the complete
+  nor untracked files; path checks are anchored to the repository root even when the
+  command is launched from a subdirectory;
+- the persisted experiment seed matches the precommitted config seed, the decoded seed
+  is a real integer (never a boolean or coerced fractional value), and the complete
   canonical config still hashes to the persisted experiment id/idempotency key;
-- the snapshot manifest `logical_identity` exactly matches the persisted provider,
-  calendar, universe, start/end and `as_of` fields, and that logical identity plus
-  content hash recreates the persisted snapshot id;
+- snapshot start/end are canonical midnight UTC instants; the snapshot manifest
+  `logical_identity` exactly matches the persisted provider, calendar, universe,
+  start/end and `as_of` fields, and that logical identity plus content hash recreates
+  the persisted snapshot id;
 - every daily observation is pinned to the exchange-calendar close, is not observed
   before that close, and both timestamp and knowledge time are at or before snapshot
   `as_of`;
@@ -97,8 +100,9 @@ The production acceptance run fails closed unless all of the following hold:
   the approved PAPER deployment/account currency.
 
 Representative fail-closed codes are
-`M7_VALIDATOR_CHECKOUT_DIRTY`, `M7_EXPERIMENT_SEED_MISMATCH`,
-`M7_EXPERIMENT_IDENTITY_MISMATCH`, `M7_SNAPSHOT_LOGICAL_IDENTITY_MISMATCH`,
+`M7_VALIDATOR_CHECKOUT_DIRTY`, `M7_EXPERIMENT_CONFIG_INVALID`,
+`M7_EXPERIMENT_SEED_MISMATCH`, `M7_EXPERIMENT_IDENTITY_MISMATCH`,
+`M7_SNAPSHOT_BOUNDARY_NOT_MIDNIGHT`, `M7_SNAPSHOT_LOGICAL_IDENTITY_MISMATCH`,
 `M7_SNAPSHOT_ID_MISMATCH`, `M7_OBSERVATION_TIME_INCONSISTENT`, and
 `M7_INSTRUMENT_CURRENCY_MISMATCH`. None of these conditions may be waived by the
 validation command.

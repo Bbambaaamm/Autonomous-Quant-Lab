@@ -365,12 +365,17 @@ def test_dirty_checkout_is_rejected_for_validator_sha(monkeypatch):
     )
     monkeypatch.setattr(module.shutil, "which", lambda _: "/usr/bin/git")
 
+    calls = []
+
     def fake_run(args, **kwargs):
-        if args[1:] == ["rev-parse", "--is-inside-work-tree"]:
-            return SimpleNamespace(returncode=0, stdout="true\n")
+        calls.append((args, kwargs.get("cwd")))
+        if args[1:] == ["rev-parse", "--show-toplevel"]:
+            return SimpleNamespace(returncode=0, stdout="/repo\n")
         if args[1:] == ["rev-parse", "HEAD"]:
+            assert kwargs.get("cwd") == "/repo"
             return SimpleNamespace(returncode=0, stdout=sha + "\n")
         if args[1:4] == ["status", "--porcelain", "--untracked-files=all"]:
+            assert kwargs.get("cwd") == "/repo"
             return SimpleNamespace(
                 returncode=0, stdout="?? backend/src/quantlab/untracked_runtime.py\n"
             )
@@ -451,3 +456,52 @@ def test_loader_keeps_currency_for_member_without_observation(tmp_path):
         db.flush()
         _, _, _, _, currencies = module._load_snapshot(db, row)
         assert currencies["m7-b"] == "EUR"
+
+
+def test_snapshot_boundaries_must_be_canonical_midnight(tmp_path):
+    factory, _, snapshot, deployment_id = _seed(tmp_path)
+    with factory() as db, db.begin():
+        row = db.get(DatasetSnapshotRecord, snapshot.snapshot_id)
+        row.start_at = row.start_at + timedelta(hours=1)
+    with pytest.raises(ValueError, match="M7_SNAPSHOT_BOUNDARY_NOT_MIDNIGHT"):
+        run_m7_validation(factory, deployment_id=deployment_id)
+
+
+def test_non_integer_seed_in_config_is_rejected_before_coercion(tmp_path):
+    factory, experiment, _, deployment_id = _seed(tmp_path)
+    with factory() as db, db.begin():
+        row = db.get(ExperimentRecord, experiment.id)
+        config = json.loads(row.config_json)
+        config["seed"] = 42.9
+        row.config_json = json.dumps(config, sort_keys=True, separators=(",", ":"))
+    with pytest.raises(ValueError, match="M7_EXPERIMENT_CONFIG_INVALID"):
+        run_m7_validation(factory, deployment_id=deployment_id)
+
+
+def test_runtime_dirty_guard_is_root_anchored_even_from_subdirectory(monkeypatch):
+    import quantlab.m7_validation as module
+
+    sha = "b" * 40
+    monkeypatch.setattr(
+        Phase6ExperimentRunner,
+        "_code_sha",
+        staticmethod(lambda explicit: sha),
+    )
+    monkeypatch.setattr(module.shutil, "which", lambda _: "/usr/bin/git")
+    calls = []
+
+    def fake_run(args, **kwargs):
+        calls.append((args, kwargs.get("cwd")))
+        if args[1:] == ["rev-parse", "--show-toplevel"]:
+            return SimpleNamespace(returncode=0, stdout="/repo\n")
+        if args[1:] == ["rev-parse", "HEAD"]:
+            assert kwargs.get("cwd") == "/repo"
+            return SimpleNamespace(returncode=0, stdout=sha + "\n")
+        if args[1:4] == ["status", "--porcelain", "--untracked-files=all"]:
+            assert kwargs.get("cwd") == "/repo"
+            return SimpleNamespace(returncode=0, stdout="")
+        raise AssertionError(args)
+
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+    assert _runtime_code_sha() == sha
+    assert any(cwd == "/repo" for _, cwd in calls)
