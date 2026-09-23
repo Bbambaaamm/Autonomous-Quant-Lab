@@ -413,7 +413,6 @@ def test_validator_rejects_git_root_that_does_not_contain_its_source(monkeypatch
 def test_validator_fails_closed_when_source_repository_cannot_be_verified(monkeypatch):
     import quantlab.m7_validation as module
 
-    repository_root = module.Path(module.__file__).resolve().parents[3]
     monkeypatch.setattr(module.shutil, "which", lambda _: "/usr/bin/git")
     monkeypatch.setattr(
         module.subprocess,
