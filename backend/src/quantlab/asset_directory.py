@@ -11,7 +11,7 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import DateTime, ForeignKey, String, Text, func, select
+from sqlalchemy import DateTime, ForeignKey, Index, String, Text, func, select
 from sqlalchemy.orm import Mapped, Session, mapped_column
 
 from quantlab.config import Settings
@@ -53,8 +53,9 @@ class AssetDirectoryEntry(Base):
     symbol: Mapped[str] = mapped_column(String(32), index=True)
     exchange: Mapped[str] = mapped_column(String(32))
     name: Mapped[str] = mapped_column(String(255))
-    status: Mapped[str] = mapped_column(String(16), index=True)
+    status: Mapped[str] = mapped_column(String(16))
     payload_json: Mapped[str] = mapped_column(Text)
+    __table_args__ = (Index("ix_asset_directory_entries_status", "snapshot_id", "status"),)
 
 
 def parse_assets(body: bytes) -> list[dict[str, str]]:
@@ -63,12 +64,14 @@ def parse_assets(body: bytes) -> list[dict[str, str]]:
         if not isinstance(data, list) or not data:
             raise ValueError
         ids: set[str] = set()
+        active_symbols: set[str] = set()
         output = []
         for row in data:
             identity = str(UUID(row["id"]))
             symbol = row["symbol"]
             name = row["name"]
             exchange = row["exchange"]
+            status = row["status"]
             if (
                 identity in ids
                 or not isinstance(symbol, str)
@@ -78,17 +81,20 @@ def parse_assets(body: bytes) -> list[dict[str, str]]:
                 or not isinstance(exchange, str)
                 or not 1 <= len(exchange) <= 32
                 or row["class"] != "us_equity"
-                or row["status"] not in {"active", "inactive"}
+                or status not in {"active", "inactive"}
+                or (status == "active" and symbol in active_symbols)
             ):
                 raise ValueError
             ids.add(identity)
+            if status == "active":
+                active_symbols.add(symbol)
             output.append(
                 {
                     "asset_id": identity,
                     "symbol": symbol,
                     "name": name,
                     "exchange": exchange,
-                    "status": row["status"],
+                    "status": status,
                     "payload_json": json.dumps(row, sort_keys=True),
                 }
             )
