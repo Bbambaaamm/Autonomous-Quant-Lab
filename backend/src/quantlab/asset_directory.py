@@ -20,7 +20,11 @@ from quantlab.market_catalog import CatalogError, NoRedirect
 from quantlab.market_data_service import _lock
 from quantlab.persistence import Base
 
-ASSET_URL = "https://paper-api.alpaca.markets/v2/assets?status=active&asset_class=us_equity"
+ASSET_URLS = {
+    "active": "https://paper-api.alpaca.markets/v2/assets?status=active&asset_class=us_equity",
+    "inactive": "https://paper-api.alpaca.markets/v2/assets?status=inactive&asset_class=us_equity",
+}
+MAX_ASSET_BYTES = 32 * 1024 * 1024
 VENUES = {
     "NYSE": "XNYS",
     "NASDAQ": "XNAS",
@@ -49,6 +53,7 @@ class AssetDirectoryEntry(Base):
     symbol: Mapped[str] = mapped_column(String(32), index=True)
     exchange: Mapped[str] = mapped_column(String(32))
     name: Mapped[str] = mapped_column(String(255))
+    status: Mapped[str] = mapped_column(String(16), index=True)
     payload_json: Mapped[str] = mapped_column(Text)
 
 
@@ -58,7 +63,6 @@ def parse_assets(body: bytes) -> list[dict[str, str]]:
         if not isinstance(data, list) or not data:
             raise ValueError
         ids: set[str] = set()
-        symbols: set[str] = set()
         output = []
         for row in data:
             identity = str(UUID(row["id"]))
@@ -67,7 +71,6 @@ def parse_assets(body: bytes) -> list[dict[str, str]]:
             exchange = row["exchange"]
             if (
                 identity in ids
-                or symbol in symbols
                 or not isinstance(symbol, str)
                 or not 1 <= len(symbol) <= 32
                 or not isinstance(name, str)
@@ -75,17 +78,17 @@ def parse_assets(body: bytes) -> list[dict[str, str]]:
                 or not isinstance(exchange, str)
                 or not 1 <= len(exchange) <= 32
                 or row["class"] != "us_equity"
-                or row["status"] != "active"
+                or row["status"] not in {"active", "inactive"}
             ):
                 raise ValueError
             ids.add(identity)
-            symbols.add(symbol)
             output.append(
                 {
                     "asset_id": identity,
                     "symbol": symbol,
                     "name": name,
                     "exchange": exchange,
+                    "status": row["status"],
                     "payload_json": json.dumps(row, sort_keys=True),
                 }
             )
@@ -95,26 +98,40 @@ def parse_assets(body: bytes) -> list[dict[str, str]]:
 
 
 def fetch_assets(settings: Settings) -> bytes:
+    """Fetch both active and inactive US equity identities without hiding lifecycle state."""
     if not settings.alpaca_key_id or not settings.alpaca_secret_key:
         raise CatalogError("Na serveru chybí přístupové údaje Alpaca")
-    request = urllib.request.Request(
-        ASSET_URL,
-        method="GET",
-        headers={
-            "APCA-API-KEY-ID": settings.alpaca_key_id,
-            "APCA-API-SECRET-KEY": settings.alpaca_secret_key,
-        },
-    )
-    try:
-        with urllib.request.build_opener(NoRedirect()).open(request, timeout=15) as response:
-            body: bytes = response.read(32 * 1024 * 1024 + 1)
-    except urllib.error.HTTPError as exc:
-        raise CatalogError(f"Adresář identit odmítl požadavek (HTTP {exc.code})") from None
-    except (urllib.error.URLError, TimeoutError) as exc:
-        raise CatalogError("Adresář identit není dostupný") from exc
-    if len(body) > 32 * 1024 * 1024:
-        raise CatalogError("Adresář překročil limit; neúplná odpověď nebyla uložena")
-    return body
+    combined: list[dict[str, Any]] = []
+    for status, url in ASSET_URLS.items():
+        request = urllib.request.Request(
+            url,
+            method="GET",
+            headers={
+                "APCA-API-KEY-ID": settings.alpaca_key_id,
+                "APCA-API-SECRET-KEY": settings.alpaca_secret_key,
+            },
+        )
+        try:
+            with urllib.request.build_opener(NoRedirect()).open(request, timeout=15) as response:
+                body: bytes = response.read(MAX_ASSET_BYTES + 1)
+        except urllib.error.HTTPError as exc:
+            raise CatalogError(
+                f"Adresář identit {status} odmítl požadavek (HTTP {exc.code})"
+            ) from None
+        except (urllib.error.URLError, TimeoutError) as exc:
+            raise CatalogError(f"Adresář identit {status} není dostupný") from exc
+        if len(body) > MAX_ASSET_BYTES:
+            raise CatalogError("Adresář překročil limit; neúplná odpověď nebyla uložena")
+        try:
+            rows = json.loads(body)
+        except (UnicodeError, json.JSONDecodeError) as exc:
+            raise CatalogError("Adresář identit neobsahuje platné JSON") from exc
+        if not isinstance(rows, list) or not rows:
+            raise CatalogError("Adresář identit je prázdný nebo má neplatný tvar")
+        if any(not isinstance(row, dict) or row.get("status") != status for row in rows):
+            raise CatalogError("Provider vrátil jiný lifecycle status než požadovaný")
+        combined.extend(rows)
+    return json.dumps(combined, sort_keys=True, separators=(",", ":")).encode()
 
 
 class AssetDirectoryService:
@@ -160,6 +177,22 @@ class AssetDirectoryService:
                 .select_from(AssetDirectoryEntry)
                 .where(AssetDirectoryEntry.snapshot_id == row.snapshot_id)
             )
+            active = session.scalar(
+                select(func.count())
+                .select_from(AssetDirectoryEntry)
+                .where(
+                    AssetDirectoryEntry.snapshot_id == row.snapshot_id,
+                    AssetDirectoryEntry.status == "active",
+                )
+            )
+            inactive = session.scalar(
+                select(func.count())
+                .select_from(AssetDirectoryEntry)
+                .where(
+                    AssetDirectoryEntry.snapshot_id == row.snapshot_id,
+                    AssetDirectoryEntry.status == "inactive",
+                )
+            )
             previous = session.scalar(
                 select(AssetDirectorySnapshot)
                 .where(AssetDirectorySnapshot.received_at < row.received_at)
@@ -169,7 +202,7 @@ class AssetDirectoryService:
             changes = None
             if previous is not None:
                 current = {
-                    r.asset_id: (r.symbol, r.exchange)
+                    r.asset_id: (r.symbol, r.exchange, r.status)
                     for r in session.scalars(
                         select(AssetDirectoryEntry).where(
                             AssetDirectoryEntry.snapshot_id == row.snapshot_id
@@ -177,7 +210,7 @@ class AssetDirectoryService:
                     )
                 }
                 before = {
-                    r.asset_id: (r.symbol, r.exchange)
+                    r.asset_id: (r.symbol, r.exchange, r.status)
                     for r in session.scalars(
                         select(AssetDirectoryEntry).where(
                             AssetDirectoryEntry.snapshot_id == previous.snapshot_id
@@ -188,7 +221,18 @@ class AssetDirectoryService:
                     "first_seen": len(current.keys() - before.keys()),
                     "no_longer_present": len(before.keys() - current.keys()),
                     "symbol_or_venue_changed": sum(
-                        current[k] != before[k] for k in current.keys() & before.keys()
+                        current[k][:2] != before[k][:2] for k in current.keys() & before.keys()
+                    ),
+                    "status_changed": sum(
+                        current[k][2] != before[k][2] for k in current.keys() & before.keys()
+                    ),
+                    "became_inactive": sum(
+                        before[k][2] == "active" and current[k][2] == "inactive"
+                        for k in current.keys() & before.keys()
+                    ),
+                    "became_active": sum(
+                        before[k][2] == "inactive" and current[k][2] == "active"
+                        for k in current.keys() & before.keys()
                     ),
                     "previous_received_at": previous.received_at,
                 }
@@ -196,5 +240,7 @@ class AssetDirectoryService:
                 "snapshot_id": row.snapshot_id,
                 "received_at": row.received_at,
                 "total": total,
+                "active": active,
+                "inactive": inactive,
                 "changes": changes,
             }
