@@ -131,7 +131,7 @@ def _runtime_code_sha() -> str:
         env=git_env,
     ).stdout.strip()
     head = Phase6ExperimentRunner._code_sha(head)
-    configured_sha = os.environ.get("QUANTLAB_CODE_SHA")
+    configured_sha = os.environ.get("QUANTLAB_CODE_SHA") or None
     if configured_sha is not None and Phase6ExperimentRunner._code_sha(configured_sha) != head:
         raise ValueError("M7_VALIDATOR_SHA_MISMATCH")
     dirty = subprocess.run(  # noqa: S603 - executable is resolved by shutil.which
