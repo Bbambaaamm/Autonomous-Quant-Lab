@@ -118,6 +118,7 @@ def test_account_scoped_apply_ignores_global_history_and_avoids_n_plus_one(facto
                 created_at=datetime(2020, 1, 1, tzinfo=UTC),
             )
         )
+        session.flush()
         for index in range(100):
             session.add(
                 CorporateActionRecord(
@@ -148,15 +149,16 @@ def test_account_scoped_apply_ignores_global_history_and_avoids_n_plus_one(facto
 
     assert {row.action_id for row in applied} == set(relevant_ids)
     assert sum("paper_fills" in statement for statement in statements) == 1
-    assert sum("paper_orders" in statement and "distinct" in statement for statement in statements) == 1
+    assert (
+        sum("paper_orders" in statement and "distinct" in statement for statement in statements)
+        == 1
+    )
 
     statements.clear()
     event.listen(engine, "before_cursor_execute", capture)
     try:
         assert (
-            PaperCorporateActionService(factory).apply(
-                account, effective + timedelta(seconds=11)
-            )
+            PaperCorporateActionService(factory).apply(account, effective + timedelta(seconds=11))
             == ()
         )
     finally:
