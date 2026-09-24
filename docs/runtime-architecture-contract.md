@@ -6,7 +6,7 @@ This document turns the target architecture from issue #190 into a development c
 
 1. **Heavy work is not an always-on responsibility.** Market-data and research-heavy processing runs in bounded, short-lived child processes or an equivalent explicitly resource-bounded execution unit. Heavy research additionally holds one cross-process PostgreSQL advisory admission slot across the resource-capacity check and child lifetime, preventing concurrent research children from racing the pre-check.
 2. **Long-lived processes stay thin.** Backend, automation worker, event listener and frontend must not accumulate workload-sized in-memory state. The automation worker keeps its soft RSS recycle guard.
-3. **Runtime data access is explicitly scoped.** Provider construction requires an explicit instrument scope. Corporate-action evidence uses the scoped loader; a request/job/listener path must not silently return to full-provider-history materialization. Phase 6 snapshot verification uses bounded database batches, incremental canonical hashing and cutoff-based evaluation rather than full-prefix copies.
+3. **Runtime data access is explicitly scoped.** Provider construction requires an explicit instrument scope. Corporate-action evidence uses the scoped loader; a request/job/listener path must not silently return to full-provider-history materialization. Phase 6 snapshot verification hashes the immutable manifest before processing, releases verified manifest entries progressively, uses bounded database batches and cutoff-based evaluation rather than retaining parallel workload-sized copies or full-prefix lists.
 4. **Market work remains one-shot and backpressured.** The automation worker checks host/cgroup capacity before spawning the one-shot market task process. The child processes at most one durable market task and exits. Provider HTTP work has an explicit request budget.
 5. **PostgreSQL is the durable authority.** Queue state, leases/fencing, checkpoints, immutable receipts and audit/provenance stay persistent and restart-safe. An in-memory cache may optimize reads but may not become the only source of truth.
    Core paper-trading evidence (`risk_decisions`, `paper_fills`, `audit_events`, `risk_events`, `reconciliation_results`) is append-only: PostgreSQL rejects UPDATE/DELETE and the runtime role has no mutation privilege on these tables. Mutable execution state such as accounts, positions, cycles and orders remains updateable.
@@ -53,7 +53,8 @@ The guard currently checks:
 - backpressure + subprocess isolation for market work;
 - soft RSS recycling of the long-lived worker;
 - bounded snapshot scope, explicit range budget and streamed authoritative observation reads;
-- bounded Phase 6 snapshot verification batches, incremental content hashing and cutoff-based evaluation;
+- bounded Phase 6 snapshot verification batches, incremental content hashing, progressive manifest release, repeated-identity interning and cutoff-based evaluation;
+- the required 500k-bar `Phase6ExperimentRunner` child benchmark and its 1 GiB RSS gate;
 - durable market-pipeline retry/restart/idempotence regressions through required CI;
 - production Compose CPU/RAM ceilings and absence of worker/listener host ports;
 - that the architecture guard stays wired into both required CI contexts.

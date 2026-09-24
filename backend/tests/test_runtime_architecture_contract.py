@@ -140,11 +140,26 @@ def test_phase6_snapshot_verification_stays_batched_and_copy_bounded() -> None:
     assert "snapshot_load_batch_size = 1000" in runner_segment
     assert "range(0, len(entries), self.snapshot_load_batch_size)" in runner_segment
     assert "canonical_snapshot_content_hash(immutable_content)" in runner_segment
+    assert "session.expunge(snapshot)" in runner_segment
+    assert "entries[entry_index] = None" in runner_segment
+    assert "seen_observation_ids" not in runner_segment
     assert (
         "[item for item in observations if item.timestamp <= evaluation_end]" not in runner_segment
     )
     assert "evaluation_end=evaluation_end" in runner_segment
     assert "encoder.iterencode(value)" in service_source
+    assert "sys.intern(row.instrument_id)" in service_source
+
+
+def test_broad_research_resource_gate_is_required_ci_work() -> None:
+    ci = (REPOSITORY_ROOT / ".github" / "workflows" / "ci.yml").read_text()
+
+    unit_research = ci.split("  unit-research:", 1)[1].split("\n  api:", 1)[0]
+    assert "benchmarks/broad_research.py" in unit_research
+    assert "--instruments 2000" in unit_research
+    assert "--sessions 250" in unit_research
+    assert "--max-rss-mib 1024" in unit_research
+    assert "--max-seconds 180" in unit_research
 
 
 def test_production_compose_keeps_measured_resource_ceiling_contract() -> None:
