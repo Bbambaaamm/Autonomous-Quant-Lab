@@ -9,7 +9,7 @@ from uuid import uuid4
 import pytest
 from fastapi.testclient import TestClient
 from phase6_audit_helpers import CALENDAR, MappingProvider, daily_bar
-from sqlalchemy import select, text
+from sqlalchemy import func, select, text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session
 
