@@ -13,6 +13,14 @@ pytestmark = pytest.mark.skipif(
     os.getenv("RUN_POSTGRES_TESTS") != "1", reason="Vyžaduje autoritativní PostgreSQL 17 CI"
 )
 
+CORE_IMMUTABLE_EVIDENCE = (
+    "risk_decisions",
+    "paper_fills",
+    "audit_events",
+    "risk_events",
+    "reconciliation_results",
+)
+
 
 def _dsn(database: str = "quantlab") -> str:
     configured = os.environ["DATABASE_URL"].replace("postgresql+psycopg://", "postgresql://", 1)
@@ -30,6 +38,11 @@ def _create_runtime_role() -> None:
         connection.execute("GRANT USAGE ON SCHEMA public TO quantlab_runtime_phase9")
         connection.execute(
             "GRANT SELECT, INSERT, UPDATE ON ALL TABLES IN SCHEMA public TO quantlab_runtime_phase9"
+        )
+        connection.execute(
+            "REVOKE UPDATE, DELETE ON TABLE "
+            + ", ".join(CORE_IMMUTABLE_EVIDENCE)
+            + " FROM quantlab_runtime_phase9"
         )
         connection.execute(
             "GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO quantlab_runtime_phase9"
@@ -59,6 +72,223 @@ def test_runtime_role_allows_dml_but_denies_ddl() -> None:
         ):
             with pytest.raises(psycopg.errors.InsufficientPrivilege):
                 connection.execute(statement)
+
+
+def test_runtime_role_cannot_mutate_core_evidence() -> None:
+    _create_runtime_role()
+    parsed = urlsplit(_dsn())
+    runtime_dsn = urlunsplit(
+        (
+            parsed.scheme,
+            f"quantlab_runtime_phase9:phase9-runtime-password@{parsed.hostname}:{parsed.port}",
+            parsed.path,
+            "",
+            "",
+        )
+    )
+    with psycopg.connect(runtime_dsn, autocommit=True) as connection:
+        for table in CORE_IMMUTABLE_EVIDENCE:
+            for statement in (
+                f"UPDATE {table} SET id = id WHERE false",
+                f"DELETE FROM {table} WHERE false",
+            ):
+                with pytest.raises(psycopg.errors.InsufficientPrivilege):
+                    connection.execute(statement)
+
+
+def test_runtime_role_script_revokes_core_evidence_mutation() -> None:
+    script = (
+        Path(__file__).parents[2] / "scripts" / "configure-runtime-role.sql"
+    ).read_text()
+    revoke_block = script.split("REVOKE UPDATE, DELETE ON TABLE", 1)[1].split(
+        'FROM :"runtime_role";', 1
+    )[0]
+    for table in CORE_IMMUTABLE_EVIDENCE:
+        assert table in revoke_block
+    assert (
+        'ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT ON TABLES TO :"runtime_role";'
+        in script
+    )
+    assert (
+        'ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE UPDATE, DELETE ON TABLES FROM :"runtime_role";'
+        in script
+    )
+
+
+def test_core_phase4_evidence_is_database_immutable() -> None:
+    from datetime import UTC, date, datetime
+    from decimal import Decimal
+
+    from sqlalchemy import create_engine, text
+    from sqlalchemy.exc import DBAPIError
+    from sqlalchemy.orm import sessionmaker
+
+    from quantlab.phase4 import (
+        AuditEventRecord,
+        PaperAccountRecord,
+        PaperFillRecord,
+        PaperOrderRecord,
+        ReconciliationRecord,
+        RiskDecisionRecord,
+        RiskEventRecord,
+        TradingCycleRecord,
+    )
+
+    engine = create_engine(os.environ["DATABASE_URL"])
+    with engine.connect() as connection:
+        transaction = connection.begin()
+        try:
+            sessions = sessionmaker(connection, join_transaction_mode="create_savepoint")
+            now = datetime.now(UTC)
+            suffix = uuid4().hex[:12]
+            account_id = f"immut-account-{suffix}"
+            cycle_id = f"immut-cycle-{suffix}"
+            decision_id = f"immut-decision-{suffix}"
+            order_id = f"immut-order-{suffix}"
+            fill_id = f"immut-fill-{suffix}"
+            audit_id = f"immut-audit-{suffix}"
+            risk_event_id = f"immut-risk-{suffix}"
+            reconciliation_id = f"immut-recon-{suffix}"
+
+            with sessions() as session, session.begin():
+                session.add(
+                    PaperAccountRecord(
+                        id=account_id,
+                        base_currency="USD",
+                        starting_cash=Decimal("1000"),
+                        cash=Decimal("900"),
+                        equity=Decimal("1000"),
+                        high_water_mark=Decimal("1000"),
+                        realized_pnl=Decimal("0"),
+                        trading_state="NORMAL",
+                        session_date=date(2026, 9, 24),
+                        session_start_equity=Decimal("1000"),
+                        reconciliation_safe=True,
+                        created_at=now,
+                        updated_at=now,
+                    )
+                )
+                session.flush()
+                session.add(
+                    TradingCycleRecord(
+                        id=cycle_id,
+                        cycle_key=f"immut-key-{suffix}",
+                        account_id=account_id,
+                        strategy_id="immut-strategy",
+                        session_date=date(2026, 9, 24),
+                        started_at=now,
+                        completed_at=now,
+                        status="COMPLETED",
+                        correlation_id=f"immut-correlation-{suffix}",
+                        data_fingerprint="a" * 64,
+                        failure_reason=None,
+                        lease_owner=None,
+                        lease_expires_at=None,
+                    )
+                )
+                session.flush()
+                session.add(
+                    RiskDecisionRecord(
+                        id=decision_id,
+                        timestamp=now,
+                        account_id=account_id,
+                        order_intent_id=f"immut-intent-{suffix}",
+                        trading_cycle_id=cycle_id,
+                        status="APPROVED",
+                        original_quantity=Decimal("1"),
+                        approved_quantity=Decimal("1"),
+                        reasons_json="[]",
+                        limits_json="{}",
+                        portfolio_json="{}",
+                        correlation_id=f"immut-correlation-{suffix}",
+                    )
+                )
+                session.flush()
+                session.add(
+                    PaperOrderRecord(
+                        id=order_id,
+                        client_order_id=f"immut-client-{suffix}",
+                        account_id=account_id,
+                        trading_cycle_id=cycle_id,
+                        order_intent_id=f"immut-intent-{suffix}",
+                        risk_decision_id=decision_id,
+                        instrument_id="SPY",
+                        side="BUY",
+                        order_type="MARKET",
+                        quantity=Decimal("1"),
+                        submitted_notional=Decimal("100"),
+                        filled_quantity=Decimal("1"),
+                        remaining_quantity=Decimal("0"),
+                        limit_price=None,
+                        status="FILLED",
+                        created_at=now,
+                        submitted_at=now,
+                        completed_at=now,
+                        cancelled_at=None,
+                        failure_reason=None,
+                        correlation_id=f"immut-correlation-{suffix}",
+                    )
+                )
+                session.flush()
+                session.add_all(
+                    [
+                        PaperFillRecord(
+                            id=fill_id,
+                            order_id=order_id,
+                            sequence=1,
+                            quantity=Decimal("1"),
+                            price=Decimal("100"),
+                            reference_price=Decimal("100"),
+                            commission=Decimal("0"),
+                            timestamp=now,
+                        ),
+                        AuditEventRecord(
+                            id=audit_id,
+                            timestamp=now,
+                            event_type="IMMUTABILITY_TEST",
+                            entity_type="test",
+                            entity_id=account_id,
+                            trading_cycle_id=cycle_id,
+                            correlation_id=f"immut-correlation-{suffix}",
+                            payload_json="{}",
+                        ),
+                        RiskEventRecord(
+                            id=risk_event_id,
+                            account_id=account_id,
+                            timestamp=now,
+                            event_type="IMMUTABILITY_TEST",
+                            reason="regression",
+                            correlation_id=f"immut-correlation-{suffix}",
+                        ),
+                        ReconciliationRecord(
+                            id=reconciliation_id,
+                            account_id=account_id,
+                            timestamp=now,
+                            status="SUCCEEDED",
+                            differences_json="{}",
+                            correlation_id=f"immut-correlation-{suffix}",
+                        ),
+                    ]
+                )
+
+            identities = {
+                "risk_decisions": decision_id,
+                "paper_fills": fill_id,
+                "audit_events": audit_id,
+                "risk_events": risk_event_id,
+                "reconciliation_results": reconciliation_id,
+            }
+            for table, identity in identities.items():
+                for statement in (
+                    f"UPDATE {table} SET id=id WHERE id=:id",
+                    f"DELETE FROM {table} WHERE id=:id",
+                ):
+                    with pytest.raises(DBAPIError) as excinfo, sessions() as session, session.begin():
+                        session.execute(text(statement), {"id": identity})
+                    assert "core evidence is immutable" in str(excinfo.value.orig)
+        finally:
+            transaction.rollback()
+    engine.dispose()
 
 
 def test_production_repository_does_not_create_schema_implicitly() -> None:
