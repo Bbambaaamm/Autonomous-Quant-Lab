@@ -609,10 +609,20 @@ def test_alpaca_sse_reconnect_uses_last_event_id_and_skips_inclusive_replay() ->
         )
     )
     stored: list[CorporateActionEvent] = []
+    persisted_ids: set[str] = set()
+
+    def persist(provider: str, event: CorporateActionEvent) -> bool:
+        assert provider == "alpaca"
+        if event.event_id in persisted_ids:
+            return False
+        persisted_ids.add(event.event_id)
+        stored.append(event)
+        return True
+
     consumer = AlpacaCorporateActionStream(
         "key",
         "secret",
-        lambda provider, event: stored.append(event) if provider == "alpaca" else None,
+        persist,
         transport=stream_transport,
         timeout=1,
         max_reconnects=2,
@@ -628,6 +638,41 @@ def test_alpaca_sse_reconnect_uses_last_event_id_and_skips_inclusive_replay() ->
     assert stored[1].received_at == datetime(2026, 8, 29, 18, tzinfo=UTC)
     assert "Last-Event-Id" not in headers_seen[0]
     assert headers_seen[1]["Last-Event-Id"] == "e-1"
+
+
+def test_alpaca_sse_old_duplicate_does_not_move_cursor_backwards() -> None:
+    events = [
+        json.loads(_sse_payload(_split("ca-100"), event_id="e-100")),
+        json.loads(_sse_payload(_split("ca-050"), event_id="e-050")),
+        json.loads(_sse_payload(_split("ca-101"), event_id="e-101")),
+    ]
+    sink_calls: list[str] = []
+    persisted = {"e-100", "e-050"}
+
+    def sink(provider: str, event: CorporateActionEvent) -> bool:
+        assert provider == "alpaca"
+        sink_calls.append(event.event_id)
+        if event.event_id in persisted:
+            return False
+        persisted.add(event.event_id)
+        return True
+
+    consumer = AlpacaCorporateActionStream(
+        "key",
+        "secret",
+        sink,
+        transport=lambda *_: (json.dumps(events).encode(),),
+        timeout=1,
+        max_reconnects=1,
+        sleep=lambda _: None,
+        clock=lambda: datetime(2026, 8, 29, 18, tzinfo=UTC),
+    )
+
+    cursor = consumer.consume_once("e-100", max_events=1)
+
+    assert sink_calls == ["e-100", "e-050", "e-101"]
+    assert cursor == "e-101"
+    assert consumer.last_event_id == "e-101"
 
 
 def test_current_stock_dividend_is_extra_shares_and_preserves_receipt_time():
