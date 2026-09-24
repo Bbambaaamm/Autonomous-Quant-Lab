@@ -30,7 +30,12 @@ def _dsn(database: str = "quantlab") -> str:
 
 def _create_runtime_role() -> None:
     with psycopg.connect(_dsn(), autocommit=True) as connection:
-        connection.execute("DROP ROLE IF EXISTS quantlab_runtime_phase9")
+        exists = connection.execute(
+            "SELECT 1 FROM pg_roles WHERE rolname = 'quantlab_runtime_phase9'"
+        ).fetchone()
+        if exists is not None:
+            connection.execute("DROP OWNED BY quantlab_runtime_phase9")
+            connection.execute("DROP ROLE quantlab_runtime_phase9")
         connection.execute(
             "CREATE ROLE quantlab_runtime_phase9 LOGIN PASSWORD 'phase9-runtime-password'"
         )
