@@ -145,3 +145,76 @@ def test_production_worker_configuration_requires_enabled_postgres_runtime() -> 
         ).validate_worker_runtime()
     configured = Settings(**base, automation_enabled=True)
     configured.validate_worker_runtime()
+
+
+
+def test_staging_backup_creates_checksum_and_prunes_expired_dump(tmp_path: Path) -> None:
+    repository = Path(__file__).parents[2]
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    docker = tools / "docker"
+    docker.write_text('#!/bin/sh\nprintf "portable staging dump"\n')
+    docker.chmod(0o700)
+
+    backup_dir = tmp_path / "backups"
+    backup_dir.mkdir()
+    old = backup_dir / "quantlab-daily-20260101T000000Z.dump"
+    old.write_text("old")
+    old.with_suffix(".dump.sha256").write_text("old checksum\n")
+    stale = 20 * 24 * 60 * 60
+    old_time = int(__import__("time").time()) - stale
+    os.utime(old, (old_time, old_time))
+    os.utime(old.with_suffix(".dump.sha256"), (old_time, old_time))
+
+    result = subprocess.run(
+        ["sh", str(repository / "scripts/staging-db-backup.sh")],
+        env={
+            **os.environ,
+            "BACKUP_DIR": str(backup_dir),
+            "BACKUP_RETENTION_DAYS": "14",
+            "DOCKER_BIN": str(docker),
+        },
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    dumps = list(backup_dir.glob("quantlab-daily-*.dump"))
+    assert len(dumps) == 1
+    assert dumps[0].stat().st_size > 0
+    assert dumps[0].with_suffix(".dump.sha256").is_file()
+    assert not old.exists()
+    assert not old.with_suffix(".dump.sha256").exists()
+
+
+def test_schema_migration_detector_only_flags_schema_boundary(tmp_path: Path) -> None:
+    repository = Path(__file__).parents[2]
+    work = tmp_path / "repo"
+    work.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=work, check=True)
+    subprocess.run(["git", "config", "user.email", "ci@example.invalid"], cwd=work, check=True)
+    subprocess.run(["git", "config", "user.name", "CI"], cwd=work, check=True)
+    (work / "alembic" / "versions").mkdir(parents=True)
+    (work / "scripts").mkdir()
+    (work / "alembic.ini").write_text("[alembic]\n")
+    (work / "scripts" / "configure-runtime-role.sql").write_text("-- grants\n")
+    (work / "README.md").write_text("base\n")
+    subprocess.run(["git", "add", "."], cwd=work, check=True)
+    subprocess.run(["git", "commit", "-qm", "base"], cwd=work, check=True)
+    base = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=work, text=True).strip()
+
+    (work / "README.md").write_text("application-only\n")
+    subprocess.run(["git", "add", "README.md"], cwd=work, check=True)
+    subprocess.run(["git", "commit", "-qm", "app"], cwd=work, check=True)
+    app = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=work, text=True).strip()
+    detector = repository / "scripts/schema-migration-needed.sh"
+    ordinary = subprocess.check_output(["sh", str(detector), base, app], cwd=work, text=True)
+    assert ordinary.strip() == "no"
+
+    (work / "alembic" / "versions" / "next.py").write_text('revision = "next"\n')
+    subprocess.run(["git", "add", "."], cwd=work, check=True)
+    subprocess.run(["git", "commit", "-qm", "schema"], cwd=work, check=True)
+    schema = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=work, text=True).strip()
+    migration = subprocess.check_output(["sh", str(detector), app, schema], cwd=work, text=True)
+    assert migration.strip() == "yes"
