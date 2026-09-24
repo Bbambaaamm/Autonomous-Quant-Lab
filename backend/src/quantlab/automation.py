@@ -40,6 +40,7 @@ from sqlalchemy.exc import DBAPIError, IntegrityError, OperationalError
 from sqlalchemy.orm import Mapped, Session, mapped_column
 
 from quantlab.config import Settings
+from quantlab.control_audit import ControlAudit, add_control_audit
 from quantlab.persistence import Base, _sqlite_fk
 from quantlab.phase4 import ReconciliationService, TradingCycleRecord, TradingCycleService
 
@@ -395,6 +396,7 @@ class AutomationRepository:
         config: dict[str, Any] | None = None,
         enabled: bool = True,
         job_id: str | None = None,
+        audit: ControlAudit | None = None,
     ) -> ScheduledJob:
         config = config or {}
         validate_payload(config)
@@ -450,6 +452,8 @@ class AutomationRepository:
         with Session(self.engine) as session:
             session.add(row)
             try:
+                if audit is not None:
+                    add_control_audit(session, audit, row.id)
                 session.commit()
             except IntegrityError:
                 session.rollback()
@@ -474,6 +478,7 @@ class AutomationRepository:
         monitoring_id: str,
         account_id: str,
         now: datetime | None = None,
+        audit: ControlAudit | None = None,
     ) -> ScheduledJob:
         """Idempotentně vytvoří nebo opraví deterministický monitoring schedule."""
         now = utc(now or datetime.now(UTC))
@@ -532,6 +537,9 @@ class AutomationRepository:
                 if drifted:
                     row.next_run_at = now
                 row.updated_at = now
+                session.flush()
+            if audit is not None:
+                add_control_audit(session, audit, row.id)
                 session.flush()
             session.refresh(row)
             session.expunge(row)
@@ -624,11 +632,17 @@ class AutomationRepository:
             session.expunge(run)
             return run
 
-    def create_deployment_job(self, *, deployment_id: str, **schedule: Any) -> ScheduledJob:
+    def create_deployment_job(
+        self,
+        *,
+        deployment_id: str,
+        audit: ControlAudit | None = None,
+        **schedule: Any,
+    ) -> ScheduledJob:
         """Vytvoří idempotentní job pouze z ověřené persistentní deployment lineage."""
         from quantlab.persistence import StrategyDeploymentRecord
 
-        with Session(self.engine) as session:
+        with Session(self.engine) as session, session.begin():
             deployment = session.get(StrategyDeploymentRecord, deployment_id)
             if deployment is None:
                 raise KeyError(deployment_id)
@@ -642,6 +656,9 @@ class AutomationRepository:
                 )
             )
             if existing is not None:
+                if audit is not None:
+                    add_control_audit(session, audit, existing.id)
+                    session.flush()
                 session.expunge(existing)
                 return existing
             account_id = deployment.paper_account_id
@@ -651,11 +668,17 @@ class AutomationRepository:
             strategy_id=None,
             config={"deployment_id": deployment_id},
             job_id=hashlib.sha256(f"paper-deployment:{deployment_id}".encode()).hexdigest(),
+            audit=audit,
             **schedule,
         )
 
     def set_autonomous_deployment(
-        self, *, deployment_id: str, enabled: bool, now: datetime | None = None
+        self,
+        *,
+        deployment_id: str,
+        enabled: bool,
+        now: datetime | None = None,
+        audit: ControlAudit | None = None,
     ) -> ScheduledJob:
         """Idempotentně zapne nebo vypne opt-in XNYS-open orchestrace deploymentu."""
         from quantlab.persistence import StrategyDeploymentRecord
@@ -728,6 +751,8 @@ class AutomationRepository:
                     existing.max_attempts = 1
                     existing.next_run_at = next_open_schedule
                 existing.updated_at = now
+                if audit is not None:
+                    add_control_audit(session, audit, existing.id)
                 session.commit()
                 session.refresh(existing)
                 session.expunge(existing)
@@ -746,6 +771,7 @@ class AutomationRepository:
             config={"deployment_id": deployment_id},
             enabled=enabled,
             job_id=job_id,
+            audit=audit,
         )
 
     def materialize_execution_session(
