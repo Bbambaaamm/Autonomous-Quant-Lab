@@ -48,6 +48,12 @@ class RateLimiter:
 limiter = RateLimiter()
 logger = logging.getLogger("quantlab.security")
 PUBLIC_PATHS = frozenset({"/healthz", "/readyz"})
+MUTATION_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+
+
+def production_mutation_allowed(path: str, method: str) -> bool:
+    """Production writes exist only behind the audited operator control plane."""
+    return method.upper() not in MUTATION_METHODS or path.startswith("/operator/")
 
 
 def authenticate(request: Request, settings: Settings) -> Principal | None:
@@ -72,6 +78,14 @@ async def security_boundary(
     correlation_id = request.headers.get("x-correlation-id")
     if not correlation_id or len(correlation_id) > 128:
         correlation_id = hashlib.sha256(f"{time.time_ns()}".encode()).hexdigest()[:24]
+    if settings.app_env == "production" and not production_mutation_allowed(
+        request.url.path, request.method
+    ):
+        return JSONResponse(
+            {"detail": "Not found"},
+            404,
+            headers={"Cache-Control": "no-store", "X-Correlation-ID": correlation_id},
+        )
     if request.url.path in PUBLIC_PATHS:
         response = await call_next(request)
     else:

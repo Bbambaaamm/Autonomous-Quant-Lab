@@ -64,11 +64,10 @@ docker run --rm --network "$network" -e DATABASE_URL="$migration_url" \
 
 docker exec -i -e PGPASSWORD="$DB_PASSWORD" "$postgres" psql -U quantlab -d quantlab -v ON_ERROR_STOP=1 <<'SQL'
 CREATE ROLE quantlab_runtime LOGIN PASSWORD 'phase9-runtime-password';
-REVOKE CREATE ON SCHEMA public FROM PUBLIC;
-GRANT USAGE ON SCHEMA public TO quantlab_runtime;
-GRANT SELECT, INSERT, UPDATE ON ALL TABLES IN SCHEMA public TO quantlab_runtime;
-GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO quantlab_runtime;
 SQL
+docker exec -i -e PGPASSWORD="$DB_PASSWORD" "$postgres" \
+  psql -U quantlab -d quantlab -v ON_ERROR_STOP=1 -v runtime_role=quantlab_runtime \
+  < scripts/configure-runtime-role.sql
 
 runtime_url="postgresql+psycopg://quantlab_runtime:phase9-runtime-password@${postgres}:5432/quantlab"
 docker run -d --name "$backend" --network "$network" --read-only --tmpfs /tmp \
@@ -209,7 +208,8 @@ assert request("/operator/overview", viewer) == 200
 assert request("/operator/risk/halt", viewer, {"confirmation": "HALT", "reason": "smoke"}) == 403
 assert request("/operator/risk/halt", operator, {"confirmation": "HALT", "reason": "smoke"}) == 200
 assert request("/operator/risk/resume", operator, {"confirmation": "RESUME", "reason": "smoke"}) == 403
-assert request("/reconciliation/run", admin, {}) == 200
+assert request("/reconciliation/run", admin, {}) == 404
+assert request("/operator/reconciliation/run", admin, {"reason": "smoke"}) == 200
 assert request("/operator/risk/resume", admin, {"confirmation": "RESUME", "reason": "smoke"}) == 200
 PY
 

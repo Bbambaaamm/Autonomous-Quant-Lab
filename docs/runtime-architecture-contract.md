@@ -13,6 +13,7 @@ This document turns the target architecture from issue #190 into a development c
 6. **Paper/PIT/causality invariants stay intact.** Resource optimization must not weaken paper-only execution, point-in-time semantics, idempotence, fail-closed behavior or immutable evidence.
 7. **Production services keep measured CPU/RAM ceilings.** The current resource contract is enforced in CI against `docker-compose.production.yml`. A limit change is an architecture change, not a routine tuning edit.
 8. **Staging deployment consumes built artifacts.** Normal staging deployment uses CI-built images/GHCR and must not reintroduce host-side builds as the standard deployment path.
+9. **Production mutations have one control-plane boundary.** HTTP writes in production are accepted only under `/operator/`. Legacy, demo, paper and generic automation mutation routes may remain for development/regression compatibility, but production rejects them before handler execution. The frontend mutation helper independently enforces the same `/operator/` allowlist.
 
 ## Current measured production ceilings
 

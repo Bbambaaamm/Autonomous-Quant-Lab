@@ -4,11 +4,12 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
 
 from quantlab import api
 from quantlab.config import Settings
-from quantlab.security import limiter
+from quantlab.security import MUTATION_METHODS, limiter, production_mutation_allowed
 
 
 def test_backup_fails_when_checksum_cannot_be_computed(tmp_path: Path) -> None:
@@ -107,6 +108,40 @@ def test_production_configuration_fails_closed() -> None:
             pass
         else:
             raise AssertionError("Nebezpečná production konfigurace byla přijata")
+
+
+def test_production_mutation_surface_is_operator_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    for route in api.app.routes:
+        if not isinstance(route, APIRoute):
+            continue
+        for method in route.methods or set():
+            if method in MUTATION_METHODS:
+                assert production_mutation_allowed(route.path, method) is route.path.startswith(
+                    "/operator/"
+                )
+
+    original = api.settings.app_env
+    api.settings.app_env = "production"
+    try:
+        admin = client()
+        for path in (
+            "/paper/monitoring/policies",
+            "/automation/jobs",
+            "/risk/halt",
+            "/reconciliation/run",
+            "/api/backtests/demo",
+            "/demo/research/experiments",
+        ):
+            response = admin.post(path, json={})
+            assert response.status_code == 404, (path, response.text)
+            assert response.headers["cache-control"] == "no-store"
+            assert response.headers["x-correlation-id"]
+
+        # Operator mutation reaches normal request validation instead of the
+        # production legacy-route gate.
+        assert admin.post("/operator/instruments", json={}).status_code == 422
+    finally:
+        api.settings.app_env = original
 
 
 def test_rate_limit_http_boundary_has_retry_after() -> None:
