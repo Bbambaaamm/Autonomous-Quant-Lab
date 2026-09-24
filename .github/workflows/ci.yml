@@ -49,6 +49,7 @@ jobs:
       - run: uv run ruff format --check .
       - run: uv run ruff check .
       - run: uv run mypy src/quantlab
+      - run: uv run pytest -q tests/test_runtime_architecture_contract.py
 
   unit-research:
     runs-on: ubuntu-latest
@@ -75,6 +76,7 @@ jobs:
           tests/test_alpaca_corporate_actions.py
           tests/test_xnys_calendar.py
           tests/test_paper_only_architecture.py
+          tests/test_runtime_architecture_contract.py
           tests/test_phase6_runtime.py
           tests/test_phase6_audit_fixes.py
           tests/test_phase6_experiment_audit.py
