@@ -232,3 +232,63 @@ def test_staging_deploy_is_pull_only_and_schema_backup_bounded() -> None:
     assert "quantlab-pre-migration-" in deploy
     assert "bez schema change -> full DB dump se nevytvari" in deploy
     assert 'if [ -f "$CONFIG/deploy.hold" ]; then' in deploy
+
+
+
+def test_staging_soak_checker_accepts_stable_24h_and_rejects_rss_limit(tmp_path: Path) -> None:
+    repository = Path(__file__).parents[2]
+    checker = repository / "scripts/staging-soak-check.py"
+    samples = tmp_path / "soak.jsonl"
+    import datetime as dt
+
+    start = dt.datetime(2026, 9, 24, tzinfo=dt.UTC)
+    rows = []
+    for index in range(289):
+        when = start + dt.timedelta(minutes=5 * index)
+        rows.append(
+            {
+                "timestamp": when.isoformat(),
+                "deployed_sha": "a" * 40,
+                "host_available_kib": 4 * 1024 * 1024,
+                "load": [0.1, 0.1, 0.1],
+                "processes": {
+                    "backend": {"rss_kib": 190000},
+                    "worker": {"rss_kib": 170000},
+                    "listener": {"rss_kib": 165000},
+                    "frontend": {"rss_kib": 100000},
+                },
+                "containers": {
+                    name: {"running": True, "oom_killed": False, "restart_count": 0}
+                    for name in ("backend", "worker", "listener", "frontend", "postgres")
+                },
+                "readyz": {"status": 200, "latency_ms": 5.0},
+                "db_size_bytes": 1000000 + index,
+                "market_tasks": {},
+                "job_runs": {},
+                "corporate_action_events": 100,
+            }
+        )
+    samples.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+
+    accepted = subprocess.run(
+        ["python3", str(checker), str(samples), "--minimum-hours", "24"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert accepted.returncode == 0, accepted.stdout + accepted.stderr
+    assert json.loads(accepted.stdout)["ok"] is True
+
+    rows[-1]["processes"]["listener"]["rss_kib"] = 400 * 1024
+    samples.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+    rejected = subprocess.run(
+        ["python3", str(checker), str(samples), "--minimum-hours", "24"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert rejected.returncode != 0
+    assert any(
+        reason.startswith("RSS_LIMIT:listener")
+        for reason in json.loads(rejected.stdout)["reasons"]
+    )
