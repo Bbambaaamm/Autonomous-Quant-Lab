@@ -32,6 +32,7 @@ from quantlab.automation import (
 )
 from quantlab.backtest import serialize_result
 from quantlab.config import get_settings
+from quantlab.control_audit import ControlAudit, add_control_audit
 from quantlab.control_plane import ControlPlaneRegistryService
 from quantlab.demo import run_demo
 from quantlab.domain import AuditEventType
@@ -512,6 +513,23 @@ def _correlation(request: Request) -> str:
     return request.headers.get("x-correlation-id", str(uuid4()))[:64]
 
 
+def _control_audit(
+    request: Request,
+    event_type: str,
+    entity_type: str,
+    reason: str,
+    *,
+    correlation_id: str | None = None,
+) -> ControlAudit:
+    return ControlAudit(
+        event_type=event_type,
+        entity_type=entity_type,
+        actor=_actor(request),
+        reason=reason,
+        correlation_id=correlation_id or _correlation(request),
+    )
+
+
 def _audit_control_mutation(
     event_type: str,
     entity_type: str,
@@ -520,33 +538,9 @@ def _audit_control_mutation(
     reason: str,
     correlation_id: str,
 ) -> None:
-    identity = hashlib.sha256(
-        json.dumps(
-            [
-                event_type,
-                entity_type,
-                entity_id,
-                actor["actor_id"],
-                reason,
-                correlation_id,
-            ],
-            sort_keys=True,
-        ).encode()
-    ).hexdigest()
+    audit = ControlAudit(event_type, entity_type, actor, reason, correlation_id)
     with session_factory() as session, session.begin():
-        if session.get(AuditEventRecord, identity) is None:
-            session.add(
-                AuditEventRecord(
-                    id=identity,
-                    timestamp=datetime.now(UTC),
-                    event_type=event_type,
-                    entity_type=entity_type,
-                    entity_id=entity_id,
-                    trading_cycle_id=None,
-                    correlation_id=correlation_id,
-                    payload_json=json.dumps({"actor": actor, "reason": reason}, sort_keys=True),
-                )
-            )
+        add_control_audit(session, audit, entity_id)
 
 
 @app.post("/operator/reconciliation/run", response_model=OperatorDocument)
@@ -578,15 +572,13 @@ def create_instrument(body: InstrumentCreate, request: Request) -> dict[str, obj
                 body.active_from,
                 body.active_to,
                 datetime.now(UTC),
-            )
-        )
-        _audit_control_mutation(
-            "CONTROL_INSTRUMENT_REGISTERED",
-            "instrument",
-            row.instrument_id,
-            _actor(request),
-            body.reason,
-            _correlation(request),
+            ),
+            audit=_control_audit(
+                request,
+                "CONTROL_INSTRUMENT_REGISTERED",
+                "instrument",
+                body.reason,
+            ),
         )
         return _row(row)
     except (ValueError, DatasetInvalid) as exc:
@@ -597,15 +589,13 @@ def create_instrument(body: InstrumentCreate, request: Request) -> dict[str, obj
 def create_universe(body: UniverseCreate, request: Request) -> dict[str, object]:
     try:
         row = control_plane_registry.create_universe(
-            UniverseDefinition(body.universe_id, body.name, body.kind, datetime.now(UTC))
-        )
-        _audit_control_mutation(
-            "CONTROL_UNIVERSE_CREATED",
-            "universe",
-            row.universe_id,
-            _actor(request),
-            body.reason,
-            _correlation(request),
+            UniverseDefinition(body.universe_id, body.name, body.kind, datetime.now(UTC)),
+            audit=_control_audit(
+                request,
+                "CONTROL_UNIVERSE_CREATED",
+                "universe",
+                body.reason,
+            ),
         )
         return _row(row)
     except (ValueError, DatasetInvalid) as exc:
@@ -620,16 +610,13 @@ def add_universe_membership(
         row = control_plane_registry.add_membership(
             UniverseMembership(
                 universe_id, body.instrument_id, body.valid_from, body.valid_to, body.known_at
-            )
-        )
-        evidence_id = f"{universe_id}:{body.instrument_id}:{body.valid_from.isoformat()}"
-        _audit_control_mutation(
-            "CONTROL_MEMBERSHIP_ADDED",
-            "universe_membership",
-            evidence_id[:64],
-            _actor(request),
-            body.reason,
-            _correlation(request),
+            ),
+            audit=_control_audit(
+                request,
+                "CONTROL_MEMBERSHIP_ADDED",
+                "universe_membership",
+                body.reason,
+            ),
         )
         return _row(row)
     except (ValueError, DatasetInvalid) as exc:
