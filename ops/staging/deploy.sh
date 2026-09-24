@@ -39,6 +39,14 @@ cd "$REPO"
 test -f "$DEPLOYED_FILE" || { echo "DEPLOY: chybi deployed-sha"; exit 11; }
 DEPLOYED="$(cat "$DEPLOYED_FILE")"
 
+install_backup_timer() {
+    [ "$EUID" -eq 0 ] || return 0
+    install -m 0644 "$REPO/ops/systemd/quantlab-db-backup.service"         /etc/systemd/system/quantlab-db-backup.service
+    install -m 0644 "$REPO/ops/systemd/quantlab-db-backup.timer"         /etc/systemd/system/quantlab-db-backup.timer
+    systemctl daemon-reload
+    systemctl enable --now quantlab-db-backup.timer >/dev/null
+}
+
 gitq fetch --quiet origin main
 REMOTE="$(gitq rev-parse origin/main)"
 LOCAL="$(gitq rev-parse HEAD)"
@@ -144,6 +152,7 @@ done
 
 printf '%s\n' "$REMOTE" > "$DEPLOYED_FILE"
 chmod 600 "$DEPLOYED_FILE"
+install_backup_timer
 trap - ERR
 echo "DEPLOY: HOTOVO"
 echo "Nasazena verze: ${REMOTE:0:8}"
