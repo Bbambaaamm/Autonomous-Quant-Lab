@@ -12,9 +12,7 @@ def _module(name: str) -> tuple[str, ast.Module]:
 
 def _function(tree: ast.Module, name: str) -> ast.FunctionDef:
     return next(
-        node
-        for node in tree.body
-        if isinstance(node, ast.FunctionDef) and node.name == name
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == name
     )
 
 
