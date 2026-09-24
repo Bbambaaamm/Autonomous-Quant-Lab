@@ -42,7 +42,7 @@ from quantlab.phase7 import (
     PaperPerformanceEvaluationRecord,
     PaperPerformanceSnapshotRecord,
 )
-from quantlab.provider_factory import build_market_data_provider
+from quantlab.provider_factory import market_data_provider_metadata
 
 
 def _utc(value: datetime | None) -> datetime | None:
@@ -521,7 +521,7 @@ class OperatorReadModel:
             engine = session.get_bind()
             if not isinstance(engine, Engine):
                 raise TypeError("Operator read model requires an Engine-bound session")
-            provider = build_market_data_provider(self._settings, engine).metadata
+            provider = market_data_provider_metadata(self._settings)
             return {
                 "provider": {
                     "name": provider.name,
