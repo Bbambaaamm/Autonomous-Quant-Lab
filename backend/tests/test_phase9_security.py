@@ -147,7 +147,6 @@ def test_production_worker_configuration_requires_enabled_postgres_runtime() -> 
     configured.validate_worker_runtime()
 
 
-
 def test_staging_backup_creates_checksum_and_prunes_expired_dump(tmp_path: Path) -> None:
     repository = Path(__file__).parents[2]
     tools = tmp_path / "tools"
