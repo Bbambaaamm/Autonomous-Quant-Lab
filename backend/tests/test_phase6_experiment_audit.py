@@ -15,6 +15,7 @@ from sqlalchemy.orm import sessionmaker
 
 import quantlab.phase6_runtime as runtime
 from quantlab import api
+from quantlab.control_audit import ControlAudit
 from quantlab.market_data import DatasetInvalid
 from quantlab.market_data_service import (
     CorporateActionRevisionCanonicalizationRecord,
@@ -58,6 +59,31 @@ def test_phase6_runner_is_sequentially_exactly_once_and_never_auto_promotes() ->
     assert first.decision == second.decision == "RESEARCH_ONLY"
     with sessions() as session:
         assert session.scalar(select(func.count()).select_from(ExperimentRecord)) == 1
+
+
+def test_phase6_audit_failure_rolls_back_experiment(monkeypatch: pytest.MonkeyPatch) -> None:
+    sessions = factory()
+    _, _, _, _, request = seed_phase6_snapshot(sessions, suffix="audit-rollback")
+    audit = ControlAudit(
+        event_type="CONTROL_PHASE6_EXPERIMENT_COMPLETED",
+        entity_type="experiment",
+        actor={
+            "actor_id": "atomicity-test",
+            "actor_role": "ADMIN",
+            "authentication": "test",
+        },
+        reason="synthetic audit rollback",
+        correlation_id="phase6-audit-rollback",
+    )
+
+    def fail_audit(*_args, **_kwargs):
+        raise RuntimeError("SYNTHETIC_CONTROL_AUDIT_FAILURE")
+
+    monkeypatch.setattr(runtime, "add_control_audit", fail_audit)
+    with pytest.raises(RuntimeError, match="SYNTHETIC_CONTROL_AUDIT_FAILURE"):
+        Phase6ExperimentRunner(sessions).run(request, audit=audit)
+    with sessions() as session:
+        assert session.scalar(select(func.count()).select_from(ExperimentRecord)) == 0
 
 
 def test_phase6_runner_oos_isolation() -> None:
