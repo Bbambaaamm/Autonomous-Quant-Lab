@@ -102,9 +102,7 @@ def test_runtime_role_cannot_mutate_core_evidence() -> None:
 
 
 def test_runtime_role_script_revokes_core_evidence_mutation() -> None:
-    script = (
-        Path(__file__).parents[2] / "scripts" / "configure-runtime-role.sql"
-    ).read_text()
+    script = (Path(__file__).parents[2] / "scripts" / "configure-runtime-role.sql").read_text()
     revoke_block = script.split("REVOKE UPDATE, DELETE ON TABLE", 1)[1].split(
         'FROM :"runtime_role";', 1
     )[0]
@@ -288,7 +286,11 @@ def test_core_phase4_evidence_is_database_immutable() -> None:
                     f"UPDATE {table} SET id=id WHERE id=:id",
                     f"DELETE FROM {table} WHERE id=:id",
                 ):
-                    with pytest.raises(DBAPIError) as excinfo, sessions() as session, session.begin():
+                    with (
+                        pytest.raises(DBAPIError) as excinfo,
+                        sessions() as session,
+                        session.begin(),
+                    ):
                         session.execute(text(statement), {"id": identity})
                     assert "core evidence is immutable" in str(excinfo.value.orig)
         finally:
