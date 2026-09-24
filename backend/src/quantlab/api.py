@@ -650,9 +650,7 @@ def ingest_market_data(body: IngestionCreate, request: Request) -> dict[str, obj
             persisted.active_to.date() if persisted.active_to else None,
             persisted.created_at,
         )
-    provider = build_market_data_provider(
-        settings, paper_repository.engine, instrument=instrument
-    )
+    provider = build_market_data_provider(settings, paper_repository.engine, instrument=instrument)
     result = market_data_service.ingest(
         provider, instrument, body.start, body.end, datetime.now(UTC)
     )
