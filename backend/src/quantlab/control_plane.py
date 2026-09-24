@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from quantlab.control_audit import ControlAudit, add_control_audit
 from quantlab.domain import require_utc
 from quantlab.market_data import AssetType, DatasetInvalid, Instrument
 from quantlab.multi_asset import STRATEGY_REGISTRY
@@ -27,7 +28,9 @@ class ControlPlaneRegistryService:
     def __init__(self, sessions: Callable[[], Session]) -> None:
         self.sessions = sessions
 
-    def register_instrument(self, instrument: Instrument) -> InstrumentRecord:
+    def register_instrument(
+        self, instrument: Instrument, *, audit: ControlAudit | None = None
+    ) -> InstrumentRecord:
         if not instrument.instrument_id.strip() or not instrument.symbol.strip():
             raise ValueError("Instrument identity a symbol jsou povinné")
         if (
@@ -64,6 +67,9 @@ class ControlPlaneRegistryService:
                 )
                 if persisted != identity:
                     raise DatasetInvalid("Instrument identity koliduje s immutable metadata")
+                if audit is not None:
+                    add_control_audit(session, audit, existing.instrument_id)
+                    session.flush()
                 session.expunge(existing)
                 return existing
             symbol_conflict = session.scalar(
@@ -99,10 +105,15 @@ class ControlPlaneRegistryService:
                     valid_to=row.active_to,
                 )
             )
+            if audit is not None:
+                add_control_audit(session, audit, row.instrument_id)
+            session.flush()
             session.expunge(row)
             return row
 
-    def create_universe(self, definition: UniverseDefinition) -> UniverseDefinitionRecord:
+    def create_universe(
+        self, definition: UniverseDefinition, *, audit: ControlAudit | None = None
+    ) -> UniverseDefinitionRecord:
         if definition.kind is not UniverseKind.POINT_IN_TIME_MEMBERSHIP:
             raise ValueError("Production Phase 6 bootstrap vyžaduje PIT universe")
         with self.sessions() as session, session.begin():
@@ -110,6 +121,9 @@ class ControlPlaneRegistryService:
             if existing is not None:
                 if existing.name != definition.name or existing.kind != definition.kind.value:
                     raise DatasetInvalid("Universe identity koliduje s immutable metadata")
+                if audit is not None:
+                    add_control_audit(session, audit, existing.universe_id)
+                    session.flush()
                 session.expunge(existing)
                 return existing
             same_name = session.scalar(
@@ -127,10 +141,15 @@ class ControlPlaneRegistryService:
             )
             session.add(row)
             session.flush()
+            if audit is not None:
+                add_control_audit(session, audit, row.universe_id)
+                session.flush()
             session.expunge(row)
             return row
 
-    def add_membership(self, membership: UniverseMembership) -> UniverseMembershipRecord:
+    def add_membership(
+        self, membership: UniverseMembership, *, audit: ControlAudit | None = None
+    ) -> UniverseMembershipRecord:
         with self.sessions() as session, session.begin():
             universe = session.get(UniverseDefinitionRecord, membership.universe_id)
             if universe is None or universe.kind != UniverseKind.POINT_IN_TIME_MEMBERSHIP.value:
@@ -150,6 +169,13 @@ class ControlPlaneRegistryService:
                     or existing.known_at != membership.known_at
                 ):
                     raise DatasetInvalid("Membership identity koliduje s immutable intervalem")
+                if audit is not None:
+                    entity_id = (
+                        f"{membership.universe_id}:{membership.instrument_id}:"
+                        f"{membership.valid_from.isoformat()}"
+                    )[:64]
+                    add_control_audit(session, audit, entity_id)
+                    session.flush()
                 session.expunge(existing)
                 return existing
             row = UniverseMembershipRecord(
@@ -161,6 +187,13 @@ class ControlPlaneRegistryService:
             )
             session.add(row)
             session.flush()
+            if audit is not None:
+                entity_id = (
+                    f"{membership.universe_id}:{membership.instrument_id}:"
+                    f"{membership.valid_from.isoformat()}"
+                )[:64]
+                add_control_audit(session, audit, entity_id)
+                session.flush()
             session.expunge(row)
             return row
 
