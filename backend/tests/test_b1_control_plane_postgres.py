@@ -47,7 +47,9 @@ def test_supported_b1_control_plane_reaches_active_monitoring(monkeypatch) -> No
         },
         {},
     )
-    monkeypatch.setattr(api_module, "build_market_data_provider", lambda settings, engine, **kwargs: provider)
+    monkeypatch.setattr(
+        api_module, "build_market_data_provider", lambda settings, engine, **kwargs: provider
+    )
     client = TestClient(api_module.app)
     reason = "B1 PostgreSQL acceptance"
 
