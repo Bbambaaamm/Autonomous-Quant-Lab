@@ -270,6 +270,11 @@ def test_postgres_asset_directory_and_batch_are_immutable():
                     snapshot,
                 ),
                 ("DELETE FROM asset_directory_entries WHERE snapshot_id=:id", snapshot),
+                (
+                    "UPDATE asset_directory_snapshot_metrics SET total=999 WHERE snapshot_id=:id",
+                    snapshot,
+                ),
+                ("DELETE FROM asset_directory_snapshot_metrics WHERE snapshot_id=:id", snapshot),
                 ("DELETE FROM market_batches WHERE batch_id=:id", batch),
             ):
                 with pytest.raises(DBAPIError), sessions() as session, session.begin():
