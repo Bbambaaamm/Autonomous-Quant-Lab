@@ -1,0 +1,45 @@
+name: Release images
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with: {persist-credentials: false}
+      - name: Build backend image
+        run: docker build -f backend/Dockerfile --build-arg "QUANTLAB_CODE_SHA=$GITHUB_SHA" -t quantlab-backend .
+      - name: Build frontend image
+        run: docker build -f frontend/Dockerfile -t quantlab-frontend .
+      - name: Scan backend image
+        run: >-
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock
+          aquasec/trivy:0.66.0 image --exit-code 1
+          --severity HIGH,CRITICAL --scanners vuln --skip-version-check
+          quantlab-backend
+      - name: Scan frontend image
+        run: >-
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock
+          aquasec/trivy:0.66.0 image --exit-code 1
+          --severity HIGH,CRITICAL --scanners vuln --skip-version-check
+          quantlab-frontend
+      - name: Publish immutable SHA images
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+        run: |
+          owner="$(printf '%s' "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')"
+          backend_ref="ghcr.io/$owner/autonomous-quant-lab-backend:$GITHUB_SHA"
+          frontend_ref="ghcr.io/$owner/autonomous-quant-lab-frontend:$GITHUB_SHA"
+          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          docker tag quantlab-backend "$backend_ref"
+          docker tag quantlab-frontend "$frontend_ref"
+          docker push "$backend_ref"
+          docker push "$frontend_ref"
+          docker logout ghcr.io
