@@ -40,6 +40,7 @@ from quantlab.market_data import (
 )
 from quantlab.persistence import (
     Base,
+    CorporateActionEventCursorRecord,
     CorporateActionEventRecord,
     CorporateActionReadinessRecord,
     CorporateActionRecord,
@@ -179,12 +180,29 @@ class PersistentMarketDataService:
         self.calendar = calendar or XNYSCalendar()
         self.clock = clock or (lambda: datetime.now(UTC))
 
-    def record_corporate_action_event(self, provider: str, event: CorporateActionEvent) -> None:
-        """Zapíše první lokální receipt jednou; replay nesmí přepsat kauzální čas."""
+    def latest_corporate_action_event_id(self, provider: str) -> str | None:
+        """Vrátí replay cursor bez materializace historických eventů."""
+        with self._sessions() as session:
+            cursor = session.get(CorporateActionEventCursorRecord, provider)
+            if cursor is not None:
+                return cursor.last_event_id
+            return session.scalar(
+                select(CorporateActionEventRecord.event_id)
+                .where(CorporateActionEventRecord.provider == provider)
+                .order_by(
+                    CorporateActionEventRecord.occurred_at.desc(),
+                    CorporateActionEventRecord.event_id.desc(),
+                )
+                .limit(1)
+            )
+
+    def record_corporate_action_event(self, provider: str, event: CorporateActionEvent) -> bool:
+        """Zapíše první lokální receipt jednou a atomicky posune transport cursor."""
         received_at = require_utc(event.received_at or event.at)
         symbols_json = json.dumps(list(event.symbols), sort_keys=True, separators=(",", ":"))
         scope_date = _instant(event.scope_date) if event.scope_date is not None else None
         with self._sessions() as session, session.begin():
+            _lock(session, f"corporate-action-cursor:{provider}")
             _lock(session, f"corporate-action-event:{provider}:{event.event_id}")
             existing = session.get(CorporateActionEventRecord, event.event_id)
             if existing is not None:
@@ -211,7 +229,7 @@ class PersistentMarketDataService:
                 expected_audit = (event.at, symbols_json, scope_date)
                 if audit_values != expected_audit:
                     raise DatasetInvalid("Corporate-action event audit koliduje s jiným obsahem")
-                return
+                return False
             session.add(
                 CorporateActionEventRecord(
                     event_id=event.event_id,
@@ -252,6 +270,20 @@ class PersistentMarketDataService:
                     # A far-future effective time prevents stale accounting without losing lineage.
                     current.known_at = received_at
                     current.effective_at = datetime(9999, 12, 31, tzinfo=UTC)
+
+            cursor = session.get(CorporateActionEventCursorRecord, provider)
+            if cursor is None:
+                session.add(
+                    CorporateActionEventCursorRecord(
+                        provider=provider,
+                        last_event_id=event.event_id,
+                        updated_at=received_at,
+                    )
+                )
+            else:
+                cursor.last_event_id = event.event_id
+                cursor.updated_at = received_at
+            return True
 
     def corporate_action_events(self, provider: str) -> tuple[CorporateActionEvent, ...]:
         """Načte persistentní stream evidence v pořadí prvního lokálního receipt času."""

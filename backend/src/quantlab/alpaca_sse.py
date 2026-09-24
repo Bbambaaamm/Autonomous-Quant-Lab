@@ -17,7 +17,7 @@ from quantlab.market_data import (
 )
 
 SSETransport = Callable[[str, dict[str, str], float], Iterable[bytes]]
-EventSink = Callable[[str, CorporateActionEvent], None]
+EventSink = Callable[[str, CorporateActionEvent], bool]
 
 
 def _validate_alpaca_stream_url(url: str) -> None:
@@ -141,7 +141,7 @@ class AlpacaCorporateActionStream:
     def consume_once(
         self, last_event_id: str | None = None, *, max_events: int | None = None
     ) -> str | None:
-        """Spotřebuje jedno spojení; replay stejného ``last_event_id`` se záměrně přeskočí."""
+        """Spotřebuje jedno spojení; idempotentní sink rozhoduje o replay/duplicate eventech."""
         if max_events is not None and max_events < 0:
             raise ValueError("max_events nesmí být záporné")
         if max_events == 0:
@@ -150,16 +150,14 @@ class AlpacaCorporateActionStream:
         if last_event_id:
             headers["Last-Event-Id"] = last_event_id
         cursor = last_event_id
-        seen = {last_event_id} if last_event_id else set()
         self._last_event_id = last_event_id
         self._last_batch_count = 0
         for payload in self._transport(self._url, headers, self._timeout):
             received_at = self._clock()
             for event in self._events(payload, received_at):
-                if event.event_id in seen:
+                inserted = self._sink("alpaca", event)
+                if not inserted:
                     continue
-                self._sink("alpaca", event)
-                seen.add(event.event_id)
                 cursor = event.event_id
                 self._last_event_id = cursor
                 self._last_batch_count += 1
