@@ -4,7 +4,7 @@ from decimal import Decimal
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import event, select
 from sqlalchemy.orm import sessionmaker
 
 from quantlab.asset_directory import AssetDirectoryService, parse_assets
@@ -63,6 +63,83 @@ class Provider:
 
     def corporate_actions(self, symbol, start, end):
         return []
+
+
+def test_asset_directory_latest_uses_persisted_summary_without_entry_scan(tmp_path) -> None:
+    repository = Phase4Repository(f"sqlite:///{tmp_path / 'summary.db'}")
+    factory = sessionmaker(repository.engine)
+    service = AssetDirectoryService(factory)
+    asset_a = str(uuid4())
+    asset_b = str(uuid4())
+
+    def payload(rows):
+        return json.dumps(rows, sort_keys=True).encode()
+
+    first = payload(
+        [
+            {
+                "id": asset_a,
+                "symbol": "AAA",
+                "name": "AAA company",
+                "exchange": "NASDAQ",
+                "class": "us_equity",
+                "status": "active",
+            },
+            {
+                "id": asset_b,
+                "symbol": "BBB",
+                "name": "BBB company",
+                "exchange": "NYSE",
+                "class": "us_equity",
+                "status": "active",
+            },
+        ]
+    )
+    second = payload(
+        [
+            {
+                "id": asset_a,
+                "symbol": "AAB",
+                "name": "AAA company",
+                "exchange": "NASDAQ",
+                "class": "us_equity",
+                "status": "inactive",
+            }
+        ]
+    )
+    service.sync(first, actor="test", reason="First summary", received_at=NOW)
+    service.sync(
+        second,
+        actor="test",
+        reason="Second summary",
+        received_at=NOW + timedelta(days=1),
+    )
+
+    statements: list[str] = []
+
+    def capture(_conn, _cursor, statement, _parameters, _context, _executemany):  # type: ignore[no-untyped-def]
+        if statement.lstrip().upper().startswith("SELECT"):
+            statements.append(statement.lower())
+
+    event.listen(repository.engine, "before_cursor_execute", capture)
+    try:
+        latest = service.latest(NOW + timedelta(days=2))
+    finally:
+        event.remove(repository.engine, "before_cursor_execute", capture)
+
+    assert latest["total"] == 1
+    assert latest["active"] == 0
+    assert latest["inactive"] == 1
+    assert latest["changes"] == {
+        "first_seen": 0,
+        "no_longer_present": 1,
+        "symbol_or_venue_changed": 1,
+        "status_changed": 1,
+        "became_inactive": 1,
+        "became_active": 0,
+        "previous_received_at": NOW,
+    }
+    assert not any("from asset_directory_entries" in statement for statement in statements)
 
 
 def test_entire_directory_enqueued_and_processed_without_orders(env):
