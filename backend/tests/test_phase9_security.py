@@ -217,3 +217,18 @@ def test_schema_migration_detector_only_flags_schema_boundary(tmp_path: Path) ->
     schema = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=work, text=True).strip()
     migration = subprocess.check_output(["sh", str(detector), app, schema], cwd=work, text=True)
     assert migration.strip() == "yes"
+
+
+def test_staging_deploy_is_pull_only_and_schema_backup_bounded() -> None:
+    repository = Path(__file__).parents[2]
+    deploy = (repository / "ops/staging/deploy.sh").read_text()
+
+    assert "compose build" not in deploy
+    assert "compose pull backend worker alpaca-events frontend" in deploy
+    assert 'manifest inspect "$BACKEND_IMAGE"' in deploy
+    assert 'manifest inspect "$FRONTEND_IMAGE"' in deploy
+    assert "SCHEMA_CHANGE=no" in deploy
+    assert 'if [ "$SCHEMA_CHANGE" = yes ]; then' in deploy
+    assert "quantlab-pre-migration-" in deploy
+    assert "bez schema change -> full DB dump se nevytvari" in deploy
+    assert 'if [ -f "$CONFIG/deploy.hold" ]; then' in deploy
