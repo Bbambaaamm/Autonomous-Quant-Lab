@@ -20,6 +20,11 @@ class Settings(BaseSettings):
     worker_batch_size: int = 1
     worker_id_prefix: str = "quantlab-worker"
     worker_require_production: bool = False
+    worker_soft_rss_mb: int = 400
+    market_job_min_available_mb: int = 1536
+    market_job_min_cgroup_headroom_mb: int = 512
+    research_job_min_available_mb: int = 2048
+    research_job_min_cgroup_headroom_mb: int = 768
     market_data_provider: str = "stooq"
     market_data_timeout: float = 10.0
     market_data_max_attempts: int = 3
@@ -52,6 +57,14 @@ class Settings(BaseSettings):
             raise ValueError("Počet pokusů musí být v rozsahu 1 až 100")
         if self.retry_base_delay <= 0 or self.retry_max_delay < self.retry_base_delay:
             raise ValueError("Retry intervaly nejsou platné")
+        if (
+            self.worker_soft_rss_mb < 128
+            or self.market_job_min_available_mb < 512
+            or self.market_job_min_cgroup_headroom_mb < 256
+            or self.research_job_min_available_mb < self.market_job_min_available_mb
+            or self.research_job_min_cgroup_headroom_mb < self.market_job_min_cgroup_headroom_mb
+        ):
+            raise ValueError("Resource guard limity nejsou platné")
         if (
             self.market_data_provider not in {"stooq", "alpaca"}
             or self.market_data_calendar != "XNYS"
