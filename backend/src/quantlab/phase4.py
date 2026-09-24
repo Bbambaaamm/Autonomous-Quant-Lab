@@ -30,6 +30,7 @@ from sqlalchemy.engine import CursorResult
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Mapped, Session, mapped_column
 
+from quantlab.control_audit import ControlAudit, add_control_audit
 from quantlab.data import dataset_identity, validate_bars
 from quantlab.domain import (
     AuditEventType,
@@ -1036,6 +1037,7 @@ class ReconciliationService:
         expected_positions: dict[str, Decimal] | None = None,
         tolerance: Decimal = Decimal("0.000001"),
         correlation_id: str | None = None,
+        audit: ControlAudit | None = None,
     ) -> ReconciliationResult:
         correlation_id = correlation_id or str(uuid4())
         differences: dict[str, object] = {}
@@ -1127,6 +1129,8 @@ class ReconciliationService:
             self.repository.audit(
                 session, event_type, "account", account_id, None, correlation_id, differences
             )
+            if audit is not None:
+                add_control_audit(session, audit, result_id)
             session.commit()
         return ReconciliationResult(result_id, account_id, status, datetime.now(UTC), differences)
 
