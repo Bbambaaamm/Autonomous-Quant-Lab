@@ -728,6 +728,7 @@ class AlpacaProvider:
         rows = self._get_corporate_action_rows(normalized)
         try:
             returned_ids: set[str] = set()
+            scoped_current_ids: set[str] = set()
             for _, row in rows:
                 provider_action_id = row.get("id")
                 if not isinstance(provider_action_id, str) or not provider_action_id:
@@ -735,13 +736,15 @@ class AlpacaProvider:
                         "Alpaca corporate action nemá platnou provider identitu"
                     )
                 returned_ids.add(provider_action_id)
+                if start <= self._scope_date(row) <= end:
+                    scoped_current_ids.add(provider_action_id)
 
             scope = CorporateActionEvidenceScope(
                 provider="alpaca",
                 symbol=normalized,
                 start=start,
                 end=end,
-                current_provider_action_ids=tuple(returned_ids),
+                current_provider_action_ids=tuple(scoped_current_ids),
             )
             latest: dict[str, CorporateActionEvent] = {}
             for event in self._evidence_loader(scope):
