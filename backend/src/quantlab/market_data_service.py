@@ -1176,9 +1176,7 @@ class DatasetSnapshotService:
                 present_count += 1
 
             coverage = (
-                Decimal(present_count) / Decimal(expected_count)
-                if expected_count
-                else Decimal(1)
+                Decimal(present_count) / Decimal(expected_count) if expected_count else Decimal(1)
             )
 
             revision_rows = canonical_corporate_action_revisions(
@@ -1235,9 +1233,7 @@ class DatasetSnapshotService:
             ):
                 known_at = _database_utc(revision_action.known_at)
                 if (
-                    latest_cancel.get(
-                        revision_action.action_id, datetime.min.replace(tzinfo=UTC)
-                    )
+                    latest_cancel.get(revision_action.action_id, datetime.min.replace(tzinfo=UTC))
                     >= known_at
                 ):
                     continue
@@ -1291,11 +1287,7 @@ class DatasetSnapshotService:
                 json.dumps(immutable_content, sort_keys=True, separators=(",", ":")).encode()
             ).hexdigest()
             snapshot_id = hashlib.sha256(f"{logical}|{content_hash}".encode()).hexdigest()
-            status = (
-                "VALID"
-                if expected_count and coverage >= minimum_coverage
-                else "INVALID"
-            )
+            status = "VALID" if expected_count and coverage >= minimum_coverage else "INVALID"
             manifest = json.dumps(
                 {
                     "schema_version": "4",
