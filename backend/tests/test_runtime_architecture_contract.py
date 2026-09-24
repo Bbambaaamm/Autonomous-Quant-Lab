@@ -88,6 +88,18 @@ def test_automation_worker_keeps_market_work_in_a_backpressured_child_process() 
     assert "MarketPipeline(" not in source
 
 
+def test_research_work_stays_single_slot_isolated_and_capacity_gated() -> None:
+    api_source, _ = _module("api.py")
+    admission_source, _ = _module("research_admission.py")
+
+    assert "with research_admission(paper_repository.engine):" in api_source
+    assert "require_capacity(" in api_source
+    assert '[sys.executable, "-m", "quantlab.research_worker"]' in api_source
+    assert "pg_try_advisory_lock" in admission_source
+    assert "pg_advisory_unlock" in admission_source
+    assert "RESEARCH_CONCURRENCY_LIMIT" in admission_source
+
+
 def test_long_lived_worker_keeps_soft_rss_recycling() -> None:
     source, _ = _module("worker.py")
 
