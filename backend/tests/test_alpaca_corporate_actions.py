@@ -14,6 +14,7 @@ from quantlab.config import Settings
 from quantlab.market_data import (
     AlpacaProvider,
     CorporateActionEvent,
+    CorporateActionEvidenceScope,
     CorporateActionEventType,
     CorporateActionKind,
     DatasetInvalid,
@@ -135,11 +136,43 @@ def _provider(
     return AlpacaProvider(
         "key",
         "secret",
-        lambda provider: tuple(events) if provider == "alpaca" else (),
+        lambda scope: tuple(events) if scope.provider == "alpaca" else (),
         {"AAPL": "instrument-aapl"},
         _transport(pages, captured),
         timeout=1,
     )
+
+
+def test_alpaca_evidence_loader_receives_bounded_symbol_scope() -> None:
+    row = _split("ca-scope")
+    event = CorporateActionEvent.from_sse(_sse_payload(row, event_id="event-scope"))
+    scopes: list[CorporateActionEvidenceScope] = []
+
+    def loader(scope: CorporateActionEvidenceScope):
+        scopes.append(scope)
+        return (event,)
+
+    provider = AlpacaProvider(
+        "key",
+        "secret",
+        loader,
+        {"AAPL": "instrument-aapl"},
+        _transport({None: _response({"forward_splits": [row]})}, []),
+        timeout=1,
+    )
+
+    actions = provider.corporate_actions("AAPL", date(2026, 9, 1), date(2026, 9, 2))
+
+    assert len(actions) == 1
+    assert scopes == [
+        CorporateActionEvidenceScope(
+            provider="alpaca",
+            symbol="AAPL",
+            start=date(2026, 9, 1),
+            end=date(2026, 9, 2),
+            current_provider_action_ids=("ca-scope",),
+        )
+    ]
 
 
 def test_alpaca_action_known_at_comes_only_from_matching_sse_version() -> None:
