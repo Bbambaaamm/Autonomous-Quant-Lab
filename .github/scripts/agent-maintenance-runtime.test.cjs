@@ -653,7 +653,7 @@ test('historical ruleset sync is now a GET-only audit and preserves stronger rev
   const workflow = fs.readFileSync('.github/workflows/agent-ruleset-sync.yml', 'utf8');
   assert.match(workflow, /ref: \$\{\{ github\.workflow_sha \}\}/);
   assert.doesNotMatch(workflow, /--method PUT|contents: write|pull-requests: write/);
-  const script = workflow.split('          script: |\n')[1].split('\n').map(line => line.replace(/^            /, '')).join('\n');
+  const script = workflow.split('          script: |\n')[1].split('\n      - name:')[0].split('\n').map(line => line.replace(/^            /, '')).join('\n');
   const f = fixture(), calls = [], notices = [];
   f.d.ruleset.rules.find(r => r.type === 'pull_request').parameters.required_approving_review_count = 2;
   const original = clone(f.d.ruleset);
