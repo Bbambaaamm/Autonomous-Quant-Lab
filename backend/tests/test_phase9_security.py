@@ -1,3 +1,4 @@
+import inspect
 import json
 import os
 import subprocess
@@ -142,6 +143,24 @@ def test_production_mutation_surface_is_operator_only(monkeypatch: pytest.Monkey
         assert admin.post("/operator/instruments", json={}).status_code == 422
     finally:
         api.settings.app_env = original
+
+
+def test_every_production_operator_mutation_requires_reason_model() -> None:
+    for route in api.app.routes:
+        if not isinstance(route, APIRoute) or not route.path.startswith("/operator/"):
+            continue
+        if not MUTATION_METHODS.intersection(route.methods or set()):
+            continue
+        annotations = [
+            parameter.annotation
+            for parameter in inspect.signature(route.endpoint).parameters.values()
+        ]
+        assert any(
+            isinstance(annotation, type)
+            and hasattr(annotation, "model_fields")
+            and "reason" in annotation.model_fields
+            for annotation in annotations
+        ), route.path
 
 
 def test_rate_limit_http_boundary_has_retry_after() -> None:
