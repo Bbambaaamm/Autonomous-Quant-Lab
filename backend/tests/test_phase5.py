@@ -30,6 +30,7 @@ from quantlab.automation import (
 from quantlab.config import Settings
 from quantlab.market_pipeline import MarketTask
 from quantlab.phase4 import Phase4Repository
+from quantlab.resource_guard import ResourcePressure, require_capacity
 
 
 def test_migration_revisions_own_only_their_tables() -> None:
@@ -292,6 +293,40 @@ def test_production_worker_idle_poll_is_five_seconds() -> None:
     compose = (Path(__file__).parents[2] / "docker-compose.production.yml").read_text()
     assert 'WORKER_POLL_INTERVAL: "5"' in compose
     assert 'WORKER_POLL_INTERVAL: "0.2"' not in compose
+
+
+def test_resource_guard_rejects_low_host_or_cgroup_memory(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setattr("quantlab.resource_guard.host_available_mib", lambda: 1000)
+    monkeypatch.setattr("quantlab.resource_guard.cgroup_headroom_mib", lambda: 900)
+    with pytest.raises(ResourcePressure, match="host_available_mib=1000"):
+        require_capacity(host_min_mib=1536, cgroup_min_mib=512, purpose="MARKET")
+
+    monkeypatch.setattr("quantlab.resource_guard.host_available_mib", lambda: 5000)
+    monkeypatch.setattr("quantlab.resource_guard.cgroup_headroom_mib", lambda: 200)
+    with pytest.raises(ResourcePressure, match="cgroup_headroom_mib=200"):
+        require_capacity(host_min_mib=1536, cgroup_min_mib=512, purpose="MARKET")
+
+
+def test_market_child_is_not_spawned_under_resource_pressure(tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    repository, _ = setup(tmp_path)
+    monkeypatch.setattr(
+        "quantlab.resource_guard.require_capacity",
+        lambda **kwargs: (_ for _ in ()).throw(ResourcePressure("RESOURCE_PRESSURE_MARKET")),
+    )
+    monkeypatch.setattr(
+        "quantlab.automation.subprocess.run",
+        lambda *args, **kwargs: pytest.fail("child must not start under resource pressure"),
+    )
+    with pytest.raises(TransientJobError, match="RESOURCE_PRESSURE_MARKET"):
+        JobExecutor(repository)(ScheduledJob(), _market_price_run())
+
+
+def test_production_compose_resource_budgets_are_explicit() -> None:
+    compose = (Path(__file__).parents[2] / "docker-compose.production.yml").read_text()
+    for value in ("mem_limit: 2g", "mem_limit: 1536m", "mem_limit: 1024m", "mem_limit: 384m"):
+        assert value in compose
+    assert compose.count("mem_limit:") == 5
+    assert compose.count("cpus:") == 5
 
 
 def test_scheduler_is_idempotent_and_advances_without_drift(tmp_path) -> None:  # type: ignore[no-untyped-def]
