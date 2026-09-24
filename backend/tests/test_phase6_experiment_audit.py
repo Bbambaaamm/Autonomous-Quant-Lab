@@ -33,6 +33,7 @@ from quantlab.phase6_runtime import (
     Phase6ExperimentRunner,
     normalize_strategy_config,
 )
+from quantlab.research_admission import ResearchAdmissionBusy
 from quantlab.resource_guard import ResourcePressure
 
 
@@ -214,6 +215,43 @@ def test_experiment_api_returns_domain_error_for_invalid_config(
         },
     )
     assert response.status_code == 409, response.text
+
+
+def test_research_api_rejects_second_admission_before_capacity_or_child(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class BusyAdmission:
+        def __enter__(self):
+            raise ResearchAdmissionBusy("RESEARCH_CONCURRENCY_LIMIT")
+
+        def __exit__(self, *_args):
+            return False
+
+    monkeypatch.setattr(api.control_plane_registry, "ensure_strategy", lambda *args: None)
+    monkeypatch.setattr(api, "research_admission", lambda _engine: BusyAdmission())
+    monkeypatch.setattr(
+        api,
+        "require_capacity",
+        lambda **kwargs: pytest.fail("capacity check must run only after research admission"),
+    )
+    monkeypatch.setattr(
+        api.subprocess,
+        "run",
+        lambda *args, **kwargs: pytest.fail("second research child must not start"),
+    )
+    response = TestClient(api.app).post(
+        "/operator/research/experiments",
+        json={
+            "snapshot_id": "unused",
+            "strategy_name": "multi_asset_mean_reversion",
+            "strategy_version": "1.0.0",
+            "parameter_configs": [{"lookback": 20, "threshold": "0.95"}],
+            "code_sha": "a" * 40,
+            "reason": "concurrency regression",
+        },
+    )
+    assert response.status_code == 503
+    assert response.json()["detail"] == "RESEARCH_CONCURRENCY_LIMIT"
 
 
 def test_research_api_defers_before_child_spawn_under_resource_pressure(
