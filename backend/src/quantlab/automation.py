@@ -1246,9 +1246,7 @@ class JobExecutor:
 
                 with Session(self.repository.engine) as session, session.begin():
                     scheduled = session.scalar(
-                        select(ScheduledJob)
-                        .where(ScheduledJob.id == job.id)
-                        .with_for_update()
+                        select(ScheduledJob).where(ScheduledJob.id == job.id).with_for_update()
                     )
                     pending = session.scalar(
                         select(func.count())
