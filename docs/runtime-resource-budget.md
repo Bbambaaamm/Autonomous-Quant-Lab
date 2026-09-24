@@ -23,7 +23,7 @@ Listener baseline před #189 byl ~1.48 GiB RSS; po #189 stabilně ~164–169 MiB
 - Long-lived worker soft RSS watermark: **400 MiB** → graceful process exit/restart.
 - Heavy market concurrency: **1** díky jednomu automation workeru a one-shot child lifecycle.
 - Heavy research concurrency: **1** přes PostgreSQL session-level advisory admission slot. Slot se drží po celou kritickou sekci `admission → capacity check → research child → persisted result/audit`; druhý heavy research request fail-closed vrací `RESEARCH_CONCURRENCY_LIMIT` a nespustí child ani další capacity check.
-- Research admission po dobu heavy jobu rezervuje **jedno backend PostgreSQL connection** pro session-level advisory lock. Po success/error/timeout se connection uvolní; zánik session uvolní lock server-side.
+- Research admission po dobu heavy jobu rezervuje **jedno backend PostgreSQL connection** pro session-level advisory lock. Jde o bounded režii jednoho připojení, ne o in-memory queue; po success/error/timeout se connection uvolní a při zániku procesu PostgreSQL lock odstraní se session. Tento connection budget musí zůstat zahrnutý při změnách backend poolu nebo při zvyšování research concurrency.
 - Phase 6 immutable snapshot verification používá nejvýše **1000 observation/action/instrument IDs na jeden DB batch**.
 - Phase 6 nejdříve ověří canonical hash celého manifestu a poté již ověřené observation entries uvolňuje po DB batchi; nedrží vedle observations druhou workload-sized množinu všech ID.
 - Opakované observation identity (`instrument_id`, provider, timeframe, ingestion) jsou během převodu ORM řádků internovány, unikátní provenance zůstává nezměněná.
