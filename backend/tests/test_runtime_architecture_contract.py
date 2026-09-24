@@ -96,6 +96,25 @@ def test_long_lived_worker_keeps_soft_rss_recycling() -> None:
     assert "worker.request_stop()" in source
 
 
+def test_snapshot_builder_keeps_bounded_scope_and_streaming() -> None:
+    source, tree = _module("market_data_service.py")
+    service = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "DatasetSnapshotService"
+    )
+    source_segment = ast.get_source_segment(source, service) or ""
+
+    assert "max_snapshot_days = 5 * 366" in source_segment
+    assert "stream_batch_size = 512" in source_segment
+    assert "InstrumentRecord.instrument_id.in_(membership_ids)" in source_segment
+    assert "MarketObservationRecord.instrument_id.in_(instrument_ids)" in source_segment
+    assert "stream_results=True" in source_segment
+    assert "yield_per=cls.stream_batch_size" in source_segment
+    assert "select(InstrumentRecord)" in source_segment
+    assert "select(InstrumentRecord).where(" in source_segment
+
+
 def test_production_compose_keeps_measured_resource_ceiling_contract() -> None:
     expected = {
         "postgres": ("2g", "2.0"),
@@ -121,3 +140,4 @@ def test_architecture_contract_remains_wired_into_required_ci_checks() -> None:
     # Both jobs are required by the main-branch ruleset. Keeping the contract
     # in two independent required contexts makes accidental removal visible.
     assert ci.count(invocation) >= 2
+    assert "tests/test_market_pipeline.py" in ci
