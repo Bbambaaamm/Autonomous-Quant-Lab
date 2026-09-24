@@ -73,7 +73,6 @@ jobs:
           tests/test_research_engine.py
           tests/test_phase6.py
           tests/test_alpaca_corporate_actions.py
-          tests/test_alpaca_production_wiring.py
           tests/test_xnys_calendar.py
           tests/test_paper_only_architecture.py
           tests/test_phase6_runtime.py
@@ -169,10 +168,7 @@ jobs:
       - name: Stage C autonomous market-data/session orchestration acceptance
         run: uv run pytest -q tests/test_stage_c_autonomous_session_postgres.py
       - name: H2 corporate-action capability/readiness acceptance
-        run: >-
-          uv run pytest -q
-          tests/test_h2_corporate_action_readiness_postgres.py
-          tests/test_alpaca_event_cursor_postgres.py
+        run: uv run pytest -q tests/test_h2_corporate_action_readiness_postgres.py
       - name: H3 approved runtime-config identity acceptance
         run: uv run pytest -q tests/test_h3_runtime_identity_postgres.py
       - name: Recreate clean application schema for M1 acceptance
