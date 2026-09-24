@@ -79,6 +79,7 @@ from quantlab.phase7 import (
     PaperPerformanceSnapshotRecord,
 )
 from quantlab.provider_factory import build_market_data_provider, market_data_provider_metadata
+from quantlab.research_admission import ResearchAdmissionBusy, research_admission
 from quantlab.research_service import ResearchService
 from quantlab.resource_guard import ResourcePressure, require_capacity
 from quantlab.security import current_principal, security_boundary
@@ -714,14 +715,20 @@ def run_phase6_experiment(body: ExperimentCreate, request: Request) -> dict[str,
             body.strategy_name, body.strategy_version, datetime.now(UTC)
         )
         try:
-            require_capacity(
-                host_min_mib=settings.research_job_min_available_mb,
-                cgroup_min_mib=settings.research_job_min_cgroup_headroom_mb,
-                purpose="RESEARCH",
-            )
-        except ResourcePressure as exc:
-            raise HTTPException(503, "RESOURCE_PRESSURE_RESEARCH_DEFERRED") from exc
-        payload = {
+            admission = research_admission(paper_repository.engine)
+            admission.__enter__()
+        except ResearchAdmissionBusy as exc:
+            raise HTTPException(503, "RESEARCH_CONCURRENCY_LIMIT") from exc
+        try:
+            try:
+                require_capacity(
+                    host_min_mib=settings.research_job_min_available_mb,
+                    cgroup_min_mib=settings.research_job_min_cgroup_headroom_mb,
+                    purpose="RESEARCH",
+                )
+            except ResourcePressure as exc:
+                raise HTTPException(503, "RESOURCE_PRESSURE_RESEARCH_DEFERRED") from exc
+            payload = {
             "snapshot_id": body.snapshot_id,
             "strategy_name": body.strategy_name,
             "strategy_version": body.strategy_version,
@@ -777,15 +784,17 @@ def run_phase6_experiment(body: ExperimentCreate, request: Request) -> dict[str,
             if row is None:
                 raise HTTPException(503, "RESEARCH_PROCESS_RESULT_NOT_PERSISTED")
             response = _row(row)
-        _audit_control_mutation(
-            "CONTROL_PHASE6_EXPERIMENT_COMPLETED",
-            "experiment",
-            result["experiment_id"],
-            _actor(request),
-            body.reason,
-            _correlation(request),
-        )
-        return response
+            _audit_control_mutation(
+                "CONTROL_PHASE6_EXPERIMENT_COMPLETED",
+                "experiment",
+                result["experiment_id"],
+                _actor(request),
+                body.reason,
+                _correlation(request),
+            )
+            return response
+        finally:
+            admission.__exit__(None, None, None)
     except HTTPException:
         raise
     except (ValueError, DatasetInvalid) as exc:
