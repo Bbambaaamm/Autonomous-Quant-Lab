@@ -1046,11 +1046,38 @@ def canonical_corporate_action_revisions(
 
 
 class DatasetSnapshotService:
+    """PIT snapshot builder s working setem omezeným requested universe/scope."""
+
+    max_snapshot_days = 5 * 366
+    stream_batch_size = 512
+
     def __init__(
         self, session_factory: Callable[[], Session], calendar: XNYSCalendar | None = None
     ) -> None:
         self._sessions = session_factory
         self.calendar = calendar or XNYSCalendar()
+
+    @staticmethod
+    def _eligible_on_day(
+        *,
+        instrument: InstrumentRecord,
+        memberships: Sequence[UniverseMembershipRecord],
+        universe_kind: UniverseKind,
+        day: date,
+        session_close: datetime,
+    ) -> bool:
+        if instrument.active_from.date() > day:
+            return False
+        if instrument.active_to is not None and day >= instrument.active_to.date():
+            return False
+        if universe_kind is UniverseKind.STATIC:
+            return bool(memberships)
+        return any(
+            _database_utc(membership.known_at) <= session_close
+            and membership.valid_from.date() <= day
+            and (membership.valid_to is None or day < membership.valid_to.date())
+            for membership in memberships
+        )
 
     def build(
         self,
@@ -1062,6 +1089,11 @@ class DatasetSnapshotService:
         end: date,
         minimum_coverage: Decimal,
     ) -> DatasetSnapshot:
+        if start > end:
+            raise DatasetInvalid("Snapshot interval je neplatný")
+        if (end - start).days > self.max_snapshot_days:
+            raise DatasetInvalid("SNAPSHOT_RANGE_EXCEEDS_RESOURCE_BUDGET")
+
         cutoff = require_utc(as_of)
         logical = (
             f"{provider}|{self.calendar.identity}|{universe_id}|{start}|{end}|{cutoff.isoformat()}"
@@ -1071,7 +1103,7 @@ class DatasetSnapshotService:
             universe = session.get(UniverseDefinitionRecord, universe_id)
             if universe is None:
                 raise DatasetInvalid("Universe neexistuje")
-            rows = self._authoritative_rows(session, provider, cutoff, start, end)
+
             memberships = tuple(
                 session.scalars(
                     select(UniverseMembershipRecord).where(
@@ -1080,48 +1112,73 @@ class DatasetSnapshotService:
                     )
                 )
             )
-            instruments = {
-                row.instrument_id: row for row in session.scalars(select(InstrumentRecord))
-            }
-            universe_kind = UniverseKind(universe.kind)
-            expected = {
-                (instrument_id, day)
-                for day in self.calendar.sessions_between(start, end)
-                for instrument_id, instrument in instruments.items()
-                if instrument.active_from.date() <= day
-                and (instrument.active_to is None or day < instrument.active_to.date())
-                and (
-                    (
-                        universe_kind is UniverseKind.STATIC
-                        and any(
-                            membership.instrument_id == instrument_id for membership in memberships
+            membership_ids = tuple(sorted({item.instrument_id for item in memberships}))
+            instruments = (
+                {
+                    row.instrument_id: row
+                    for row in session.scalars(
+                        select(InstrumentRecord).where(
+                            InstrumentRecord.instrument_id.in_(membership_ids)
                         )
                     )
-                    or (
-                        universe_kind is UniverseKind.POINT_IN_TIME_MEMBERSHIP
-                        and any(
-                            membership.instrument_id == instrument_id
-                            and _database_utc(membership.known_at)
-                            <= self.calendar.session_close(day)
-                            and membership.valid_from.date() <= day
-                            and (membership.valid_to is None or day < membership.valid_to.date())
-                            for membership in memberships
-                        )
-                    )
-                )
-            }
-            selected = tuple(
-                row for row in rows if (row.instrument_id, row.session_date.date()) in expected
+                }
+                if membership_ids
+                else {}
             )
-            present = {(row.instrument_id, row.session_date.date()) for row in selected}
-            coverage = Decimal(len(present)) / Decimal(len(expected)) if expected else Decimal(1)
-            canonical = [
-                {"id": row.observation_id, "revision": row.revision, "hash": row.source_hash}
-                for row in sorted(
-                    selected, key=lambda item: (item.instrument_id, item.session_date)
+            membership_by_instrument: dict[str, list[UniverseMembershipRecord]] = {}
+            for membership in memberships:
+                membership_by_instrument.setdefault(membership.instrument_id, []).append(membership)
+
+            universe_kind = UniverseKind(universe.kind)
+            sessions = self.calendar.sessions_between(start, end)
+            session_closes = {day: self.calendar.session_close(day) for day in sessions}
+
+            expected_count = 0
+            for instrument_id, instrument in instruments.items():
+                instrument_memberships = membership_by_instrument.get(instrument_id, [])
+                for day in sessions:
+                    if self._eligible_on_day(
+                        instrument=instrument,
+                        memberships=instrument_memberships,
+                        universe_kind=universe_kind,
+                        day=day,
+                        session_close=session_closes[day],
+                    ):
+                        expected_count += 1
+
+            canonical: list[dict[str, object]] = []
+            selected_instruments: set[str] = set()
+            present_count = 0
+            for row in self._authoritative_rows(
+                session,
+                provider,
+                cutoff,
+                start,
+                end,
+                tuple(instruments),
+            ):
+                selected_instrument = instruments.get(row.instrument_id)
+                if selected_instrument is None:
+                    continue
+                day = row.session_date.date()
+                if not self._eligible_on_day(
+                    instrument=selected_instrument,
+                    memberships=membership_by_instrument.get(row.instrument_id, []),
+                    universe_kind=universe_kind,
+                    day=day,
+                    session_close=session_closes[day],
+                ):
+                    continue
+                canonical.append(
+                    {"id": row.observation_id, "revision": row.revision, "hash": row.source_hash}
                 )
-            ]
-            selected_instruments = {row.instrument_id for row in selected}
+                selected_instruments.add(row.instrument_id)
+                present_count += 1
+
+            coverage = (
+                Decimal(present_count) / Decimal(expected_count) if expected_count else Decimal(1)
+            )
+
             revision_rows = canonical_corporate_action_revisions(
                 session,
                 CorporateActionRevisionRecord.instrument_id.in_(selected_instruments),
@@ -1148,6 +1205,7 @@ class DatasetSnapshotService:
                 raise DatasetInvalid(
                     "Nový snapshot nelze vytvořit bez immutable corporate-action revision evidence"
                 )
+
             action_ids = set(latest_revisions)
             cancellations = (
                 tuple(
@@ -1229,7 +1287,7 @@ class DatasetSnapshotService:
                 json.dumps(immutable_content, sort_keys=True, separators=(",", ":")).encode()
             ).hexdigest()
             snapshot_id = hashlib.sha256(f"{logical}|{content_hash}".encode()).hexdigest()
-            status = "VALID" if expected and coverage >= minimum_coverage else "INVALID"
+            status = "VALID" if expected_count and coverage >= minimum_coverage else "INVALID"
             manifest = json.dumps(
                 {
                     "schema_version": "4",
@@ -1238,8 +1296,8 @@ class DatasetSnapshotService:
                     "observations": canonical,
                     "corporate_actions": canonical_actions,
                     "universe_memberships": canonical_memberships,
-                    "expected_count": len(expected),
-                    "present_count": len(present),
+                    "expected_count": expected_count,
+                    "present_count": present_count,
                 },
                 sort_keys=True,
                 separators=(",", ":"),
@@ -1273,15 +1331,23 @@ class DatasetSnapshotService:
                 end,
                 "1d",
                 content_hash,
-                tuple(row.observation_id for row in selected),
+                tuple(str(item["id"]) for item in canonical),
                 status,
                 coverage,
             )
 
-    @staticmethod
+    @classmethod
     def _authoritative_rows(
-        session: Session, provider: str, cutoff: datetime, start: date, end: date
-    ) -> Sequence[MarketObservationRecord]:
+        cls,
+        session: Session,
+        provider: str,
+        cutoff: datetime,
+        start: date,
+        end: date,
+        instrument_ids: Sequence[str],
+    ) -> Iterator[MarketObservationRecord]:
+        if not instrument_ids:
+            return
         ranked = (
             select(
                 MarketObservationRecord.id.label("id"),
@@ -1301,6 +1367,7 @@ class DatasetSnapshotService:
             )
             .where(
                 MarketObservationRecord.provider == provider,
+                MarketObservationRecord.instrument_id.in_(instrument_ids),
                 MarketObservationRecord.observed_at <= cutoff,
                 MarketObservationRecord.timestamp <= cutoff,
                 MarketObservationRecord.session_date >= _instant(start),
@@ -1308,7 +1375,10 @@ class DatasetSnapshotService:
             )
             .subquery()
         )
-        statement: Select[tuple[MarketObservationRecord]] = select(MarketObservationRecord).join(
-            ranked, and_(MarketObservationRecord.id == ranked.c.id, ranked.c.rank == 1)
+        statement: Select[tuple[MarketObservationRecord]] = (
+            select(MarketObservationRecord)
+            .join(ranked, and_(MarketObservationRecord.id == ranked.c.id, ranked.c.rank == 1))
+            .order_by(MarketObservationRecord.instrument_id, MarketObservationRecord.session_date)
+            .execution_options(stream_results=True, yield_per=cls.stream_batch_size)
         )
-        return tuple(session.scalars(statement))
+        yield from session.scalars(statement)

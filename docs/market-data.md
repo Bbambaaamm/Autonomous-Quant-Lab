@@ -103,3 +103,10 @@ Promotion ani deployment nevznikají automaticky a opakovaná promotion je idemp
 nejnovější dokončené XNYS session a přijímá jen nejnovější revizi z úspěšné ingestion. Runtime
 rekonstruuje pouze přesnou allowlisted strategii, verzi, parametry, PIT universe a USD/XNYS/1d
 scope. Live trading path nadále neexistuje.
+
+
+## Resource-bounded dataset snapshots
+
+`DatasetSnapshotService` omezuje observation query na instrumenty konkrétního universe ještě v PostgreSQL a authoritative rows streamuje v dávkách. Coverage denominator se počítá inkrementálně bez materializace kartézského `instrument × session` setu. Snapshot manifest a content hash zůstávají deterministické a se stejnou schema-version semantikou.
+
+Operator snapshot request má hard resource guard: maximální interval je 5 let (`5 × 366` dní). Delší rozsah failne jako `SNAPSHOT_RANGE_EXCEEDS_RESOURCE_BUDGET`; velké historické práce se mají rozdělit do explicitních bounded snapshotů/research jobs.

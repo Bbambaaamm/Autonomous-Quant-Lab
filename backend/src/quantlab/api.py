@@ -9,7 +9,7 @@ from uuid import uuid4
 from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse, RedirectResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 
@@ -227,6 +227,14 @@ class SnapshotCreate(BaseModel):
     as_of: datetime
     minimum_coverage: Decimal = Field(Decimal("0.8"), ge=0, le=1)
     reason: str = Field(min_length=3, max_length=1000)
+
+    @model_validator(mode="after")
+    def validate_resource_budget(self) -> "SnapshotCreate":
+        if self.start > self.end:
+            raise ValueError("Snapshot interval je neplatný")
+        if (self.end - self.start).days > DatasetSnapshotService.max_snapshot_days:
+            raise ValueError("SNAPSHOT_RANGE_EXCEEDS_RESOURCE_BUDGET")
+        return self
 
 
 class ExperimentCreate(BaseModel):
