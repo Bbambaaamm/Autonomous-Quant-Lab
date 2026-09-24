@@ -25,6 +25,24 @@ run unit and relevant integration tests, and update documentation.
 - CI and development use only `PaperBroker`.
 - Live trading requires independent mode, enablement, and confirmation gates and fails closed.
 
+## Runtime architecture contract (#190)
+- Read `docs/runtime-architecture-contract.md` and `docs/runtime-resource-budget.md` before
+  changing worker, provider, market-data, corporate-action, research isolation, deployment, or
+  production Compose behavior.
+- Heavy market/research work stays short-lived, resource-bounded, and backpressured; do not move
+  workload-sized processing back into always-on services.
+- Runtime provider/data access uses explicit bounded scope. Never reintroduce implicit full-history
+  or full-universe materialization on a request, listener, or per-task hot path.
+- PostgreSQL/checkpoints remain the durable authority for queues, leases/fencing, receipts,
+  idempotence, provenance, and restart safety.
+- Do not weaken measured production CPU/RAM ceilings, soft RSS recycling, or capacity guards merely
+  to make a feature fit. An intentional architecture change requires a linked issue/ADR and
+  before/after evidence.
+- Any intentional change to this contract must update the contract document, resource-budget
+  documentation, and `backend/tests/test_runtime_architecture_contract.py` in the same PR.
+- Run `uv run pytest -q tests/test_runtime_architecture_contract.py` from `backend/` for affected
+  changes.
+
 ## Security invariants
 - Never bypass authentication or disable RBAC to make a test pass; tests use real synthetic credentials.
 - Never commit or log credentials, and never expose server secrets through `NEXT_PUBLIC_*`.

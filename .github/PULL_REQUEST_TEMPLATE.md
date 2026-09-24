@@ -33,10 +33,20 @@ Check all that apply and explain material impacts below.
 - [ ] Fail-closed behavior preserved for invalid critical evidence
 - [ ] No secrets committed or logged
 - [ ] Dependency lock policies respected
+- [ ] #190 runtime architecture contract preserved, or intentional contract change linked below
+- [ ] Runtime data access remains explicitly bounded; no new full-history/materialize-all hot path
+- [ ] Heavy runtime work remains short-lived/resource-bounded/backpressured where applicable
+- [ ] Production resource ceilings unchanged, or benchmark/evidence + contract update included
 
 ### Material invariant impact
 
 <!-- Describe any changed causal, validation, risk, execution, persistence, or security semantics. If none, say none. -->
+
+### Runtime architecture impact
+
+- Contract impact: none / compatible implementation / intentional contract change
+- Linked architecture issue / ADR (required for intentional change):
+- Resource/query evidence (required when runtime shape or budget changes):
 
 ## Data / persistence
 
