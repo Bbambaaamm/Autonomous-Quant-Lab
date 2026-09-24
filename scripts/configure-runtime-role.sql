@@ -39,8 +39,10 @@ REVOKE UPDATE, DELETE ON TABLE
     market_batch_metrics
 FROM :"runtime_role";
 
--- Future tables default to read + append only. A new mutable table must receive
--- UPDATE explicitly through the reviewed runtime-role configuration.
+-- Future tables default to read + append only between role-configuration runs.
+-- Deploy-time configuration still grants UPDATE broadly for mutable runtime-state
+-- compatibility, so every new immutable evidence table must be added to the
+-- explicit revoke list in the same reviewed change.
 ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT ON TABLES TO :"runtime_role";
 ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE UPDATE, DELETE ON TABLES FROM :"runtime_role";
 ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO :"runtime_role";
