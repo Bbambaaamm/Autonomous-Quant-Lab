@@ -15,6 +15,7 @@ from uuid import uuid4
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from quantlab.control_audit import ControlAudit, add_control_audit
 from quantlab.domain import AuditEventType, Bar, OrderIntent, require_utc
 from quantlab.market_data import (
     CorporateAction,
@@ -254,20 +255,26 @@ class Phase6ExperimentRunner:
             raise DatasetInvalid("Code SHA musí být plný lowercase Git SHA")
         return value
 
-    def run(self, request: Phase6ExperimentRequest) -> ExperimentRecord:
-        result = self._execute(request, persist=True)
+    def run(
+        self, request: Phase6ExperimentRequest, *, audit: ControlAudit | None = None
+    ) -> ExperimentRecord:
+        result = self._execute(request, persist=True, audit=audit)
         if not isinstance(result, ExperimentRecord):
             raise TypeError("Persistovaný experiment vrátil neplatný typ")
         return result
 
     def replay(self, request: Phase6ExperimentRequest) -> Phase6ExperimentReplay:
-        result = self._execute(request, persist=False)
+        result = self._execute(request, persist=False, audit=None)
         if not isinstance(result, Phase6ExperimentReplay):
             raise TypeError("Replay experimentu vrátil neplatný typ")
         return result
 
     def _execute(
-        self, request: Phase6ExperimentRequest, *, persist: bool
+        self,
+        request: Phase6ExperimentRequest,
+        *,
+        persist: bool,
+        audit: ControlAudit | None,
     ) -> ExperimentRecord | Phase6ExperimentReplay:
         if not request.parameter_configs:
             raise ValueError("Parameter space nesmí být prázdný")
@@ -299,6 +306,9 @@ class Phase6ExperimentRunner:
                     select(ExperimentRecord).where(ExperimentRecord.idempotency_key == identity)
                 )
                 if existing is not None:
+                    if audit is not None:
+                        add_control_audit(session, audit, existing.id)
+                        session.flush()
                     session.expunge(existing)
                     return existing
             snapshot = session.get(DatasetSnapshotRecord, request.snapshot_id)
@@ -605,6 +615,8 @@ class Phase6ExperimentRunner:
                 ),
             )
             session.add(experiment)
+            if audit is not None:
+                add_control_audit(session, audit, experiment.id)
             session.flush()
             session.expunge(experiment)
             return experiment
