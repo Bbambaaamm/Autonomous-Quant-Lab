@@ -80,6 +80,7 @@ from quantlab.phase7 import (
 )
 from quantlab.provider_factory import build_market_data_provider, market_data_provider_metadata
 from quantlab.research_service import ResearchService
+from quantlab.resource_guard import ResourcePressure, require_capacity
 from quantlab.security import current_principal, security_boundary
 from quantlab.universe import UniverseDefinition, UniverseKind, UniverseMembership
 
@@ -712,6 +713,14 @@ def run_phase6_experiment(body: ExperimentCreate, request: Request) -> dict[str,
         control_plane_registry.ensure_strategy(
             body.strategy_name, body.strategy_version, datetime.now(UTC)
         )
+        try:
+            require_capacity(
+                host_min_mib=settings.research_job_min_available_mb,
+                cgroup_min_mib=settings.research_job_min_cgroup_headroom_mb,
+                purpose="RESEARCH",
+            )
+        except ResourcePressure as exc:
+            raise HTTPException(503, "RESOURCE_PRESSURE_RESEARCH_DEFERRED") from exc
         payload = {
             "snapshot_id": body.snapshot_id,
             "strategy_name": body.strategy_name,
