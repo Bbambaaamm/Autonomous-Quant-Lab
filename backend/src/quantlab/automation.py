@@ -1229,6 +1229,23 @@ class JobExecutor:
                 or result["trading_cycle_id"] is not None
             ):
                 raise TransientJobError("MARKET_TASK_PROCESS_INVALID_RESULT")
+            if result["outcome"] == "NO_PENDING_MARKET_DATA":
+                from quantlab.market_pipeline import MarketTask
+
+                with Session(self.repository.engine) as session, session.begin():
+                    scheduled = session.scalar(
+                        select(ScheduledJob)
+                        .where(ScheduledJob.id == job.id)
+                        .with_for_update()
+                    )
+                    pending = session.scalar(
+                        select(func.count())
+                        .select_from(MarketTask)
+                        .where(MarketTask.state.in_(("PENDING", "RETRY", "RUNNING")))
+                    )
+                    if scheduled is not None and not pending:
+                        scheduled.enabled = False
+                        scheduled.updated_at = self.clock()
             return {"outcome": result["outcome"], "trading_cycle_id": None}
         if job_type == JobType.SYNC_MARKET_CATALOG:
             if payload or strategy_id is not None:
