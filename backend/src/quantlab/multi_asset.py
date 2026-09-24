@@ -361,9 +361,14 @@ def run_multi_asset(
             previous = latest_by_key.get(key)
             if previous is None:
                 insort(history_times.setdefault(row.instrument_id, []), row.timestamp)
-            if pinned or previous is None or (row.observed_at, row.revision) > (
-                previous.observed_at,
-                previous.revision,
+            if (
+                pinned
+                or previous is None
+                or (row.observed_at, row.revision)
+                > (
+                    previous.observed_at,
+                    previous.revision,
+                )
             ):
                 latest_by_key[key] = row
             activation_index += 1
@@ -469,9 +474,7 @@ def run_multi_asset(
                 adjusted = causal_adjusted_close(
                     bars, actions_by_instrument.get(instrument, ()), when
                 )
-                signal_prices[instrument] = tuple(
-                    adjusted[bar.session_date] for bar in bars
-                )
+                signal_prices[instrument] = tuple(adjusted[bar.session_date] for bar in bars)
 
             context = StrategyContext(
                 when,
