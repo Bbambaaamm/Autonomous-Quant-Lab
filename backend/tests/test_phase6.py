@@ -1,3 +1,5 @@
+import hashlib
+import json
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
@@ -24,6 +26,7 @@ from quantlab.market_data import (
     causal_adjusted_close,
     normalize_bar,
 )
+from quantlab.market_data_service import canonical_snapshot_content_hash
 from quantlab.multi_asset import (
     CrossSectionalMomentumStrategy,
     MeanReversionStrategy,
@@ -222,6 +225,18 @@ def test_ingestion_idempotency_overlap_revision_and_snapshot_immutability():
         end=date(2024, 1, 8),
     )
     assert s1.content_hash == s1_again.content_hash != s2.content_hash
+
+
+def test_streaming_snapshot_hash_matches_legacy_canonical_encoding():
+    payload = {
+        "observations": [{"id": "abc", "revision": 1, "hash": "def"}],
+        "corporate_actions": [],
+        "universe_memberships": [{"instrument_id": "žluťoučký", "valid_to": None}],
+    }
+    expected = hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    assert canonical_snapshot_content_hash(payload) == expected
 
 
 def test_future_corporate_action_does_not_change_past_adjustment():
@@ -574,6 +589,31 @@ def test_runner_uses_adjusted_signals_and_applies_actions():
     )
     assert dict(result.decisions)[CAL.session_close(days[2])].weights == (("a", Decimal("1")),)
     assert result.dividend_income > 0
+
+
+def test_evaluation_end_matches_explicit_observation_prefix():
+    days = [date(2024, 1, day) for day in (3, 4, 5, 8, 9, 10)]
+    rows = [obs("a", day, str(100 + index)) for index, day in enumerate(days)]
+    cutoff = CAL.session_close(days[3])
+    strategy = TrendStrategy(1, 2, rebalance_frequency=RebalanceFrequency.DAILY)
+
+    explicit = run_multi_asset(
+        [row for row in rows if row.timestamp <= cutoff],
+        single_asset_universe(),
+        strategy,
+        initial_cash=Decimal("1000"),
+        commission_bps=Decimal("0"),
+    )
+    bounded = run_multi_asset(
+        rows,
+        single_asset_universe(),
+        strategy,
+        initial_cash=Decimal("1000"),
+        commission_bps=Decimal("0"),
+        evaluation_end=cutoff,
+    )
+
+    assert bounded == explicit
 
 
 def test_evaluation_window_preserves_lookback_without_pre_window_trades():
