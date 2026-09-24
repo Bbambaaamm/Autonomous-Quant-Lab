@@ -705,6 +705,14 @@ def run_phase6_experiment(body: ExperimentCreate, request: Request) -> dict[str,
         )
         try:
             with research_admission(paper_repository.engine):
+                correlation_id = _correlation(request)
+                control_audit = _control_audit(
+                    request,
+                    "CONTROL_PHASE6_EXPERIMENT_COMPLETED",
+                    "experiment",
+                    body.reason,
+                    correlation_id=correlation_id,
+                )
                 try:
                     require_capacity(
                         host_min_mib=settings.research_job_min_available_mb,
@@ -724,6 +732,13 @@ def run_phase6_experiment(body: ExperimentCreate, request: Request) -> dict[str,
                     "commission_bps": str(body.commission_bps),
                     "seed": body.seed,
                     "code_sha": body.code_sha,
+                    "control_audit": {
+                        "event_type": control_audit.event_type,
+                        "entity_type": control_audit.entity_type,
+                        "actor": control_audit.actor,
+                        "reason": control_audit.reason,
+                        "correlation_id": control_audit.correlation_id,
+                    },
                 }
                 try:
                     source_root = str(Path(__file__).parents[1])
@@ -771,14 +786,6 @@ def run_phase6_experiment(body: ExperimentCreate, request: Request) -> dict[str,
                     if row is None:
                         raise HTTPException(503, "RESEARCH_PROCESS_RESULT_NOT_PERSISTED")
                     response = _row(row)
-                _audit_control_mutation(
-                    "CONTROL_PHASE6_EXPERIMENT_COMPLETED",
-                    "experiment",
-                    result["experiment_id"],
-                    _actor(request),
-                    body.reason,
-                    _correlation(request),
-                )
                 return response
         except ResearchAdmissionBusy as exc:
             raise HTTPException(503, "RESEARCH_CONCURRENCY_LIMIT") from exc
