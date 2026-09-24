@@ -36,6 +36,7 @@ from quantlab.multi_asset import (
     MultiAssetResult,
     ObservationKnowledgeMode,
     RebalanceFrequency,
+    prepare_snapshot_pinned_observations,
     run_multi_asset,
 )
 from quantlab.persistence import (
@@ -373,6 +374,9 @@ class Phase6ExperimentRunner:
                             "Snapshot manifest odkazuje na změněná nebo chybějící data"
                         )
                     observations.append(_observation(row))
+            prepared_observations = prepare_snapshot_pinned_observations(observations)
+            observations.clear()
+
             action_entries = manifest.get("corporate_actions")
             if not isinstance(action_entries, list):
                 raise DatasetInvalid("Snapshot manifest neobsahuje immutable corporate actions")
@@ -414,31 +418,7 @@ class Phase6ExperimentRunner:
             action_ids = [item.action_id for item in corporate_actions]
             if len(set(action_ids)) != len(action_ids):
                 raise DatasetInvalid("Snapshot corporate actions obsahují duplicity")
-            immutable_revisions: list[CorporateActionRevisionRecord] = []
-            for offset in range(0, len(action_ids), self.snapshot_load_batch_size):
-                immutable_revisions.extend(
-                    session.scalars(
-                        select(CorporateActionRevisionRecord).where(
-                            CorporateActionRevisionRecord.action_id.in_(
-                                action_ids[offset : offset + self.snapshot_load_batch_size]
-                            ),
-                            CorporateActionRevisionRecord.provider == snapshot.provider,
-                        )
-                    )
-                )
-            revision_evidence = {
-                (
-                    revision.action_id,
-                    revision.instrument_id,
-                    revision.kind,
-                    _database_utc(revision.effective_at),
-                    _database_utc(revision.known_at),
-                    revision.value,
-                    revision.new_symbol,
-                )
-                for revision in immutable_revisions
-            }
-            if any(
+            expected_revision_evidence = {
                 (
                     item.action_id,
                     item.instrument_id,
@@ -448,9 +428,43 @@ class Phase6ExperimentRunner:
                     str(item.value) if item.value is not None else None,
                     item.new_symbol,
                 )
-                not in revision_evidence
                 for item in corporate_actions
-            ):
+            }
+            for offset in range(0, len(action_ids), self.snapshot_load_batch_size):
+                statement = (
+                    select(
+                        CorporateActionRevisionRecord.action_id,
+                        CorporateActionRevisionRecord.instrument_id,
+                        CorporateActionRevisionRecord.kind,
+                        CorporateActionRevisionRecord.effective_at,
+                        CorporateActionRevisionRecord.known_at,
+                        CorporateActionRevisionRecord.value,
+                        CorporateActionRevisionRecord.new_symbol,
+                    )
+                    .where(
+                        CorporateActionRevisionRecord.action_id.in_(
+                            action_ids[offset : offset + self.snapshot_load_batch_size]
+                        ),
+                        CorporateActionRevisionRecord.provider == snapshot.provider,
+                    )
+                    .execution_options(
+                        stream_results=True,
+                        yield_per=self.snapshot_load_batch_size,
+                    )
+                )
+                for revision in session.execute(statement):
+                    expected_revision_evidence.discard(
+                        (
+                            revision.action_id,
+                            revision.instrument_id,
+                            revision.kind,
+                            _database_utc(revision.effective_at),
+                            _database_utc(revision.known_at),
+                            revision.value,
+                            revision.new_symbol,
+                        )
+                    )
+            if expected_revision_evidence:
                 raise DatasetInvalid(
                     "Snapshot corporate actions neodpovídají persistentní evidence"
                 )
@@ -466,7 +480,7 @@ class Phase6ExperimentRunner:
             manifest_hash = canonical_snapshot_content_hash(immutable_content)
             if manifest_hash != snapshot.content_hash:
                 raise DatasetInvalid("Snapshot manifest neodpovídá uloženému content hash")
-            times = sorted({item.timestamp for item in observations})
+            times = [item[0] for item in prepared_observations.sessions]
             train_end = int(len(times) * float(request.train_fraction))
             validation_end = train_end + int(len(times) * float(request.validation_fraction))
             if train_end < 1 or validation_end <= train_end or validation_end >= len(times):
@@ -518,7 +532,7 @@ class Phase6ExperimentRunner:
                 immutable_memberships,
                 static_knowledge_as_of=_database_utc(snapshot.as_of),
             )
-            instrument_ids = {item.instrument_id for item in observations}
+            instrument_ids = {item.instrument_id for item in prepared_observations.rows}
             currencies: dict[str, str] = {}
             ordered_instrument_ids = sorted(instrument_ids)
             for offset in range(0, len(ordered_instrument_ids), self.snapshot_load_batch_size):
@@ -542,7 +556,7 @@ class Phase6ExperimentRunner:
                 evaluation_start = selected_times[0]
                 evaluation_end = selected_times[-1]
                 result = run_multi_asset(
-                    observations,
+                    prepared_observations,
                     universe,
                     strategy,
                     request.initial_cash,
