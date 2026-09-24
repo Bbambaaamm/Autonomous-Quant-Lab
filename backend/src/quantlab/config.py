@@ -62,8 +62,7 @@ class Settings(BaseSettings):
             or self.market_job_min_available_mb < 512
             or self.market_job_min_cgroup_headroom_mb < 256
             or self.research_job_min_available_mb < self.market_job_min_available_mb
-            or self.research_job_min_cgroup_headroom_mb
-            < self.market_job_min_cgroup_headroom_mb
+            or self.research_job_min_cgroup_headroom_mb < self.market_job_min_cgroup_headroom_mb
         ):
             raise ValueError("Resource guard limity nejsou platné")
         if (
