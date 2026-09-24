@@ -7,8 +7,6 @@ from datetime import UTC, datetime
 
 from sqlalchemy.orm import Session
 
-from quantlab.phase4 import AuditEventRecord
-
 
 @dataclass(frozen=True)
 class ControlAudit:
@@ -33,7 +31,11 @@ def add_control_audit(
     entity_id: str,
     *,
     timestamp: datetime | None = None,
-) -> AuditEventRecord:
+) -> object:
+    # Local import keeps this primitive usable from phase4 itself without
+    # creating a module-import cycle.
+    from quantlab.phase4 import AuditEventRecord
+
     identity = hashlib.sha256(
         json.dumps(
             [
