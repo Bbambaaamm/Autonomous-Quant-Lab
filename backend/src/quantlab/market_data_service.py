@@ -338,8 +338,7 @@ class PersistentMarketDataService:
                     )
                     .join(
                         CorporateActionEventAuditRecord,
-                        CorporateActionEventAuditRecord.event_id
-                        == CorporateActionEventRecord.event_id,
+                        CorporateActionEventAuditRecord.event_id == CorporateActionEventRecord.event_id,
                     )
                     .where(
                         CorporateActionEventRecord.provider == scope.provider,
@@ -389,8 +388,7 @@ class PersistentMarketDataService:
                 select(CorporateActionEventRecord, CorporateActionEventAuditRecord)
                 .join(
                     CorporateActionEventAuditRecord,
-                    CorporateActionEventAuditRecord.event_id
-                    == CorporateActionEventRecord.event_id,
+                    CorporateActionEventAuditRecord.event_id == CorporateActionEventRecord.event_id,
                 )
                 .where(CorporateActionEventRecord.provider == provider)
                 .order_by(
