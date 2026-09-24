@@ -941,13 +941,24 @@ def operator_monitoring_enrollment(
 ) -> dict[str, object]:
     try:
         now = datetime.now(UTC)
-        row = monitoring_service.enroll(body.deployment_id, body.policy_id, now)
+        correlation_id = _correlation(request)
+        row = monitoring_service.enroll(
+            body.deployment_id,
+            body.policy_id,
+            now,
+            audit=_control_audit(
+                request,
+                "CONTROL_MONITORING_ENROLLED",
+                "monitoring",
+                body.reason,
+                correlation_id=correlation_id,
+            ),
+        )
         with session_factory() as session:
             deployment = session.get(StrategyDeploymentRecord, row.deployment_id)
             if deployment is None:
                 raise DatasetInvalid("Monitoring deployment lineage neexistuje")
             account_id = deployment.paper_account_id
-        correlation_id = _correlation(request)
         monitoring_job = automation_repository.ensure_monitoring_job(
             monitoring_id=row.monitoring_id,
             account_id=account_id,
@@ -959,14 +970,6 @@ def operator_monitoring_enrollment(
                 body.reason,
                 correlation_id=correlation_id,
             ),
-        )
-        _audit_control_mutation(
-            "CONTROL_MONITORING_ENROLLED",
-            "monitoring",
-            row.monitoring_id,
-            _actor(request),
-            body.reason,
-            correlation_id,
         )
         result = _row(row)
         result["monitoring_job"] = _row(monitoring_job)
@@ -990,14 +993,16 @@ def create_operator_monitoring_policy(
     body: OperatorMonitoringPolicyCreate, request: Request
 ) -> dict[str, object]:
     try:
-        row = monitoring_service.create_policy(body.name, body.config, datetime.now(UTC))
-        _audit_control_mutation(
-            "CONTROL_MONITORING_POLICY_CREATED",
-            "monitoring_policy",
-            row.policy_id,
-            _actor(request),
-            body.reason,
-            _correlation(request),
+        row = monitoring_service.create_policy(
+            body.name,
+            body.config,
+            datetime.now(UTC),
+            audit=_control_audit(
+                request,
+                "CONTROL_MONITORING_POLICY_CREATED",
+                "monitoring_policy",
+                body.reason,
+            ),
         )
         return _row(row)
     except ValueError as exc:
@@ -1076,11 +1081,21 @@ def monitoring_evaluations(
 
 
 def _transition_monitoring(
-    monitoring_id: str, target: MonitoringState, request: MonitoringTransition
+    monitoring_id: str,
+    target: MonitoringState,
+    request: MonitoringTransition,
+    *,
+    audit: ControlAudit | None = None,
 ) -> dict[str, object]:
     try:
         return _row(
-            monitoring_service.transition(monitoring_id, target, request.reason, datetime.now(UTC))
+            monitoring_service.transition(
+                monitoring_id,
+                target,
+                request.reason,
+                datetime.now(UTC),
+                audit=audit,
+            )
         )
     except (ValueError, RuntimeError) as exc:
         raise HTTPException(409, str(exc)) from exc
@@ -1114,16 +1129,17 @@ def operator_monitoring_transition(
     target = targets.get(action)
     if target is None:
         raise HTTPException(404, "Monitoring transition není podporována")
-    result = _transition_monitoring(monitoring_id, target, body)
-    _audit_control_mutation(
-        f"CONTROL_MONITORING_{action.upper()}",
-        "monitoring",
+    return _transition_monitoring(
         monitoring_id,
-        _actor(request),
-        body.reason,
-        _correlation(request),
+        target,
+        body,
+        audit=_control_audit(
+            request,
+            f"CONTROL_MONITORING_{action.upper()}",
+            "monitoring",
+            body.reason,
+        ),
     )
-    return result
 
 
 @app.get("/paper/deployments/{deployment_id}/performance")
