@@ -234,7 +234,6 @@ def test_staging_deploy_is_pull_only_and_schema_backup_bounded() -> None:
     assert 'if [ -f "$CONFIG/deploy.hold" ]; then' in deploy
 
 
-
 def test_staging_soak_checker_accepts_stable_24h_and_rejects_rss_limit(tmp_path: Path) -> None:
     repository = Path(__file__).parents[2]
     checker = repository / "scripts/staging-soak-check.py"
@@ -289,6 +288,5 @@ def test_staging_soak_checker_accepts_stable_24h_and_rejects_rss_limit(tmp_path:
     )
     assert rejected.returncode != 0
     assert any(
-        reason.startswith("RSS_LIMIT:listener")
-        for reason in json.loads(rejected.stdout)["reasons"]
+        reason.startswith("RSS_LIMIT:listener") for reason in json.loads(rejected.stdout)["reasons"]
     )
