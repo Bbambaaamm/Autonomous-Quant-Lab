@@ -140,7 +140,9 @@ def test_phase6_snapshot_verification_stays_batched_and_copy_bounded() -> None:
     assert "snapshot_load_batch_size = 1000" in runner_segment
     assert "range(0, len(entries), self.snapshot_load_batch_size)" in runner_segment
     assert "canonical_snapshot_content_hash(immutable_content)" in runner_segment
-    assert "[item for item in observations if item.timestamp <= evaluation_end]" not in runner_segment
+    assert (
+        "[item for item in observations if item.timestamp <= evaluation_end]" not in runner_segment
+    )
     assert "evaluation_end=evaluation_end" in runner_segment
     assert "encoder.iterencode(value)" in service_source
 

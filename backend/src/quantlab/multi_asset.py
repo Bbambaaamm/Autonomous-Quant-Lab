@@ -284,6 +284,8 @@ class PreparedSnapshotObservations:
 def prepare_snapshot_pinned_observations(
     observations: Sequence[Observation] | PreparedSnapshotObservations,
 ) -> PreparedSnapshotObservations:
+    if isinstance(observations, PreparedSnapshotObservations):
+        return observations
     ordered = tuple(
         sorted(
             observations,
@@ -316,7 +318,7 @@ def prepare_snapshot_pinned_observations(
 
 
 def run_multi_asset(
-    observations: Sequence[Observation],
+    observations: Sequence[Observation] | PreparedSnapshotObservations,
     universe: PointInTimeUniverse,
     strategy: PortfolioStrategy,
     initial_cash: Decimal = Decimal("100000"),
@@ -352,6 +354,7 @@ def run_multi_asset(
     activation_rows: Sequence[Observation] = ()
     latest_by_key: dict[tuple[str, datetime], Observation] = {}
     history_times: dict[str, list[datetime]] = {}
+    ordered_observations: Sequence[Observation]
 
     if pinned:
         prepared = (
@@ -392,6 +395,16 @@ def run_multi_asset(
         )
 
     activation_index = 0
+
+    portfolio = MultiAssetPortfolio(initial_cash)
+    pending: TargetPortfolio | None = None
+    fills: list[MultiAssetFill] = []
+    decisions: list[tuple[datetime, TargetPortfolio]] = []
+    equity: list[tuple[datetime, Decimal]] = []
+    exposure: list[tuple[datetime, Decimal]] = []
+    last_rebalance: datetime | None = None
+    last_prices: dict[str, tuple[Decimal, int]] = {}
+    excluded: dict[str, str] = {}
 
     ordered_actions = sorted(
         corporate_actions, key=lambda action: (action.effective_at, action.action_id)
@@ -536,9 +549,7 @@ def run_multi_asset(
                 else:
                     known_times = history_times.get(instrument, ())
                     tail_times = known_times[-strategy.required_lookback :]
-                    bars = tuple(
-                        latest_by_key[(instrument, timestamp)] for timestamp in tail_times
-                    )
+                    bars = tuple(latest_by_key[(instrument, timestamp)] for timestamp in tail_times)
                 causal_history[instrument] = bars
                 adjusted = causal_adjusted_close(
                     bars, actions_by_instrument.get(instrument, ()), when

@@ -536,14 +536,14 @@ class Phase6ExperimentRunner:
             currencies: dict[str, str] = {}
             ordered_instrument_ids = sorted(instrument_ids)
             for offset in range(0, len(ordered_instrument_ids), self.snapshot_load_batch_size):
-                rows = session.scalars(
+                instrument_rows = session.scalars(
                     select(InstrumentRecord).where(
                         InstrumentRecord.instrument_id.in_(
                             ordered_instrument_ids[offset : offset + self.snapshot_load_batch_size]
                         )
                     )
                 )
-                currencies.update((row.instrument_id, row.currency) for row in rows)
+                currencies.update((row.instrument_id, row.currency) for row in instrument_rows)
             if set(currencies) != instrument_ids:
                 raise DatasetInvalid("Snapshot odkazuje na chybějící instrument metadata")
 
