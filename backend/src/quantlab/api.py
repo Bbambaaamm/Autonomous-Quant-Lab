@@ -874,15 +874,13 @@ def schedule_deployment_job(
     try:
         job = automation_repository.create_deployment_job(
             deployment_id=deployment_id,
+            audit=_control_audit(
+                request,
+                "CONTROL_PAPER_DEPLOYMENT_JOB_SCHEDULED",
+                "scheduled_job",
+                body.reason,
+            ),
             **body.model_dump(exclude={"reason"}),
-        )
-        _audit_control_mutation(
-            "CONTROL_PAPER_DEPLOYMENT_JOB_SCHEDULED",
-            "scheduled_job",
-            job.id,
-            _actor(request),
-            body.reason,
-            _correlation(request),
         )
         return _row(job)
     except KeyError as exc:
@@ -919,17 +917,16 @@ def _set_autonomous_deployment(
                     "CORPORATE_ACTIONS_UNSUPPORTED: production provider není způsobilý pro equity autonomous pilot"
                 )
         job = automation_repository.set_autonomous_deployment(
-            deployment_id=deployment_id, enabled=enabled
-        )
-        _audit_control_mutation(
-            "CONTROL_AUTONOMOUS_SCHEDULE_ENABLED"
-            if enabled
-            else "CONTROL_AUTONOMOUS_SCHEDULE_DISABLED",
-            "scheduled_job",
-            job.id,
-            _actor(request),
-            body.reason,
-            _correlation(request),
+            deployment_id=deployment_id,
+            enabled=enabled,
+            audit=_control_audit(
+                request,
+                "CONTROL_AUTONOMOUS_SCHEDULE_ENABLED"
+                if enabled
+                else "CONTROL_AUTONOMOUS_SCHEDULE_DISABLED",
+                "scheduled_job",
+                body.reason,
+            ),
         )
         return _row(job)
     except KeyError as exc:
@@ -950,24 +947,23 @@ def operator_monitoring_enrollment(
             if deployment is None:
                 raise DatasetInvalid("Monitoring deployment lineage neexistuje")
             account_id = deployment.paper_account_id
+        correlation_id = _correlation(request)
         monitoring_job = automation_repository.ensure_monitoring_job(
             monitoring_id=row.monitoring_id,
             account_id=account_id,
             now=now,
+            audit=_control_audit(
+                request,
+                "CONTROL_MONITORING_JOB_ENSURED",
+                "scheduled_job",
+                body.reason,
+                correlation_id=correlation_id,
+            ),
         )
-        correlation_id = _correlation(request)
         _audit_control_mutation(
             "CONTROL_MONITORING_ENROLLED",
             "monitoring",
             row.monitoring_id,
-            _actor(request),
-            body.reason,
-            correlation_id,
-        )
-        _audit_control_mutation(
-            "CONTROL_MONITORING_JOB_ENSURED",
-            "scheduled_job",
-            monitoring_job.id,
             _actor(request),
             body.reason,
             correlation_id,
@@ -1752,14 +1748,12 @@ def operator_market_catalog_schedule(body: ReasonedMutation, request: Request) -
         next_run_at=datetime.now(UTC),
         max_attempts=3,
         config={},
-    )
-    _audit_control_mutation(
-        "CONTROL_CATALOG_SCHEDULED",
-        "scheduled_job",
-        job.id,
-        _actor(request),
-        body.reason,
-        _correlation(request),
+        audit=_control_audit(
+            request,
+            "CONTROL_CATALOG_SCHEDULED",
+            "scheduled_job",
+            body.reason,
+        ),
     )
     return {"job_id": job.id, "enabled": job.enabled}
 
@@ -1882,14 +1876,18 @@ def operator_market_job_control(body: MarketJobControl, request: Request) -> dic
             raise HTTPException(409, "Identita úlohy neodpovídá datovému sběru")
         job.enabled = body.enabled
         job.updated_at = datetime.now(UTC)
-    _audit_control_mutation(
-        "CONTROL_MARKET_JOB_ENABLED" if body.enabled else "CONTROL_MARKET_JOB_DISABLED",
-        "scheduled_job",
-        body.job_id,
-        _actor(request),
-        body.reason,
-        _correlation(request),
-    )
+        add_control_audit(
+            session,
+            _control_audit(
+                request,
+                "CONTROL_MARKET_JOB_ENABLED"
+                if body.enabled
+                else "CONTROL_MARKET_JOB_DISABLED",
+                "scheduled_job",
+                body.reason,
+            ),
+            body.job_id,
+        )
     return {"job_id": body.job_id, "enabled": body.enabled}
 
 
