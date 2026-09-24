@@ -3,6 +3,7 @@ import json
 from datetime import UTC, datetime, timedelta
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import func, select
@@ -166,6 +167,73 @@ def setup(tmp_path):  # type: ignore[no-untyped-def]
         retry_base_delay=3,
         retry_max_delay=20,
     )
+
+
+def test_market_price_job_runs_in_fixed_one_shot_child(tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    repository, _ = setup(tmp_path)
+    observed: dict[str, object] = {}
+
+    def fake_run(args, **kwargs):  # type: ignore[no-untyped-def]
+        observed["args"] = args
+        observed.update(kwargs)
+        return SimpleNamespace(
+            returncode=0,
+            stdout='{"outcome":"MARKET_DATA_TASK_PROCESSED","trading_cycle_id":null}\n',
+            stderr="",
+        )
+
+    monkeypatch.setattr("quantlab.automation.subprocess.run", fake_run)
+    executor = JobExecutor(repository)
+    run = JobRun(
+        config_snapshot_json=json.dumps(
+            {
+                "snapshot_version": 1,
+                "identity": {
+                    "account_id": "paper-main",
+                    "job_type": JobType.SYNC_MARKET_PRICE_TASK,
+                    "strategy_id": None,
+                },
+                "config": {},
+            }
+        )
+    )
+
+    result = executor(ScheduledJob(), run)
+
+    assert observed["args"][1:] == ["-m", "quantlab.market_task_worker"]
+    assert observed["shell"] if "shell" in observed else False is False
+    assert observed["timeout"] == 540
+    assert observed["capture_output"] is True
+    assert result == {
+        "outcome": "MARKET_DATA_TASK_PROCESSED",
+        "trading_cycle_id": None,
+    }
+
+
+def test_market_price_child_timeout_is_retryable(tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    repository, _ = setup(tmp_path)
+
+    def timeout(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        import subprocess
+
+        raise subprocess.TimeoutExpired(["python", "-m", "quantlab.market_task_worker"], 540)
+
+    monkeypatch.setattr("quantlab.automation.subprocess.run", timeout)
+    run = JobRun(
+        config_snapshot_json=json.dumps(
+            {
+                "snapshot_version": 1,
+                "identity": {
+                    "account_id": "paper-main",
+                    "job_type": JobType.SYNC_MARKET_PRICE_TASK,
+                    "strategy_id": None,
+                },
+                "config": {},
+            }
+        )
+    )
+    with pytest.raises(Exception, match="MARKET_TASK_PROCESS_TIMEOUT"):
+        JobExecutor(repository)(ScheduledJob(), run)
 
 
 def test_scheduler_is_idempotent_and_advances_without_drift(tmp_path) -> None:  # type: ignore[no-untyped-def]
