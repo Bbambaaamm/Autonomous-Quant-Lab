@@ -125,6 +125,25 @@ class CorporateActionEventRecord(Base):
     action: Mapped[str] = mapped_column(String(10), nullable=False)
     provider_action_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
     payload_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    __table_args__ = (
+        Index(
+            "ix_corporate_action_events_provider_occurred_event",
+            "provider",
+            "occurred_at",
+            "event_id",
+        ),
+    )
+
+
+class CorporateActionEventCursorRecord(Base):
+    """Mutable transport cursor; immutable event receipts remain the source evidence."""
+
+    __tablename__ = "corporate_action_event_cursors"
+    provider: Mapped[str] = mapped_column(String(40), primary_key=True)
+    last_event_id: Mapped[str] = mapped_column(
+        ForeignKey("corporate_action_events.event_id", ondelete="RESTRICT"), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
 class CorporateActionReadinessRecord(Base):
