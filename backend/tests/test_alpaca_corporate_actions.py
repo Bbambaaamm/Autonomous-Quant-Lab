@@ -1,4 +1,5 @@
 import json
+import logging
 import urllib.parse
 from collections.abc import Callable
 from datetime import UTC, date, datetime
@@ -7,7 +8,9 @@ from typing import Any
 
 import pytest
 
+import quantlab.alpaca_event_worker as event_worker
 from quantlab.alpaca_sse import AlpacaCorporateActionStream
+from quantlab.config import Settings
 from quantlab.market_data import (
     AlpacaProvider,
     CorporateActionEvent,
@@ -638,6 +641,67 @@ def test_alpaca_sse_reconnect_uses_last_event_id_and_skips_inclusive_replay() ->
     assert stored[1].received_at == datetime(2026, 8, 29, 18, tzinfo=UTC)
     assert "Last-Event-Id" not in headers_seen[0]
     assert headers_seen[1]["Last-Event-Id"] == "e-1"
+
+
+def test_alpaca_event_worker_startup_uses_cursor_not_full_history(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = type("Engine", (), {"dispose": lambda self: None})()
+    cursors: list[str | None] = []
+
+    class Service:
+        def latest_corporate_action_event_id(self, provider: str) -> str | None:
+            assert provider == "alpaca"
+            return "event-999"
+
+        def corporate_action_events(self, provider: str):  # type: ignore[no-untyped-def]
+            pytest.fail(f"full event history must not be loaded for startup: {provider}")
+
+        def record_corporate_action_event(self, provider, event):  # type: ignore[no-untyped-def]
+            return True
+
+    stream = type("Stream", (), {"run": lambda self, cursor: cursors.append(cursor)})()
+    monkeypatch.setattr(
+        event_worker,
+        "get_settings",
+        lambda: Settings(
+            market_data_provider="alpaca", alpaca_key_id="key", alpaca_secret_key="secret"
+        ),
+    )
+    monkeypatch.setattr(event_worker, "create_engine", lambda *args, **kwargs: engine)
+    monkeypatch.setattr(event_worker, "sessionmaker", lambda *args, **kwargs: object())
+    monkeypatch.setattr(event_worker, "PersistentMarketDataService", lambda factory: Service())
+    monkeypatch.setattr(event_worker, "AlpacaCorporateActionStream", lambda *args, **kwargs: stream)
+
+    with pytest.raises(ProviderUnavailable, match="vyčerpal povolené reconnect pokusy"):
+        event_worker.main()
+
+    assert cursors == ["event-999"]
+
+
+def test_alpaca_event_listener_telemetry_is_bounded_and_observable() -> None:
+    ticks = iter((10.0, 11.0, 16.0))
+    telemetry = event_worker._ListenerTelemetry(
+        logging.getLogger("test.alpaca.telemetry"),
+        monotonic=lambda: next(ticks),
+        cpu_clock=lambda: 2.5,
+        rss_reader=lambda: 123,
+        peak_reader=lambda: 456,
+    )
+    telemetry.record_received()
+    telemetry.record_result(True)
+    telemetry.record_received()
+    telemetry.record_result(False)
+
+    assert telemetry.snapshot() == {
+        "rss_current_kib": 123,
+        "rss_peak_kib": 456,
+        "cpu_seconds": 2.5,
+        "events_received": 2,
+        "events_written": 1,
+        "events_duplicate": 1,
+        "idle_seconds": 5.0,
+    }
 
 
 def test_alpaca_sse_old_duplicate_does_not_move_cursor_backwards() -> None:
