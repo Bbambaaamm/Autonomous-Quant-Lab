@@ -11,8 +11,8 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import DateTime, ForeignKey, Index, String, Text, func, select
-from sqlalchemy.orm import Mapped, Session, mapped_column
+from sqlalchemy import DateTime, ForeignKey, Index, Integer, String, Text, func, select
+from sqlalchemy.orm import Mapped, Session, aliased, mapped_column
 
 from quantlab.config import Settings
 from quantlab.domain import require_utc
@@ -56,6 +56,28 @@ class AssetDirectoryEntry(Base):
     status: Mapped[str] = mapped_column(String(16))
     payload_json: Mapped[str] = mapped_column(Text)
     __table_args__ = (Index("ix_asset_directory_entries_status", "snapshot_id", "status"),)
+
+
+class AssetDirectorySnapshotMetric(Base):
+    """Immutable read model pro O(1) dashboard summary asset directory."""
+
+    __tablename__ = "asset_directory_snapshot_metrics"
+    snapshot_id: Mapped[str] = mapped_column(
+        ForeignKey("asset_directory_snapshots.snapshot_id", ondelete="RESTRICT"),
+        primary_key=True,
+    )
+    previous_snapshot_id: Mapped[str | None] = mapped_column(
+        ForeignKey("asset_directory_snapshots.snapshot_id", ondelete="RESTRICT")
+    )
+    total: Mapped[int] = mapped_column(Integer, nullable=False)
+    active: Mapped[int] = mapped_column(Integer, nullable=False)
+    inactive: Mapped[int] = mapped_column(Integer, nullable=False)
+    first_seen: Mapped[int] = mapped_column(Integer, nullable=False)
+    no_longer_present: Mapped[int] = mapped_column(Integer, nullable=False)
+    symbol_or_venue_changed: Mapped[int] = mapped_column(Integer, nullable=False)
+    status_changed: Mapped[int] = mapped_column(Integer, nullable=False)
+    became_inactive: Mapped[int] = mapped_column(Integer, nullable=False)
+    became_active: Mapped[int] = mapped_column(Integer, nullable=False)
 
 
 def parse_assets(body: bytes) -> list[dict[str, str]]:
@@ -170,7 +192,116 @@ class AssetDirectoryService:
             )
             session.flush()
             session.add_all(AssetDirectoryEntry(snapshot_id=identity, **row) for row in rows)
+            session.flush()
+            previous = session.scalar(
+                select(AssetDirectorySnapshot)
+                .where(
+                    AssetDirectorySnapshot.received_at < received,
+                    AssetDirectorySnapshot.snapshot_id != identity,
+                )
+                .order_by(AssetDirectorySnapshot.received_at.desc())
+                .limit(1)
+            )
+            session.add(
+                self._summary_metric(
+                    session,
+                    identity,
+                    previous.snapshot_id if previous is not None else None,
+                    rows,
+                )
+            )
         return identity
+
+    @staticmethod
+    def _summary_metric(
+        session: Session,
+        snapshot_id: str,
+        previous_snapshot_id: str | None,
+        parsed_rows: list[dict[str, str]],
+    ) -> AssetDirectorySnapshotMetric:
+        total = len(parsed_rows)
+        active = sum(row["status"] == "active" for row in parsed_rows)
+        inactive = total - active
+        if previous_snapshot_id is None:
+            return AssetDirectorySnapshotMetric(
+                snapshot_id=snapshot_id,
+                previous_snapshot_id=None,
+                total=total,
+                active=active,
+                inactive=inactive,
+                first_seen=total,
+                no_longer_present=0,
+                symbol_or_venue_changed=0,
+                status_changed=0,
+                became_inactive=0,
+                became_active=0,
+            )
+
+        current = aliased(AssetDirectoryEntry)
+        previous = aliased(AssetDirectoryEntry)
+        first_seen = session.scalar(
+            select(func.count())
+            .select_from(current)
+            .outerjoin(
+                previous,
+                (previous.snapshot_id == previous_snapshot_id)
+                & (previous.asset_id == current.asset_id),
+            )
+            .where(current.snapshot_id == snapshot_id, previous.asset_id.is_(None))
+        )
+        no_longer = session.scalar(
+            select(func.count())
+            .select_from(previous)
+            .outerjoin(
+                current,
+                (current.snapshot_id == snapshot_id) & (current.asset_id == previous.asset_id),
+            )
+            .where(previous.snapshot_id == previous_snapshot_id, current.asset_id.is_(None))
+        )
+        changed = session.execute(
+            select(
+                func.sum(
+                    func.cast(
+                        (current.symbol != previous.symbol)
+                        | (current.exchange != previous.exchange),
+                        Integer,
+                    )
+                ),
+                func.sum(func.cast(current.status != previous.status, Integer)),
+                func.sum(
+                    func.cast(
+                        (previous.status == "active") & (current.status == "inactive"),
+                        Integer,
+                    )
+                ),
+                func.sum(
+                    func.cast(
+                        (previous.status == "inactive") & (current.status == "active"),
+                        Integer,
+                    )
+                ),
+            )
+            .select_from(current)
+            .join(
+                previous,
+                (previous.snapshot_id == previous_snapshot_id)
+                & (previous.asset_id == current.asset_id),
+            )
+            .where(current.snapshot_id == snapshot_id)
+        ).one()
+        return AssetDirectorySnapshotMetric(
+            snapshot_id=snapshot_id,
+            previous_snapshot_id=previous_snapshot_id,
+            total=total,
+            active=active,
+            inactive=inactive,
+            first_seen=int(first_seen or 0),
+            no_longer_present=int(no_longer or 0),
+            symbol_or_venue_changed=int(changed[0] or 0),
+            status_changed=int(changed[1] or 0),
+            became_inactive=int(changed[2] or 0),
+            became_active=int(changed[3] or 0),
+        )
 
     def latest(self, now: datetime) -> dict[str, Any]:
         with self.sessions() as session:
@@ -182,75 +313,34 @@ class AssetDirectoryService:
             )
             if row is None:
                 return {"snapshot_id": None, "received_at": None}
-            total = session.scalar(
-                select(func.count())
-                .select_from(AssetDirectoryEntry)
-                .where(AssetDirectoryEntry.snapshot_id == row.snapshot_id)
-            )
-            active = session.scalar(
-                select(func.count())
-                .select_from(AssetDirectoryEntry)
-                .where(
-                    AssetDirectoryEntry.snapshot_id == row.snapshot_id,
-                    AssetDirectoryEntry.status == "active",
-                )
-            )
-            inactive = session.scalar(
-                select(func.count())
-                .select_from(AssetDirectoryEntry)
-                .where(
-                    AssetDirectoryEntry.snapshot_id == row.snapshot_id,
-                    AssetDirectoryEntry.status == "inactive",
-                )
-            )
-            previous = session.scalar(
-                select(AssetDirectorySnapshot)
-                .where(AssetDirectorySnapshot.received_at < row.received_at)
-                .order_by(AssetDirectorySnapshot.received_at.desc())
-                .limit(1)
-            )
-            changes = None
-            if previous is not None:
-                current = {
-                    r.asset_id: (r.symbol, r.exchange, r.status)
-                    for r in session.scalars(
-                        select(AssetDirectoryEntry).where(
-                            AssetDirectoryEntry.snapshot_id == row.snapshot_id
-                        )
+            metric = session.get(AssetDirectorySnapshotMetric, row.snapshot_id)
+            if metric is None:
+                raise CatalogError("ASSET_DIRECTORY_SUMMARY_MISSING")
+            previous_received_at = None
+            if metric.previous_snapshot_id is not None:
+                previous_received_at = session.scalar(
+                    select(AssetDirectorySnapshot.received_at).where(
+                        AssetDirectorySnapshot.snapshot_id == metric.previous_snapshot_id
                     )
+                )
+            changes = (
+                {
+                    "first_seen": metric.first_seen,
+                    "no_longer_present": metric.no_longer_present,
+                    "symbol_or_venue_changed": metric.symbol_or_venue_changed,
+                    "status_changed": metric.status_changed,
+                    "became_inactive": metric.became_inactive,
+                    "became_active": metric.became_active,
+                    "previous_received_at": previous_received_at,
                 }
-                before = {
-                    r.asset_id: (r.symbol, r.exchange, r.status)
-                    for r in session.scalars(
-                        select(AssetDirectoryEntry).where(
-                            AssetDirectoryEntry.snapshot_id == previous.snapshot_id
-                        )
-                    )
-                }
-                changes = {
-                    "first_seen": len(current.keys() - before.keys()),
-                    "no_longer_present": len(before.keys() - current.keys()),
-                    "symbol_or_venue_changed": sum(
-                        current[k][:2] != before[k][:2] for k in current.keys() & before.keys()
-                    ),
-                    "status_changed": sum(
-                        current[k][2] != before[k][2] for k in current.keys() & before.keys()
-                    ),
-                    "became_inactive": sum(
-                        before[k][2] == "active" and current[k][2] == "inactive"
-                        for k in current.keys() & before.keys()
-                    ),
-                    "became_active": sum(
-                        before[k][2] == "inactive" and current[k][2] == "active"
-                        for k in current.keys() & before.keys()
-                    ),
-                    "previous_received_at": previous.received_at,
-                }
+                if metric.previous_snapshot_id is not None
+                else None
+            )
             return {
                 "snapshot_id": row.snapshot_id,
                 "received_at": row.received_at,
-                "total": total,
-                "active": active,
-                "inactive": inactive,
+                "total": metric.total,
+                "active": metric.active,
+                "inactive": metric.inactive,
                 "changes": changes,
             }
