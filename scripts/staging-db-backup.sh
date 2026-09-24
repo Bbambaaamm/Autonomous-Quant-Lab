@@ -33,9 +33,7 @@ test -s "$tmp"
 mv "$tmp" "$target"
 sha256sum "$target" > "$target.sha256"
 
-find "$backup_dir" -type f -name "$prefix-*.dump" -mtime +"$retention_days" -print0 |
-while IFS= read -r -d '' old; do
-  rm -f "$old" "$old.sha256"
-done
+find "$backup_dir" -type f -name "$prefix-*.dump" -mtime +"$retention_days" \
+  -exec sh -c 'for old do rm -f "$old" "$old.sha256"; done' sh {} +
 
 printf '%s\n' "$target"
