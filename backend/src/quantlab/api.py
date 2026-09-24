@@ -646,15 +646,17 @@ def ingest_market_data(body: IngestionCreate, request: Request) -> dict[str, obj
         )
     provider = build_market_data_provider(settings, paper_repository.engine, instrument=instrument)
     result = market_data_service.ingest(
-        provider, instrument, body.start, body.end, datetime.now(UTC)
-    )
-    _audit_control_mutation(
-        "CONTROL_MARKET_DATA_INGESTED",
-        "market_data_ingestion",
-        result.ingestion_id,
-        _actor(request),
-        body.reason,
-        _correlation(request),
+        provider,
+        instrument,
+        body.start,
+        body.end,
+        datetime.now(UTC),
+        audit=_control_audit(
+            request,
+            "CONTROL_MARKET_DATA_INGESTED",
+            "market_data_ingestion",
+            body.reason,
+        ),
     )
     # HTTPException detail obchází Pydantic response serializaci; proto zde datumy
     # převádíme explicitně a deterministicky, stejně jako úspěšná JSON response.
@@ -674,14 +676,12 @@ def build_dataset(body: SnapshotCreate, request: Request) -> dict[str, object]:
             start=body.start,
             end=body.end,
             minimum_coverage=body.minimum_coverage,
-        )
-        _audit_control_mutation(
-            "CONTROL_DATASET_BUILT",
-            "dataset_snapshot",
-            snapshot.snapshot_id,
-            _actor(request),
-            body.reason,
-            _correlation(request),
+            audit=_control_audit(
+                request,
+                "CONTROL_DATASET_BUILT",
+                "dataset_snapshot",
+                body.reason,
+            ),
         )
         if snapshot.status != "VALID":
             raise HTTPException(
