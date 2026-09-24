@@ -8,7 +8,7 @@ from uuid import uuid4
 
 import pytest
 from phase6_audit_helpers import CALENDAR, MappingProvider, daily_bar
-from sqlalchemy import func, select
+from sqlalchemy import event, func, select
 from sqlalchemy.orm import sessionmaker
 from test_phase7_e2e_postgres import _economic_counts, _execution_service
 from test_phase7_postgres import _completed_as_of, _executed_monitoring
@@ -16,7 +16,7 @@ from test_phase7_postgres import _completed_as_of, _executed_monitoring
 from quantlab.domain import Bar
 from quantlab.market_data import CorporateActionKind, DatasetInvalid
 from quantlab.market_data_service import PersistentMarketDataService
-from quantlab.persistence import CorporateActionRecord, MarketObservationRecord
+from quantlab.persistence import CorporateActionRecord, InstrumentRecord, MarketObservationRecord
 from quantlab.phase4 import (
     PaperAccountRecord,
     PaperFillRecord,
@@ -86,6 +86,84 @@ def _next_account_session(factory, account_id: str, after: date) -> date:
     with factory() as session:
         created_day = session.get(PaperAccountRecord, account_id).created_at.date()
     return CALENDAR.next_session(max(after, created_day))
+
+
+def test_account_scoped_apply_ignores_global_history_and_avoids_n_plus_one(factory) -> None:
+    account, _deployment, _run, instrument = _executed_monitoring(factory)
+    effective = datetime.now(UTC) + timedelta(seconds=1)
+    relevant_ids = [
+        _action(
+            factory,
+            instrument.instrument_id,
+            CorporateActionKind.CASH_DIVIDEND,
+            effective + timedelta(seconds=index),
+            effective + timedelta(seconds=index),
+            "0.01",
+        )
+        for index in range(5)
+    ]
+
+    unrelated_id = f"unrelated-{uuid4().hex}"
+    with factory() as session, session.begin():
+        session.add(
+            InstrumentRecord(
+                instrument_id=unrelated_id,
+                symbol=f"U{uuid4().hex[:7]}",
+                exchange="XNYS",
+                calendar="XNYS",
+                currency="USD",
+                asset_type="EQUITY",
+                active_from=datetime(2020, 1, 1, tzinfo=UTC),
+                active_to=None,
+                created_at=datetime(2020, 1, 1, tzinfo=UTC),
+            )
+        )
+        session.flush()
+        for index in range(100):
+            session.add(
+                CorporateActionRecord(
+                    action_id=f"global-{index}-{uuid4().hex}",
+                    instrument_id=unrelated_id,
+                    kind=CorporateActionKind.CASH_DIVIDEND,
+                    effective_at=effective,
+                    known_at=effective,
+                    value="1",
+                    new_symbol=None,
+                )
+            )
+
+    statements: list[str] = []
+    engine = factory.kw["bind"]
+
+    def capture(_conn, _cursor, statement, _parameters, _context, _executemany):  # type: ignore[no-untyped-def]
+        if statement.lstrip().upper().startswith("SELECT"):
+            statements.append(statement.lower())
+
+    event.listen(engine, "before_cursor_execute", capture)
+    try:
+        applied = PaperCorporateActionService(factory).apply(
+            account, effective + timedelta(seconds=10)
+        )
+    finally:
+        event.remove(engine, "before_cursor_execute", capture)
+
+    assert {row.action_id for row in applied} == set(relevant_ids)
+    assert sum("paper_fills" in statement for statement in statements) == 1
+    assert (
+        sum("paper_orders" in statement and "distinct" in statement for statement in statements)
+        == 1
+    )
+
+    statements.clear()
+    event.listen(engine, "before_cursor_execute", capture)
+    try:
+        assert (
+            PaperCorporateActionService(factory).apply(account, effective + timedelta(seconds=11))
+            == ()
+        )
+    finally:
+        event.remove(engine, "before_cursor_execute", capture)
+    assert not any("paper_fills" in statement for statement in statements)
 
 
 def test_late_known_corporate_action_is_causal_and_exactly_once(factory) -> None:

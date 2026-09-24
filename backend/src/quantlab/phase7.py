@@ -19,6 +19,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    exists,
     func,
     select,
 )
@@ -259,7 +260,7 @@ def _entitled_quantity(
 
 
 class PaperCorporateActionService:
-    """Aplikuje kauzální corporate actions přímo na paper ledger, bez order/fill cesty."""
+    """Aplikuje kauzální corporate actions account-scoped a bez N+1 DB scanů."""
 
     def __init__(self, sessions: Callable[[], Session]) -> None:
         self.sessions = sessions
@@ -277,69 +278,123 @@ class PaperCorporateActionService:
             )
             if account is None:
                 raise DatasetInvalid("Paper účet neexistuje")
+
+            position_instruments = set(
+                session.scalars(
+                    select(PositionRecord.instrument_id).where(
+                        PositionRecord.account_id == account_id
+                    )
+                )
+            )
+            traded_instruments = set(
+                session.scalars(
+                    select(PaperOrderRecord.instrument_id)
+                    .where(PaperOrderRecord.account_id == account_id)
+                    .distinct()
+                )
+            )
+            relevant_instruments = tuple(sorted(position_instruments | traded_instruments))
+            if not relevant_instruments:
+                return ()
+
+            already_applied = exists(
+                select(PaperCorporateActionApplicationRecord.application_id).where(
+                    PaperCorporateActionApplicationRecord.account_id == account_id,
+                    PaperCorporateActionApplicationRecord.action_id
+                    == CorporateActionRecord.action_id,
+                )
+            )
             actions = tuple(
                 session.scalars(
                     select(CorporateActionRecord)
                     .where(
+                        CorporateActionRecord.instrument_id.in_(relevant_instruments),
                         CorporateActionRecord.known_at <= cutoff,
                         CorporateActionRecord.effective_at <= cutoff,
                         CorporateActionRecord.effective_at >= account.created_at,
+                        ~already_applied,
                     )
                     .order_by(CorporateActionRecord.effective_at, CorporateActionRecord.action_id)
                 )
             )
-            for action in actions:
-                existing = session.scalar(
-                    select(PaperCorporateActionApplicationRecord).where(
-                        PaperCorporateActionApplicationRecord.account_id == account_id,
-                        PaperCorporateActionApplicationRecord.action_id == action.action_id,
-                    )
-                )
-                if existing is not None:
-                    continue
-                position = session.scalar(
+            if not actions:
+                return ()
+
+            action_instruments = tuple(sorted({action.instrument_id for action in actions}))
+            positions = {
+                row.instrument_id: row
+                for row in session.scalars(
                     select(PositionRecord)
                     .where(
                         PositionRecord.account_id == account_id,
-                        PositionRecord.instrument_id == action.instrument_id,
+                        PositionRecord.instrument_id.in_(action_instruments),
                     )
                     .with_for_update()
                 )
-                fill_rows = tuple(
-                    session.execute(
-                        select(
-                            PaperFillRecord.timestamp,
-                            PaperFillRecord.quantity,
-                            PaperOrderRecord.side,
-                        )
-                        .join(PaperOrderRecord, PaperOrderRecord.id == PaperFillRecord.order_id)
-                        .where(
-                            PaperOrderRecord.account_id == account_id,
-                            PaperOrderRecord.instrument_id == action.instrument_id,
-                            PaperFillRecord.timestamp <= action.effective_at,
-                        )
-                    )
+            }
+
+            fills_by_instrument: dict[str, list[tuple[datetime, Decimal, str]]] = {}
+            for instrument_id, timestamp, quantity, side in session.execute(
+                select(
+                    PaperOrderRecord.instrument_id,
+                    PaperFillRecord.timestamp,
+                    PaperFillRecord.quantity,
+                    PaperOrderRecord.side,
                 )
-                applied_splits = tuple(
-                    session.execute(
-                        select(CorporateActionRecord.effective_at, CorporateActionRecord.value)
-                        .join(
-                            PaperCorporateActionApplicationRecord,
-                            PaperCorporateActionApplicationRecord.action_id
-                            == CorporateActionRecord.action_id,
-                        )
-                        .where(
-                            PaperCorporateActionApplicationRecord.account_id == account_id,
-                            CorporateActionRecord.instrument_id == action.instrument_id,
-                            CorporateActionRecord.kind == CorporateActionKind.SPLIT,
-                            CorporateActionRecord.effective_at <= action.effective_at,
-                        )
-                    )
+                .join(PaperOrderRecord, PaperOrderRecord.id == PaperFillRecord.order_id)
+                .where(
+                    PaperOrderRecord.account_id == account_id,
+                    PaperOrderRecord.instrument_id.in_(action_instruments),
+                    PaperFillRecord.timestamp <= cutoff,
                 )
-                historical_quantity = _entitled_quantity(
-                    [(timestamp, quantity, side) for timestamp, quantity, side in fill_rows],
-                    [(effective_at, value) for effective_at, value in applied_splits],
+                .order_by(PaperOrderRecord.instrument_id, PaperFillRecord.timestamp)
+            ):
+                fills_by_instrument.setdefault(instrument_id, []).append(
+                    (timestamp, quantity, side)
                 )
+
+            splits_by_instrument: dict[str, list[tuple[datetime, str | None]]] = {}
+            for instrument_id, effective_at, value in session.execute(
+                select(
+                    CorporateActionRecord.instrument_id,
+                    CorporateActionRecord.effective_at,
+                    CorporateActionRecord.value,
+                )
+                .join(
+                    PaperCorporateActionApplicationRecord,
+                    PaperCorporateActionApplicationRecord.action_id
+                    == CorporateActionRecord.action_id,
+                )
+                .where(
+                    PaperCorporateActionApplicationRecord.account_id == account_id,
+                    CorporateActionRecord.instrument_id.in_(action_instruments),
+                    CorporateActionRecord.kind == CorporateActionKind.SPLIT,
+                    CorporateActionRecord.effective_at <= cutoff,
+                )
+                .order_by(
+                    CorporateActionRecord.instrument_id,
+                    CorporateActionRecord.effective_at,
+                    CorporateActionRecord.action_id,
+                )
+            ):
+                splits_by_instrument.setdefault(instrument_id, []).append((effective_at, value))
+
+            monitoring_run: PaperMonitoringRunRecord | None = None
+            monitoring_loaded = False
+
+            for action in actions:
+                position = positions.get(action.instrument_id)
+                fill_rows = [
+                    item
+                    for item in fills_by_instrument.get(action.instrument_id, [])
+                    if _database_utc(item[0]) <= _database_utc(action.effective_at)
+                ]
+                applied_splits = [
+                    item
+                    for item in splits_by_instrument.get(action.instrument_id, [])
+                    if _database_utc(item[0]) <= _database_utc(action.effective_at)
+                ]
+                historical_quantity = _entitled_quantity(fill_rows, applied_splits)
                 if (
                     not fill_rows
                     and position is not None
@@ -349,6 +404,7 @@ class PaperCorporateActionService:
                 quantity = max(historical_quantity, Decimal(0))
                 kind = CorporateActionKind(action.kind)
                 effect: dict[str, object] = {"kind": kind, "eligible_quantity": quantity}
+
                 if kind is CorporateActionKind.SPLIT and position is not None:
                     ratio = Decimal(action.value or "0")
                     if ratio <= 0:
@@ -383,6 +439,9 @@ class PaperCorporateActionService:
                     )
                     position.updated_at = cutoff
                     effect.update({"ratio": ratio, "quantity_after": position.quantity})
+                    splits_by_instrument.setdefault(action.instrument_id, []).append(
+                        (action.effective_at, action.value)
+                    )
                 elif kind is CorporateActionKind.CASH_DIVIDEND:
                     dividend = Decimal(action.value or "0")
                     if dividend <= 0:
@@ -397,23 +456,26 @@ class PaperCorporateActionService:
                     and position is not None
                     and position.quantity
                 ):
-                    run = session.scalar(
-                        select(PaperMonitoringRunRecord)
-                        .where(
-                            PaperMonitoringRunRecord.paper_account_id == account_id,
-                            PaperMonitoringRunRecord.state.in_(OPEN_STATES),
+                    if not monitoring_loaded:
+                        monitoring_run = session.scalar(
+                            select(PaperMonitoringRunRecord)
+                            .where(
+                                PaperMonitoringRunRecord.paper_account_id == account_id,
+                                PaperMonitoringRunRecord.state.in_(OPEN_STATES),
+                            )
+                            .with_for_update()
                         )
-                        .with_for_update()
-                    )
-                    if run is not None:
-                        run.state = MonitoringState.SUSPENDED
-                        run.state_reason = "DELISTING_UNSUPPORTED"
-                        run.state_changed_at = cutoff
+                        monitoring_loaded = True
+                    if monitoring_run is not None:
+                        monitoring_run.state = MonitoringState.SUSPENDED
+                        monitoring_run.state_reason = "DELISTING_UNSUPPORTED"
+                        monitoring_run.state_changed_at = cutoff
                     effect["resolution"] = "SUSPENDED_NO_SYNTHETIC_FILL"
                 elif kind is CorporateActionKind.SYMBOL_CHANGE:
                     effect.update(
                         {"canonical_instrument_unchanged": True, "new_symbol": action.new_symbol}
                     )
+
                 row = PaperCorporateActionApplicationRecord(
                     application_id=identity(
                         {"account_id": account_id, "action_id": action.action_id}
@@ -427,6 +489,7 @@ class PaperCorporateActionService:
                 session.add(row)
                 session.flush()
                 applied.append(row)
+
             for row in applied:
                 session.expunge(row)
         return tuple(applied)
