@@ -4,7 +4,7 @@ This document turns the target architecture from issue #190 into a development c
 
 ## Non-negotiable runtime invariants
 
-1. **Heavy work is not an always-on responsibility.** Market-data and research-heavy processing runs in bounded, short-lived child processes or an equivalent explicitly resource-bounded execution unit.
+1. **Heavy work is not an always-on responsibility.** Market-data and research-heavy processing runs in bounded, short-lived child processes or an equivalent explicitly resource-bounded execution unit. Heavy research additionally holds one cross-process PostgreSQL advisory admission slot across the resource-capacity check and child lifetime, preventing concurrent research children from racing the pre-check.
 2. **Long-lived processes stay thin.** Backend, automation worker, event listener and frontend must not accumulate workload-sized in-memory state. The automation worker keeps its soft RSS recycle guard.
 3. **Runtime data access is explicitly scoped.** Provider construction requires an explicit instrument scope. Corporate-action evidence uses the scoped loader; a request/job/listener path must not silently return to full-provider-history materialization.
 4. **Market work remains one-shot and backpressured.** The automation worker checks host/cgroup capacity before spawning the one-shot market task process. The child processes at most one durable market task and exits. Provider HTTP work has an explicit request budget.
