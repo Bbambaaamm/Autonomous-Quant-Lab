@@ -1411,7 +1411,7 @@ class JobExecutor:
             }
         scoped_instruments = tuple(
             Instrument(
-                instrument.instrument_id,
+                row.instrument_id,
                 row.symbol,
                 row.exchange,
                 row.calendar,
@@ -1726,7 +1726,7 @@ class JobExecutor:
                 )
                 required_open_instruments = set(
                     persisted_execution_open_scope(
-                        {instrument.instrument_id for row in rows}, held_instruments
+                        {row.instrument_id for row in rows}, held_instruments
                     )
                 )
                 instrument_rows = tuple(
