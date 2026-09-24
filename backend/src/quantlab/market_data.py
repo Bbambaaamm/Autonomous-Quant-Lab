@@ -436,7 +436,10 @@ class CorporateActionEvidenceScope:
             not self.provider
             or not symbol
             or self.start > self.end
-            or any(not item or len(item) > 128 for item in self.current_provider_action_ids)
+            or any(
+                not isinstance(item, str) or not item or len(item) > 128
+                for item in self.current_provider_action_ids
+            )
         ):
             raise ValueError("Corporate-action evidence scope není platný")
         object.__setattr__(self, "symbol", symbol)
