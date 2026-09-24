@@ -556,7 +556,12 @@ class PaperMonitoringService:
         self.sessions = sessions
 
     def create_policy(
-        self, name: str, config: dict[str, object], now: datetime
+        self,
+        name: str,
+        config: dict[str, object],
+        now: datetime,
+        *,
+        audit: ControlAudit | None = None,
     ) -> PaperMonitoringPolicyRecord:
         validate_policy(config)
         created = require_utc(now)
@@ -578,10 +583,20 @@ class PaperMonitoringService:
                 )
                 session.add(existing)
                 session.flush()
+            if audit is not None:
+                add_control_audit(session, audit, existing.policy_id)
+                session.flush()
             session.expunge(existing)
             return existing
 
-    def enroll(self, deployment_id: str, policy_id: str, now: datetime) -> PaperMonitoringRunRecord:
+    def enroll(
+        self,
+        deployment_id: str,
+        policy_id: str,
+        now: datetime,
+        *,
+        audit: ControlAudit | None = None,
+    ) -> PaperMonitoringRunRecord:
         started = require_utc(now)
         with self.sessions() as session, session.begin():
             # Serializace na deploymentu uzavírá okno mezi kontrolou open runu a insertem.
@@ -626,6 +641,9 @@ class PaperMonitoringService:
             )
             if open_run is not None:
                 if open_run.deployment_id == deployment_id:
+                    if audit is not None:
+                        add_control_audit(session, audit, open_run.monitoring_id)
+                        session.flush()
                     session.expunge(open_run)
                     return open_run
                 raise DatasetInvalid("Paper account již má otevřený monitoring run")
@@ -739,9 +757,12 @@ class PaperMonitoringService:
             session.add(run)
             try:
                 session.flush()
+                if audit is not None:
+                    add_control_audit(session, audit, run.monitoring_id)
+                    session.flush()
             except IntegrityError:
                 session.rollback()
-                with self.sessions() as retry:
+                with self.sessions() as retry, retry.begin():
                     found = retry.scalar(
                         select(PaperMonitoringRunRecord).where(
                             PaperMonitoringRunRecord.deployment_id == deployment_id,
@@ -750,13 +771,22 @@ class PaperMonitoringService:
                     )
                     if found is None:
                         raise
+                    if audit is not None:
+                        add_control_audit(session=retry, audit=audit, entity_id=found.monitoring_id)
+                        retry.flush()
                     retry.expunge(found)
                     return found
             session.expunge(run)
             return run
 
     def transition(
-        self, monitoring_id: str, target: MonitoringState, reason: str, now: datetime
+        self,
+        monitoring_id: str,
+        target: MonitoringState,
+        reason: str,
+        now: datetime,
+        *,
+        audit: ControlAudit | None = None,
     ) -> PaperMonitoringRunRecord:
         changed = require_utc(now)
         if not reason.strip():
@@ -825,6 +855,8 @@ class PaperMonitoringService:
                     if job is not None:
                         job.enabled = False
                         job.updated_at = changed
+            if audit is not None:
+                add_control_audit(session, audit, monitoring_id, timestamp=changed)
             session.flush()
             session.expunge(run)
             return run
