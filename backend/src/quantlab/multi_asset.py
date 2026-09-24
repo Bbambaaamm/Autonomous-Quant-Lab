@@ -282,6 +282,7 @@ def run_multi_asset(
     currencies: Mapping[str, str] | None = None,
     corporate_actions: Sequence[CorporateAction] = (),
     evaluation_start: datetime | None = None,
+    evaluation_end: datetime | None = None,
     observation_knowledge_mode: ObservationKnowledgeMode = (
         ObservationKnowledgeMode.CURRENT_AS_KNOWN
     ),
@@ -289,9 +290,22 @@ def run_multi_asset(
     if currencies and len(set(currencies.values())) > 1:
         raise ValueError("Multi-currency portfolio bez FX konverze není podporováno")
 
+    evaluation_cutoff = require_utc(evaluation_end) if evaluation_end is not None else None
+    if (
+        evaluation_start is not None
+        and evaluation_cutoff is not None
+        and require_utc(evaluation_start) > evaluation_cutoff
+    ):
+        raise ValueError("Evaluation interval musí být neprázdný")
+
     pinned = observation_knowledge_mode is ObservationKnowledgeMode.SNAPSHOT_PINNED
     ordered_observations = sorted(
-        observations, key=lambda item: (item.timestamp, item.observed_at, item.revision)
+        (
+            row
+            for row in observations
+            if evaluation_cutoff is None or row.timestamp <= evaluation_cutoff
+        ),
+        key=lambda item: (item.timestamp, item.observed_at, item.revision),
     )
     if pinned:
         seen_keys: set[tuple[str, datetime]] = set()
