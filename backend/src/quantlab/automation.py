@@ -1204,6 +1204,18 @@ class JobExecutor:
         if job_type == JobType.SYNC_MARKET_PRICE_TASK:
             if payload or strategy_id is not None:
                 raise PermanentJobError("Datová fronta nepřijímá vlastní konfiguraci")
+            from quantlab.config import get_settings
+            from quantlab.resource_guard import ResourcePressure, require_capacity
+
+            resource_settings = get_settings()
+            try:
+                require_capacity(
+                    host_min_mib=resource_settings.market_job_min_available_mb,
+                    cgroup_min_mib=resource_settings.market_job_min_cgroup_headroom_mb,
+                    purpose="MARKET",
+                )
+            except ResourcePressure as exc:
+                raise TransientJobError(str(exc)) from exc
             try:
                 completed = subprocess.run(  # noqa: S603
                     [sys.executable, "-m", "quantlab.market_task_worker"],
