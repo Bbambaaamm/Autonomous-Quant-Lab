@@ -28,6 +28,7 @@ from quantlab.persistence import (
     UniverseMembershipRecord,
 )
 from quantlab.phase6_runtime import ValidatedCurrentDataAccessor
+from quantlab.research_admission import ResearchAdmissionBusy, research_admission
 
 pytestmark = pytest.mark.skipif(
     os.getenv("RUN_POSTGRES_TESTS") != "1", reason="vyžaduje PostgreSQL"
@@ -76,6 +77,18 @@ def seed(session):
             )
         )
     session.commit()
+
+
+def test_research_admission_is_cross_connection_and_recoverable(engine) -> None:
+    with research_admission(engine):
+        with pytest.raises(ResearchAdmissionBusy, match="RESEARCH_CONCURRENCY_LIMIT"):
+            with research_admission(engine):
+                raise AssertionError("second research admission must not succeed")
+
+    # Releasing/closing the first PostgreSQL session makes the slot available
+    # again; process termination has the same server-side advisory-lock cleanup.
+    with research_admission(engine):
+        pass
 
 
 def test_persistent_ingest_publishes_causal_raw_open(engine) -> None:
