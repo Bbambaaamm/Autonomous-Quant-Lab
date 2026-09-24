@@ -1454,14 +1454,14 @@ class JobExecutor:
                     }
                 except ProviderError as exc:
                     raise TransientJobError("CORPORATE_ACTIONS_UNAVAILABLE") from exc
-            if row.instrument_id in eligible_ids:
+            if instrument.instrument_id in eligible_ids:
                 with sessions() as session:
                     signal_ready = session.scalar(
                         select(func.count())
                         .select_from(MarketObservationRecord)
                         .join(MarketDataIngestionRecord)
                         .where(
-                            MarketObservationRecord.instrument_id == row.instrument_id,
+                            MarketObservationRecord.instrument_id == instrument.instrument_id,
                             MarketObservationRecord.session_date
                             == datetime.combine(signal_session, time(), UTC),
                             MarketObservationRecord.timeframe == "1d",
@@ -1485,7 +1485,7 @@ class JobExecutor:
                         .select_from(MarketObservationRecord)
                         .join(MarketDataIngestionRecord)
                         .where(
-                            MarketObservationRecord.instrument_id == row.instrument_id,
+                            MarketObservationRecord.instrument_id == instrument.instrument_id,
                             MarketObservationRecord.session_date
                             == datetime.combine(signal_session, time(), UTC),
                             MarketObservationRecord.timeframe == "1d",
