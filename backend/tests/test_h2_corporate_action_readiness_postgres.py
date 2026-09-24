@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from uuid import uuid4
@@ -1086,3 +1086,40 @@ def test_event_symbol_sidecar_and_scoped_indexes_are_immutable_and_present(scope
             {"event_id": event.event_id},
         )
         session.commit()
+
+
+def test_scoped_evidence_migration_backfills_existing_symbol_audit(scope) -> None:
+    factory, _ = scope
+    suffix = uuid4().hex[:10]
+    event_id = f"legacy-symbol-{suffix}"
+    provider_action_id = f"legacy-ca-{suffix}"
+    config = Config(str(Path(__file__).parents[2] / "alembic.ini"))
+
+    # The sidecar is derived/index data, so dropping/rebuilding it is non-destructive.
+    command.downgrade(config, "20260924_01")
+    with factory() as session, session.begin():
+        session.add(
+            CorporateActionEventRecord(
+                event_id=event_id,
+                provider="alpaca",
+                occurred_at=datetime(2026, 9, 24, 8, tzinfo=UTC),
+                action=CorporateActionEventType.INSERT.value,
+                provider_action_id=provider_action_id,
+                payload_hash="d" * 64,
+            )
+        )
+        session.flush()
+        session.add(
+            CorporateActionEventAuditRecord(
+                event_id=event_id,
+                provider_at=datetime(2026, 9, 24, 7, tzinfo=UTC),
+                symbols_json='["h2a"]',
+                scope_date=datetime(2026, 9, 25, tzinfo=UTC),
+            )
+        )
+
+    command.upgrade(config, "head")
+
+    with factory() as session:
+        sidecar = session.get(CorporateActionEventSymbolRecord, (event_id, "H2A"))
+    assert sidecar is not None
