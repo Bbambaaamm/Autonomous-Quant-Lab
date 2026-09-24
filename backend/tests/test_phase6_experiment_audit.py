@@ -28,12 +28,12 @@ from quantlab.persistence import (
     ExperimentRecord,
     StrategyRecord,
 )
-from quantlab.resource_guard import ResourcePressure
 from quantlab.phase6_runtime import (
     Phase6ExperimentRequest,
     Phase6ExperimentRunner,
     normalize_strategy_config,
 )
+from quantlab.resource_guard import ResourcePressure
 
 
 def factory():
