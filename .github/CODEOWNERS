@@ -1,0 +1,11 @@
+# Architecture control-plane files
+# Enforcement requires "Require review from Code Owners" in the Protect main ruleset.
+/.github/CODEOWNERS @Bbambaaamm
+/.github/workflows/ci.yml @Bbambaaamm
+/.github/workflows/agent-ruleset-sync.yml @Bbambaaamm
+/backend/tests/test_runtime_architecture_contract.py @Bbambaaamm
+/docs/runtime-architecture-contract.md @Bbambaaamm
+/docs/runtime-resource-budget.md @Bbambaaamm
+/docker-compose.production.yml @Bbambaaamm
+/ops/staging/deploy.sh @Bbambaaamm
+/AGENTS.md @Bbambaaamm
