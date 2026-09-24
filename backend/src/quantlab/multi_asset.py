@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from bisect import insort
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -287,16 +288,20 @@ def run_multi_asset(
 ) -> MultiAssetResult:
     if currencies and len(set(currencies.values())) > 1:
         raise ValueError("Multi-currency portfolio bez FX konverze není podporováno")
-    revisions: dict[tuple[str, datetime], list[Observation]] = {}
-    for row in sorted(
+
+    pinned = observation_knowledge_mode is ObservationKnowledgeMode.SNAPSHOT_PINNED
+    ordered_observations = sorted(
         observations, key=lambda item: (item.timestamp, item.observed_at, item.revision)
-    ):
-        revisions.setdefault((row.instrument_id, row.timestamp), []).append(row)
-    if observation_knowledge_mode is ObservationKnowledgeMode.SNAPSHOT_PINNED and any(
-        len(rows) != 1 for rows in revisions.values()
-    ):
-        raise ValueError("Snapshot-pinned research vyžaduje právě jednu připnutou revision")
-    times = sorted({row.timestamp for row in observations})
+    )
+    if pinned:
+        seen_keys: set[tuple[str, datetime]] = set()
+        for row in ordered_observations:
+            key = (row.instrument_id, row.timestamp)
+            if key in seen_keys:
+                raise ValueError("Snapshot-pinned research vyžaduje právě jednu připnutou revision")
+            seen_keys.add(key)
+
+    times = sorted({row.timestamp for row in ordered_observations})
     portfolio = MultiAssetPortfolio(initial_cash)
     pending: TargetPortfolio | None = None
     fills: list[MultiAssetFill] = []
@@ -306,29 +311,81 @@ def run_multi_asset(
     last_rebalance: datetime | None = None
     last_prices: dict[str, tuple[Decimal, int]] = {}
     excluded: dict[str, str] = {}
+
+    instruments_at_timestamp: dict[datetime, set[str]] = {}
+    for row in ordered_observations:
+        instruments_at_timestamp.setdefault(row.timestamp, set()).add(row.instrument_id)
+
+    def observation_activation(row: Observation) -> datetime:
+        if pinned:
+            return row.timestamp
+        return max(row.timestamp, row.observed_at)
+
+    activation_rows = sorted(
+        ordered_observations,
+        key=lambda item: (
+            observation_activation(item),
+            item.timestamp,
+            item.instrument_id,
+            item.observed_at,
+            item.revision,
+        ),
+    )
+    activation_index = 0
+    latest_by_key: dict[tuple[str, datetime], Observation] = {}
+    history_times: dict[str, list[datetime]] = {}
+
     ordered_actions = sorted(
         corporate_actions, key=lambda action: (action.effective_at, action.action_id)
     )
+    actions_by_instrument: dict[str, list[CorporateAction]] = {}
+    for action in ordered_actions:
+        actions_by_instrument.setdefault(action.instrument_id, []).append(action)
+    activation_actions = sorted(
+        ordered_actions,
+        key=lambda action: (
+            max(action.effective_at, action.known_at),
+            action.effective_at,
+            action.action_id,
+        ),
+    )
+    action_index = 0
+    requested_assets: set[str] = set()
+
     for index, when in enumerate(times):
-        if observation_knowledge_mode is ObservationKnowledgeMode.SNAPSHOT_PINNED:
-            known_rows = {key: rows[0] for key, rows in revisions.items() if key[1] <= when}
-        else:
-            known_rows = {
-                key: max(
-                    (row for row in rows if row.observed_at <= when),
-                    key=lambda row: (row.observed_at, row.revision),
-                )
-                for key, rows in revisions.items()
-                if key[1] <= when and any(row.observed_at <= when for row in rows)
-            }
+        while activation_index < len(activation_rows):
+            row = activation_rows[activation_index]
+            if observation_activation(row) > when:
+                break
+            key = (row.instrument_id, row.timestamp)
+            previous = latest_by_key.get(key)
+            if previous is None:
+                insort(history_times.setdefault(row.instrument_id, []), row.timestamp)
+            if pinned or previous is None or (row.observed_at, row.revision) > (
+                previous.observed_at,
+                previous.revision,
+            ):
+                latest_by_key[key] = row
+            activation_index += 1
+
         current = {
-            instrument: row
-            for (instrument, timestamp), row in known_rows.items()
-            if timestamp == when
+            instrument: latest_by_key[(instrument, when)]
+            for instrument in sorted(instruments_at_timestamp.get(when, ()))
+            if (instrument, when) in latest_by_key
         }
-        for action in ordered_actions:
-            if action.effective_at <= when and action.known_at <= when:
-                portfolio.apply_action(action)
+
+        newly_applicable_actions: list[CorporateAction] = []
+        while action_index < len(activation_actions):
+            action = activation_actions[action_index]
+            if max(action.effective_at, action.known_at) > when:
+                break
+            newly_applicable_actions.append(action)
+            action_index += 1
+        for action in sorted(
+            newly_applicable_actions, key=lambda item: (item.effective_at, item.action_id)
+        ):
+            portfolio.apply_action(action)
+
         # Pending close T targets se realizují až na raw open další dostupné společné session.
         in_evaluation = evaluation_start is None or when >= require_utc(evaluation_start)
         if pending is not None and in_evaluation:
@@ -386,13 +443,12 @@ def run_multi_asset(
                     fills.append(fill)
             if not missing_positions:
                 pending = None
+
         for instrument, bar in current.items():
             last_prices[instrument] = (bar.close, index)
-        history: dict[str, list[Observation]] = {}
-        for (instrument, _), bar in sorted(known_rows.items(), key=lambda item: item[0][1]):
-            history.setdefault(instrument, []).append(bar)
+
         eligible = universe.eligible(when)
-        visible = {instrument: tuple(history.get(instrument, ())) for instrument in eligible}
+        requested_assets.update(eligible)
         if (
             in_evaluation
             and pending is None
@@ -400,16 +456,23 @@ def run_multi_asset(
         ):
             fresh = tuple(instrument for instrument in eligible if instrument in current)
             for instrument in eligible:
-                if instrument not in fresh:
+                if instrument not in current:
                     excluded[instrument] = "stale_or_missing_execution_bar"
-            causal_history = {k: visible[k] for k in fresh}
-            signal_prices = {
-                instrument: tuple(
-                    causal_adjusted_close(bars, ordered_actions, when)[bar.session_date]
-                    for bar in bars
+
+            causal_history: dict[str, tuple[Observation, ...]] = {}
+            signal_prices: dict[str, tuple[Decimal, ...]] = {}
+            for instrument in fresh:
+                known_times = history_times.get(instrument, ())
+                tail_times = known_times[-strategy.required_lookback :]
+                bars = tuple(latest_by_key[(instrument, timestamp)] for timestamp in tail_times)
+                causal_history[instrument] = bars
+                adjusted = causal_adjusted_close(
+                    bars, actions_by_instrument.get(instrument, ()), when
                 )
-                for instrument, bars in causal_history.items()
-            }
+                signal_prices[instrument] = tuple(
+                    adjusted[bar.session_date] for bar in bars
+                )
+
             context = StrategyContext(
                 when,
                 causal_history,
@@ -420,6 +483,7 @@ def run_multi_asset(
             pending = strategy.generate_targets(context)
             decisions.append((when, pending))
             last_rebalance = when
+
         value = portfolio.cash
         for instrument, quantity in portfolio.positions.items():
             if not quantity:
@@ -431,13 +495,13 @@ def run_multi_asset(
         if in_evaluation:
             equity.append((when, value))
             exposure.append((when, (value - portfolio.cash) / value if value else Decimal("0")))
-    requested = len({m for when in times for m in universe.eligible(when)})
+
     used = len({fill.instrument_id for fill in fills})
     return MultiAssetResult(
         tuple(fills),
         tuple(decisions),
         tuple(equity),
-        requested,
+        len(requested_assets),
         used,
         tuple(sorted(excluded.items())),
         portfolio.cash,
