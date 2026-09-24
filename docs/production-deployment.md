@@ -35,3 +35,13 @@ Backup vytvoří `BACKUP=backups/name.dump make db-backup`. Restore vyžaduje ji
 Off-site přenos ani plánování backupu není implementováno; provozovatel je musí zajistit.
 
 Nasazení je pouze PAPER. Neposkytuje live broker ani cestu k reálnému orderu.
+
+
+## Backup policy
+
+Staging používá dvě oddělené vrstvy:
+
+1. `quantlab-db-backup.timer` spouští denní dump (výchozí 02:15 UTC s random delay), SHA-256 manifest a 14denní retenci přes `scripts/staging-db-backup.sh`.
+2. Deploy vytvoří pre-migration dump pouze pokud `scripts/schema-migration-needed.sh <deployed-sha> <target-sha>` vrátí `yes`. Běžný aplikační deploy bez změny Alembic/schema boundary full dump nevytváří.
+
+Restore zůstává explicitní a fail-closed přes existující `db-restore.sh`; pravidelná restore verification je součástí PostgreSQL CI acceptance. Backup adresář musí být přenášen/off-site chráněn provozní vrstvou podle místní politiky.
