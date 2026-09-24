@@ -1,5 +1,8 @@
 import hashlib
 import json
+import os
+import subprocess
+import sys
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -42,6 +45,7 @@ from quantlab.multi_asset import STRATEGY_REGISTRY
 from quantlab.operator_read_model import OperatorReadModel
 from quantlab.persistence import (
     DatasetSnapshotRecord,
+    ExperimentRecord,
     InstrumentRecord,
     MarketDataIngestionRecord,
     RunRepository,
@@ -63,7 +67,6 @@ from quantlab.phase4 import (
 from quantlab.phase6_runtime import (
     DeploymentService,
     Phase6EligibilityService,
-    Phase6ExperimentRequest,
     Phase6ExperimentRunner,
     normalize_strategy_config,
 )
@@ -709,29 +712,73 @@ def run_phase6_experiment(body: ExperimentCreate, request: Request) -> dict[str,
         control_plane_registry.ensure_strategy(
             body.strategy_name, body.strategy_version, datetime.now(UTC)
         )
-        row = phase6_runner.run(
-            Phase6ExperimentRequest(
-                body.snapshot_id,
-                body.strategy_name,
-                body.strategy_version,
-                tuple(body.parameter_configs),
-                body.train_fraction,
-                body.validation_fraction,
-                body.initial_cash,
-                body.commission_bps,
-                body.seed,
-                body.code_sha,
+        payload = {
+            "snapshot_id": body.snapshot_id,
+            "strategy_name": body.strategy_name,
+            "strategy_version": body.strategy_version,
+            "parameter_configs": body.parameter_configs,
+            "train_fraction": str(body.train_fraction),
+            "validation_fraction": str(body.validation_fraction),
+            "initial_cash": str(body.initial_cash),
+            "commission_bps": str(body.commission_bps),
+            "seed": body.seed,
+            "code_sha": body.code_sha,
+        }
+        try:
+            source_root = str(Path(__file__).parents[1])
+            pythonpath = os.environ.get("PYTHONPATH")
+            child_env = {
+                **os.environ,
+                "PYTHONPATH": (
+                    f"{source_root}{os.pathsep}{pythonpath}" if pythonpath else source_root
+                ),
+            }
+            completed = subprocess.run(  # noqa: S603
+                [sys.executable, "-m", "quantlab.research_worker"],
+                input=json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str),
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=900,
+                env=child_env,
             )
-        )
+        except subprocess.TimeoutExpired as exc:
+            raise HTTPException(503, "RESEARCH_PROCESS_TIMEOUT") from exc
+        try:
+            result = json.loads(completed.stdout)
+        except json.JSONDecodeError as exc:
+            raise HTTPException(503, "RESEARCH_PROCESS_INVALID_RESULT") from exc
+        if (
+            completed.returncode == 2
+            and isinstance(result, dict)
+            and result.get("status") == "validation_error"
+            and isinstance(result.get("error"), str)
+        ):
+            raise HTTPException(409, str(result["error"]))
+        if (
+            completed.returncode != 0
+            or not isinstance(result, dict)
+            or set(result) != {"status", "experiment_id"}
+            or result.get("status") != "ok"
+            or not isinstance(result.get("experiment_id"), str)
+        ):
+            raise HTTPException(503, "RESEARCH_PROCESS_FAILED")
+        with session_factory() as session:
+            row = session.get(ExperimentRecord, result["experiment_id"])
+            if row is None:
+                raise HTTPException(503, "RESEARCH_PROCESS_RESULT_NOT_PERSISTED")
+            response = _row(row)
         _audit_control_mutation(
             "CONTROL_PHASE6_EXPERIMENT_COMPLETED",
             "experiment",
-            row.id,
+            result["experiment_id"],
             _actor(request),
             body.reason,
             _correlation(request),
         )
-        return _row(row)
+        return response
+    except HTTPException:
+        raise
     except (ValueError, DatasetInvalid) as exc:
         raise HTTPException(409, str(exc)) from exc
 

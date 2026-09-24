@@ -72,3 +72,10 @@ Promotion ani deployment nevznikají automaticky a opakovaná promotion je idemp
 nejnovější dokončené XNYS session a přijímá jen nejnovější revizi z úspěšné ingestion. Runtime
 rekonstruuje pouze přesnou allowlisted strategii, verzi, parametry, PIT universe a USD/XNYS/1d
 scope. Live trading path nadále neexistuje.
+
+
+## Izolace research procesu
+
+Operator endpoint zachovává synchronní HTTP kontrakt, ale samotný `Phase6ExperimentRunner` běží v krátkodobém child procesu. API předává bounded research request přes stdin, nikoli přes command-line argumenty; child používá stejnou PostgreSQL databázi, zapíše deterministický `ExperimentRecord`, vrátí pouze experiment ID a skončí. API pak načte persistentní řádek a zapíše stejný control-plane audit jako dříve.
+
+Child má hard timeout 900 sekund. Očekávané domain/validation chyby se vrací strukturovaně a zůstávají HTTP 409; timeout, crash nebo neplatný child protokol failují jako 503. Tím se Pandas/NumPy/Arrow/backtest working set po každém experimentu vrátí operačnímu systému místo kumulace v dlouho žijícím API procesu.
