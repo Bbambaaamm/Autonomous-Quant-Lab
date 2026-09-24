@@ -14,7 +14,21 @@ from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session
 
 import quantlab.api as api_module
-from quantlab.automation import JobRun, RunStatus, ScheduledJob
+import quantlab.automation as automation_module
+import quantlab.control_plane as control_plane_module
+import quantlab.phase4 as phase4_module
+import quantlab.phase7 as phase7_module
+from quantlab.automation import (
+    AutomationRepository,
+    JobRun,
+    JobType,
+    RunStatus,
+    ScheduledJob,
+    ScheduleType,
+)
+from quantlab.control_audit import ControlAudit
+from quantlab.control_plane import ControlPlaneRegistryService
+from quantlab.market_data import AssetType, Instrument
 from quantlab.persistence import (
     DatasetSnapshotRecord,
     ExperimentRecord,
@@ -22,8 +36,8 @@ from quantlab.persistence import (
     StrategyDeploymentRecord,
     UniverseMembershipRecord,
 )
-from quantlab.phase4 import AuditEventRecord
-from quantlab.phase7 import PaperMonitoringRunRecord
+from quantlab.phase4 import AuditEventRecord, ReconciliationRecord, ReconciliationService
+from quantlab.phase7 import DEFAULT_POLICY, PaperMonitoringRunRecord, PaperMonitoringService
 from quantlab.security import limiter
 
 pytestmark = pytest.mark.skipif(
@@ -327,6 +341,119 @@ def test_supported_b1_control_plane_reaches_active_monitoring(monkeypatch) -> No
             {"experiment_id": experiment_id},
         )
         session.commit()
+
+
+def test_control_audit_failure_rolls_back_business_mutations(monkeypatch) -> None:
+    engine = api_module.paper_repository.engine
+    suffix = uuid4().hex
+    actor = {
+        "actor_id": "atomicity-test",
+        "actor_role": "ADMIN",
+        "authentication": "test",
+    }
+
+    def audit(event_type: str, entity_type: str) -> ControlAudit:
+        return ControlAudit(
+            event_type=event_type,
+            entity_type=entity_type,
+            actor=actor,
+            reason="synthetic audit rollback",
+            correlation_id=f"atomic-{suffix}",
+        )
+
+    def fail_audit(*_args, **_kwargs):
+        raise RuntimeError("SYNTHETIC_CONTROL_AUDIT_FAILURE")
+
+    instrument_id = f"atomic-{suffix[:32]}"
+    instrument = Instrument(
+        instrument_id,
+        f"A{suffix[:7]}".upper(),
+        "XNYS",
+        "XNYS",
+        "USD",
+        AssetType.EQUITY,
+        date(2020, 1, 1),
+        None,
+        datetime.now(UTC),
+    )
+    with monkeypatch.context() as patch:
+        patch.setattr(control_plane_module, "add_control_audit", fail_audit)
+        with pytest.raises(RuntimeError, match="SYNTHETIC_CONTROL_AUDIT_FAILURE"):
+            ControlPlaneRegistryService(lambda: Session(engine)).register_instrument(
+                instrument,
+                audit=audit("CONTROL_ATOMIC_INSTRUMENT", "instrument"),
+            )
+    with Session(engine) as session:
+        assert session.get(InstrumentRecord, instrument_id) is None
+
+    with Session(engine) as session:
+        before_reconciliations = session.scalar(
+            select(func.count()).select_from(ReconciliationRecord)
+        )
+        account = session.get(phase4_module.PaperAccountRecord, "paper-main")
+        before_account = (
+            account.reconciliation_safe,
+            account.trading_state,
+            account.updated_at,
+        )
+    with monkeypatch.context() as patch:
+        patch.setattr(phase4_module, "add_control_audit", fail_audit)
+        with pytest.raises(RuntimeError, match="SYNTHETIC_CONTROL_AUDIT_FAILURE"):
+            ReconciliationService(api_module.paper_repository).reconcile(
+                "paper-main",
+                audit=audit("CONTROL_ATOMIC_RECONCILIATION", "reconciliation"),
+            )
+    with Session(engine) as session:
+        assert (
+            session.scalar(select(func.count()).select_from(ReconciliationRecord))
+            == before_reconciliations
+        )
+        account = session.get(phase4_module.PaperAccountRecord, "paper-main")
+        assert (
+            account.reconciliation_safe,
+            account.trading_state,
+            account.updated_at,
+        ) == before_account
+
+    database_url = engine.url.render_as_string(hide_password=False)
+    repository = AutomationRepository(database_url)
+    job_id = f"atomic-job-{suffix}"
+    with monkeypatch.context() as patch:
+        patch.setattr(automation_module, "add_control_audit", fail_audit)
+        with pytest.raises(RuntimeError, match="SYNTHETIC_CONTROL_AUDIT_FAILURE"):
+            repository.create_job(
+                job_id=job_id,
+                job_type=JobType.RUN_RECONCILIATION,
+                account_id="paper-main",
+                schedule_type=ScheduleType.INTERVAL,
+                interval_seconds=3600,
+                next_run_at=datetime.now(UTC),
+                audit=audit("CONTROL_ATOMIC_JOB", "scheduled_job"),
+            )
+    with Session(engine) as session:
+        assert session.get(ScheduledJob, job_id) is None
+
+    policy_name = f"atomic-policy-{suffix}"
+    policy_config = dict(DEFAULT_POLICY)
+    policy_config["bootstrap_samples"] = 1000 + int(suffix[:3], 16) % 1000
+    with monkeypatch.context() as patch:
+        patch.setattr(phase7_module, "add_control_audit", fail_audit)
+        with pytest.raises(RuntimeError, match="SYNTHETIC_CONTROL_AUDIT_FAILURE"):
+            PaperMonitoringService(lambda: Session(engine)).create_policy(
+                policy_name,
+                policy_config,
+                datetime.now(UTC),
+                audit=audit("CONTROL_ATOMIC_POLICY", "monitoring_policy"),
+            )
+    with Session(engine) as session:
+        assert (
+            session.scalar(
+                select(func.count())
+                .select_from(phase7_module.PaperMonitoringPolicyRecord)
+                .where(phase7_module.PaperMonitoringPolicyRecord.name == policy_name)
+            )
+            == 0
+        )
 
 
 def test_control_plane_requires_admin_and_authentication() -> None:
