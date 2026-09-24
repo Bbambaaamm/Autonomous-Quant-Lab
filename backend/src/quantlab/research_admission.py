@@ -47,7 +47,8 @@ def research_admission(engine: Engine) -> Iterator[None]:
                 if released is not True:
                     connection.invalidate()
             except Exception:
+                # Invalidating/closing the connection releases a session-level
+                # advisory lock server-side without masking the request outcome.
                 connection.invalidate()
-                raise
     finally:
         connection.close()
