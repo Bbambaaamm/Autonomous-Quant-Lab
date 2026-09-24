@@ -1,3 +1,4 @@
+import logging
 from pathlib import Path
 
 import pytest
@@ -78,19 +79,24 @@ def test_alpaca_event_worker_exits_successfully_for_stooq(monkeypatch: pytest.Mo
     assert event_worker.main() is None
 
 
-def test_alpaca_event_worker_fails_after_clean_stream_exhaustion(
+def test_alpaca_event_worker_uses_bounded_cursor_without_loading_history(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     engine = type("Engine", (), {"dispose": lambda self: None})()
-    service = type(
-        "Service",
-        (),
-        {
-            "corporate_action_events": lambda self, provider: (),
-            "record_corporate_action_event": lambda self, event: None,
-        },
-    )()
-    stream = type("Stream", (), {"run": lambda self, cursor: None})()
+    cursors: list[str | None] = []
+
+    class Service:
+        def latest_corporate_action_event_id(self, provider: str) -> str | None:
+            assert provider == "alpaca"
+            return "event-999"
+
+        def corporate_action_events(self, provider: str):  # type: ignore[no-untyped-def]
+            pytest.fail(f"full event history must not be loaded for startup: {provider}")
+
+        def record_corporate_action_event(self, provider, event):  # type: ignore[no-untyped-def]
+            return True
+
+    stream = type("Stream", (), {"run": lambda self, cursor: cursors.append(cursor)})()
     monkeypatch.setattr(
         event_worker,
         "get_settings",
@@ -100,8 +106,37 @@ def test_alpaca_event_worker_fails_after_clean_stream_exhaustion(
     )
     monkeypatch.setattr(event_worker, "create_engine", lambda *args, **kwargs: engine)
     monkeypatch.setattr(event_worker, "sessionmaker", lambda *args, **kwargs: object())
-    monkeypatch.setattr(event_worker, "PersistentMarketDataService", lambda factory: service)
+    monkeypatch.setattr(event_worker, "PersistentMarketDataService", lambda factory: Service())
     monkeypatch.setattr(event_worker, "AlpacaCorporateActionStream", lambda *args, **kwargs: stream)
 
     with pytest.raises(ProviderUnavailable, match="vyčerpal povolené reconnect pokusy"):
         event_worker.main()
+
+    assert cursors == ["event-999"]
+
+
+def test_listener_telemetry_reports_resource_and_event_counters() -> None:
+    ticks = iter((10.0, 11.0, 16.0))
+    telemetry = event_worker._ListenerTelemetry(
+        logging.getLogger("test.alpaca.telemetry"),
+        monotonic=lambda: next(ticks),
+        cpu_clock=lambda: 2.5,
+        rss_reader=lambda: 123,
+        peak_reader=lambda: 456,
+    )
+
+    telemetry.record_received()
+    telemetry.record_result(True)
+    telemetry.record_received()
+    telemetry.record_result(False)
+    metrics = telemetry.snapshot()
+
+    assert metrics == {
+        "rss_current_kib": 123,
+        "rss_peak_kib": 456,
+        "cpu_seconds": 2.5,
+        "events_received": 2,
+        "events_written": 1,
+        "events_duplicate": 1,
+        "idle_seconds": 5.0,
+    }
