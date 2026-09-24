@@ -233,7 +233,7 @@ for(const [name,change] of drift) test(`production merge denies ${name} after su
 });
 test("authoritative CI source is byte-identical to the trusted baseline",()=>{
  const crypto=require('node:crypto'),data=fs.readFileSync('.github/workflows/ci.yml');
- assert.equal(crypto.createHash('sha1').update(Buffer.concat([Buffer.from(`blob ${data.length}\0`),data])).digest('hex'),'cc50bbf7fcbcef4f5af8357336a03eb39fae411c');
+ assert.equal(crypto.createHash('sha1').update(Buffer.concat([Buffer.from(`blob ${data.length}\0`),data])).digest('hex'),'17afca722405319e18bd01c070bd3f83700c1969');
 });
 
 

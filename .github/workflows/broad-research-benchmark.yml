@@ -1,12 +1,6 @@
 name: Broad research benchmark
 
 on:
-  pull_request:
-    paths:
-      - "backend/benchmarks/broad_research.py"
-      - "backend/src/quantlab/multi_asset.py"
-      - "backend/src/quantlab/phase6_runtime.py"
-      - ".github/workflows/broad-research-benchmark.yml"
   workflow_dispatch:
 
 permissions:

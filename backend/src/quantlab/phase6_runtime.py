@@ -36,6 +36,7 @@ from quantlab.multi_asset import (
     MultiAssetResult,
     ObservationKnowledgeMode,
     RebalanceFrequency,
+    prepare_snapshot_pinned_observations,
     run_multi_asset,
 )
 from quantlab.persistence import (
@@ -312,6 +313,11 @@ class Phase6ExperimentRunner:
                 or session.get(UniverseDefinitionRecord, snapshot.universe_id) is None
             ):
                 raise DatasetInvalid("Experiment vyžaduje existující VALID snapshot s universe")
+            snapshot_id = snapshot.snapshot_id
+            snapshot_provider = snapshot.provider
+            snapshot_universe_id = snapshot.universe_id
+            snapshot_as_of = _database_utc(snapshot.as_of)
+            snapshot_content_hash = snapshot.content_hash
             strategy_row = session.scalar(
                 select(StrategyRecord).where(
                     StrategyRecord.strategy_name == request.strategy_name,
@@ -325,6 +331,8 @@ class Phase6ExperimentRunner:
                 manifest: object = json.loads(snapshot.manifest_json)
             except json.JSONDecodeError as exc:
                 raise DatasetInvalid("Snapshot manifest není validní JSON") from exc
+            session.expunge(snapshot)
+            del snapshot
             if not isinstance(manifest, dict):
                 raise DatasetInvalid("Snapshot manifest musí být objekt")
             if manifest.get("schema_version") != "4":
@@ -332,11 +340,31 @@ class Phase6ExperimentRunner:
             entries = manifest.get("observations")
             if not isinstance(entries, list) or not entries:
                 raise DatasetInvalid("Snapshot manifest neobsahuje observations")
+            action_entries = manifest.get("corporate_actions")
+            if not isinstance(action_entries, list):
+                raise DatasetInvalid("Snapshot manifest neobsahuje immutable corporate actions")
+            membership_entries = manifest.get("universe_memberships")
+            if not isinstance(membership_entries, list):
+                raise DatasetInvalid("Snapshot neobsahuje immutable universe memberships")
+            universe_lineage = manifest.get("universe")
+            if universe_lineage is not None and not isinstance(universe_lineage, dict):
+                raise DatasetInvalid("Snapshot universe lineage není konzistentní")
+            immutable_content = {
+                "observations": entries,
+                "corporate_actions": action_entries,
+                "universe_memberships": membership_entries,
+            }
+            manifest_hash = canonical_snapshot_content_hash(immutable_content)
+            if manifest_hash != snapshot_content_hash:
+                raise DatasetInvalid("Snapshot manifest neodpovídá uloženému content hash")
+            del immutable_content
+
             observations: list[Observation] = []
-            seen_observation_ids: set[str] = set()
             for offset in range(0, len(entries), self.snapshot_load_batch_size):
                 expected: dict[str, tuple[int, str]] = {}
-                for entry in entries[offset : offset + self.snapshot_load_batch_size]:
+                stop = min(offset + self.snapshot_load_batch_size, len(entries))
+                for entry_index in range(offset, stop):
+                    entry = entries[entry_index]
                     if not isinstance(entry, dict):
                         raise DatasetInvalid("Snapshot manifest není interně konzistentní")
                     observation_id = entry.get("id")
@@ -348,11 +376,12 @@ class Phase6ExperimentRunner:
                         or isinstance(revision, bool)
                         or revision <= 0
                         or not isinstance(source_hash, str)
-                        or observation_id in seen_observation_ids
                     ):
                         raise DatasetInvalid("Snapshot manifest není interně konzistentní")
-                    seen_observation_ids.add(observation_id)
                     expected[observation_id] = (revision, source_hash)
+                    entries[entry_index] = None
+                if len(expected) != stop - offset:
+                    raise DatasetInvalid("Snapshot manifest obsahuje duplicitní observation")
 
                 rows = tuple(
                     session.scalars(
@@ -373,9 +402,11 @@ class Phase6ExperimentRunner:
                             "Snapshot manifest odkazuje na změněná nebo chybějící data"
                         )
                     observations.append(_observation(row))
-            action_entries = manifest.get("corporate_actions")
-            if not isinstance(action_entries, list):
-                raise DatasetInvalid("Snapshot manifest neobsahuje immutable corporate actions")
+            prepared_observations = prepare_snapshot_pinned_observations(observations)
+            observations.clear()
+            manifest.pop("observations", None)
+            del entries
+
             try:
                 corporate_actions_list: list[CorporateAction] = []
                 for entry in action_entries:
@@ -414,31 +445,7 @@ class Phase6ExperimentRunner:
             action_ids = [item.action_id for item in corporate_actions]
             if len(set(action_ids)) != len(action_ids):
                 raise DatasetInvalid("Snapshot corporate actions obsahují duplicity")
-            immutable_revisions: list[CorporateActionRevisionRecord] = []
-            for offset in range(0, len(action_ids), self.snapshot_load_batch_size):
-                immutable_revisions.extend(
-                    session.scalars(
-                        select(CorporateActionRevisionRecord).where(
-                            CorporateActionRevisionRecord.action_id.in_(
-                                action_ids[offset : offset + self.snapshot_load_batch_size]
-                            ),
-                            CorporateActionRevisionRecord.provider == snapshot.provider,
-                        )
-                    )
-                )
-            revision_evidence = {
-                (
-                    revision.action_id,
-                    revision.instrument_id,
-                    revision.kind,
-                    _database_utc(revision.effective_at),
-                    _database_utc(revision.known_at),
-                    revision.value,
-                    revision.new_symbol,
-                )
-                for revision in immutable_revisions
-            }
-            if any(
+            expected_revision_evidence = {
                 (
                     item.action_id,
                     item.instrument_id,
@@ -448,30 +455,52 @@ class Phase6ExperimentRunner:
                     str(item.value) if item.value is not None else None,
                     item.new_symbol,
                 )
-                not in revision_evidence
                 for item in corporate_actions
-            ):
+            }
+            for offset in range(0, len(action_ids), self.snapshot_load_batch_size):
+                statement = (
+                    select(
+                        CorporateActionRevisionRecord.action_id,
+                        CorporateActionRevisionRecord.instrument_id,
+                        CorporateActionRevisionRecord.kind,
+                        CorporateActionRevisionRecord.effective_at,
+                        CorporateActionRevisionRecord.known_at,
+                        CorporateActionRevisionRecord.value,
+                        CorporateActionRevisionRecord.new_symbol,
+                    )
+                    .where(
+                        CorporateActionRevisionRecord.action_id.in_(
+                            action_ids[offset : offset + self.snapshot_load_batch_size]
+                        ),
+                        CorporateActionRevisionRecord.provider == snapshot_provider,
+                    )
+                    .execution_options(
+                        stream_results=True,
+                        yield_per=self.snapshot_load_batch_size,
+                    )
+                )
+                for revision in session.execute(statement):
+                    expected_revision_evidence.discard(
+                        (
+                            revision.action_id,
+                            revision.instrument_id,
+                            revision.kind,
+                            _database_utc(revision.effective_at),
+                            _database_utc(revision.known_at),
+                            revision.value,
+                            revision.new_symbol,
+                        )
+                    )
+            if expected_revision_evidence:
                 raise DatasetInvalid(
                     "Snapshot corporate actions neodpovídají persistentní evidence"
                 )
-            universe_lineage = manifest.get("universe")
-            immutable_content = {
-                "observations": entries,
-                "corporate_actions": action_entries,
-                "universe_memberships": manifest.get("universe_memberships"),
-            }
-            if universe_lineage is not None:
-                if not isinstance(universe_lineage, dict):
-                    raise DatasetInvalid("Snapshot universe lineage není konzistentní")
-            manifest_hash = canonical_snapshot_content_hash(immutable_content)
-            if manifest_hash != snapshot.content_hash:
-                raise DatasetInvalid("Snapshot manifest neodpovídá uloženému content hash")
-            times = sorted({item.timestamp for item in observations})
+            times = [item[0] for item in prepared_observations.sessions]
             train_end = int(len(times) * float(request.train_fraction))
             validation_end = train_end + int(len(times) * float(request.validation_fraction))
             if train_end < 1 or validation_end <= train_end or validation_end >= len(times):
                 raise DatasetInvalid("Každá chronologická část musí obsahovat data")
-            definition_row = session.get(UniverseDefinitionRecord, snapshot.universe_id)
+            definition_row = session.get(UniverseDefinitionRecord, snapshot_universe_id)
             if definition_row is None:
                 raise RuntimeError("Universe definition pro snapshot nebyla nalezena")
             expected_bias = (
@@ -482,16 +511,13 @@ class Phase6ExperimentRunner:
             if universe_lineage is not None and universe_lineage != {
                 "kind": definition_row.kind,
                 "survivorship_bias_status": expected_bias,
-                "knowledge_as_of": _database_utc(snapshot.as_of).isoformat(),
+                "knowledge_as_of": snapshot_as_of.isoformat(),
             }:
                 raise DatasetInvalid("Snapshot universe lineage neodpovídá universe a cutoffu")
-            membership_entries = manifest.get("universe_memberships")
-            if not isinstance(membership_entries, list):
-                raise DatasetInvalid("Snapshot neobsahuje immutable universe memberships")
             try:
                 immutable_memberships = [
                     UniverseMembership(
-                        snapshot.universe_id,
+                        snapshot_universe_id,
                         entry["instrument_id"],
                         require_utc(datetime.fromisoformat(entry["valid_from"])),
                         (
@@ -516,20 +542,23 @@ class Phase6ExperimentRunner:
                     _database_utc(definition_row.created_at),
                 ),
                 immutable_memberships,
-                static_knowledge_as_of=_database_utc(snapshot.as_of),
+                static_knowledge_as_of=snapshot_as_of,
             )
-            instrument_ids = {item.instrument_id for item in observations}
+            manifest.clear()
+            action_entries.clear()
+            membership_entries.clear()
+            instrument_ids = {item.instrument_id for item in prepared_observations.rows}
             currencies: dict[str, str] = {}
             ordered_instrument_ids = sorted(instrument_ids)
             for offset in range(0, len(ordered_instrument_ids), self.snapshot_load_batch_size):
-                rows = session.scalars(
+                instrument_rows = session.scalars(
                     select(InstrumentRecord).where(
                         InstrumentRecord.instrument_id.in_(
                             ordered_instrument_ids[offset : offset + self.snapshot_load_batch_size]
                         )
                     )
                 )
-                currencies.update((row.instrument_id, row.currency) for row in rows)
+                currencies.update((row.instrument_id, row.currency) for row in instrument_rows)
             if set(currencies) != instrument_ids:
                 raise DatasetInvalid("Snapshot odkazuje na chybějící instrument metadata")
 
@@ -542,7 +571,7 @@ class Phase6ExperimentRunner:
                 evaluation_start = selected_times[0]
                 evaluation_end = selected_times[-1]
                 result = run_multi_asset(
-                    observations,
+                    prepared_observations,
                     universe,
                     strategy,
                     request.initial_cash,
@@ -588,7 +617,7 @@ class Phase6ExperimentRunner:
                 created_at=datetime.now(UTC),
                 completed_at=datetime.now(UTC),
                 status="COMPLETED",
-                snapshot_id=snapshot.snapshot_id,
+                snapshot_id=snapshot_id,
                 strategy_identity=strategy_row.strategy_identity,
                 strategy_name=request.strategy_name,
                 strategy_version=request.strategy_version,

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sys
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import replace
 from datetime import UTC, date, datetime, time, timedelta
@@ -86,9 +87,9 @@ def _lock(session: Session, identity: str) -> None:
 def _observation(row: MarketObservationRecord) -> Observation:
     return Observation(
         row.observation_id,
-        row.instrument_id,
-        row.provider,
-        row.timeframe,
+        sys.intern(row.instrument_id),
+        sys.intern(row.provider),
+        sys.intern(row.timeframe),
         row.session_date.date(),
         _database_utc(row.timestamp),
         Decimal(row.open),
@@ -99,7 +100,7 @@ def _observation(row: MarketObservationRecord) -> Observation:
         _database_utc(row.observed_at),
         row.source_id,
         row.source_hash,
-        row.ingestion_id,
+        sys.intern(row.ingestion_id),
         row.revision,
     )
 
