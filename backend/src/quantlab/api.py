@@ -715,86 +715,84 @@ def run_phase6_experiment(body: ExperimentCreate, request: Request) -> dict[str,
             body.strategy_name, body.strategy_version, datetime.now(UTC)
         )
         try:
-            admission = research_admission(paper_repository.engine)
-            admission.__enter__()
+            with research_admission(paper_repository.engine):
+                try:
+                    require_capacity(
+                        host_min_mib=settings.research_job_min_available_mb,
+                        cgroup_min_mib=settings.research_job_min_cgroup_headroom_mb,
+                        purpose="RESEARCH",
+                    )
+                except ResourcePressure as exc:
+                    raise HTTPException(503, "RESOURCE_PRESSURE_RESEARCH_DEFERRED") from exc
+                payload = {
+                    "snapshot_id": body.snapshot_id,
+                    "strategy_name": body.strategy_name,
+                    "strategy_version": body.strategy_version,
+                    "parameter_configs": body.parameter_configs,
+                    "train_fraction": str(body.train_fraction),
+                    "validation_fraction": str(body.validation_fraction),
+                    "initial_cash": str(body.initial_cash),
+                    "commission_bps": str(body.commission_bps),
+                    "seed": body.seed,
+                    "code_sha": body.code_sha,
+                }
+                try:
+                    source_root = str(Path(__file__).parents[1])
+                    pythonpath = os.environ.get("PYTHONPATH")
+                    child_env = {
+                        **os.environ,
+                        "PYTHONPATH": (
+                            f"{source_root}{os.pathsep}{pythonpath}" if pythonpath else source_root
+                        ),
+                    }
+                    completed = subprocess.run(  # noqa: S603
+                        [sys.executable, "-m", "quantlab.research_worker"],
+                        input=json.dumps(
+                            payload, sort_keys=True, separators=(",", ":"), default=str
+                        ),
+                        check=False,
+                        capture_output=True,
+                        text=True,
+                        timeout=900,
+                        env=child_env,
+                    )
+                except subprocess.TimeoutExpired as exc:
+                    raise HTTPException(503, "RESEARCH_PROCESS_TIMEOUT") from exc
+                try:
+                    result = json.loads(completed.stdout)
+                except json.JSONDecodeError as exc:
+                    raise HTTPException(503, "RESEARCH_PROCESS_INVALID_RESULT") from exc
+                if (
+                    completed.returncode == 2
+                    and isinstance(result, dict)
+                    and result.get("status") == "validation_error"
+                    and isinstance(result.get("error"), str)
+                ):
+                    raise HTTPException(409, str(result["error"]))
+                if (
+                    completed.returncode != 0
+                    or not isinstance(result, dict)
+                    or set(result) != {"status", "experiment_id"}
+                    or result.get("status") != "ok"
+                    or not isinstance(result.get("experiment_id"), str)
+                ):
+                    raise HTTPException(503, "RESEARCH_PROCESS_FAILED")
+                with session_factory() as session:
+                    row = session.get(ExperimentRecord, result["experiment_id"])
+                    if row is None:
+                        raise HTTPException(503, "RESEARCH_PROCESS_RESULT_NOT_PERSISTED")
+                    response = _row(row)
+                _audit_control_mutation(
+                    "CONTROL_PHASE6_EXPERIMENT_COMPLETED",
+                    "experiment",
+                    result["experiment_id"],
+                    _actor(request),
+                    body.reason,
+                    _correlation(request),
+                )
+                return response
         except ResearchAdmissionBusy as exc:
             raise HTTPException(503, "RESEARCH_CONCURRENCY_LIMIT") from exc
-        try:
-            try:
-                require_capacity(
-                    host_min_mib=settings.research_job_min_available_mb,
-                    cgroup_min_mib=settings.research_job_min_cgroup_headroom_mb,
-                    purpose="RESEARCH",
-                )
-            except ResourcePressure as exc:
-                raise HTTPException(503, "RESOURCE_PRESSURE_RESEARCH_DEFERRED") from exc
-            payload = {
-            "snapshot_id": body.snapshot_id,
-            "strategy_name": body.strategy_name,
-            "strategy_version": body.strategy_version,
-            "parameter_configs": body.parameter_configs,
-            "train_fraction": str(body.train_fraction),
-            "validation_fraction": str(body.validation_fraction),
-            "initial_cash": str(body.initial_cash),
-            "commission_bps": str(body.commission_bps),
-            "seed": body.seed,
-            "code_sha": body.code_sha,
-        }
-        try:
-            source_root = str(Path(__file__).parents[1])
-            pythonpath = os.environ.get("PYTHONPATH")
-            child_env = {
-                **os.environ,
-                "PYTHONPATH": (
-                    f"{source_root}{os.pathsep}{pythonpath}" if pythonpath else source_root
-                ),
-            }
-            completed = subprocess.run(  # noqa: S603
-                [sys.executable, "-m", "quantlab.research_worker"],
-                input=json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str),
-                check=False,
-                capture_output=True,
-                text=True,
-                timeout=900,
-                env=child_env,
-            )
-        except subprocess.TimeoutExpired as exc:
-            raise HTTPException(503, "RESEARCH_PROCESS_TIMEOUT") from exc
-        try:
-            result = json.loads(completed.stdout)
-        except json.JSONDecodeError as exc:
-            raise HTTPException(503, "RESEARCH_PROCESS_INVALID_RESULT") from exc
-        if (
-            completed.returncode == 2
-            and isinstance(result, dict)
-            and result.get("status") == "validation_error"
-            and isinstance(result.get("error"), str)
-        ):
-            raise HTTPException(409, str(result["error"]))
-        if (
-            completed.returncode != 0
-            or not isinstance(result, dict)
-            or set(result) != {"status", "experiment_id"}
-            or result.get("status") != "ok"
-            or not isinstance(result.get("experiment_id"), str)
-        ):
-            raise HTTPException(503, "RESEARCH_PROCESS_FAILED")
-        with session_factory() as session:
-            row = session.get(ExperimentRecord, result["experiment_id"])
-            if row is None:
-                raise HTTPException(503, "RESEARCH_PROCESS_RESULT_NOT_PERSISTED")
-            response = _row(row)
-            _audit_control_mutation(
-                "CONTROL_PHASE6_EXPERIMENT_COMPLETED",
-                "experiment",
-                result["experiment_id"],
-                _actor(request),
-                body.reason,
-                _correlation(request),
-            )
-            return response
-        finally:
-            admission.__exit__(None, None, None)
     except HTTPException:
         raise
     except (ValueError, DatasetInvalid) as exc:
