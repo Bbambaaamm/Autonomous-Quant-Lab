@@ -30,6 +30,7 @@ from quantlab.multi_asset import (
     MultiAssetFill,
     MultiAssetPortfolio,
     ObservationKnowledgeMode,
+    PortfolioStrategy,
     RebalanceFrequency,
     StrategyContext,
     TargetPortfolio,
@@ -429,6 +430,63 @@ def test_revision_known_later_does_not_change_earlier_decision():
     assert [(when, target.weights) for when, target in baseline.decisions if when <= cutoff] == [
         (when, target.weights) for when, target in revised.decisions if when <= cutoff
     ]
+
+
+def test_late_revision_updates_history_only_when_it_becomes_known():
+    days = [date(2024, 1, day) for day in (3, 4, 5, 8)]
+    rows = [obs("a", day, str(10 + index)) for index, day in enumerate(days)]
+    correction = obs(
+        "a",
+        days[2],
+        "999",
+        observed=CAL.session_close(days[-1]),
+        ingestion="late-correction",
+    )
+    strategy = TrendStrategy(1, 2, rebalance_frequency=RebalanceFrequency.DAILY)
+
+    baseline = run_multi_asset(rows, single_asset_universe(), strategy)
+    revised = run_multi_asset([*rows, correction], single_asset_universe(), strategy)
+
+    before_correction = CAL.session_close(days[2])
+    assert [
+        (when, target.weights)
+        for when, target in baseline.decisions
+        if when <= before_correction
+    ] == [
+        (when, target.weights)
+        for when, target in revised.decisions
+        if when <= before_correction
+    ]
+    assert dict(baseline.decisions)[CAL.session_close(days[-1])].weights == (
+        ("a", Decimal("1")),
+    )
+    assert dict(revised.decisions)[CAL.session_close(days[-1])].weights == ()
+
+
+def test_strategy_context_is_bounded_to_declared_lookback():
+    seen_lengths: list[int] = []
+
+    class ProbeStrategy(PortfolioStrategy):
+        name = "probe"
+        version = "1"
+        rebalance_frequency = RebalanceFrequency.DAILY
+
+        @property
+        def required_lookback(self) -> int:
+            return 2
+
+        def generate_targets(self, context: StrategyContext) -> TargetPortfolio:
+            seen_lengths.extend(len(bars) for bars in context.history.values())
+            return TargetPortfolio((), "probe")
+
+    days = [date(2024, 1, day) for day in (3, 4, 5, 8, 9, 10)]
+    rows = [obs("a", day, str(100 + index)) for index, day in enumerate(days)]
+
+    result = run_multi_asset(rows, single_asset_universe(), ProbeStrategy())
+
+    assert result.decisions
+    assert seen_lengths
+    assert max(seen_lengths) <= 2
 
 
 def test_snapshot_pinned_research_uses_bars_ingested_after_historical_sessions():
