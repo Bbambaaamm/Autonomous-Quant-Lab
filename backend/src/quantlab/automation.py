@@ -1403,9 +1403,7 @@ class JobExecutor:
             for row in sorted(rows, key=lambda item: item.instrument_id)
         )
         provider = (
-            self.provider_factory(scoped_instruments)
-            if self.provider_factory
-            else StooqProvider()
+            self.provider_factory(scoped_instruments) if self.provider_factory else StooqProvider()
         )
         ingestions: list[str] = []
         action_evidence: list[str] = []
