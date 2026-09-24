@@ -9,13 +9,14 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
 from quantlab.config import get_settings
+from quantlab.control_audit import ControlAudit
 from quantlab.market_data import DatasetInvalid
 from quantlab.phase6_runtime import Phase6ExperimentRequest, Phase6ExperimentRunner
 
 MAX_REQUEST_BYTES = 1024 * 1024
 
 
-def _request_from_payload(payload: object) -> Phase6ExperimentRequest:
+def _request_from_payload(payload: object) -> tuple[Phase6ExperimentRequest, ControlAudit | None]:
     if not isinstance(payload, dict):
         raise ValueError("Research request musí být objekt")
     required = {
@@ -30,7 +31,8 @@ def _request_from_payload(payload: object) -> Phase6ExperimentRequest:
         "seed",
         "code_sha",
     }
-    if set(payload) != required:
+    allowed = required | {"control_audit"}
+    if set(payload) not in (required, allowed):
         raise ValueError("Research request má neplatný kontrakt")
     parameter_configs = payload["parameter_configs"]
     if not isinstance(parameter_configs, list) or any(
@@ -43,7 +45,31 @@ def _request_from_payload(payload: object) -> Phase6ExperimentRequest:
     seed = payload["seed"]
     if isinstance(seed, bool) or not isinstance(seed, int):
         raise ValueError("Research seed má neplatný tvar")
-    return Phase6ExperimentRequest(
+    audit_payload = payload.get("control_audit")
+    audit = None
+    if audit_payload is not None:
+        if not isinstance(audit_payload, dict) or set(audit_payload) != {
+            "event_type",
+            "entity_type",
+            "actor",
+            "reason",
+            "correlation_id",
+        }:
+            raise ValueError("Research control audit má neplatný kontrakt")
+        actor = audit_payload["actor"]
+        if not isinstance(actor, dict) or any(
+            not isinstance(key, str) or not isinstance(value, str)
+            for key, value in actor.items()
+        ):
+            raise ValueError("Research control audit actor má neplatný kontrakt")
+        audit = ControlAudit(
+            event_type=str(audit_payload["event_type"]),
+            entity_type=str(audit_payload["entity_type"]),
+            actor=dict(actor),
+            reason=str(audit_payload["reason"]),
+            correlation_id=str(audit_payload["correlation_id"]),
+        )
+    request = Phase6ExperimentRequest(
         snapshot_id=str(payload["snapshot_id"]),
         strategy_name=str(payload["strategy_name"]),
         strategy_version=str(payload["strategy_version"]),
@@ -55,14 +81,15 @@ def _request_from_payload(payload: object) -> Phase6ExperimentRequest:
         seed=seed,
         code_sha=code_sha,
     )
+    return request, audit
 
 
 def run_payload(payload: object) -> dict[str, Any]:
-    request = _request_from_payload(payload)
+    request, audit = _request_from_payload(payload)
     settings = get_settings()
     engine = create_engine(settings.database_url, pool_pre_ping=True)
     try:
-        row = Phase6ExperimentRunner(lambda: Session(engine)).run(request)
+        row = Phase6ExperimentRunner(lambda: Session(engine)).run(request, audit=audit)
         return {"status": "ok", "experiment_id": row.id}
     finally:
         engine.dispose()
