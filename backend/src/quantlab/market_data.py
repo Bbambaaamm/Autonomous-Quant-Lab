@@ -420,8 +420,35 @@ class CorporateActionEvent:
             raise InvalidProviderResponse("Alpaca SSE event nemá platný envelope") from exc
 
 
+@dataclass(frozen=True)
+class CorporateActionEvidenceScope:
+    """Bounded evidence request for one provider symbol and economic interval."""
+
+    provider: str
+    symbol: str
+    start: date
+    end: date
+    current_provider_action_ids: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        symbol = self.symbol.strip().upper()
+        if (
+            not self.provider
+            or not symbol
+            or self.start > self.end
+            or any(not item or len(item) > 128 for item in self.current_provider_action_ids)
+        ):
+            raise ValueError("Corporate-action evidence scope není platný")
+        object.__setattr__(self, "symbol", symbol)
+        object.__setattr__(
+            self,
+            "current_provider_action_ids",
+            tuple(sorted(set(self.current_provider_action_ids))),
+        )
+
+
 AlpacaTransport = Callable[[str, dict[str, str], float], tuple[int, dict[str, str], bytes]]
-ActionEvidenceLoader = Callable[[str], tuple[CorporateActionEvent, ...]]
+ActionEvidenceLoader = Callable[[CorporateActionEvidenceScope], Iterable[CorporateActionEvent]]
 
 
 class AlpacaProvider:
@@ -698,32 +725,39 @@ class AlpacaProvider:
         if start > end:
             raise ValueError("Počáteční datum musí předcházet koncovému")
         normalized = self.resolve(symbol)["provider_symbol"]
-        events = self._evidence_loader("alpaca")
-        latest: dict[str, CorporateActionEvent] = {}
-        for event in sorted(
-            events,
-            key=lambda item: (cast(datetime, item.received_at), item.event_id),
-        ):
-            previous = latest.get(event.provider_action_id)
-            if (
-                previous is not None
-                and previous.action is not CorporateActionEventType.DELETE
-                and event.action is not CorporateActionEventType.DELETE
-                and previous.payload_hash == event.payload_hash
-            ):
-                # Consecutive replay stejného aktivního faktu je stále tatáž incarnation.
-                # První lokální receipt proto zůstává jejím kauzálním knowledge time.
-                continue
-            latest[event.provider_action_id] = event
-
-        result: list[CorporateAction] = []
         rows = self._get_corporate_action_rows(normalized)
-        returned_ids = {
-            str(row.get("id"))
-            for _, row in rows
-            if isinstance(row.get("id"), str) and row.get("id")
-        }
         try:
+            returned_ids: set[str] = set()
+            for _, row in rows:
+                provider_action_id = row.get("id")
+                if not isinstance(provider_action_id, str) or not provider_action_id:
+                    raise InvalidProviderResponse(
+                        "Alpaca corporate action nemá platnou provider identitu"
+                    )
+                returned_ids.add(provider_action_id)
+
+            scope = CorporateActionEvidenceScope(
+                provider="alpaca",
+                symbol=normalized,
+                start=start,
+                end=end,
+                current_provider_action_ids=tuple(returned_ids),
+            )
+            latest: dict[str, CorporateActionEvent] = {}
+            for event in self._evidence_loader(scope):
+                previous = latest.get(event.provider_action_id)
+                if (
+                    previous is not None
+                    and previous.action is not CorporateActionEventType.DELETE
+                    and event.action is not CorporateActionEventType.DELETE
+                    and previous.payload_hash == event.payload_hash
+                ):
+                    # Consecutive replay stejného aktivního faktu je stále tatáž incarnation.
+                    # První lokální receipt proto zůstává jejím kauzálním knowledge time.
+                    continue
+                latest[event.provider_action_id] = event
+
+            result: list[CorporateAction] = []
             for collection, row in rows:
                 scope_date = self._scope_date(row)
                 if not start <= scope_date <= end:
