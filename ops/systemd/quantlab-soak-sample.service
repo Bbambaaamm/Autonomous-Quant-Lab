@@ -1,0 +1,8 @@
+[Unit]
+Description=QuantLab staging soak evidence sample
+Wants=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash -lc 'set -eu; sha=$(cat /home/quantadmin/quantlab-config/deployed-sha); mkdir -p /home/quantadmin/quantlab-soak; /usr/bin/python3 /home/quantadmin/apps/quantlab-staging/scripts/staging-soak-sample.py --output "/home/quantadmin/quantlab-soak/soak-$sha.jsonl"'
