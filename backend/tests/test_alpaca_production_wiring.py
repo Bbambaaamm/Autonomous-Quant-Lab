@@ -71,6 +71,13 @@ def test_production_compose_hardens_alpaca_event_worker() -> None:
     assert 'restart: "on-failure:5"' in service
 
 
+def test_production_worker_uses_bounded_idle_polling() -> None:
+    service = _compose_service("worker")
+
+    assert 'WORKER_POLL_INTERVAL: "5"' in service
+    assert 'WORKER_POLL_INTERVAL: "0.2"' not in service
+
+
 def test_alpaca_event_worker_exits_successfully_for_stooq(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         event_worker, "get_settings", lambda: Settings(market_data_provider="stooq")
