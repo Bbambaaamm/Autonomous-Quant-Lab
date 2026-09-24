@@ -19,8 +19,10 @@ from quantlab.automation import (
     MisfirePolicy,
     PermanentJobError,
     RunStatus,
+    ScheduledJob,
     SchedulerService,
     ScheduleType,
+    TransientJobError,
     WorkerHeartbeat,
     WorkerService,
     next_occurrence,
@@ -201,7 +203,7 @@ def test_market_price_job_runs_in_fixed_one_shot_child(tmp_path, monkeypatch) ->
     result = executor(ScheduledJob(), run)
 
     assert observed["args"][1:] == ["-m", "quantlab.market_task_worker"]
-    assert observed["shell"] if "shell" in observed else False is False
+    assert "shell" not in observed
     assert observed["timeout"] == 540
     assert observed["capture_output"] is True
     assert result == {
@@ -232,7 +234,7 @@ def test_market_price_child_timeout_is_retryable(tmp_path, monkeypatch) -> None:
             }
         )
     )
-    with pytest.raises(Exception, match="MARKET_TASK_PROCESS_TIMEOUT"):
+    with pytest.raises(TransientJobError, match="MARKET_TASK_PROCESS_TIMEOUT"):
         JobExecutor(repository)(ScheduledJob(), run)
 
 
