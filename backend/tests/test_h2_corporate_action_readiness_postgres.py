@@ -925,6 +925,7 @@ def test_scoped_corporate_action_loader_excludes_unrelated_history_and_keeps_del
     suffix = uuid4().hex[:10]
     relevant_id = f"ca-relevant-{suffix}"
     unrelated_id = f"ca-unrelated-{suffix}"
+    symbol = f"S{suffix}".upper()
     received = datetime(2026, 9, 24, 8, tzinfo=UTC)
 
     relevant_insert = CorporateActionEvent(
@@ -934,7 +935,7 @@ def test_scoped_corporate_action_loader_excludes_unrelated_history_and_keeps_del
         relevant_id,
         "a" * 64,
         received,
-        ("H2A",),
+        (symbol,),
         date(2026, 9, 25),
     )
     relevant_delete = CorporateActionEvent(
@@ -944,7 +945,7 @@ def test_scoped_corporate_action_loader_excludes_unrelated_history_and_keeps_del
         relevant_id,
         "a" * 64,
         received + timedelta(minutes=1),
-        ("H2A",),
+        (symbol,),
         date(2026, 9, 25),
     )
     unrelated = CorporateActionEvent(
@@ -964,7 +965,7 @@ def test_scoped_corporate_action_loader_excludes_unrelated_history_and_keeps_del
         service.corporate_action_events_for_scope(
             CorporateActionEvidenceScope(
                 provider="alpaca",
-                symbol="H2A",
+                symbol=symbol,
                 start=date(2026, 9, 24),
                 end=date(2026, 9, 26),
                 current_provider_action_ids=(),
@@ -984,6 +985,7 @@ def test_scoped_loader_returns_full_incarnation_history_for_current_action(scope
     service = PersistentMarketDataService(factory)
     suffix = uuid4().hex[:10]
     provider_action_id = f"ca-history-{suffix}"
+    symbol = f"T{suffix}".upper()
     base = datetime(2026, 9, 24, 8, tzinfo=UTC)
     events = (
         CorporateActionEvent(
@@ -993,7 +995,7 @@ def test_scoped_loader_returns_full_incarnation_history_for_current_action(scope
             provider_action_id,
             "a" * 64,
             base,
-            ("H2A",),
+            (symbol,),
             date(2026, 9, 25),
         ),
         CorporateActionEvent(
@@ -1003,7 +1005,7 @@ def test_scoped_loader_returns_full_incarnation_history_for_current_action(scope
             provider_action_id,
             "b" * 64,
             base + timedelta(minutes=1),
-            ("H2A",),
+            (symbol,),
             date(2026, 9, 25),
         ),
         CorporateActionEvent(
@@ -1013,7 +1015,7 @@ def test_scoped_loader_returns_full_incarnation_history_for_current_action(scope
             provider_action_id,
             "a" * 64,
             base + timedelta(minutes=2),
-            ("H2A",),
+            (symbol,),
             date(2026, 9, 25),
         ),
     )
@@ -1024,7 +1026,7 @@ def test_scoped_loader_returns_full_incarnation_history_for_current_action(scope
         service.corporate_action_events_for_scope(
             CorporateActionEvidenceScope(
                 provider="alpaca",
-                symbol="H2A",
+                symbol=symbol,
                 start=date(2026, 9, 24),
                 end=date(2026, 9, 26),
                 current_provider_action_ids=(provider_action_id,),
@@ -1037,6 +1039,7 @@ def test_scoped_loader_returns_full_incarnation_history_for_current_action(scope
 def test_event_symbol_sidecar_and_scoped_indexes_are_immutable_and_present(scope) -> None:
     factory, _ = scope
     suffix = uuid4().hex[:10]
+    symbol = f"U{suffix}".upper()
     event = CorporateActionEvent(
         f"symbol-sidecar-{suffix}",
         datetime(2026, 9, 24, 8, tzinfo=UTC),
@@ -1044,13 +1047,13 @@ def test_event_symbol_sidecar_and_scoped_indexes_are_immutable_and_present(scope
         f"ca-sidecar-{suffix}",
         "c" * 64,
         datetime(2026, 9, 24, 8, tzinfo=UTC),
-        ("H2A",),
+        (symbol,),
         date(2026, 9, 25),
     )
     PersistentMarketDataService(factory).record_corporate_action_event("alpaca", event)
 
     with factory() as session:
-        sidecar = session.get(CorporateActionEventSymbolRecord, (event.event_id, "H2A"))
+        sidecar = session.get(CorporateActionEventSymbolRecord, (event.event_id, symbol))
         event_indexes = set(
             session.scalars(
                 text(
@@ -1081,9 +1084,9 @@ def test_event_symbol_sidecar_and_scoped_indexes_are_immutable_and_present(scope
         session.execute(
             text(
                 "UPDATE corporate_action_event_symbols "
-                "SET symbol='OTHER' WHERE event_id=:event_id AND symbol='H2A'"
+                "SET symbol='OTHER' WHERE event_id=:event_id AND symbol=:symbol"
             ),
-            {"event_id": event.event_id},
+            {"event_id": event.event_id, "symbol": symbol},
         )
         session.commit()
 
