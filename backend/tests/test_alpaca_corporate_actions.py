@@ -7,16 +7,21 @@ from decimal import Decimal
 from typing import Any
 
 import pytest
+from sqlalchemy import create_engine
 
 import quantlab.alpaca_event_worker as event_worker
+import quantlab.provider_factory as provider_factory
 from quantlab.alpaca_sse import AlpacaCorporateActionStream
 from quantlab.config import Settings
 from quantlab.market_data import (
     AlpacaProvider,
+    AssetType,
     CorporateActionEvent,
     CorporateActionEventType,
+    CorporateActionEvidenceScope,
     CorporateActionKind,
     DatasetInvalid,
+    Instrument,
     InvalidProviderResponse,
     ProviderUnavailable,
     canonical_corporate_action_payload_hash,
@@ -135,11 +140,91 @@ def _provider(
     return AlpacaProvider(
         "key",
         "secret",
-        lambda provider: tuple(events) if provider == "alpaca" else (),
+        lambda scope: tuple(events) if scope.provider == "alpaca" else (),
         {"AAPL": "instrument-aapl"},
         _transport(pages, captured),
         timeout=1,
     )
+
+
+def test_provider_factory_wires_scoped_evidence_loader(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[CorporateActionEvidenceScope] = []
+
+    class Service:
+        def __init__(self, sessions):  # type: ignore[no-untyped-def]
+            self.sessions = sessions
+
+        def corporate_action_events_for_scope(self, scope: CorporateActionEvidenceScope):
+            calls.append(scope)
+            return ()
+
+        def corporate_action_events(self, provider: str):  # type: ignore[no-untyped-def]
+            pytest.fail(f"production provider must not wire full-history loader: {provider}")
+
+    monkeypatch.setattr(provider_factory, "PersistentMarketDataService", Service)
+    engine = create_engine("sqlite://")
+    provider = provider_factory.build_market_data_provider(
+        Settings(
+            market_data_provider="alpaca",
+            alpaca_key_id="key",
+            alpaca_secret_key="secret",
+        ),
+        engine,
+        instrument=Instrument(
+            "instrument-aapl",
+            "AAPL",
+            "XNYS",
+            "XNYS",
+            "USD",
+            AssetType.EQUITY,
+            date(2020, 1, 1),
+        ),
+    )
+    scope = CorporateActionEvidenceScope(
+        provider="alpaca",
+        symbol="AAPL",
+        start=date(2026, 9, 1),
+        end=date(2026, 9, 2),
+        current_provider_action_ids=("ca-1",),
+    )
+
+    assert tuple(provider._evidence_loader(scope)) == ()  # type: ignore[attr-defined]
+    assert calls == [scope]
+    engine.dispose()
+
+
+def test_alpaca_evidence_loader_receives_bounded_symbol_scope() -> None:
+    row = _split("ca-scope")
+    event = CorporateActionEvent.from_sse(_sse_payload(row, event_id="event-scope"))
+    scopes: list[CorporateActionEvidenceScope] = []
+
+    def loader(scope: CorporateActionEvidenceScope):
+        scopes.append(scope)
+        return (event,)
+
+    provider = AlpacaProvider(
+        "key",
+        "secret",
+        loader,
+        {"AAPL": "instrument-aapl"},
+        _transport({None: _response({"forward_splits": [row]})}, []),
+        timeout=1,
+    )
+
+    actions = provider.corporate_actions("AAPL", date(2026, 9, 1), date(2026, 9, 2))
+
+    assert len(actions) == 1
+    assert scopes == [
+        CorporateActionEvidenceScope(
+            provider="alpaca",
+            symbol="AAPL",
+            start=date(2026, 9, 1),
+            end=date(2026, 9, 2),
+            current_provider_action_ids=("ca-scope",),
+        )
+    ]
 
 
 def test_alpaca_action_known_at_comes_only_from_matching_sse_version() -> None:
@@ -399,7 +484,7 @@ def test_alpaca_future_process_date_is_included_by_full_inventory_horizon() -> N
     provider = AlpacaProvider(
         "key",
         "secret",
-        lambda name: (event,) if name == "alpaca" else (),
+        lambda scope: (event,) if scope.provider == "alpaca" else (),
         {"DMA": "instrument-dma"},
         _transport({None: _response({"cash_dividends": [row]})}, calls),
         timeout=1,
