@@ -17,7 +17,7 @@ from sqlalchemy.orm import Mapped, Session, aliased, mapped_column
 from quantlab.config import Settings
 from quantlab.domain import require_utc
 from quantlab.market_catalog import CatalogError, NoRedirect
-from quantlab.market_data_service import _lock
+from quantlab.market_data_service import _database_utc, _lock
 from quantlab.persistence import Base
 
 ASSET_URLS = {
@@ -323,6 +323,9 @@ class AssetDirectoryService:
                         AssetDirectorySnapshot.snapshot_id == metric.previous_snapshot_id
                     )
                 )
+                if previous_received_at is None:
+                    raise CatalogError("ASSET_DIRECTORY_PREVIOUS_SNAPSHOT_MISSING")
+                previous_received_at = _database_utc(previous_received_at)
             changes = (
                 {
                     "first_seen": metric.first_seen,
@@ -338,7 +341,7 @@ class AssetDirectoryService:
             )
             return {
                 "snapshot_id": row.snapshot_id,
-                "received_at": row.received_at,
+                "received_at": _database_utc(row.received_at),
                 "total": metric.total,
                 "active": metric.active,
                 "inactive": metric.inactive,
