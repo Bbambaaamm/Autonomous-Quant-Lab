@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import replace
 from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
@@ -17,6 +17,7 @@ from sqlalchemy import (
     UniqueConstraint,
     and_,
     func,
+    or_,
     select,
     text,
 )
@@ -26,6 +27,7 @@ from quantlab.domain import require_utc
 from quantlab.market_data import (
     CorporateAction,
     CorporateActionEvent,
+    CorporateActionEvidenceScope,
     CorporateActionEventType,
     DatasetInvalid,
     DatasetSnapshot,
@@ -102,6 +104,34 @@ class CorporateActionEventAuditRecord(Base):
     provider_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     symbols_json: Mapped[str] = mapped_column(Text, nullable=False)
     scope_date: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class CorporateActionEventSymbolRecord(Base):
+    """Immutable normalized symbol index derived from the raw event envelope."""
+
+    __tablename__ = "corporate_action_event_symbols"
+    event_id: Mapped[str] = mapped_column(
+        ForeignKey("corporate_action_events.event_id", ondelete="RESTRICT"), primary_key=True
+    )
+    symbol: Mapped[str] = mapped_column(String(32), primary_key=True)
+
+
+def _corporate_action_event(
+    row: CorporateActionEventRecord, audit: CorporateActionEventAuditRecord
+) -> CorporateActionEvent:
+    decoded = json.loads(audit.symbols_json)
+    if not isinstance(decoded, list) or any(not isinstance(item, str) for item in decoded):
+        raise DatasetInvalid("Corporate-action event audit má neplatný symbol scope")
+    return CorporateActionEvent(
+        row.event_id,
+        _database_utc(audit.provider_at),
+        CorporateActionEventType(row.action),
+        row.provider_action_id,
+        row.payload_hash,
+        _database_utc(row.occurred_at),
+        tuple(decoded),
+        audit.scope_date.date() if audit.scope_date is not None else None,
+    )
 
 
 class CorporateActionRevisionRecord(Base):
@@ -249,6 +279,10 @@ class PersistentMarketDataService:
                     scope_date=scope_date,
                 )
             )
+            session.add_all(
+                CorporateActionEventSymbolRecord(event_id=event.event_id, symbol=symbol)
+                for symbol in event.symbols
+            )
             if event.action is CorporateActionEventType.DELETE:
                 action_id = corporate_action_logical_id(provider, event.provider_action_id)
                 cancellation_id = hashlib.sha256(
@@ -285,42 +319,83 @@ class PersistentMarketDataService:
                 cursor.updated_at = received_at
             return True
 
-    def corporate_action_events(self, provider: str) -> tuple[CorporateActionEvent, ...]:
-        """Načte persistentní stream evidence v pořadí prvního lokálního receipt času."""
+    def corporate_action_events_for_scope(
+        self, scope: CorporateActionEvidenceScope
+    ) -> Iterator[CorporateActionEvent]:
+        """Streamuje pouze evidence relevantní pro jeden symbol/interval."""
         with self._sessions() as session:
-            rows = tuple(
-                session.execute(
-                    select(CorporateActionEventRecord, CorporateActionEventAuditRecord)
+            deleted_ids = set(
+                session.scalars(
+                    select(CorporateActionEventRecord.provider_action_id)
+                    .join(
+                        CorporateActionEventSymbolRecord,
+                        CorporateActionEventSymbolRecord.event_id
+                        == CorporateActionEventRecord.event_id,
+                    )
                     .join(
                         CorporateActionEventAuditRecord,
                         CorporateActionEventAuditRecord.event_id
                         == CorporateActionEventRecord.event_id,
                     )
-                    .where(CorporateActionEventRecord.provider == provider)
-                    .order_by(
-                        CorporateActionEventRecord.occurred_at,
-                        CorporateActionEventRecord.event_id,
+                    .where(
+                        CorporateActionEventRecord.provider == scope.provider,
+                        CorporateActionEventRecord.action == CorporateActionEventType.DELETE.value,
+                        CorporateActionEventSymbolRecord.symbol == scope.symbol,
+                        or_(
+                            CorporateActionEventAuditRecord.scope_date.is_(None),
+                            and_(
+                                CorporateActionEventAuditRecord.scope_date >= _instant(scope.start),
+                                CorporateActionEventAuditRecord.scope_date
+                                < _instant(scope.end + timedelta(days=1)),
+                            ),
+                        ),
                     )
+                    .distinct()
                 )
             )
-        result: list[CorporateActionEvent] = []
-        for row, audit in rows:
-            decoded = json.loads(audit.symbols_json)
-            if not isinstance(decoded, list) or any(not isinstance(item, str) for item in decoded):
-                raise DatasetInvalid("Corporate-action event audit má neplatný symbol scope")
-            result.append(
-                CorporateActionEvent(
-                    row.event_id,
-                    _database_utc(audit.provider_at),
-                    CorporateActionEventType(row.action),
-                    row.provider_action_id,
-                    row.payload_hash,
-                    _database_utc(row.occurred_at),
-                    tuple(decoded),
-                    audit.scope_date.date() if audit.scope_date is not None else None,
+            provider_action_ids = tuple(
+                sorted(set(scope.current_provider_action_ids) | deleted_ids)
+            )
+            if not provider_action_ids:
+                return
+
+            statement = (
+                select(CorporateActionEventRecord, CorporateActionEventAuditRecord)
+                .join(
+                    CorporateActionEventAuditRecord,
+                    CorporateActionEventAuditRecord.event_id
+                    == CorporateActionEventRecord.event_id,
+                )
+                .where(
+                    CorporateActionEventRecord.provider == scope.provider,
+                    CorporateActionEventRecord.provider_action_id.in_(provider_action_ids),
+                )
+                .order_by(
+                    CorporateActionEventRecord.occurred_at,
+                    CorporateActionEventRecord.event_id,
+                )
+                .execution_options(stream_results=True, yield_per=256)
+            )
+            for row, audit in session.execute(statement):
+                yield _corporate_action_event(row, audit)
+
+    def corporate_action_events(self, provider: str) -> tuple[CorporateActionEvent, ...]:
+        """Legacy full-history accessor; production provider wiring must not call it."""
+        with self._sessions() as session:
+            rows = session.execute(
+                select(CorporateActionEventRecord, CorporateActionEventAuditRecord)
+                .join(
+                    CorporateActionEventAuditRecord,
+                    CorporateActionEventAuditRecord.event_id
+                    == CorporateActionEventRecord.event_id,
+                )
+                .where(CorporateActionEventRecord.provider == provider)
+                .order_by(
+                    CorporateActionEventRecord.occurred_at,
+                    CorporateActionEventRecord.event_id,
                 )
             )
-        return tuple(result)
+            return tuple(_corporate_action_event(row, audit) for row, audit in rows)
 
     def ingest(
         self,
