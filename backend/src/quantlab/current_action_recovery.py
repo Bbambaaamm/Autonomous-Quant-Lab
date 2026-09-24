@@ -12,6 +12,7 @@ from typing import Any
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from quantlab.control_audit import ControlAudit, add_control_audit
 from quantlab.current_actions import NORMALIZATION_VERSION
 from quantlab.domain import require_utc
 from quantlab.market_data import AlpacaProvider, DatasetInvalid, InvalidProviderResponse
@@ -91,6 +92,8 @@ def recheck_current_receipts(
     actor: str,
     reason: str,
     now: datetime,
+    *,
+    audit: ControlAudit | None = None,
 ) -> dict[str, Any]:
     now = require_utc(now)
     if not re.fullmatch("[a-f0-9]{64}", batch_id) or not 1 <= len(symbols) <= 50:
@@ -197,6 +200,9 @@ def recheck_current_receipts(
             task.mean_reversion = after["mean_reversion"]
             task.evidence_json = canonical(after)
             results.append({"symbol": task.symbol, "result": "RESOLVED", "review_id": review_id})
+        if audit is not None:
+            add_control_audit(session, audit, batch_id, timestamp=now)
+            session.flush()
     return {
         "batch_id": batch_id,
         "normalization_version": NORMALIZATION_VERSION,
