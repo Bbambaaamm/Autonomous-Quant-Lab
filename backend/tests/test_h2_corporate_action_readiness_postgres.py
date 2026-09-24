@@ -20,6 +20,7 @@ from quantlab.market_data import (
     AssetType,
     CorporateAction,
     CorporateActionEvent,
+    CorporateActionEvidenceScope,
     CorporateActionEventType,
     CorporateActionKind,
     DatasetInvalid,
@@ -32,6 +33,7 @@ from quantlab.market_data import (
 from quantlab.market_data_service import (
     CorporateActionCancellationRecord,
     CorporateActionEventAuditRecord,
+    CorporateActionEventSymbolRecord,
     CorporateActionRevisionCanonicalizationRecord,
     CorporateActionRevisionRecord,
     PersistentMarketDataService,
@@ -915,3 +917,172 @@ def test_alpaca_event_cursor_is_atomic_idempotent_and_stream_ordered(scope) -> N
     assert cursor is not None and cursor.last_event_id == second.event_id
     assert count == 2
     assert "ix_corporate_action_events_provider_occurred_event" in index_names
+
+
+def test_scoped_corporate_action_loader_excludes_unrelated_history_and_keeps_delete(scope) -> None:
+    factory, _ = scope
+    service = PersistentMarketDataService(factory)
+    suffix = uuid4().hex[:10]
+    relevant_id = f"ca-relevant-{suffix}"
+    unrelated_id = f"ca-unrelated-{suffix}"
+    received = datetime(2026, 9, 24, 8, tzinfo=UTC)
+
+    relevant_insert = CorporateActionEvent(
+        f"rel-insert-{suffix}",
+        received,
+        CorporateActionEventType.INSERT,
+        relevant_id,
+        "a" * 64,
+        received,
+        ("H2A",),
+        date(2026, 9, 25),
+    )
+    relevant_delete = CorporateActionEvent(
+        f"rel-delete-{suffix}",
+        received + timedelta(minutes=1),
+        CorporateActionEventType.DELETE,
+        relevant_id,
+        "a" * 64,
+        received + timedelta(minutes=1),
+        ("H2A",),
+        date(2026, 9, 25),
+    )
+    unrelated = CorporateActionEvent(
+        f"other-{suffix}",
+        received,
+        CorporateActionEventType.INSERT,
+        unrelated_id,
+        "b" * 64,
+        received,
+        ("OTHER",),
+        date(2026, 9, 25),
+    )
+    for event in (relevant_insert, relevant_delete, unrelated):
+        service.record_corporate_action_event("alpaca", event)
+
+    loaded = tuple(
+        service.corporate_action_events_for_scope(
+            CorporateActionEvidenceScope(
+                provider="alpaca",
+                symbol="H2A",
+                start=date(2026, 9, 24),
+                end=date(2026, 9, 26),
+                current_provider_action_ids=(),
+            )
+        )
+    )
+
+    assert [item.event_id for item in loaded] == [
+        relevant_insert.event_id,
+        relevant_delete.event_id,
+    ]
+    assert unrelated.event_id not in {item.event_id for item in loaded}
+
+
+def test_scoped_loader_returns_full_incarnation_history_for_current_action(scope) -> None:
+    factory, _ = scope
+    service = PersistentMarketDataService(factory)
+    suffix = uuid4().hex[:10]
+    provider_action_id = f"ca-history-{suffix}"
+    base = datetime(2026, 9, 24, 8, tzinfo=UTC)
+    events = (
+        CorporateActionEvent(
+            f"a1-{suffix}",
+            base,
+            CorporateActionEventType.INSERT,
+            provider_action_id,
+            "a" * 64,
+            base,
+            ("H2A",),
+            date(2026, 9, 25),
+        ),
+        CorporateActionEvent(
+            f"b-{suffix}",
+            base + timedelta(minutes=1),
+            CorporateActionEventType.UPDATE,
+            provider_action_id,
+            "b" * 64,
+            base + timedelta(minutes=1),
+            ("H2A",),
+            date(2026, 9, 25),
+        ),
+        CorporateActionEvent(
+            f"a2-{suffix}",
+            base + timedelta(minutes=2),
+            CorporateActionEventType.UPDATE,
+            provider_action_id,
+            "a" * 64,
+            base + timedelta(minutes=2),
+            ("H2A",),
+            date(2026, 9, 25),
+        ),
+    )
+    for event in events:
+        service.record_corporate_action_event("alpaca", event)
+
+    loaded = tuple(
+        service.corporate_action_events_for_scope(
+            CorporateActionEvidenceScope(
+                provider="alpaca",
+                symbol="H2A",
+                start=date(2026, 9, 24),
+                end=date(2026, 9, 26),
+                current_provider_action_ids=(provider_action_id,),
+            )
+        )
+    )
+    assert [item.event_id for item in loaded] == [item.event_id for item in events]
+
+
+def test_event_symbol_sidecar_and_scoped_indexes_are_immutable_and_present(scope) -> None:
+    factory, _ = scope
+    suffix = uuid4().hex[:10]
+    event = CorporateActionEvent(
+        f"symbol-sidecar-{suffix}",
+        datetime(2026, 9, 24, 8, tzinfo=UTC),
+        CorporateActionEventType.INSERT,
+        f"ca-sidecar-{suffix}",
+        "c" * 64,
+        datetime(2026, 9, 24, 8, tzinfo=UTC),
+        ("H2A",),
+        date(2026, 9, 25),
+    )
+    PersistentMarketDataService(factory).record_corporate_action_event("alpaca", event)
+
+    with factory() as session:
+        sidecar = session.get(CorporateActionEventSymbolRecord, (event.event_id, "H2A"))
+        event_indexes = set(
+            session.scalars(
+                text(
+                    """
+                    SELECT indexname FROM pg_indexes
+                    WHERE schemaname=current_schema()
+                      AND tablename='corporate_action_events'
+                    """
+                )
+            )
+        )
+        symbol_indexes = set(
+            session.scalars(
+                text(
+                    """
+                    SELECT indexname FROM pg_indexes
+                    WHERE schemaname=current_schema()
+                      AND tablename='corporate_action_event_symbols'
+                    """
+                )
+            )
+        )
+    assert sidecar is not None
+    assert "ix_corporate_action_events_provider_action_occurred_event" in event_indexes
+    assert "ix_corporate_action_event_symbols_symbol_event" in symbol_indexes
+
+    with factory() as session, pytest.raises(DBAPIError, match="immutable"):
+        session.execute(
+            text(
+                "UPDATE corporate_action_event_symbols "
+                "SET symbol='OTHER' WHERE event_id=:event_id AND symbol='H2A'"
+            ),
+            {"event_id": event.event_id},
+        )
+        session.commit()
