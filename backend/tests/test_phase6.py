@@ -449,17 +449,9 @@ def test_late_revision_updates_history_only_when_it_becomes_known():
 
     before_correction = CAL.session_close(days[2])
     assert [
-        (when, target.weights)
-        for when, target in baseline.decisions
-        if when <= before_correction
-    ] == [
-        (when, target.weights)
-        for when, target in revised.decisions
-        if when <= before_correction
-    ]
-    assert dict(baseline.decisions)[CAL.session_close(days[-1])].weights == (
-        ("a", Decimal("1")),
-    )
+        (when, target.weights) for when, target in baseline.decisions if when <= before_correction
+    ] == [(when, target.weights) for when, target in revised.decisions if when <= before_correction]
+    assert dict(baseline.decisions)[CAL.session_close(days[-1])].weights == (("a", Decimal("1")),)
     assert dict(revised.decisions)[CAL.session_close(days[-1])].weights == ()
 
 
