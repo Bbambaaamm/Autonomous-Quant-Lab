@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 from quantlab.automation import AutomationRepository, JobExecutor, SchedulerService, WorkerService
 from quantlab.config import get_settings
 from quantlab.provider_factory import build_market_data_provider, market_data_provider_metadata
+from quantlab.resource_guard import current_rss_mib
 
 
 def main() -> None:
@@ -47,6 +48,15 @@ def main() -> None:
                 worker.stop_event.wait(dispatch_delay)
                 continue
             worker.execute_one()
+            rss_mib = current_rss_mib()
+            if rss_mib is not None and rss_mib >= settings.worker_soft_rss_mb:
+                logger.warning(
+                    "Worker dosáhl soft RSS watermarku: rss_mib=%s limit_mib=%s; restartuje",
+                    rss_mib,
+                    settings.worker_soft_rss_mb,
+                )
+                worker.request_stop()
+                continue
             dispatch_delay = worker.next_xnys_dispatch_delay(datetime.now(UTC))
             wait_for = settings.worker_poll_interval
             if dispatch_delay is not None:
