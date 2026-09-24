@@ -50,8 +50,22 @@ The guard currently checks:
 - one-shot market task lifecycle and bounded provider request budget;
 - backpressure + subprocess isolation for market work;
 - soft RSS recycling of the long-lived worker;
+- bounded snapshot scope, explicit range budget and streamed authoritative observation reads;
+- durable market-pipeline retry/restart/idempotence regressions through required CI;
 - production Compose CPU/RAM ceilings and absence of worker/listener host ports;
 - that the architecture guard stays wired into both required CI contexts.
+
+## Architecture control-plane ownership
+
+`.github/CODEOWNERS` assigns the architecture-control-plane files to `@Bbambaaamm`.
+The intended GitHub repository setting is **Require review from Code Owners** for the
+`Protect main` ruleset. CODEOWNERS alone documents ownership; GitHub must have that
+ruleset option enabled for the approval to be mechanically mandatory.
+
+The ruleset itself is audited daily by
+`.github/workflows/agent-ruleset-sync.yml`. A failed audit opens or refreshes
+`[architecture] Protect main ruleset drift` so changes to required checks, strict
+freshness, bypass actors, PR/deletion/non-fast-forward protection or CodeQL are visible.
 
 ## Developer / agent command
 
