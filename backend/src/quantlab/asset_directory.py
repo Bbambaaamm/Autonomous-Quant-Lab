@@ -323,6 +323,9 @@ class AssetDirectoryService:
                         AssetDirectorySnapshot.snapshot_id == metric.previous_snapshot_id
                     )
                 )
+                if previous_received_at is None:
+                    raise CatalogError("ASSET_DIRECTORY_PREVIOUS_SNAPSHOT_MISSING")
+                previous_received_at = _database_utc(previous_received_at)
             changes = (
                 {
                     "first_seen": metric.first_seen,
@@ -331,7 +334,7 @@ class AssetDirectoryService:
                     "status_changed": metric.status_changed,
                     "became_inactive": metric.became_inactive,
                     "became_active": metric.became_active,
-                    "previous_received_at": _database_utc(previous_received_at),
+                    "previous_received_at": previous_received_at,
                 }
                 if metric.previous_snapshot_id is not None
                 else None
