@@ -1961,15 +1961,13 @@ def operator_market_recheck(
             current_principal(request).actor_id,
             body.reason,
             datetime.now(UTC),
+            audit=_control_audit(
+                request,
+                "CONTROL_MARKET_RECEIPTS_REVIEWED",
+                "market_batch",
+                body.reason,
+            ),
         )
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
-    _audit_control_mutation(
-        "CONTROL_MARKET_RECEIPTS_REVIEWED",
-        "market_batch",
-        body.batch_id,
-        _actor(request),
-        body.reason,
-        _correlation(request),
-    )
     return result
