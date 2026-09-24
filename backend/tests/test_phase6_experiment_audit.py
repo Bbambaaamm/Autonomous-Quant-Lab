@@ -5,6 +5,7 @@ import json
 from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
@@ -186,6 +187,20 @@ def test_experiment_api_returns_domain_error_for_invalid_config(
     config: dict[str, object], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(api.control_plane_registry, "ensure_strategy", lambda *args: None)
+    monkeypatch.setattr(
+        api.phase6_runner,
+        "run",
+        lambda *_args, **_kwargs: pytest.fail("API nesmí spouštět research runner in-process"),
+    )
+    monkeypatch.setattr(
+        api.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=2,
+            stdout='{"status":"validation_error","error":"invalid strategy config"}',
+            stderr="",
+        ),
+    )
     response = TestClient(api.app).post(
         "/operator/research/experiments",
         json={
