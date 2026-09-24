@@ -546,14 +546,16 @@ def _audit_control_mutation(
 @app.post("/operator/reconciliation/run", response_model=OperatorDocument)
 def operator_reconciliation(body: ReasonedMutation, request: Request) -> dict[str, object]:
     correlation_id = _correlation(request)
-    result = reconciliation_service.reconcile("paper-main", correlation_id=correlation_id)
-    _audit_control_mutation(
-        "CONTROL_RECONCILIATION_RUN",
-        "reconciliation",
-        result.id,
-        _actor(request),
-        body.reason,
-        correlation_id,
+    result = reconciliation_service.reconcile(
+        "paper-main",
+        correlation_id=correlation_id,
+        audit=_control_audit(
+            request,
+            "CONTROL_RECONCILIATION_RUN",
+            "reconciliation",
+            body.reason,
+            correlation_id=correlation_id,
+        ),
     )
     return vars(result)
 
