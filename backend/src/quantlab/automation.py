@@ -1411,7 +1411,7 @@ class JobExecutor:
             }
         scoped_instruments = tuple(
             Instrument(
-                row.instrument_id,
+                instrument.instrument_id,
                 row.symbol,
                 row.exchange,
                 row.calendar,
@@ -1513,7 +1513,7 @@ class JobExecutor:
                     .select_from(MarketObservationRecord)
                     .join(MarketDataIngestionRecord)
                     .where(
-                        MarketObservationRecord.instrument_id == row.instrument_id,
+                        MarketObservationRecord.instrument_id == instrument.instrument_id,
                         MarketObservationRecord.session_date
                         == datetime.combine(execution_session, time(), UTC),
                         MarketObservationRecord.timeframe == "open",
@@ -1726,7 +1726,7 @@ class JobExecutor:
                 )
                 required_open_instruments = set(
                     persisted_execution_open_scope(
-                        {row.instrument_id for row in rows}, held_instruments
+                        {instrument.instrument_id for row in rows}, held_instruments
                     )
                 )
                 instrument_rows = tuple(
@@ -1797,7 +1797,7 @@ class JobExecutor:
                 }
             persisted_intents = tuple(
                 OrderIntent(
-                    row.instrument_id,
+                    instrument.instrument_id,
                     Side(row.side),
                     row.quantity,
                     utc(row.decision_time),
