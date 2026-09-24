@@ -8,4 +8,4 @@ Type=oneshot
 Environment=BACKUP_DIR=/home/quantadmin/quantlab-backups
 Environment=BACKUP_RETENTION_DAYS=14
 Environment=BACKUP_PREFIX=quantlab-daily
-ExecStart=/home/quantadmin/apps/quantlab-staging/scripts/staging-db-backup.sh
+ExecStart=/bin/sh /home/quantadmin/apps/quantlab-staging/scripts/staging-db-backup.sh
