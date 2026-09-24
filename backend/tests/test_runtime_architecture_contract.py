@@ -127,6 +127,24 @@ def test_snapshot_builder_keeps_bounded_scope_and_streaming() -> None:
     assert "select(InstrumentRecord).where(" in source_segment
 
 
+def test_phase6_snapshot_verification_stays_batched_and_copy_bounded() -> None:
+    phase6_source, phase6_tree = _module("phase6_runtime.py")
+    service_source, _ = _module("market_data_service.py")
+    runner = next(
+        node
+        for node in phase6_tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "Phase6ExperimentRunner"
+    )
+    runner_segment = ast.get_source_segment(phase6_source, runner) or ""
+
+    assert "snapshot_load_batch_size = 1000" in runner_segment
+    assert "range(0, len(entries), self.snapshot_load_batch_size)" in runner_segment
+    assert "canonical_snapshot_content_hash(immutable_content)" in runner_segment
+    assert "[item for item in observations if item.timestamp <= evaluation_end]" not in runner_segment
+    assert "evaluation_end=evaluation_end" in runner_segment
+    assert "encoder.iterencode(value)" in service_source
+
+
 def test_production_compose_keeps_measured_resource_ceiling_contract() -> None:
     expected = {
         "postgres": ("2g", "2.0"),
