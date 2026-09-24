@@ -132,6 +132,13 @@ class CorporateActionEventRecord(Base):
             "occurred_at",
             "event_id",
         ),
+        Index(
+            "ix_corporate_action_events_provider_action_occurred_event",
+            "provider",
+            "provider_action_id",
+            "occurred_at",
+            "event_id",
+        ),
     )
 
 
