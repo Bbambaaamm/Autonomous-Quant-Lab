@@ -67,7 +67,11 @@ def test_market_task_processing_stays_one_shot_and_request_bounded() -> None:
     ]
     assert len(provider_calls) == 1
     request_budget = next(
-        (keyword.value for keyword in provider_calls[0].keywords if keyword.arg == "request_budget"),
+        (
+            keyword.value
+            for keyword in provider_calls[0].keywords
+            if keyword.arg == "request_budget"
+        ),
         None,
     )
     assert isinstance(request_budget, ast.Constant)
