@@ -45,3 +45,13 @@ Staging používá dvě oddělené vrstvy:
 2. Deploy vytvoří pre-migration dump pouze pokud `scripts/schema-migration-needed.sh <deployed-sha> <target-sha>` vrátí `yes`. Běžný aplikační deploy bez změny Alembic/schema boundary full dump nevytváří.
 
 Restore zůstává explicitní a fail-closed přes existující `db-restore.sh`; pravidelná restore verification je součástí PostgreSQL CI acceptance. Backup adresář musí být přenášen/off-site chráněn provozní vrstvou podle místní politiky.
+
+
+## Immutable GHCR staging images
+
+A push do `main` spouští samostatný `Release images` workflow. Ten znovu sestaví a Trivy HIGH/CRITICAL oskenuje backend i frontend a publikuje je pod immutable Git SHA tagem:
+
+- `ghcr.io/bbambaaamm/autonomous-quant-lab-backend:<git-sha>`
+- `ghcr.io/bbambaaamm/autonomous-quant-lab-frontend:<git-sha>`
+
+Production compose čte `BACKEND_IMAGE` a `FRONTEND_IMAGE`; bez nich zachovává lokální fallback pro development/smoke. Staging deploy musí používat přesný cílový SHA, provést `docker compose pull backend worker alpaca-events frontend` a nesmí při běžném deployi stavět image na hostu.

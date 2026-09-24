@@ -28,6 +28,7 @@ RUN rm -rf /usr/local/lib/python3.12/site-packages/pip* \
     done < /tmp/runtime-libs
 
 FROM gcr.io/distroless/static-debian13:nonroot
+LABEL org.opencontainers.image.source="https://github.com/Bbambaaamm/Autonomous-Quant-Lab"
 WORKDIR /app
 COPY --from=build /runtime-libs/usr/ /usr/
 COPY --from=build /usr/local /usr/local

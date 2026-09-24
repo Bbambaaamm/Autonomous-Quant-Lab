@@ -20,7 +20,7 @@ services:
     cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETGID, SETUID]
     security_opt: [no-new-privileges:true]
   backend:
-    image: quantlab-backend
+    image: "${BACKEND_IMAGE:-quantlab-backend}"
     build:
       context: .
       dockerfile: backend/Dockerfile
@@ -39,7 +39,7 @@ services:
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
   worker:
-    image: quantlab-backend
+    image: "${BACKEND_IMAGE:-quantlab-backend}"
     env_file: [.env.production]
     environment:
       AUTOMATION_ENABLED: "true"
@@ -58,7 +58,7 @@ services:
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
   alpaca-events:
-    image: quantlab-backend
+    image: "${BACKEND_IMAGE:-quantlab-backend}"
     env_file: [.env.production]
     command: ["/app/backend/.venv/bin/quantlab-alpaca-events"]
     healthcheck: {disable: true}
@@ -72,6 +72,7 @@ services:
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
   frontend:
+    image: "${FRONTEND_IMAGE:-quantlab-frontend}"
     build: {context: ., dockerfile: frontend/Dockerfile}
     env_file: [.env.production]
     depends_on: [backend]

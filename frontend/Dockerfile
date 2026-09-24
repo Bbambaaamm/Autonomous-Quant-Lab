@@ -21,6 +21,7 @@ RUN npm run build \
     done < /tmp/runtime-libs
 
 FROM gcr.io/distroless/static-debian13:nonroot
+LABEL org.opencontainers.image.source="https://github.com/Bbambaaamm/Autonomous-Quant-Lab"
 ENV NODE_ENV=production HOSTNAME=0.0.0.0 PORT=3000 VALIDATE_PRODUCTION_STARTUP=true
 WORKDIR /app
 COPY --from=build /runtime-libs/usr/ /usr/
