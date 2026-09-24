@@ -11,6 +11,7 @@ from sqlalchemy import (
     ColumnElement,
     DateTime,
     ForeignKey,
+    Index,
     Select,
     String,
     Text,
@@ -114,6 +115,9 @@ class CorporateActionEventSymbolRecord(Base):
         ForeignKey("corporate_action_events.event_id", ondelete="RESTRICT"), primary_key=True
     )
     symbol: Mapped[str] = mapped_column(String(32), primary_key=True)
+    __table_args__ = (
+        Index("ix_corporate_action_event_symbols_symbol_event", "symbol", "event_id"),
+    )
 
 
 def _corporate_action_event(
