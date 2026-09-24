@@ -484,7 +484,7 @@ def test_alpaca_future_process_date_is_included_by_full_inventory_horizon() -> N
     provider = AlpacaProvider(
         "key",
         "secret",
-        lambda name: (event,) if name == "alpaca" else (),
+        lambda scope: (event,) if scope.provider == "alpaca" else (),
         {"DMA": "instrument-dma"},
         _transport({None: _response({"cash_dividends": [row]})}, calls),
         timeout=1,
