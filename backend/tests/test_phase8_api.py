@@ -137,6 +137,23 @@ def test_audit_pagination_is_stable_when_timestamps_match(tmp_path, monkeypatch)
     ]
 
 
+def test_snapshot_create_rejects_unbounded_date_range(tmp_path, monkeypatch):
+    api = client(tmp_path, monkeypatch)
+    response = api.post(
+        "/operator/datasets",
+        json={
+            "universe_id": "resource-budget",
+            "start": "2010-01-01",
+            "end": "2026-09-24",
+            "as_of": "2026-09-24T00:00:00Z",
+            "minimum_coverage": "1",
+            "reason": "resource guard regression",
+        },
+    )
+    assert response.status_code == 422
+    assert "SNAPSHOT_RANGE_EXCEEDS_RESOURCE_BUDGET" in response.text
+
+
 def test_openapi_exposes_stable_operator_contracts(tmp_path, monkeypatch):
     schema = client(tmp_path, monkeypatch).get("/openapi.json").json()
     required = {
