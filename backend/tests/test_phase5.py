@@ -3,6 +3,7 @@ import json
 from datetime import UTC, datetime, timedelta
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import func, select
@@ -18,8 +19,10 @@ from quantlab.automation import (
     MisfirePolicy,
     PermanentJobError,
     RunStatus,
+    ScheduledJob,
     SchedulerService,
     ScheduleType,
+    TransientJobError,
     WorkerHeartbeat,
     WorkerService,
     next_occurrence,
@@ -166,6 +169,91 @@ def setup(tmp_path):  # type: ignore[no-untyped-def]
         retry_base_delay=3,
         retry_max_delay=20,
     )
+
+
+def _market_price_run() -> JobRun:
+    return JobRun(
+        config_snapshot_json=json.dumps(
+            {
+                "snapshot_version": 1,
+                "identity": {
+                    "account_id": "paper-main",
+                    "job_type": JobType.SYNC_MARKET_PRICE_TASK,
+                    "strategy_id": None,
+                },
+                "config": {},
+            }
+        )
+    )
+
+
+def test_market_price_job_runs_in_fixed_one_shot_child(tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    repository, _ = setup(tmp_path)
+    observed: dict[str, object] = {}
+
+    def fake_run(args, **kwargs):  # type: ignore[no-untyped-def]
+        observed["args"] = args
+        observed.update(kwargs)
+        return SimpleNamespace(
+            returncode=0,
+            stdout='{"outcome":"MARKET_DATA_TASK_PROCESSED","trading_cycle_id":null}\n',
+            stderr="",
+        )
+
+    monkeypatch.setattr("quantlab.automation.subprocess.run", fake_run)
+    result = JobExecutor(repository)(ScheduledJob(), _market_price_run())
+
+    assert observed["args"][1:] == ["-m", "quantlab.market_task_worker"]
+    assert "shell" not in observed
+    assert observed["timeout"] == 540
+    assert observed["capture_output"] is True
+    assert result == {
+        "outcome": "MARKET_DATA_TASK_PROCESSED",
+        "trading_cycle_id": None,
+    }
+
+
+def test_market_price_child_timeout_is_retryable(tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    repository, _ = setup(tmp_path)
+
+    def timeout(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        import subprocess
+
+        raise subprocess.TimeoutExpired(["python", "-m", "quantlab.market_task_worker"], 540)
+
+    monkeypatch.setattr("quantlab.automation.subprocess.run", timeout)
+    with pytest.raises(TransientJobError, match="MARKET_TASK_PROCESS_TIMEOUT"):
+        JobExecutor(repository)(ScheduledJob(), _market_price_run())
+
+
+def test_market_task_worker_runs_one_pipeline_step(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    import quantlab.market_task_worker as worker
+
+    events: list[str] = []
+
+    class Engine:
+        def dispose(self) -> None:
+            events.append("dispose")
+
+    class Pipeline:
+        def __init__(self, sessions):  # type: ignore[no-untyped-def]
+            self.sessions = sessions
+
+        def step(self, provider_factory, clock):  # type: ignore[no-untyped-def]
+            events.append("step")
+            assert callable(provider_factory)
+            assert callable(clock)
+            return {"outcome": "NO_PENDING_MARKET_DATA", "trading_cycle_id": None}
+
+    monkeypatch.setattr(worker, "get_settings", lambda: Settings())
+    monkeypatch.setattr(worker, "create_engine", lambda *args, **kwargs: Engine())
+    monkeypatch.setattr(worker, "MarketPipeline", Pipeline)
+
+    assert worker.run_once() == {
+        "outcome": "NO_PENDING_MARKET_DATA",
+        "trading_cycle_id": None,
+    }
+    assert events == ["step", "dispose"]
 
 
 def test_scheduler_is_idempotent_and_advances_without_drift(tmp_path) -> None:  # type: ignore[no-untyped-def]

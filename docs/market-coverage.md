@@ -337,3 +337,10 @@ completion time, wall-clock duration, task attempts, request/response metriky po
 i delete tohoto completion evidence a downgrade migrace odmítne ztrátu již zaznamenané
 telemetrie. Tato evidence neměří jiné procesy sdílející stejný Alpaca účet; je to přesné
 měření request pokusů vytvořených touto širokou cenovou dávkou.
+
+
+## One-shot market task worker
+
+Plánovaný `SYNC_MARKET_PRICE_TASK` už nemá provádět těžký `MarketPipeline.step()` v dlouho žijícím automation workeru. Parent spouští fixed-argv child `python -m quantlab.market_task_worker`, který převezme nejvýše jeden durable `market_tasks` záznam přes stávající PostgreSQL lease/fencing mechanismus, uloží checkpoint a skončí.
+
+Parent obnovuje svůj automation JobRun heartbeat nezávisle. Child má hard timeout 540 sekund, kratší než 10minutový `MarketTask` lease. Při timeoutu/crashi zůstává task recoverable stávajícím expired-lease mechanismem a další běh jej může bezpečně reclaimnout. Jeden child = nejvýše jeden market task, takže Python allocator/cache nemůže kumulovat RSS napříč širokým backfillem.
