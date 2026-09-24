@@ -1157,12 +1157,12 @@ class DatasetSnapshotService:
                 end,
                 tuple(instruments),
             ):
-                instrument = instruments.get(row.instrument_id)
-                if instrument is None:
+                selected_instrument = instruments.get(row.instrument_id)
+                if selected_instrument is None:
                     continue
                 day = row.session_date.date()
                 if not self._eligible_on_day(
-                    instrument=instrument,
+                    instrument=selected_instrument,
                     memberships=membership_by_instrument.get(row.instrument_id, []),
                     universe_kind=universe_kind,
                     day=day,
