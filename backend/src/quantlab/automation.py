@@ -5,6 +5,8 @@ import json
 import os
 import signal
 import socket
+import subprocess
+import sys
 from collections.abc import Callable
 from datetime import UTC, date, datetime, time, timedelta
 from decimal import ROUND_DOWN, Decimal
@@ -1202,16 +1204,32 @@ class JobExecutor:
         if job_type == JobType.SYNC_MARKET_PRICE_TASK:
             if payload or strategy_id is not None:
                 raise PermanentJobError("Datová fronta nepřijímá vlastní konfiguraci")
-            from quantlab.config import get_settings
-            from quantlab.market_pipeline import MarketPipeline
-            from quantlab.provider_factory import build_market_data_provider
-
-            return MarketPipeline(lambda: Session(self.repository.engine)).step(
-                lambda instrument: build_market_data_provider(
-                    get_settings(), self.repository.engine, instrument=instrument, request_budget=12
-                ),
-                clock=self.clock,
-            )
+            try:
+                completed = subprocess.run(  # noqa: S603
+                    [sys.executable, "-m", "quantlab.market_task_worker"],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    timeout=540,
+                )
+            except subprocess.TimeoutExpired as exc:
+                raise TransientJobError("MARKET_TASK_PROCESS_TIMEOUT") from exc
+            if completed.returncode != 0:
+                detail = completed.stderr.strip().splitlines()
+                reason = detail[-1][:500] if detail else "child process failed"
+                raise TransientJobError(f"MARKET_TASK_PROCESS_FAILED: {reason}")
+            try:
+                result = json.loads(completed.stdout)
+            except json.JSONDecodeError as exc:
+                raise TransientJobError("MARKET_TASK_PROCESS_INVALID_RESULT") from exc
+            if (
+                not isinstance(result, dict)
+                or set(result) != {"outcome", "trading_cycle_id"}
+                or not isinstance(result["outcome"], str)
+                or result["trading_cycle_id"] is not None
+            ):
+                raise TransientJobError("MARKET_TASK_PROCESS_INVALID_RESULT")
+            return {"outcome": result["outcome"], "trading_cycle_id": None}
         if job_type == JobType.SYNC_MARKET_CATALOG:
             if payload or strategy_id is not None:
                 raise PermanentJobError("Katalog nepřijímá vlastní konfiguraci")
