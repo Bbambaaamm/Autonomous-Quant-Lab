@@ -61,12 +61,6 @@ def upgrade() -> None:
         "corporate_action_events",
         ["provider", "provider_action_id", "occurred_at", "event_id"],
     )
-    op.create_index(
-        "ix_corporate_action_event_audit_scope_event",
-        "corporate_action_event_audit",
-        ["scope_date", "event_id"],
-    )
-
     if op.get_bind().dialect.name == "postgresql":
         op.execute(
             sa.text(
@@ -100,10 +94,6 @@ def downgrade() -> None:
             "DROP TRIGGER IF EXISTS corporate_action_event_symbols_immutable "
             "ON corporate_action_event_symbols"
         )
-    op.drop_index(
-        "ix_corporate_action_event_audit_scope_event",
-        table_name="corporate_action_event_audit",
-    )
     op.drop_index(
         "ix_corporate_action_events_provider_action_occurred_event",
         table_name="corporate_action_events",
