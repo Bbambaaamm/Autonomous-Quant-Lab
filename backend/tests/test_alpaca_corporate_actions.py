@@ -147,6 +147,36 @@ def _provider(
     )
 
 
+def test_alpaca_provider_factory_requires_explicit_instrument_scope() -> None:
+    engine = create_engine("sqlite://")
+    with pytest.raises(InvalidProviderResponse, match="ALPACA_INSTRUMENT_SCOPE_REQUIRED"):
+        provider_factory.build_market_data_provider(
+            Settings(
+                market_data_provider="alpaca",
+                alpaca_key_id="key",
+                alpaca_secret_key="secret",
+            ),
+            engine,
+        )
+    engine.dispose()
+
+
+def test_provider_metadata_is_db_free_and_preserves_lineage() -> None:
+    metadata = provider_factory.market_data_provider_metadata(
+        Settings(
+            market_data_provider="alpaca",
+            alpaca_key_id="key",
+            alpaca_secret_key="secret",
+            alpaca_feed="iex",
+        )
+    )
+
+    assert metadata.name == "alpaca"
+    assert metadata.version == "5"
+    assert metadata.supports_actions is True
+    assert metadata.persistent_name == "alpaca:iex"
+
+
 def test_provider_factory_wires_scoped_evidence_loader(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

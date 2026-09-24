@@ -75,7 +75,7 @@ from quantlab.phase7 import (
     PaperPerformanceEvaluationRecord,
     PaperPerformanceSnapshotRecord,
 )
-from quantlab.provider_factory import build_market_data_provider
+from quantlab.provider_factory import build_market_data_provider, market_data_provider_metadata
 from quantlab.research_service import ResearchService
 from quantlab.security import current_principal, security_boundary
 from quantlab.universe import UniverseDefinition, UniverseKind, UniverseMembership
@@ -650,7 +650,7 @@ def ingest_market_data(body: IngestionCreate, request: Request) -> dict[str, obj
             persisted.active_to.date() if persisted.active_to else None,
             persisted.created_at,
         )
-    provider = build_market_data_provider(settings, paper_repository.engine)
+    provider = build_market_data_provider(settings, paper_repository.engine, instrument=instrument)
     result = market_data_service.ingest(
         provider, instrument, body.start, body.end, datetime.now(UTC)
     )
@@ -675,10 +675,7 @@ def build_dataset(body: SnapshotCreate, request: Request) -> dict[str, object]:
     try:
         snapshot = dataset_snapshot_service.build(
             as_of=body.as_of,
-            provider=body.provider
-            or build_market_data_provider(
-                settings, paper_repository.engine
-            ).metadata.persistent_name,
+            provider=body.provider or market_data_provider_metadata(settings).persistent_name,
             universe_id=body.universe_id,
             start=body.start,
             end=body.end,
@@ -864,8 +861,8 @@ def _set_autonomous_deployment(
 ) -> dict[str, object]:
     try:
         if enabled:
-            provider = build_market_data_provider(settings, paper_repository.engine)
-            if not provider.metadata.supports_actions:
+            metadata = market_data_provider_metadata(settings)
+            if not metadata.supports_actions:
                 raise DatasetInvalid(
                     "CORPORATE_ACTIONS_UNSUPPORTED: production provider není způsobilý pro equity autonomous pilot"
                 )
@@ -1163,7 +1160,7 @@ def readyz() -> dict[str, str]:
 @app.get("/market-data/providers")
 def market_data_providers() -> list[dict[str, object]]:
     """Vrací právě aktivní allowlistovaný provider bez dynamického importu nebo arbitrary URL."""
-    metadata = build_market_data_provider(settings, paper_repository.engine).metadata
+    metadata = market_data_provider_metadata(settings)
     return [
         {
             "name": metadata.name,

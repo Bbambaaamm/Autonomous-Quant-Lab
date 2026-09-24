@@ -3,7 +3,7 @@ from datetime import UTC, datetime
 
 from quantlab.automation import AutomationRepository, JobExecutor, SchedulerService, WorkerService
 from quantlab.config import get_settings
-from quantlab.provider_factory import build_market_data_provider
+from quantlab.provider_factory import build_market_data_provider, market_data_provider_metadata
 
 
 def main() -> None:
@@ -19,7 +19,10 @@ def main() -> None:
     scheduler = SchedulerService(repository)
     executor = JobExecutor(
         repository,
-        provider_factory=lambda: build_market_data_provider(settings, repository.engine),
+        provider_factory=lambda instruments: build_market_data_provider(
+            settings, repository.engine, instruments=instruments
+        ),
+        provider_metadata=market_data_provider_metadata(settings),
     )
     worker = WorkerService(repository, settings, executor=executor)
     reconciled = repository.reconcile_managed_schedules()

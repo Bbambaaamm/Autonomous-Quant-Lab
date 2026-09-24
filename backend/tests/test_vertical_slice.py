@@ -100,7 +100,9 @@ def test_failed_ingestion_api_returns_json_502_with_iso_dates(monkeypatch) -> No
         (),
         "provider unavailable",
     )
-    monkeypatch.setattr(api_module, "build_market_data_provider", lambda settings, engine: object())
+    monkeypatch.setattr(
+        api_module, "build_market_data_provider", lambda settings, engine, **kwargs: object()
+    )
     monkeypatch.setattr(api_module.market_data_service, "ingest", lambda *args: failed)
 
     response = client.post(

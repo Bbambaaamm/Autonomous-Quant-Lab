@@ -938,7 +938,8 @@ class JobExecutor:
         self,
         repository: AutomationRepository,
         *,
-        provider_factory: Callable[[], Any] | None = None,
+        provider_factory: Callable[[tuple[Any, ...]], Any] | None = None,
+        provider_metadata: Any | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         from quantlab.phase4 import Phase4Repository
@@ -951,6 +952,7 @@ class JobExecutor:
         self.reconciliation = ReconciliationService(phase4)
         self.repository = repository
         self.provider_factory = provider_factory
+        self.provider_metadata = provider_metadata
         self.clock = clock or (lambda: datetime.now(UTC))
 
     @staticmethod
@@ -1386,11 +1388,8 @@ class JobExecutor:
                 "outcome": "NO_ACTION",
                 "no_action_reason": PREOPEN_EXECUTION_INTENT_BLOCK,
             }
-        provider = self.provider_factory() if self.provider_factory else StooqProvider()
-        ingestions: list[str] = []
-        action_evidence: list[str] = []
-        for row in sorted(rows, key=lambda item: item.instrument_id):
-            instrument = Instrument(
+        scoped_instruments = tuple(
+            Instrument(
                 row.instrument_id,
                 row.symbol,
                 row.exchange,
@@ -1401,6 +1400,14 @@ class JobExecutor:
                 row.active_to.date() if row.active_to else None,
                 utc(row.created_at),
             )
+            for row in sorted(rows, key=lambda item: item.instrument_id)
+        )
+        provider = (
+            self.provider_factory(scoped_instruments) if self.provider_factory else StooqProvider()
+        )
+        ingestions: list[str] = []
+        action_evidence: list[str] = []
+        for instrument in scoped_instruments:
             if instrument.asset_type == AssetType.EQUITY:
                 try:
                     action_evidence.append(
@@ -1426,14 +1433,14 @@ class JobExecutor:
                     }
                 except ProviderError as exc:
                     raise TransientJobError("CORPORATE_ACTIONS_UNAVAILABLE") from exc
-            if row.instrument_id in eligible_ids:
+            if instrument.instrument_id in eligible_ids:
                 with sessions() as session:
                     signal_ready = session.scalar(
                         select(func.count())
                         .select_from(MarketObservationRecord)
                         .join(MarketDataIngestionRecord)
                         .where(
-                            MarketObservationRecord.instrument_id == row.instrument_id,
+                            MarketObservationRecord.instrument_id == instrument.instrument_id,
                             MarketObservationRecord.session_date
                             == datetime.combine(signal_session, time(), UTC),
                             MarketObservationRecord.timeframe == "1d",
@@ -1457,7 +1464,7 @@ class JobExecutor:
                         .select_from(MarketObservationRecord)
                         .join(MarketDataIngestionRecord)
                         .where(
-                            MarketObservationRecord.instrument_id == row.instrument_id,
+                            MarketObservationRecord.instrument_id == instrument.instrument_id,
                             MarketObservationRecord.session_date
                             == datetime.combine(signal_session, time(), UTC),
                             MarketObservationRecord.timeframe == "1d",
@@ -1485,7 +1492,7 @@ class JobExecutor:
                     .select_from(MarketObservationRecord)
                     .join(MarketDataIngestionRecord)
                     .where(
-                        MarketObservationRecord.instrument_id == row.instrument_id,
+                        MarketObservationRecord.instrument_id == instrument.instrument_id,
                         MarketObservationRecord.session_date
                         == datetime.combine(execution_session, time(), UTC),
                         MarketObservationRecord.timeframe == "open",
@@ -1687,7 +1694,6 @@ class JobExecutor:
                     "outcome": "NO_ACTION",
                     "no_action_reason": reason,
                 }
-            provider = self.provider_factory() if self.provider_factory else StooqProvider()
             with sessions() as session:
                 held_instruments = set(
                     session.scalars(
@@ -1711,8 +1717,8 @@ class JobExecutor:
                 )
             if {item.instrument_id for item in instrument_rows} != required_open_instruments:
                 raise PermanentJobError(PREOPEN_EXECUTION_INTENT_INVALID)
-            for item in instrument_rows:
-                instrument = Instrument(
+            scoped_instruments = tuple(
+                Instrument(
                     item.instrument_id,
                     item.symbol,
                     item.exchange,
@@ -1723,6 +1729,14 @@ class JobExecutor:
                     item.active_to.date() if item.active_to else None,
                     utc(item.created_at),
                 )
+                for item in instrument_rows
+            )
+            provider = (
+                self.provider_factory(scoped_instruments)
+                if self.provider_factory
+                else StooqProvider()
+            )
+            for instrument in scoped_instruments:
                 request_time = utc(self.clock())
                 if not calendar.is_executable_open_time(execution_session, request_time):
                     return {
@@ -1762,7 +1776,7 @@ class JobExecutor:
                 }
             persisted_intents = tuple(
                 OrderIntent(
-                    row.instrument_id,
+                    instrument.instrument_id,
                     Side(row.side),
                     row.quantity,
                     utc(row.decision_time),
@@ -1772,15 +1786,15 @@ class JobExecutor:
                 )
                 for row in sorted(rows, key=lambda item: item.instrument_id)
             )
-        provider = self.provider_factory() if self.provider_factory else StooqProvider()
+        metadata = self.provider_metadata or StooqProvider.metadata
         service = Phase6PaperExecutionService(
             sessions,
             ValidatedCurrentDataAccessor(sessions),
             self.trading,
             require_corporate_action_readiness=True,
             corporate_action_provider_identity=(
-                provider.metadata.persistent_name,
-                provider.metadata.version,
+                metadata.persistent_name,
+                metadata.version,
             ),
         )
         try:
