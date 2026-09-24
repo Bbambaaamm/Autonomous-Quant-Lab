@@ -33,6 +33,7 @@ from quantlab.phase6_runtime import (
     Phase6ExperimentRunner,
     normalize_strategy_config,
 )
+from quantlab.resource_guard import ResourcePressure
 
 
 def factory():
@@ -213,6 +214,35 @@ def test_experiment_api_returns_domain_error_for_invalid_config(
         },
     )
     assert response.status_code == 409, response.text
+
+
+def test_research_api_defers_before_child_spawn_under_resource_pressure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(api.control_plane_registry, "ensure_strategy", lambda *args: None)
+    monkeypatch.setattr(
+        api,
+        "require_capacity",
+        lambda **kwargs: (_ for _ in ()).throw(ResourcePressure("low memory")),
+    )
+    monkeypatch.setattr(
+        api.subprocess,
+        "run",
+        lambda *args, **kwargs: pytest.fail("research child must not start under pressure"),
+    )
+    response = TestClient(api.app).post(
+        "/operator/research/experiments",
+        json={
+            "snapshot_id": "unused",
+            "strategy_name": "multi_asset_mean_reversion",
+            "strategy_version": "1.0.0",
+            "parameter_configs": [{"lookback": 20, "threshold": "0.95"}],
+            "code_sha": "a" * 40,
+            "reason": "resource pressure regression",
+        },
+    )
+    assert response.status_code == 503
+    assert response.json()["detail"] == "RESOURCE_PRESSURE_RESEARCH_DEFERRED"
 
 
 def test_trend_and_momentum_configs_remain_typed() -> None:
