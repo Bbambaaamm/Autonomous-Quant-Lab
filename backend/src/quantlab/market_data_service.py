@@ -68,6 +68,15 @@ def _database_utc(value: datetime) -> datetime:
     return value.astimezone(UTC)
 
 
+def canonical_snapshot_content_hash(value: object) -> str:
+    """SHA-256 canonical JSON bez materializace dalšího velkého JSON stringu."""
+    digest = hashlib.sha256()
+    encoder = json.JSONEncoder(sort_keys=True, separators=(",", ":"))
+    for chunk in encoder.iterencode(value):
+        digest.update(chunk.encode())
+    return digest.hexdigest()
+
+
 def _lock(session: Session, identity: str) -> None:
     if session.bind is not None and session.bind.dialect.name == "postgresql":
         key = int.from_bytes(hashlib.sha256(identity.encode()).digest()[:8], "big", signed=True)
@@ -1283,9 +1292,7 @@ class DatasetSnapshotService:
                 "corporate_actions": canonical_actions,
                 "universe_memberships": canonical_memberships,
             }
-            content_hash = hashlib.sha256(
-                json.dumps(immutable_content, sort_keys=True, separators=(",", ":")).encode()
-            ).hexdigest()
+            content_hash = canonical_snapshot_content_hash(immutable_content)
             snapshot_id = hashlib.sha256(f"{logical}|{content_hash}".encode()).hexdigest()
             status = "VALID" if expected_count and coverage >= minimum_coverage else "INVALID"
             manifest = json.dumps(

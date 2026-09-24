@@ -24,6 +24,9 @@ Listener baseline před #189 byl ~1.48 GiB RSS; po #189 stabilně ~164–169 MiB
 - Heavy market concurrency: **1** díky jednomu automation workeru a one-shot child lifecycle.
 - Heavy research concurrency: **1** přes PostgreSQL session-level advisory admission slot. Slot se drží po celou kritickou sekci `admission → capacity check → research child → persisted result/audit`; druhý heavy research request fail-closed vrací `RESEARCH_CONCURRENCY_LIMIT` a nespustí child ani další capacity check.
 - Research admission po dobu heavy jobu rezervuje **jedno backend PostgreSQL connection** pro session-level advisory lock. Jde o bounded režii jednoho připojení, ne o in-memory queue; po success/error/timeout se connection uvolní a při zániku procesu PostgreSQL lock odstraní se session. Tento connection budget musí zůstat zahrnutý při změnách backend poolu nebo při zvyšování research concurrency.
+- Phase 6 immutable snapshot verification používá nejvýše **1000 observation/action/instrument IDs na jeden DB batch**.
+- Train/validation/OOS vyhodnocení používá jeden načtený observation dataset s explicitním `evaluation_end`; nevytváří nový full-prefix list pro každý běh.
+- Snapshot content SHA-256 se počítá inkrementálně přes canonical JSON encoder bez druhé materializované kopie celého immutable JSON payloadu.
 
 ## Hard container limits
 

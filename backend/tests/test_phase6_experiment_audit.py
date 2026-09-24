@@ -49,6 +49,7 @@ def test_phase6_runner_is_sequentially_exactly_once_and_never_auto_promotes() ->
     sessions = factory()
     _, _, _, _, request = seed_phase6_snapshot(sessions)
     runner = Phase6ExperimentRunner(sessions)
+    runner.snapshot_load_batch_size = 1
     first = runner.run(request)
     second = runner.run(request)
     assert first.id == second.id

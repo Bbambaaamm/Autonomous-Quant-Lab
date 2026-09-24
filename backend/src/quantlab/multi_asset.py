@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from bisect import insort
+from collections import deque
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -272,8 +273,52 @@ def _rebalance(day: datetime, previous: datetime | None, frequency: RebalanceFre
     return (day.year, day.month) != (previous.year, previous.month)
 
 
+@dataclass(frozen=True)
+class PreparedSnapshotObservations:
+    """Jednou seřazený immutable pohled pro opakované SNAPSHOT_PINNED experimenty."""
+
+    rows: tuple[Observation, ...]
+    sessions: tuple[tuple[datetime, int, int], ...]
+
+
+def prepare_snapshot_pinned_observations(
+    observations: Sequence[Observation] | PreparedSnapshotObservations,
+) -> PreparedSnapshotObservations:
+    if isinstance(observations, PreparedSnapshotObservations):
+        return observations
+    ordered = tuple(
+        sorted(
+            observations,
+            key=lambda item: (
+                item.timestamp,
+                item.instrument_id,
+                item.observed_at,
+                item.revision,
+            ),
+        )
+    )
+    sessions: list[tuple[datetime, int, int]] = []
+    previous_key: tuple[str, datetime] | None = None
+    session_start = 0
+    session_time: datetime | None = None
+    for index, row in enumerate(ordered):
+        key = (row.instrument_id, row.timestamp)
+        if key == previous_key:
+            raise ValueError("Snapshot-pinned research vyžaduje právě jednu připnutou revision")
+        previous_key = key
+        if session_time is None:
+            session_time = row.timestamp
+        elif row.timestamp != session_time:
+            sessions.append((session_time, session_start, index))
+            session_start = index
+            session_time = row.timestamp
+    if session_time is not None:
+        sessions.append((session_time, session_start, len(ordered)))
+    return PreparedSnapshotObservations(ordered, tuple(sessions))
+
+
 def run_multi_asset(
-    observations: Sequence[Observation],
+    observations: Sequence[Observation] | PreparedSnapshotObservations,
     universe: PointInTimeUniverse,
     strategy: PortfolioStrategy,
     initial_cash: Decimal = Decimal("100000"),
@@ -282,6 +327,7 @@ def run_multi_asset(
     currencies: Mapping[str, str] | None = None,
     corporate_actions: Sequence[CorporateAction] = (),
     evaluation_start: datetime | None = None,
+    evaluation_end: datetime | None = None,
     observation_knowledge_mode: ObservationKnowledgeMode = (
         ObservationKnowledgeMode.CURRENT_AS_KNOWN
     ),
@@ -289,19 +335,67 @@ def run_multi_asset(
     if currencies and len(set(currencies.values())) > 1:
         raise ValueError("Multi-currency portfolio bez FX konverze není podporováno")
 
-    pinned = observation_knowledge_mode is ObservationKnowledgeMode.SNAPSHOT_PINNED
-    ordered_observations = sorted(
-        observations, key=lambda item: (item.timestamp, item.observed_at, item.revision)
-    )
-    if pinned:
-        seen_keys: set[tuple[str, datetime]] = set()
-        for row in ordered_observations:
-            key = (row.instrument_id, row.timestamp)
-            if key in seen_keys:
-                raise ValueError("Snapshot-pinned research vyžaduje právě jednu připnutou revision")
-            seen_keys.add(key)
+    evaluation_cutoff = require_utc(evaluation_end) if evaluation_end is not None else None
+    if (
+        evaluation_start is not None
+        and evaluation_cutoff is not None
+        and require_utc(evaluation_start) > evaluation_cutoff
+    ):
+        raise ValueError("Evaluation interval musí být neprázdný")
 
-    times = sorted({row.timestamp for row in ordered_observations})
+    pinned = observation_knowledge_mode is ObservationKnowledgeMode.SNAPSHOT_PINNED
+
+    def observation_activation(row: Observation) -> datetime:
+        return max(row.timestamp, row.observed_at)
+
+    pinned_history: dict[str, deque[Observation]] = {}
+    session_slices: tuple[tuple[datetime, int, int], ...] = ()
+    instruments_at_timestamp: dict[datetime, set[str]] = {}
+    activation_rows: Sequence[Observation] = ()
+    latest_by_key: dict[tuple[str, datetime], Observation] = {}
+    history_times: dict[str, list[datetime]] = {}
+    ordered_observations: Sequence[Observation]
+
+    if pinned:
+        prepared = (
+            observations
+            if isinstance(observations, PreparedSnapshotObservations)
+            else prepare_snapshot_pinned_observations(observations)
+        )
+        ordered_observations = prepared.rows
+        session_slices = tuple(
+            item
+            for item in prepared.sessions
+            if evaluation_cutoff is None or item[0] <= evaluation_cutoff
+        )
+        times = tuple(item[0] for item in session_slices)
+    else:
+        if isinstance(observations, PreparedSnapshotObservations):
+            raise ValueError("Prepared snapshot observations vyžadují SNAPSHOT_PINNED režim")
+        ordered_observations = sorted(
+            (
+                row
+                for row in observations
+                if evaluation_cutoff is None or row.timestamp <= evaluation_cutoff
+            ),
+            key=lambda item: (item.timestamp, item.observed_at, item.revision),
+        )
+        times = tuple(sorted({row.timestamp for row in ordered_observations}))
+        for row in ordered_observations:
+            instruments_at_timestamp.setdefault(row.timestamp, set()).add(row.instrument_id)
+        activation_rows = sorted(
+            ordered_observations,
+            key=lambda item: (
+                observation_activation(item),
+                item.timestamp,
+                item.instrument_id,
+                item.observed_at,
+                item.revision,
+            ),
+        )
+
+    activation_index = 0
+
     portfolio = MultiAssetPortfolio(initial_cash)
     pending: TargetPortfolio | None = None
     fills: list[MultiAssetFill] = []
@@ -311,29 +405,6 @@ def run_multi_asset(
     last_rebalance: datetime | None = None
     last_prices: dict[str, tuple[Decimal, int]] = {}
     excluded: dict[str, str] = {}
-
-    instruments_at_timestamp: dict[datetime, set[str]] = {}
-    for row in ordered_observations:
-        instruments_at_timestamp.setdefault(row.timestamp, set()).add(row.instrument_id)
-
-    def observation_activation(row: Observation) -> datetime:
-        if pinned:
-            return row.timestamp
-        return max(row.timestamp, row.observed_at)
-
-    activation_rows = sorted(
-        ordered_observations,
-        key=lambda item: (
-            observation_activation(item),
-            item.timestamp,
-            item.instrument_id,
-            item.observed_at,
-            item.revision,
-        ),
-    )
-    activation_index = 0
-    latest_by_key: dict[tuple[str, datetime], Observation] = {}
-    history_times: dict[str, list[datetime]] = {}
 
     ordered_actions = sorted(
         corporate_actions, key=lambda action: (action.effective_at, action.action_id)
@@ -353,31 +424,37 @@ def run_multi_asset(
     requested_assets: set[str] = set()
 
     for index, when in enumerate(times):
-        while activation_index < len(activation_rows):
-            row = activation_rows[activation_index]
-            if observation_activation(row) > when:
-                break
-            key = (row.instrument_id, row.timestamp)
-            previous = latest_by_key.get(key)
-            if previous is None:
-                insort(history_times.setdefault(row.instrument_id, []), row.timestamp)
-            if (
-                pinned
-                or previous is None
-                or (row.observed_at, row.revision)
-                > (
+        if pinned:
+            _, start, end = session_slices[index]
+            current = {}
+            for row in ordered_observations[start:end]:
+                current[row.instrument_id] = row
+                history = pinned_history.get(row.instrument_id)
+                if history is None:
+                    history = deque(maxlen=strategy.required_lookback)
+                    pinned_history[row.instrument_id] = history
+                history.append(row)
+        else:
+            while activation_index < len(activation_rows):
+                row = activation_rows[activation_index]
+                if observation_activation(row) > when:
+                    break
+                key = (row.instrument_id, row.timestamp)
+                previous = latest_by_key.get(key)
+                if previous is None:
+                    insort(history_times.setdefault(row.instrument_id, []), row.timestamp)
+                if previous is None or (row.observed_at, row.revision) > (
                     previous.observed_at,
                     previous.revision,
-                )
-            ):
-                latest_by_key[key] = row
-            activation_index += 1
+                ):
+                    latest_by_key[key] = row
+                activation_index += 1
 
-        current = {
-            instrument: latest_by_key[(instrument, when)]
-            for instrument in sorted(instruments_at_timestamp.get(when, ()))
-            if (instrument, when) in latest_by_key
-        }
+            current = {
+                instrument: latest_by_key[(instrument, when)]
+                for instrument in sorted(instruments_at_timestamp.get(when, ()))
+                if (instrument, when) in latest_by_key
+            }
 
         newly_applicable_actions: list[CorporateAction] = []
         while action_index < len(activation_actions):
@@ -467,9 +544,12 @@ def run_multi_asset(
             causal_history: dict[str, tuple[Observation, ...]] = {}
             signal_prices: dict[str, tuple[Decimal, ...]] = {}
             for instrument in fresh:
-                known_times = history_times.get(instrument, ())
-                tail_times = known_times[-strategy.required_lookback :]
-                bars = tuple(latest_by_key[(instrument, timestamp)] for timestamp in tail_times)
+                if pinned:
+                    bars = tuple(pinned_history.get(instrument, ()))
+                else:
+                    known_times = history_times.get(instrument, ())
+                    tail_times = known_times[-strategy.required_lookback :]
+                    bars = tuple(latest_by_key[(instrument, timestamp)] for timestamp in tail_times)
                 causal_history[instrument] = bars
                 adjusted = causal_adjusted_close(
                     bars, actions_by_instrument.get(instrument, ()), when
