@@ -406,8 +406,18 @@ class PersistentMarketDataService:
         start: date,
         end: date,
         observed_at: datetime,
+        *,
+        audit: ControlAudit | None = None,
     ) -> IngestionResult:
-        return self._ingest(provider, instrument, start, end, observed_at, executable_open=False)
+        return self._ingest(
+            provider,
+            instrument,
+            start,
+            end,
+            observed_at,
+            executable_open=False,
+            audit=audit,
+        )
 
     def ingest_open(
         self,
@@ -432,6 +442,7 @@ class PersistentMarketDataService:
             session_date,
             observed_at,
             executable_open=True,
+            audit=None,
         )
 
     def verify_corporate_action_readiness(
@@ -547,6 +558,7 @@ class PersistentMarketDataService:
         observed_at: datetime,
         *,
         executable_open: bool,
+        audit: ControlAudit | None,
     ) -> IngestionResult:
         observed_at = require_utc(observed_at)
         persistent_provider = provider.metadata.persistent_name
@@ -584,9 +596,11 @@ class PersistentMarketDataService:
                         MarketObservationRecord.ingestion_id == ingestion_id
                     )
                 )
-                return IngestionResult(
-                    ingestion_id, start, end, "SUCCEEDED", tuple(map(_observation, rows))
-                )
+                observations = tuple(map(_observation, rows))
+                if audit is not None:
+                    add_control_audit(session, audit, ingestion_id)
+                    session.flush()
+                return IngestionResult(ingestion_id, start, end, "SUCCEEDED", observations)
         try:
             bars = provider.historical_daily(instrument.symbol, start, end)
             actions = (
@@ -688,6 +702,9 @@ class PersistentMarketDataService:
                 existing.status = "SUCCEEDED"
                 existing.finished_at = datetime.now(UTC)
                 existing.row_count = len(added)
+                if audit is not None:
+                    add_control_audit(session, audit, ingestion_id)
+                    session.flush()
                 return IngestionResult(ingestion_id, start, end, "SUCCEEDED", tuple(added))
         except Exception as exc:
             with self._sessions() as session, session.begin():
@@ -696,6 +713,9 @@ class PersistentMarketDataService:
                     row.finished_at = datetime.now(UTC)
                     row.status = "FAILED"
                     row.error_summary = str(exc)[:1000]
+                if audit is not None:
+                    add_control_audit(session, audit, ingestion_id)
+                    session.flush()
             return IngestionResult(ingestion_id, start, end, "FAILED", (), str(exc))
 
     def _normalize_open(
@@ -1088,6 +1108,7 @@ class DatasetSnapshotService:
         start: date,
         end: date,
         minimum_coverage: Decimal,
+        audit: ControlAudit | None = None,
     ) -> DatasetSnapshot:
         if start > end:
             raise DatasetInvalid("Snapshot interval je neplatný")
@@ -1320,6 +1341,9 @@ class DatasetSnapshotService:
                     manifest_json=manifest,
                 )
                 session.add(record)
+            if audit is not None:
+                add_control_audit(session, audit, snapshot_id)
+                session.flush()
             return DatasetSnapshot(
                 snapshot_id,
                 record.created_at,
