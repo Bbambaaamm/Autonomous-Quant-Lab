@@ -135,7 +135,7 @@ def build_market_data_provider(
     return AlpacaProvider(
         settings.alpaca_key_id,
         settings.alpaca_secret_key,
-        service.corporate_action_events,
+        service.corporate_action_events_for_scope,
         instrument_ids,
         transport,
         timeout=settings.market_data_timeout,
