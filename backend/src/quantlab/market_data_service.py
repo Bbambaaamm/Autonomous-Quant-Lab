@@ -28,8 +28,8 @@ from quantlab.domain import require_utc
 from quantlab.market_data import (
     CorporateAction,
     CorporateActionEvent,
-    CorporateActionEvidenceScope,
     CorporateActionEventType,
+    CorporateActionEvidenceScope,
     DatasetInvalid,
     DatasetSnapshot,
     IngestionResult,
