@@ -4,9 +4,8 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 
-from sqlalchemy import select
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
@@ -16,11 +15,11 @@ from quantlab.market_data import (
     Instrument,
     InvalidProviderResponse,
     MarketDataProvider,
+    ProviderMetadata,
     ProviderUnavailable,
     StooqProvider,
 )
 from quantlab.market_data_service import PersistentMarketDataService
-from quantlab.persistence import InstrumentRecord
 
 
 def _validate_alpaca_rest_url(url: str) -> None:
@@ -105,14 +104,31 @@ class _BudgetedAlpacaTransport:
         return response
 
 
+def market_data_provider_metadata(settings: Settings) -> ProviderMetadata:
+    """Vrátí production provider identity bez DB, HTTP ani instrument registry loadu."""
+    if settings.market_data_provider == "stooq":
+        return StooqProvider.metadata
+    if settings.market_data_provider == "alpaca":
+        return ProviderMetadata(
+            "alpaca",
+            "5",
+            True,
+            True,
+            f"alpaca:{settings.alpaca_feed}",
+        )
+    raise InvalidProviderResponse("Market-data provider není na production allowlistu")
+
+
 def build_market_data_provider(
     settings: Settings,
     engine: Engine,
     *,
     instrument: Instrument | None = None,
+    instruments: Sequence[Instrument] | None = None,
     request_budget: int | None = None,
 ) -> MarketDataProvider:
-    """Vrátí jediný allowlisted production provider podle validované konfigurace."""
+    """Vrátí provider pouze pro explicitně zadaný instrument scope."""
+    metadata = market_data_provider_metadata(settings)
     if settings.market_data_provider == "stooq":
         return StooqProvider(
             timeout=settings.market_data_timeout,
@@ -120,19 +136,21 @@ def build_market_data_provider(
         )
     if settings.market_data_provider != "alpaca":
         raise InvalidProviderResponse("Market-data provider není na production allowlistu")
+    if instrument is not None and instruments is not None:
+        raise ValueError("Provider instrument scope je nejednoznačný")
+    scoped = tuple(instruments or (() if instrument is None else (instrument,)))
+    if not scoped:
+        raise InvalidProviderResponse("ALPACA_INSTRUMENT_SCOPE_REQUIRED")
+    instrument_ids = {item.symbol.upper(): item.instrument_id for item in scoped}
+    if len(instrument_ids) != len(scoped):
+        raise InvalidProviderResponse("Alpaca instrument scope obsahuje duplicitní symbol")
 
     def sessions() -> Session:
         return Session(engine)
 
-    if instrument is None:
-        with sessions() as session:
-            instruments = tuple(session.scalars(select(InstrumentRecord)))
-        instrument_ids = {row.symbol.upper(): row.instrument_id for row in instruments}
-    else:
-        instrument_ids = {instrument.symbol.upper(): instrument.instrument_id}
     transport = _BudgetedAlpacaTransport(request_budget)
     service = PersistentMarketDataService(sessions)
-    return AlpacaProvider(
+    provider = AlpacaProvider(
         settings.alpaca_key_id,
         settings.alpaca_secret_key,
         service.corporate_action_events_for_scope,
@@ -141,3 +159,6 @@ def build_market_data_provider(
         timeout=settings.market_data_timeout,
         feed=settings.alpaca_feed,
     )
+    if provider.metadata != metadata:
+        raise InvalidProviderResponse("Provider metadata neodpovídají production konfiguraci")
+    return provider
