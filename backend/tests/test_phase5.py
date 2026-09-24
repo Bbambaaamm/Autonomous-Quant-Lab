@@ -28,6 +28,7 @@ from quantlab.automation import (
     next_occurrence,
 )
 from quantlab.config import Settings
+from quantlab.market_pipeline import MarketTask
 from quantlab.phase4 import Phase4Repository
 
 
@@ -254,6 +255,43 @@ def test_market_task_worker_runs_one_pipeline_step(monkeypatch) -> None:  # type
         "trading_cycle_id": None,
     }
     assert events == ["step", "dispose"]
+
+
+def test_empty_market_queue_parks_schedule(tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    repository, _ = setup(tmp_path)
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+    job = repository.create_job(
+        job_id="market-price-queue",
+        job_type=JobType.SYNC_MARKET_PRICE_TASK,
+        account_id="paper-main",
+        schedule_type=ScheduleType.INTERVAL,
+        interval_seconds=5,
+        next_run_at=now,
+    )
+    monkeypatch.setattr(
+        "quantlab.automation.subprocess.run",
+        lambda *args, **kwargs: SimpleNamespace(
+            returncode=0,
+            stdout='{"outcome":"NO_PENDING_MARKET_DATA","trading_cycle_id":null}\n',
+            stderr="",
+        ),
+    )
+
+    assert JobExecutor(repository, clock=lambda: now)(job, _market_price_run()) == {
+        "outcome": "NO_PENDING_MARKET_DATA",
+        "trading_cycle_id": None,
+    }
+    with Session(repository.engine) as session:
+        stored = session.get(ScheduledJob, "market-price-queue")
+        assert stored is not None
+        assert stored.enabled is False
+        assert session.scalar(select(func.count()).select_from(MarketTask)) == 0
+
+
+def test_production_worker_idle_poll_is_five_seconds() -> None:
+    compose = (Path(__file__).parents[2] / "docker-compose.production.yml").read_text()
+    assert 'WORKER_POLL_INTERVAL: "5"' in compose
+    assert 'WORKER_POLL_INTERVAL: "0.2"' not in compose
 
 
 def test_scheduler_is_idempotent_and_advances_without_drift(tmp_path) -> None:  # type: ignore[no-untyped-def]
