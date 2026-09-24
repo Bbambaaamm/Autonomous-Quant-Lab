@@ -1780,6 +1780,18 @@ def operator_market_batch(body: MarketBatchCreate, request: Request) -> dict[str
             max_attempts=3,
             config={},
         )
+        with session_factory() as session, session.begin():
+            queue = session.scalar(
+                select(ScheduledJob)
+                .where(ScheduledJob.id == "market-price-queue")
+                .with_for_update()
+            )
+            if queue is None:
+                raise RuntimeError("Market queue schedule nebyl vytvořen")
+            queue.enabled = True
+            queue.next_run_at = now
+            queue.updated_at = now
+        job.enabled = True
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
     automation_repository.create_job(
