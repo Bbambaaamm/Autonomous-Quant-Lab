@@ -127,6 +127,31 @@ def test_snapshot_builder_keeps_bounded_scope_and_streaming() -> None:
     assert "select(InstrumentRecord).where(" in source_segment
 
 
+def test_control_mutations_keep_audit_inside_authoritative_transactions() -> None:
+    api_source, _ = _module("api.py")
+
+    # The helper remains only for the read-only provider probe: one definition
+    # and one intentional pre-attempt call. Stateful operator mutations must
+    # hand ControlAudit into their authoritative service/session instead.
+    assert api_source.count("_audit_control_mutation(") == 2
+    probe = api_source.split("def operator_market_probe", 1)[1].split(
+        "class CurrentReceiptReviewRequest", 1
+    )[0]
+    assert "_audit_control_mutation(" in probe
+
+    for module in (
+        "control_plane.py",
+        "phase4.py",
+        "automation.py",
+        "phase7.py",
+        "market_data_service.py",
+        "phase6_runtime.py",
+        "current_action_recovery.py",
+    ):
+        source, _ = _module(module)
+        assert "add_control_audit(" in source
+
+
 def test_production_compose_keeps_measured_resource_ceiling_contract() -> None:
     expected = {
         "postgres": ("2g", "2.0"),
