@@ -208,7 +208,8 @@ assert request("/operator/overview", viewer) == 200
 assert request("/operator/risk/halt", viewer, {"confirmation": "HALT", "reason": "smoke"}) == 403
 assert request("/operator/risk/halt", operator, {"confirmation": "HALT", "reason": "smoke"}) == 200
 assert request("/operator/risk/resume", operator, {"confirmation": "RESUME", "reason": "smoke"}) == 403
-assert request("/reconciliation/run", admin, {}) == 404\nassert request("/operator/reconciliation/run", admin, {"reason": "smoke"}) == 200
+assert request("/reconciliation/run", admin, {}) == 404
+assert request("/operator/reconciliation/run", admin, {"reason": "smoke"}) == 200
 assert request("/operator/risk/resume", admin, {"confirmation": "RESUME", "reason": "smoke"}) == 200
 PY
 
