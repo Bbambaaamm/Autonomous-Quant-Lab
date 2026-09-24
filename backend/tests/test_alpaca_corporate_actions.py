@@ -7,17 +7,21 @@ from decimal import Decimal
 from typing import Any
 
 import pytest
+from sqlalchemy import create_engine
 
 import quantlab.alpaca_event_worker as event_worker
+import quantlab.provider_factory as provider_factory
 from quantlab.alpaca_sse import AlpacaCorporateActionStream
 from quantlab.config import Settings
 from quantlab.market_data import (
     AlpacaProvider,
+    AssetType,
     CorporateActionEvent,
     CorporateActionEvidenceScope,
     CorporateActionEventType,
     CorporateActionKind,
     DatasetInvalid,
+    Instrument,
     InvalidProviderResponse,
     ProviderUnavailable,
     canonical_corporate_action_payload_hash,
@@ -141,6 +145,54 @@ def _provider(
         _transport(pages, captured),
         timeout=1,
     )
+
+
+def test_provider_factory_wires_scoped_evidence_loader(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[CorporateActionEvidenceScope] = []
+
+    class Service:
+        def __init__(self, sessions):  # type: ignore[no-untyped-def]
+            self.sessions = sessions
+
+        def corporate_action_events_for_scope(self, scope: CorporateActionEvidenceScope):
+            calls.append(scope)
+            return ()
+
+        def corporate_action_events(self, provider: str):  # type: ignore[no-untyped-def]
+            pytest.fail(f"production provider must not wire full-history loader: {provider}")
+
+    monkeypatch.setattr(provider_factory, "PersistentMarketDataService", Service)
+    engine = create_engine("sqlite://")
+    provider = provider_factory.build_market_data_provider(
+        Settings(
+            market_data_provider="alpaca",
+            alpaca_key_id="key",
+            alpaca_secret_key="secret",
+        ),
+        engine,
+        instrument=Instrument(
+            "instrument-aapl",
+            "AAPL",
+            "XNYS",
+            "XNYS",
+            "USD",
+            AssetType.EQUITY,
+            date(2020, 1, 1),
+        ),
+    )
+    scope = CorporateActionEvidenceScope(
+        provider="alpaca",
+        symbol="AAPL",
+        start=date(2026, 9, 1),
+        end=date(2026, 9, 2),
+        current_provider_action_ids=("ca-1",),
+    )
+
+    assert tuple(provider._evidence_loader(scope)) == ()  # type: ignore[attr-defined]
+    assert calls == [scope]
+    engine.dispose()
 
 
 def test_alpaca_evidence_loader_receives_bounded_symbol_scope() -> None:
