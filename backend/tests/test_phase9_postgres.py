@@ -109,11 +109,13 @@ def test_runtime_role_script_revokes_core_evidence_mutation() -> None:
     for table in CORE_IMMUTABLE_EVIDENCE:
         assert table in revoke_block
     assert (
-        'ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT ON TABLES TO :"runtime_role";'
+        "ALTER DEFAULT PRIVILEGES IN SCHEMA public "
+        'GRANT SELECT, INSERT ON TABLES TO :"runtime_role";'
         in script
     )
     assert (
-        'ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE UPDATE, DELETE ON TABLES FROM :"runtime_role";'
+        "ALTER DEFAULT PRIVILEGES IN SCHEMA public "
+        'REVOKE UPDATE, DELETE ON TABLES FROM :"runtime_role";'
         in script
     )
 
