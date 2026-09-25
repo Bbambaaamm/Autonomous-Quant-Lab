@@ -147,6 +147,36 @@ def test_current_data_accepts_latest_succeeded_revision(factory) -> None:
     assert result[0].revision == 2
 
 
+def test_history_returns_only_bounded_latest_authoritative_sessions(factory) -> None:
+    latest = date(2026, 1, 16)
+    sessions = [latest]
+    for _ in range(7):
+        sessions.append(CALENDAR.previous_session(sessions[-1]))
+    sessions.reverse()
+
+    instrument_id = _observation(factory, sessions[0])
+    for session_day in sessions[1:]:
+        _observation(factory, session_day, instrument_id=instrument_id)
+    corrected = sessions[-2]
+    _observation(factory, corrected, revision=2, instrument_id=instrument_id)
+    _observation(
+        factory,
+        corrected,
+        status="FAILED",
+        revision=3,
+        instrument_id=instrument_id,
+    )
+
+    result = ValidatedCurrentDataAccessor(factory).history(
+        [instrument_id],
+        datetime(2026, 1, 16, 22, tzinfo=UTC),
+        lookback=3,
+    )
+
+    assert [item.session_date for item in result[instrument_id]] == sessions[-3:]
+    assert [item.revision for item in result[instrument_id]] == [1, 2, 1]
+
+
 def test_execution_data_requires_started_exact_session(factory) -> None:
     execution_session = date(2026, 1, 6)
     instrument_id = _observation(factory, execution_session)
