@@ -56,7 +56,7 @@ def test_alpaca_feed_is_part_of_persistent_provider_lineage() -> None:
 def test_production_compose_hardens_alpaca_event_worker() -> None:
     service = _compose_service("alpaca-events")
 
-    assert "image: quantlab-backend" in service
+    assert 'image: "${BACKEND_IMAGE:-quantlab-backend}"' in service
     assert 'command: ["/app/backend/.venv/bin/quantlab-alpaca-events"]' in service
     assert "env_file: [.env.production]" in service
     assert "depends_on: {postgres: {condition: service_healthy}}" in service
@@ -68,7 +68,7 @@ def test_production_compose_hardens_alpaca_event_worker() -> None:
     assert "tmpfs: [/tmp]" in service
     assert "cap_drop: [ALL]" in service
     assert "security_opt: [no-new-privileges:true]" in service
-    assert 'restart: "on-failure:5"' in service
+    assert 'restart: "on-failure"' in service
 
 
 def test_alpaca_event_worker_exits_successfully_for_stooq(monkeypatch: pytest.MonkeyPatch) -> None:

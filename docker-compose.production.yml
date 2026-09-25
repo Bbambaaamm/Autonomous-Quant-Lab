@@ -64,7 +64,7 @@ services:
     healthcheck: {disable: true}
     depends_on: {postgres: {condition: service_healthy}}
     networks: [data, market-data-egress]
-    restart: "on-failure:5"
+    restart: "on-failure"
     mem_limit: 384m
     cpus: 0.5
     read_only: true
