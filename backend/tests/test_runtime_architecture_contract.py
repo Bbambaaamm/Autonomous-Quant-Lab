@@ -108,6 +108,28 @@ def test_long_lived_worker_keeps_soft_rss_recycling() -> None:
     assert "worker.request_stop()" in source
 
 
+def test_current_history_limits_authoritative_rows_in_sql() -> None:
+    source, tree = _module("phase6_runtime.py")
+    accessor = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "ValidatedCurrentDataAccessor"
+    )
+    history = next(
+        node
+        for node in accessor.body
+        if isinstance(node, ast.FunctionDef) and node.name == "history"
+    )
+    segment = ast.get_source_segment(source, history) or ""
+
+    assert "func.row_number()" in segment
+    assert 'label("revision_rank")' in segment
+    assert 'label("history_rank")' in segment
+    assert ".where(bounded.c.history_rank <= lookback)" in segment
+    assert "rows = tuple(" not in segment
+    assert "seen:" not in segment
+
+
 def test_snapshot_builder_keeps_bounded_scope_and_streaming() -> None:
     source, tree = _module("market_data_service.py")
     service = next(

@@ -12,7 +12,7 @@ from datetime import UTC, date, datetime, time
 from decimal import Decimal, InvalidOperation
 from uuid import uuid4
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from quantlab.domain import AuditEventType, Bar, OrderIntent, require_utc
@@ -881,35 +881,61 @@ class ValidatedCurrentDataAccessor:
         if before_session is not None:
             cutoff = self.calendar.previous_session(before_session)
         with self._sessions() as session:
-            rows = tuple(
-                session.scalars(
-                    select(MarketObservationRecord)
-                    .join(MarketDataIngestionRecord)
-                    .where(
-                        MarketObservationRecord.instrument_id.in_(instrument_ids),
-                        MarketObservationRecord.session_date
-                        <= datetime.combine(cutoff, datetime.min.time(), UTC),
-                        MarketObservationRecord.observed_at <= knowledge_cutoff,
-                        MarketObservationRecord.timestamp <= knowledge_cutoff,
-                        MarketDataIngestionRecord.status == "SUCCEEDED",
+            authoritative = (
+                select(
+                    MarketObservationRecord.id.label("id"),
+                    MarketObservationRecord.instrument_id.label("instrument_id"),
+                    MarketObservationRecord.session_date.label("session_date"),
+                    func.row_number()
+                    .over(
+                        partition_by=(
+                            MarketObservationRecord.instrument_id,
+                            MarketObservationRecord.session_date,
+                        ),
+                        order_by=(
+                            MarketObservationRecord.observed_at.desc(),
+                            MarketObservationRecord.revision.desc(),
+                        ),
                     )
-                    .order_by(
-                        MarketObservationRecord.instrument_id,
-                        MarketObservationRecord.session_date.desc(),
-                        MarketObservationRecord.observed_at.desc(),
-                        MarketObservationRecord.revision.desc(),
+                    .label("revision_rank"),
+                )
+                .join(MarketDataIngestionRecord)
+                .where(
+                    MarketObservationRecord.instrument_id.in_(instrument_ids),
+                    MarketObservationRecord.session_date
+                    <= datetime.combine(cutoff, datetime.min.time(), UTC),
+                    MarketObservationRecord.observed_at <= knowledge_cutoff,
+                    MarketObservationRecord.timestamp <= knowledge_cutoff,
+                    MarketDataIngestionRecord.status == "SUCCEEDED",
+                )
+                .subquery()
+            )
+            bounded = (
+                select(
+                    authoritative.c.id,
+                    func.row_number()
+                    .over(
+                        partition_by=authoritative.c.instrument_id,
+                        order_by=authoritative.c.session_date.desc(),
                     )
+                    .label("history_rank"),
+                )
+                .where(authoritative.c.revision_rank == 1)
+                .subquery()
+            )
+            rows = session.scalars(
+                select(MarketObservationRecord)
+                .join(bounded, MarketObservationRecord.id == bounded.c.id)
+                .where(bounded.c.history_rank <= lookback)
+                .order_by(
+                    MarketObservationRecord.instrument_id,
+                    MarketObservationRecord.session_date,
                 )
             )
-        selected: dict[str, list[Observation]] = {item: [] for item in instrument_ids}
-        seen: set[tuple[str, object]] = set()
-        for row in rows:
-            key = (row.instrument_id, row.session_date)
-            if key in seen or len(selected[row.instrument_id]) >= lookback:
-                continue
-            seen.add(key)
-            selected[row.instrument_id].append(_observation(row))
-        return {key: tuple(reversed(value)) for key, value in selected.items()}
+            selected: dict[str, list[Observation]] = {item: [] for item in instrument_ids}
+            for row in rows:
+                selected[row.instrument_id].append(_observation(row))
+        return {key: tuple(value) for key, value in selected.items()}
 
 
 @dataclass(frozen=True)
