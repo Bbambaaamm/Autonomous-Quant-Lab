@@ -16,6 +16,7 @@ const SCENE_AGENT_IDS = new Set(['majak-hermes', 'majak-codex', 'quantlab-hermes
 const ROLES = { hermes: 'Orchestrace, paměť, nástroje a řízení práce', codex: 'Implementace, testování a technická revize' };
 const STATUS = { idle: 'Čeká', working: 'Pracuje', blocked: 'Blokováno', done: 'Hotovo', unknown: 'Neznámé', offline: 'Odpojeno' };
 const QUEUE_STATUS = { pending: 'Čeká', running: 'Běží', blocked: 'Blokováno', done: 'Hotovo', failed: 'Selhalo' };
+const GITHUB_REPO = 'Bbambaaamm/Autonomous-Quant-Lab';
 const fmt = new Intl.NumberFormat('cs-CZ');
 const compact = new Intl.NumberFormat('cs-CZ', { notation: 'compact', maximumFractionDigits: 1 });
 const escapeHTML = value => String(value ?? '').replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[ch]);
@@ -68,6 +69,10 @@ export function mountDashboard(createScene) {
   function currentQueueTask(agent = 'quantlab-hermes') { return queueTasks().find(row => row.agent === agent && ['running', 'blocked', 'failed'].includes(row.status)); }
   function nextQueueTask(agent = 'quantlab-hermes') { return queueTasks().filter(row => row.agent === agent && row.status === 'pending').sort((a, b) => (a.not_before ?? Number.MAX_SAFE_INTEGER) - (b.not_before ?? Number.MAX_SAFE_INTEGER) || a.task_id.localeCompare(b.task_id))[0]; }
   function taskDisplay(row) { return row ? `${issueLabel(row)} · ${row.task_id}` : 'Žádná'; }
+  function attemptLabel(row) { return row ? `${number(row.attempts)} / ${number(row.max_attempts)}` : 'Nedostupné'; }
+  function issueUrl(row) { return Number.isFinite(row?.issue) ? `https://github.com/${GITHUB_REPO}/issues/${row.issue}` : null; }
+  function prUrl(row) { return Number.isFinite(row?.pr_number) ? `https://github.com/${GITHUB_REPO}/pull/${row.pr_number}` : null; }
+  function detailLink(url, label) { return url ? `<a href="${escapeHTML(url)}" target="_blank" rel="noopener noreferrer">${escapeHTML(label)}</a>` : ''; }
   function agents() {
     return PROFILES.flatMap(profile => {
       const value = source(profile, 'herdr');
@@ -375,7 +380,8 @@ export function mountDashboard(createScene) {
     list.innerHTML = visible.length ? visible.map(row => {
       const blocker = row.blocker || '—';
       const timing = row.status === 'pending' ? `od ${queueTime(row.not_before)}` : `změna ${queueTime(row.updated_at)}`;
-      return `<article class="queue-task" data-status="${escapeHTML(row.status)}"><div class="queue-task-main"><b>${escapeHTML(issueLabel(row))} · <code>${escapeHTML(row.task_id)}</code></b><small>${escapeHTML(row.kind)} · ${escapeHTML(row.agent)}</small></div><span class="queue-status">${escapeHTML(QUEUE_STATUS[row.status] || row.status)}</span><span class="queue-attempt">Pokus ${number(row.attempts)}</span><time>${escapeHTML(timing)}</time><span class="queue-blocker">${escapeHTML(blocker)}</span></article>`;
+      const title = row.issue_title || row.kind;
+      return `<article class="queue-task" data-status="${escapeHTML(row.status)}"><div class="queue-task-main"><b>${escapeHTML(issueLabel(row))} · <code>${escapeHTML(row.task_id)}</code></b><small>${escapeHTML(title)} · ${escapeHTML(row.kind)} · ${escapeHTML(row.agent)}</small></div><span class="queue-status">${escapeHTML(QUEUE_STATUS[row.status] || row.status)}</span><span class="queue-attempt">Pokus ${escapeHTML(attemptLabel(row))}</span><time>${escapeHTML(timing)}</time><span class="queue-blocker">${escapeHTML(blocker)}</span></article>`;
     }).join('') : '<p class="queue-empty">Fronta je prázdná.</p>';
     if (rows.length > visible.length) list.insertAdjacentHTML('beforeend', `<p class="queue-empty">+${rows.length - visible.length} dalších záznamů v sanitizovaném snapshotu.</p>`);
   }
@@ -426,27 +432,60 @@ export function mountDashboard(createScene) {
     const row = agents().find(item => item.agent === selectedAgent);
     const profile = row?.profile || (selectedAgent.startsWith('majak-') ? 'majak' : 'quantlab');
     const value = stats(profile), search = searchStats(profile), herdr = source(profile, 'herdr');
-    const task = selectedAgent === 'quantlab-hermes' ? currentQueueTask(selectedAgent) : null;
+    const task = selectedAgent === 'quantlab-hermes'
+      ? currentQueueTask(selectedAgent) || nextQueueTask(selectedAgent) : null;
     const currentTask = selectedAgent === 'quantlab-hermes'
-      ? task ? `${issueLabel(task)} · ${task.task_id} · ${QUEUE_STATUS[task.status] || task.status}` : 'Žádná aktivní úloha v durable queue'
+      ? task ? `${issueLabel(task)} · ${task.task_id} · ${QUEUE_STATUS[task.status] || task.status}` : 'Žádná úloha v durable queue'
       : 'Nedostupné v datovém kontraktu';
+    const taskTitle = task?.issue_title || 'Nedostupné v telemetry kontraktu';
+    const taskState = task
+      ? `${QUEUE_STATUS[task.status] || task.status} · scheduler ${task.scheduler_state || 'nehlášeno'}`
+      : 'Nedostupné v telemetry kontraktu';
+    const taskTiming = task
+      ? `${task.status === 'pending' ? 'nejdříve ' + queueTime(task.not_before) : 'změna ' + queueTime(task.updated_at)}`
+      : 'Nedostupné v telemetry kontraktu';
+    const tokenCoverage = value.inputCoverage == null || value.outputCoverage == null
+      ? null : Math.min(value.inputCoverage, value.outputCoverage);
+    const tokens = value.inputKnown == null ? 'Nedostupné'
+      : `${number(value.inputKnown)} / ${number(value.outputKnown)}${tokenCoverage < 100 ? ` · coverage ${tokenCoverage} % req` : ''}`;
+    const costs = value.costKnown == null ? 'Nedostupné'
+      : `${money(value.costKnown)} známé${value.costUnknownRequests ? ` + ${fmt.format(value.costUnknownRequests)} req bez ceny` : ''}`;
+
     $('#detail-profile').textContent = profile.toUpperCase(); $('#detail-title').textContent = selectedAgent;
     $('#detail-role').textContent = ROLES[agentKind(selectedAgent)];
     $('#detail-status').textContent = `Živý stav: ${row ? statusLabel(row.status) : 'Odpojeno / neznámé'}`;
+    $('#detail-links').innerHTML = [
+      detailLink(issueUrl(task), task ? `Otevřít Issue ${issueLabel(task)}` : ''),
+      detailLink(prUrl(task), task?.pr_number ? `Otevřít PR #${task.pr_number}` : ''),
+    ].filter(Boolean).join('');
+
     const metrics = [
-      ['Aktuální úkol', currentTask], ['Modely profilu', value.models.join(', ') || 'Nedostupné v aktuálním snapshotu'],
+      ['Aktuální úkol', currentTask],
+      ['Issue / název', task ? `${issueLabel(task)} · ${taskTitle}` : 'Nedostupné v telemetry kontraktu'],
+      ['Task stav', taskState],
+      ['Pokus / maximum', attemptLabel(task)],
+      ['Čas fronty', taskTiming],
+      ['PR', task?.pr_number ? `#${task.pr_number}` : 'Není hlášeno'],
+      ['Blocker', task?.blocker || '—'],
+      ['Modely profilu', value.models.join(', ') || 'Nedostupné v aktuálním snapshotu'],
       ['Provider / fallbacky', `${value.providers.join(', ') || 'Nedostupné'} · ${number(value.fallbacks)}`],
-      ['Požadavky / náklady profilu', `${number(value.requests)} · ${value.costKnown == null ? 'Nedostupné' : `${money(value.costKnown)} známé${value.costUnknownRequests ? ` + ${fmt.format(value.costUnknownRequests)} req bez ceny` : ''}`}`],
+      ['Tokeny vstup / výstup', tokens],
+      ['Známé náklady profilu', costs],
       ['Search provider / fallbacky', `${search.providers.join(', ') || 'Nedostupné'} · ${number(search.fallbacks)}`],
-      ['Search hledání / latence / náklady', `${number(search.searches)} · ${latency(search.avgLatency)} · ${money(search.cost)}`],
+      ['Search / avg latence', `${number(search.searches)} · ${latency(search.avgLatency)}`],
+      ['Runtime / queue wait', 'Nedostupné v telemetry kontraktu'],
+      ['Branch / base / result SHA', 'Nedostupné v telemetry kontraktu'],
+      ['Test / reviewer', 'Nedostupné v telemetry kontraktu'],
     ];
     $('#detail-metrics').innerHTML = metrics.map(([title, content]) => `<div><dt>${escapeHTML(title)}</dt><dd>${escapeHTML(content)}</dd></div>`).join('');
     const events = [];
     if (row) events.push(`Herdr hlásí stav „${row.status}“ · pozorováno před ${age(herdr?.observed_at)}`);
+    if (task) events.push(`Durable queue: ${issueLabel(task)} · ${task.task_id} · ${QUEUE_STATUS[task.status] || task.status} · pokus ${attemptLabel(task)} · scheduler ${task.scheduler_state || 'nehlášeno'}`);
+    if (task?.blocker) events.push(`Blocker: ${task.blocker}`);
     if (value.router?.status === 'available') events.push(`Router profilu: ${number(value.requests)} požadavků · data před ${age(value.router.data_at)}`);
     if (search.search?.status === 'available') events.push(`Search Router: ${number(search.searches)} hledání · ${latency(search.avgLatency)} průměr · ${number(search.fallbacks)} fallbacků · data před ${age(search.search.data_at)}`);
-    if (task) events.push(`Durable queue: ${issueLabel(task)} · ${task.task_id} · pokus ${task.attempts} · metadata před ${age(queueSource()?.observed_at)}`);
-    events.push('Zdroj neposkytuje prompt, historii nástrojů, interní myšlenky ani logy úlohy.');
+    events.push('Runtime, branch/SHA, test a reviewer data se nezobrazují, dokud je autoritativní telemetry kontrakt neposkytuje.');
+    events.push('Zdroj neposkytuje prompt, historii nástrojů, interní myšlenky ani surové provozní záznamy úlohy.');
     if (demo) events.unshift('DEMO: pohyb 3D scény je syntetický. Tento detail stále zobrazuje skutečný snapshot.');
     $('#detail-events').innerHTML = events.map(event => `<li>${escapeHTML(event)}</li>`).join('');
   }
@@ -491,7 +530,22 @@ export function mountDashboard(createScene) {
       if (item.kind === 'herdr' && item.rows.some(row => typeof row.agent !== 'string' || typeof row.status !== 'string')) throw new Error('invalid');
       if (item.kind === 'queue') {
         if (item.profile !== 'quantlab') throw new Error('invalid');
-        if (item.rows.some(row => typeof row.task_id !== 'string' || typeof row.agent !== 'string' || typeof row.kind !== 'string' || !Object.hasOwn(QUEUE_STATUS, row.status))) throw new Error('invalid');
+        if (item.rows.some(row =>
+          typeof row.task_id !== 'string'
+          || (row.issue != null && (!Number.isSafeInteger(row.issue) || row.issue < 0))
+          || (row.issue_title != null && (typeof row.issue_title !== 'string' || row.issue_title.length > 160))
+          || typeof row.issue_open !== 'boolean'
+          || (row.scheduler_state != null && typeof row.scheduler_state !== 'string')
+          || typeof row.agent !== 'string'
+          || typeof row.kind !== 'string'
+          || !Object.hasOwn(QUEUE_STATUS, row.status)
+          || !Number.isSafeInteger(row.attempts) || row.attempts < 0
+          || !Number.isSafeInteger(row.max_attempts) || row.max_attempts < 0
+          || (row.not_before != null && !Number.isFinite(row.not_before))
+          || !Number.isFinite(row.updated_at)
+          || (row.blocker != null && typeof row.blocker !== 'string')
+          || (row.pr_number != null && (!Number.isSafeInteger(row.pr_number) || row.pr_number < 1))
+        )) throw new Error('invalid');
       }
       if (item.kind === 'codex') {
         if (item.profile !== 'majak' || (item.status === 'available' && item.rows.length !== 1)) throw new Error('invalid');

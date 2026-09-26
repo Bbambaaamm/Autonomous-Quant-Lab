@@ -30,9 +30,10 @@ function fixture() {
   );
   sources.push({
     profile: 'quantlab', kind: 'queue', status: 'available', reason: 'ok', observed_at: now, data_at: now,
-    rows: [{ task_id: 'issue190-prepare-20260926', issue: 190, status: 'pending', attempts: 0,
-      not_before: now + 3600, updated_at: now, agent: 'quantlab-hermes',
-      kind: 'scheduled_acceptance', blocker: null }],
+    rows: [{ task_id: 'issue190-prepare-20260926', issue: 190,
+      issue_title: 'Cílová architektura runtime', issue_open: true, scheduler_state: 'active',
+      status: 'pending', attempts: 0, max_attempts: 8, not_before: now + 3600, updated_at: now,
+      agent: 'quantlab-hermes', kind: 'scheduled_acceptance', blocker: null, pr_number: 240 }],
   });
   sources.push({
     profile: 'majak', kind: 'codex', status: 'available', reason: 'ok', observed_at: now, data_at: now,
@@ -191,7 +192,14 @@ test('durable QuantLab queue renders safe metadata and drives coordinator state'
 
   h.calls.select('quantlab-hermes');
   assert.match(h.get('#detail-metrics').innerHTML, /issue190-prepare-20260926/);
+  assert.match(h.get('#detail-metrics').innerHTML, /Cílová architektura runtime/);
+  assert.match(h.get('#detail-metrics').innerHTML, /1 \/ 8/);
+  assert.match(h.get('#detail-metrics').innerHTML, /scheduler active/);
+  assert.match(h.get('#detail-metrics').innerHTML, /#240/);
+  assert.match(h.get('#detail-links').innerHTML, /issues\/190/);
+  assert.match(h.get('#detail-links').innerHTML, /pull\/240/);
   assert.match(h.get('#detail-events').innerHTML, /Durable queue/);
+  assert.match(h.get('#detail-events').innerHTML, /Runtime, branch\/SHA, test a reviewer data/);
   assert.doesNotMatch(h.get('#detail-events').innerHTML, /PRIVATE|tool_args|secret payload|raw log/i);
 });
 
@@ -205,6 +213,15 @@ test('blocked queue task raises attention with sanitized blocker only', async t 
   assert.match(h.get('#attention-summary').textContent, /issue190-prepare-20260926/);
   assert.match(h.get('#queue-list').innerHTML, /github_write_auth_required/);
   assert.doesNotMatch(h.get('#queue-list').innerHTML, /PRIVATE|secret|prompt/i);
+});
+
+test('queue v2 browser contract rejects incomplete task metadata', async t => {
+  const h = await harness(t);
+  const queue = h.snapshot().sources.find(item => item.kind === 'queue');
+  delete queue.rows[0].max_attempts;
+  await h.refresh();
+  assert.equal(h.ui.diagnostics().freshSnapshot, false);
+  assert.equal(h.ui.diagnostics().state, 'offline');
 });
 
 test('queue source is QuantLab-only in browser validation', async t => {

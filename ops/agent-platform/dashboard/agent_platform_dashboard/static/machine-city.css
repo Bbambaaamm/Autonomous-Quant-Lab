@@ -53,3 +53,4 @@ html[data-motion=reduced] *{scroll-behavior:auto!important;animation:none!import
 @media(max-width:1200px){.observability-kpis{grid-template-columns:repeat(3,1fr)}.obs-panel,.obs-panel.wide{grid-column:span 6}}
 @media(max-width:800px){.observability-kpis{grid-template-columns:repeat(2,1fr)}.obs-panel,.obs-panel.wide,.obs-panel.full{grid-column:1/-1}.observability-grid{grid-template-columns:1fr}.coverage-row{grid-template-columns:100px 1fr 42px}}
 @media(max-width:480px){.observability-kpis{grid-template-columns:1fr}}
+.detail-links{display:flex;flex-wrap:wrap;gap:8px;margin:-10px 0 18px}.detail-links:empty{display:none}.detail-links a{border:1px solid #3a3126;padding:7px 9px;color:#d8b06d;text-decoration:none;font-size:10px;letter-spacing:.04em;background:#0b0907}.detail-links a:hover,.detail-links a:focus-visible{border-color:#8b6636;color:#f0c982;outline:none}.detail-metrics dd{overflow-wrap:anywhere}
