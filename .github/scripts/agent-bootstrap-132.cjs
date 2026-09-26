@@ -94,7 +94,7 @@ function reviewContextDecision(context) {
   if (context.issue?.number !== BINDING.issueNumber || typeof context.issue.title !== "string" || typeof context.issue.body !== "string" || !context.issue.classification?.includes("type:implementation") || context.authorization?.ok !== true || context.authorization.specHash !== BINDING.specHash || !context.authorization.marker?.includes(BINDING.specHash)) return fail("REVIEW_AUTHORIZATION_MISSING");
   if (!Array.isArray(context.governanceFiles) || JSON.stringify(context.governanceFiles.map((x) => x.path)) !== JSON.stringify(GOVERNANCE_PATHS) || context.governanceFiles.some((x) => !x.content)) return fail("REVIEW_GOVERNANCE_MISSING");
   if (!context.diff || context.diff.base !== BINDING.trustedBaseSha || context.diff.head !== BINDING.headSha || !context.diff.content) return fail("REVIEW_DIFF_MISSING");
-  if (!context.ci || context.ci.headSha !== BINDING.headSha || !Number.isSafeInteger(context.ci.runId) || !Number.isSafeInteger(context.ci.attempt) || context.ci.jobs?.length !== 9 || context.ci.jobs.some((job) => !job || job.conclusion !== "success" || job.run_attempt !== context.ci.attempt)) return fail("REVIEW_CI_MISSING");
+  if (!context.ci || context.ci.headSha !== BINDING.headSha || !Number.isSafeInteger(context.ci.runId) || !Number.isSafeInteger(context.ci.attempt) || context.ci.jobs?.length !== 10 || context.ci.jobs.some((job) => !job || job.conclusion !== "success" || job.run_attempt !== context.ci.attempt)) return fail("REVIEW_CI_MISSING");
   if (rulesetDecision(context.ruleset).ok !== true) return fail("REVIEW_RULESET_MISSING");
   return { ok: true };
 }

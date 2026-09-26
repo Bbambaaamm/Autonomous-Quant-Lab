@@ -202,7 +202,7 @@ test("production does not erase an already verified half on a fresh explicit req
  const r=await f.seal();await r.recover();assert.ok(f.d.pr.labels.includes("agent:verified"));await r.gate();assert.ok(f.d.issue.labels.includes("agent:verified"));
 });
 test("ruleset baseline is 8 contexts and authoritative CI independently remains 9 jobs",()=>{
- assert.equal(m.REQUIRED_CHECKS.length,8);assert.equal(c.requiredCiJobs.length,9);
+ assert.equal(m.REQUIRED_CHECKS.length,8);assert.equal(c.requiredCiJobs.length,10);
  assert.ok(!m.REQUIRED_CHECKS.some(x=>x.context==="agent-pipeline"));assert.ok(c.requiredCiJobs.includes("agent-pipeline"));
 });
 test("audit adapter uses only fixed GET endpoints and never leaks credential on HTTP failure",async()=>{

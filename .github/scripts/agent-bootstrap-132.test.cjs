@@ -16,7 +16,7 @@ for (const [name, mutate, reason] of [
   ["main drift",x=>x.mainBootstrapPathsOnly=false,"MAIN_BINDING_CHANGED"],
 ]) test(name,()=>{const x=base();mutate(x);assert.equal(b.bindingDecision(x).reason,reason);});
 
-test("newest exact-attempt CI requires all nine green jobs",()=>{
+test("newest exact-attempt CI requires all ten green jobs",()=>{
   const run={name:"CI",event:"pull_request",status:"completed",conclusion:"success",head_sha:b.BINDING.headSha,pull_requests:[{number:131}],run_attempt:2};
   const jobs=required.map(name=>({name,conclusion:"success",run_attempt:2}));
   assert.deepEqual(b.ciDecision(run,jobs,required),{ok:true});
