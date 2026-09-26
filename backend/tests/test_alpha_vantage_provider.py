@@ -28,24 +28,30 @@ def test_alpha_vantage_metadata_is_non_us_allowlisted() -> None:
 
 
 @pytest.mark.parametrize(
-    ("symbol", "valid"),
+    ("symbol", "provider_symbol"),
     [
-        ("LSE:BP.", True),
-        ("XETRA:BAS.DE", True),
-        ("ASX:BHP.AX", True),
-        ("AAPL", False),
-        ("XNYS:SPY", False),
-        ("INVALID:XYZ", False),
-        ("", False),
+        ("LSE:TSCO", "TSCO.LON"),
+        ("XETRA:MBG", "MBG.DEX"),
+        ("TSX:SHOP", "SHOP.TRT"),
+        ("SH:600104", "600104.SHH"),
+        ("SZ:000002", "000002.SHZ"),
     ],
 )
-def test_alpha_vantage_resolve_validates_non_us_allowlist(symbol: str, valid: bool) -> None:
+def test_alpha_vantage_resolve_maps_verified_non_us_suffixes(
+    symbol: str, provider_symbol: str
+) -> None:
     provider = AlphaVantageProvider("test-key", transport=lambda *a: (200, {}, b"{}"))
-    if valid:
-        assert provider.resolve(symbol)["provider_symbol"] == symbol.strip().upper()
-    else:
-        with pytest.raises(InvalidSymbol):
-            provider.resolve(symbol)
+    assert provider.resolve(symbol) == {
+        "symbol": symbol,
+        "provider_symbol": provider_symbol,
+    }
+
+
+@pytest.mark.parametrize("symbol", ["AAPL", "XNYS:SPY", "ASX:BHP", "INVALID:XYZ", "LSE:", ""])
+def test_alpha_vantage_resolve_rejects_unverified_or_invalid_symbols(symbol: str) -> None:
+    provider = AlphaVantageProvider("test-key", transport=lambda *a: (200, {}, b"{}"))
+    with pytest.raises(InvalidSymbol):
+        provider.resolve(symbol)
 
 
 def test_alpha_vantage_requires_api_key() -> None:
@@ -77,12 +83,12 @@ def test_alpha_vantage_historical_daily_parses_bars() -> None:
     def transport(url: str, timeout: float) -> tuple[int, dict[str, str], bytes]:
         captured.append(url)
         assert "function=TIME_SERIES_DAILY" in url
-        assert "symbol=LSE%3ABP." in url
+        assert "symbol=TSCO.LON" in url
         assert "apikey=fake-key" in url
         return (200, {}, body)
 
     provider = AlphaVantageProvider("fake-key", transport=transport, max_attempts=1)
-    bars = provider.historical_daily("LSE:BP.", date(2024, 1, 1), date(2024, 1, 2))
+    bars = provider.historical_daily("LSE:TSCO", date(2024, 1, 1), date(2024, 1, 2))
     assert len(bars) == 2
     assert bars[0] == ProviderBar(
         date(2024, 1, 1),
@@ -91,7 +97,7 @@ def test_alpha_vantage_historical_daily_parses_bars() -> None:
         Decimal("97.50"),
         Decimal("100.00"),
         Decimal("2000"),
-        "alphavantage:LSE:BP.:2024-01-01",
+        "alphavantage:TSCO.LON:2024-01-01",
     )
     assert bars[1] == ProviderBar(
         date(2024, 1, 2),
@@ -100,7 +106,7 @@ def test_alpha_vantage_historical_daily_parses_bars() -> None:
         Decimal("98.00"),
         Decimal("101.00"),
         Decimal("1000"),
-        "alphavantage:LSE:BP.:2024-01-02",
+        "alphavantage:TSCO.LON:2024-01-02",
     )
     assert len(captured) == 1
 
@@ -112,7 +118,7 @@ def test_alpha_vantage_rate_limit_raises_provider_rate_limited() -> None:
         max_attempts=1,
     )
     with pytest.raises(ProviderRateLimited):
-        provider.historical_daily("LSE:BP.", date(2024, 1, 1), date(2024, 1, 2))
+        provider.historical_daily("LSE:TSCO", date(2024, 1, 1), date(2024, 1, 2))
 
 
 def test_alpha_vantage_empty_series_raises_invalid_symbol() -> None:
@@ -122,7 +128,7 @@ def test_alpha_vantage_empty_series_raises_invalid_symbol() -> None:
         max_attempts=1,
     )
     with pytest.raises(InvalidSymbol, match="data pro symbol"):
-        provider.historical_daily("LSE:BP.", date(2024, 1, 1), date(2024, 1, 2))
+        provider.historical_daily("LSE:TSCO", date(2024, 1, 1), date(2024, 1, 2))
 
 
 def test_alpha_vantage_malformed_json_raises_invalid_provider_response() -> None:
@@ -132,9 +138,9 @@ def test_alpha_vantage_malformed_json_raises_invalid_provider_response() -> None
         max_attempts=1,
     )
     with pytest.raises(InvalidProviderResponse, match="neplat"):
-        provider.historical_daily("LSE:BP.", date(2024, 1, 1), date(2024, 1, 2))
+        provider.historical_daily("LSE:TSCO", date(2024, 1, 1), date(2024, 1, 2))
 
 
 def test_alpha_vantage_corporate_actions_fail_closed() -> None:
     provider = AlphaVantageProvider("test-key", transport=lambda *a: (200, {}, b"{}"))
-    assert provider.corporate_actions("LSE:BP.", date(2024, 1, 1), date(2024, 1, 2)) == []
+    assert provider.corporate_actions("LSE:TSCO", date(2024, 1, 1), date(2024, 1, 2)) == []

@@ -1181,14 +1181,25 @@ class AlphaVantageProvider:
     ALPHAVANTAGE_API_KEY. Free-tier license permits non-commercial use and is
     rate-limited; this adapter never initiates a paid subscription.
 
-    Coverage is intentionally bounded: only non-US exchanges exposed via an
-    explicit allowlist are accepted (US layer is Alpaca). Corporate actions are
-    NOT reliably available on the free tier, so ``corporate_actions`` fail-closed
-    and returns an empty list rather than inferring incomplete coverage.
+    Coverage is intentionally bounded: only non-US exchanges with a symbol
+    suffix documented by Alpha Vantage are accepted (US layer is Alpaca).
+    Internal symbols use EXCHANGE:TICKER; resolve() converts them to the provider
+    suffix convention. Corporate actions are NOT treated as complete on this
+    free path, so ``corporate_actions`` fails closed with an empty list.
+
+    Verified provider suffixes:
+    LSE -> .LON, XETRA -> .DEX, TSX -> .TRT, Shanghai -> .SHH,
+    Shenzhen -> .SHZ.
     """
 
     _base_url = "https://www.alphavantage.co/query"
-    _supported_exchanges = frozenset({"LSE", "XETRA", "HKEX", "TSE", "TSX", "ASX", "SZ", "SH"})
+    _exchange_suffixes = {
+        "LSE": "LON",
+        "XETRA": "DEX",
+        "TSX": "TRT",
+        "SH": "SHH",
+        "SZ": "SHZ",
+    }
 
     def __init__(
         self,
@@ -1216,12 +1227,17 @@ class AlphaVantageProvider:
 
     def resolve(self, symbol: str) -> dict[str, str]:
         normalized = symbol.strip().upper()
-        if ":" not in normalized:
-            raise InvalidSymbol("Alpha Vantage vyžaduje exchange prefix (např. LSE:BP.)")
-        exchange = normalized.partition(":")[0]
-        if exchange not in self._supported_exchanges:
-            raise InvalidSymbol(f"Exchange {exchange} není v non-US allowlistu AlphaVantage")
-        return {"symbol": normalized, "provider_symbol": normalized}
+        exchange, separator, ticker = normalized.partition(":")
+        if not separator or not ticker:
+            raise InvalidSymbol("Alpha Vantage vyžaduje interní symbol EXCHANGE:TICKER")
+        suffix = self._exchange_suffixes.get(exchange)
+        if suffix is None:
+            raise InvalidSymbol(f"Exchange {exchange} není ve verifikovaném non-US allowlistu")
+        if not ticker.isascii() or any(
+            ch not in "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-" for ch in ticker
+        ):
+            raise InvalidSymbol("Ticker má neplatný formát")
+        return {"symbol": normalized, "provider_symbol": f"{ticker}.{suffix}"}
 
     def historical_daily(self, symbol: str, start: date, end: date) -> list[ProviderBar]:
         if start > end:
