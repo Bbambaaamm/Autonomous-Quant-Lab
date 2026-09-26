@@ -7,6 +7,7 @@ live host probe, no network, no live broker, no credential.
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -161,7 +162,7 @@ def test_child_can_not_escalate_role_above_parent(tmp_path: Path) -> None:
 def test_resource_pressure_blocks_heavy_spawn(field: str, value: float, tmp_path: Path) -> None:
     ac = AdmissionControl(audit_log=_tmp_audit(tmp_path))
     usage = _idle_usage()
-    usage = usage.replace(**{field: value})
+    usage = replace(usage, **{field: value})
     spec = TaskGraphSpec(node_count=5, max_depth=2, max_fanout=2)
     decision = ac.check(_writer_identity(), spec, usage, ["read_file"])
     assert isinstance(decision, DenyDecision)
@@ -174,7 +175,7 @@ def test_resource_pressure_blocks_heavy_spawn(field: str, value: float, tmp_path
 
 def test_queue_backpressure_blocks_spawn(tmp_path: Path) -> None:
     ac = AdmissionControl(audit_log=_tmp_audit(tmp_path))
-    usage = _idle_usage().replace(queue_depth=65)  # type: ignore[call-arg]
+    usage = replace(_idle_usage(), queue_depth=65)
     spec = TaskGraphSpec(node_count=5, max_depth=2, max_fanout=2)
     decision = ac.check(_writer_identity(), spec, usage, ["read_file"])
     assert isinstance(decision, DenyDecision)
@@ -183,7 +184,7 @@ def test_queue_backpressure_blocks_spawn(tmp_path: Path) -> None:
 
 def test_task_time_budget_blocks_long_running(tmp_path: Path) -> None:
     ac = AdmissionControl(audit_log=_tmp_audit(tmp_path))
-    usage = _idle_usage().replace(elapsed_seconds=1801)  # type: ignore[call-arg]
+    usage = replace(_idle_usage(), elapsed_seconds=1801)
     spec = TaskGraphSpec(node_count=5, max_depth=2, max_fanout=2)
     decision = ac.check(_writer_identity(), spec, usage, ["read_file"])
     assert isinstance(decision, DenyDecision)
@@ -192,7 +193,7 @@ def test_task_time_budget_blocks_long_running(tmp_path: Path) -> None:
 
 def test_global_agent_cap_blocks_spawn(tmp_path: Path) -> None:
     ac = AdmissionControl(audit_log=_tmp_audit(tmp_path))
-    usage = _idle_usage().replace(active_agents=5)  # type: ignore[call-arg]
+    usage = replace(_idle_usage(), active_agents=5)
     spec = TaskGraphSpec(node_count=5, max_depth=2, max_fanout=2)
     decision = ac.check(_writer_identity(), spec, usage, ["read_file"])
     assert isinstance(decision, DenyDecision)
@@ -217,7 +218,7 @@ def test_missing_host_telemetry_fails_closed(tmp_path: Path) -> None:
 )
 def test_host_pressure_blocks_spawn(field: str, value: int | float, tmp_path: Path) -> None:
     ac = AdmissionControl(audit_log=_tmp_audit(tmp_path))
-    usage = _idle_usage().replace(**{field: value})
+    usage = replace(_idle_usage(), **{field: value})
     spec = TaskGraphSpec(node_count=5, max_depth=2, max_fanout=2)
     decision = ac.check(_writer_identity(), spec, usage, ["read_file"])
     assert isinstance(decision, DenyDecision)
@@ -226,7 +227,7 @@ def test_host_pressure_blocks_spawn(field: str, value: int | float, tmp_path: Pa
 
 def test_per_repo_agent_cap_blocks_spawn(tmp_path: Path) -> None:
     ac = AdmissionControl(audit_log=_tmp_audit(tmp_path))
-    usage = _idle_usage().replace(agents_per_repo={"QuantLab": 4})
+    usage = replace(_idle_usage(), agents_per_repo={"QuantLab": 4})
     spec = TaskGraphSpec(node_count=5, max_depth=2, max_fanout=2)
     decision = ac.check(_writer_identity(), spec, usage, ["read_file"])
     assert isinstance(decision, DenyDecision)
@@ -235,7 +236,7 @@ def test_per_repo_agent_cap_blocks_spawn(tmp_path: Path) -> None:
 
 def test_per_issue_agent_cap_blocks_spawn(tmp_path: Path) -> None:
     ac = AdmissionControl(audit_log=_tmp_audit(tmp_path))
-    usage = _idle_usage().replace(agents_per_issue={"187": 3})
+    usage = replace(_idle_usage(), agents_per_issue={"187": 3})
     spec = TaskGraphSpec(node_count=5, max_depth=2, max_fanout=2)
     decision = ac.check(_writer_identity(), spec, usage, ["read_file"])
     assert isinstance(decision, DenyDecision)

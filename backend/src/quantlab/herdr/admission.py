@@ -14,7 +14,6 @@ Invariants enforced by AdmissionControl.check():
 
 from __future__ import annotations
 
-import dataclasses
 import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -157,7 +156,7 @@ class DenyReason(StrEnum):
     # PAPER-only safety hooks.
     LIVE_TRADING_TOOL = "live_trading_tool"
     PROTECTED_PATH = "protected_path"
-    SECRET_ACCESS = "secret_access"
+    SECRET_ACCESS = "secret_access"  # noqa: S105 - denial reason code, not a credential
     EXTERNAL_NETWORK_POLICY = "external_network_policy"
 
 
@@ -249,10 +248,6 @@ class ResourceUsage:
     logical_cpus: int = 1  # used for heavy spawn gate
     total_ram_bytes: int = 0  # used for heavy spawn gate
     mem_available_bytes: int = 0  # used for heavy spawn gate
-
-    def replace(self, **kwargs) -> ResourceUsage:
-        """Return a copy with the given fields overridden (for test injection)."""
-        return dataclasses.replace(self, **kwargs)
 
 
 @dataclass(frozen=True)
