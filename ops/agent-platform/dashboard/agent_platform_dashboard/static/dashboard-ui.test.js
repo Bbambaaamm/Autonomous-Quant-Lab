@@ -215,6 +215,18 @@ test('blocked queue task raises attention with sanitized blocker only', async t 
   assert.doesNotMatch(h.get('#queue-list').innerHTML, /PRIVATE|secret|prompt/i);
 });
 
+test('technical queue blocker does not masquerade as user intervention', async t => {
+  const h = await harness(t);
+  const queue = h.snapshot().sources.find(item => item.kind === 'queue');
+  queue.rows[0].status = 'blocked';
+  queue.rows[0].blocker = 'soak_evidence_pending';
+  await h.refresh();
+  assert.equal(h.ui.diagnostics().state, 'waiting_result');
+  assert.equal(h.get('#attention-summary').hidden, true);
+  assert.match(h.get('#face-task').textContent, /technické závislosti/i);
+  assert.match(h.get('#queue-list').innerHTML, /soak_evidence_pending/);
+});
+
 test('queue v2 browser contract rejects incomplete task metadata', async t => {
   const h = await harness(t);
   const queue = h.snapshot().sources.find(item => item.kind === 'queue');

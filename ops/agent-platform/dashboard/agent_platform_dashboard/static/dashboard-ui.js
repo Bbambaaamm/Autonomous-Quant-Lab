@@ -66,6 +66,9 @@ export function mountDashboard(createScene) {
   function queueSource() { return source('quantlab', 'queue'); }
   function queueTasks() { const value = queueSource(); return value?.status === 'available' ? value.rows : []; }
   function activeQueueTasks() { return queueTasks().filter(row => row.status !== 'done'); }
+  const USER_ACTION_BLOCKERS = new Set(['user_action_required', 'agent_interactive_input_required', 'github_write_auth_required']);
+  function userBlockedTasks() { return queueTasks().filter(row => ['blocked', 'failed'].includes(row.status) && USER_ACTION_BLOCKERS.has(row.blocker)); }
+  function technicalBlockedTasks() { return queueTasks().filter(row => ['blocked', 'failed'].includes(row.status) && !USER_ACTION_BLOCKERS.has(row.blocker)); }
   function currentQueueTask(agent = 'quantlab-hermes') { return queueTasks().find(row => row.agent === agent && ['running', 'blocked', 'failed'].includes(row.status)); }
   function nextQueueTask(agent = 'quantlab-hermes') { return queueTasks().filter(row => row.agent === agent && row.status === 'pending').sort((a, b) => (a.not_before ?? Number.MAX_SAFE_INTEGER) - (b.not_before ?? Number.MAX_SAFE_INTEGER) || a.task_id.localeCompare(b.task_id))[0]; }
   function taskDisplay(row) { return row ? `${issueLabel(row)} · ${row.task_id}` : 'Žádná'; }
@@ -197,9 +200,10 @@ export function mountDashboard(createScene) {
     if (demo) return demoState;
     if (!liveData) return 'offline';
     const all = agents(), hermes = all.filter(row => agentKind(row.agent) === 'hermes'), queued = queueTasks();
-    if (all.some(row => row.status === 'blocked') || queued.some(row => ['blocked', 'failed'].includes(row.status))) return 'waiting_user';
+    if (all.some(row => row.status === 'blocked') || userBlockedTasks().length) return 'waiting_user';
     if (liveData.sources.some(row => row.kind === 'herdr' && row.status !== 'available')) return all.length ? 'error' : 'offline';
     if (hermes.some(row => row.status === 'working') || queued.some(row => row.status === 'running')) return 'working';
+    if (technicalBlockedTasks().length) return 'waiting_result';
     if (hermes.some(row => row.status === 'idle')) return 'idle';
     if (hermes.length && hermes.every(row => row.status === 'done')) return 'complete';
     return 'offline';
@@ -212,8 +216,12 @@ export function mountDashboard(createScene) {
     if (state === 'working' || (state === 'idle' && active.length)) return `Pracují: ${active.join(', ')}. Přesný úkol zdroj neposkytuje.`;
     if (state === 'waiting_user') {
       const blockedAgents = agents().filter(row => row.status === 'blocked').map(row => row.agent);
-      const blockedTasks = queueTasks().filter(row => ['blocked', 'failed'].includes(row.status)).map(row => `${issueLabel(row)} ${row.task_id}`);
+      const blockedTasks = userBlockedTasks().map(row => `${issueLabel(row)} ${row.task_id}`);
       return `Zkontrolujte: ${[...blockedAgents, ...blockedTasks].join(', ') || 'blokovanou úlohu'}.`;
+    }
+    if (state === 'waiting_result') {
+      const tasks = technicalBlockedTasks().map(row => `${issueLabel(row)} ${row.blocker || row.task_id}`);
+      return `Čekají technické závislosti: ${tasks.join(', ') || 'interní kontrola'}.`;
     }
     if (state === 'offline') return loadReason;
     if (state === 'error') return liveData.sources.filter(row => row.status === 'unavailable' && row.reason !== 'not_configured')
@@ -262,8 +270,11 @@ export function mountDashboard(createScene) {
       $(`#${profile}-agents`).innerHTML = boundRows.map(agentButton).join('') + overflow;
       const rows = actual.length ? actual : boundRows;
       const queued = profile === 'quantlab' ? queueTasks() : [];
-      $(`#${profile}-project-state`).textContent = rows.some(row => row.status === 'blocked') || queued.some(row => ['blocked', 'failed'].includes(row.status)) ? 'zásah'
-        : rows.some(row => row.status === 'working') || queued.some(row => row.status === 'running') ? 'pracuje' : rows.every(row => row.unavailable) ? 'bez dat' : 'klid';
+      const userBlocked = profile === 'quantlab' ? userBlockedTasks().length : 0;
+      const technicalBlocked = profile === 'quantlab' ? technicalBlockedTasks().length : 0;
+      $(`#${profile}-project-state`).textContent = rows.some(row => row.status === 'blocked') || userBlocked ? 'zásah'
+        : rows.some(row => row.status === 'working') || queued.some(row => row.status === 'running') ? 'pracuje'
+          : technicalBlocked ? 'čeká' : rows.every(row => row.unavailable) ? 'bez dat' : 'klid';
       sceneRows.push(...boundRows.map(row => ({ ...row, id: row.agent, role: agentKind(row.agent), visible: !$(`#${profile}-agents`).hidden })));
     }
     ui.film.querySelectorAll('[data-agent]').forEach(button => button.addEventListener('click', () => openDetail(button.dataset.agent)));
@@ -417,10 +428,10 @@ export function mountDashboard(createScene) {
     }).join('');
     const problems = (liveData?.sources || []).filter(row => row.status === 'unavailable' && row.reason !== 'not_configured');
     const blocked = agents().filter(row => row.status === 'blocked');
-    const queueAlerts = queueTasks().filter(row => ['blocked', 'failed'].includes(row.status));
+    const queueAlerts = userBlockedTasks();
     const summary = $('#attention-summary');
     summary.hidden = Boolean(liveData) && !problems.length && !blocked.length && !queueAlerts.length;
-    summary.textContent = !liveData ? loadReason : `Vyžaduje kontrolu: ${[...blocked.map(row => row.agent), ...queueAlerts.map(row => `${issueLabel(row)} ${row.task_id}`), ...problems.map(row => `${row.profile}/${row.kind} (${row.reason})`)].join(', ')}`;
+    summary.textContent = !liveData ? loadReason : `Vyžaduje váš zásah: ${[...blocked.map(row => row.agent), ...queueAlerts.map(row => `${issueLabel(row)} ${row.task_id}`), ...problems.map(row => `${row.profile}/${row.kind} (${row.reason})`)].join(', ')}`;
     if (!summary.hidden) {
       const action = document.createElement('button'); action.type = 'button'; action.className = 'attention-action';
       action.textContent = blocked.length ? 'Otevřít blokovaného agenta' : queueAlerts.length ? 'Otevřít frontu' : 'Obnovit data';
