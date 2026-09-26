@@ -36,6 +36,16 @@ DESIRED = [
         "agents": [
             {"tab": "Codex", "name": "quantlab-codex", "kind": "codex", "args": []},
             {"tab": "Hermes", "name": "quantlab-hermes", "kind": "hermes", "args": ["-p", "quantlab", "chat"]},
+            {"tab": "Sol", "name": "quantlab-sol", "kind": "codex", "args": ["-m", "gpt-6-sol"]},
+            {"tab": "Astra", "name": "quantlab-astra", "kind": "codex", "args": ["-m", "gpt-6-astra"]},
+        ],
+    },
+    {
+        "label": "DotacniMajak",
+        "cwd": str(HOME / "workspaces/dotacni-majak"),
+        "agents": [
+            {"tab": "Codex", "name": "dotacni-majak-codex", "kind": "codex", "args": []},
+            {"tab": "Hermes", "name": "dotacni-majak-hermes", "kind": "hermes", "args": ["-p", "majak", "chat"]},
         ],
     },
 ]
@@ -146,10 +156,10 @@ def ensure_workspace(label, cwd):
     log(f"Workspace {label}: created as {wid}")
     return wid
 
-def ensure_tabs(workspace_id, cwd):
+def ensure_tabs(workspace_id, cwd, desired_labels):
     tabs = [t for t in list_tabs() if t.get("workspace_id") == workspace_id]
     by_label = {t.get("label"): t for t in tabs}
-    if "Codex" not in by_label:
+    if "Codex" in desired_labels and "Codex" not in by_label:
         if len(tabs) == 1:
             tid = tabs[0]["tab_id"]
             proc = run([HERDR, "tab", "rename", tid, "Codex"])
@@ -161,13 +171,17 @@ def ensure_tabs(workspace_id, cwd):
             if proc.returncode != 0:
                 raise RuntimeError(proc.stderr or proc.stdout)
             log(f"{workspace_id}: created Codex tab")
-    tabs = [t for t in list_tabs() if t.get("workspace_id") == workspace_id]
-    by_label = {t.get("label"): t for t in tabs}
-    if "Hermes" not in by_label:
-        proc = run([HERDR, "tab", "create", "--workspace", workspace_id, "--cwd", cwd, "--label", "Hermes", "--no-focus"])
+    for label in desired_labels:
+        if label == "Codex":
+            continue
+        tabs = [t for t in list_tabs() if t.get("workspace_id") == workspace_id]
+        by_label = {t.get("label"): t for t in tabs}
+        if label in by_label:
+            continue
+        proc = run([HERDR, "tab", "create", "--workspace", workspace_id, "--cwd", cwd, "--label", label, "--no-focus"])
         if proc.returncode != 0:
             raise RuntimeError(proc.stderr or proc.stdout)
-        log(f"{workspace_id}: created Hermes tab")
+        log(f"{workspace_id}: created {label} tab")
 
 def healthy_agent_names():
     healthy_states = {"idle", "done", "working", "blocked"}
@@ -209,7 +223,7 @@ def main():
     ensure_herdr_server()
     for group in DESIRED:
         wid = ensure_workspace(group["label"], group["cwd"])
-        ensure_tabs(wid, group["cwd"])
+        ensure_tabs(wid, group["cwd"], [spec["tab"] for spec in group["agents"]])
         for spec in group["agents"]:
             ensure_agent(wid, spec)
     names = sorted(a.get("name", "") for a in list_agents())
