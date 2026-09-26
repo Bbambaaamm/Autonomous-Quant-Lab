@@ -124,6 +124,7 @@ session, serverové tokeny a same-origin kontrolu.
 | IEX vs. konsolidovaný trh | Dokumentace rozlišuje omezený Basic/IEX a širší americké pokrytí | IEX objemy nelze označit za celotržní likviditu |
 | Historické složení trhu | Nové receipt snapshoty zachovávají okamžik znalosti | Historické identity, delistované tituly, IPO a corporate-action lineage před začátkem sběru |
 | Evropa, Asie, další regiony | V současném provider factory nejsou globální adaptéry | Zvolit a ověřit datové zdroje, oprávnění, kalendáře, měny a náklady |
+| AlphaVantage (non-US candidate, #187) | Adapter implementován v `backend/src/quantlab/market_data.py` s non-US exchange allowlist (LSE/XETRA/HKEX/TSE/TSX/ASX/SZ/SH); unit testy s mock transportem pass (lint+format OK) | Real broad sync + incremental update vyžadují user-authorized ALPHAVANTAGE_API_KEY; dokud není poskytnut (interactive approval), zbývá jen offline-verifikovaný kód. Zónovění je fail-closed bez credential. |
 | Další třídy aktiv | Dosavadní runtime není univerzální multi-asset adaptér | Samostatně ověřit datový model a execution semantics |
 
 ## Co tento PR nedokončuje
