@@ -198,10 +198,7 @@ class PlanBudget:
     )
 
     def __post_init__(self) -> None:
-        frozen = {
-            str(role): frozenset(tools)
-            for role, tools in self.role_tool_allowlist.items()
-        }
+        frozen = {str(role): frozenset(tools) for role, tools in self.role_tool_allowlist.items()}
         object.__setattr__(self, "role_tool_allowlist", MappingProxyType(frozen))
 
 
@@ -358,8 +355,10 @@ class AdmissionControl:
             safe_detail = "tool request denied by secret-isolation policy"
             safe_ctx.pop("denied_tool", None)
         decision = DenyDecision(denied=True, reason=reason, detail=safe_detail)
-        assert self.audit_log is not None
-        self.audit_log.append(
+        audit_log = self.audit_log
+        if audit_log is None:
+            raise RuntimeError("admission audit sink disappeared after initialization")
+        audit_log.append(
             {
                 "event": "deny",
                 "reason": reason.value,
@@ -430,10 +429,7 @@ class AdmissionControl:
         if spec.node_count <= 0 or spec.max_depth <= 0 or spec.max_fanout < 0:
             return self._deny(
                 DenyReason.INVALID_GRAPH_SPEC,
-                (
-                    "graph dimensions must satisfy node_count>0, "
-                    "max_depth>0 and max_fanout>=0"
-                ),
+                ("graph dimensions must satisfy node_count>0, max_depth>0 and max_fanout>=0"),
                 audit_ctx,
             )
 
