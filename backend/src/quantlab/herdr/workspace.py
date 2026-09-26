@@ -102,10 +102,15 @@ class WorkspaceManager:
             task_id=task_id,
             attempt=attempt,
             base_sha=base_sha,
-            result_sha=self.result_sha(Path(self.worktrees_dir), tuple(changed_files)),
+            result_sha=self.result_sha(self._worktrees_dir, tuple(changed_files)),
             changed_files=tuple(changed_files),
             branch=f"issue-binding-{task_id}-{attempt}",
         )
+
+    @property
+    def _worktrees_dir(self) -> Path:
+        """Normalized worktrees_dir (always Path after __post_init__)."""
+        return self.worktrees_dir or self.root / "worktrees"
 
     # -- naming ------------------------------------------------------------- #
     def branch_name(self, issue: int | str, task_id: str, attempt: int = 0) -> str:
@@ -113,7 +118,7 @@ class WorkspaceManager:
         return f"issue-{issue}-{task_id}-{attempt}"
 
     def worktree_path(self, issue: int | str, task_id: str, attempt: int = 0) -> Path:
-        return Path(self.worktrees_dir) / self.branch_name(issue, task_id, attempt)
+        return self._worktrees_dir / self.branch_name(issue, task_id, attempt)
 
     # -- git helpers (all go through the injected runner) ------------------- #
     def origin_main_tip(self) -> str:
@@ -205,7 +210,7 @@ class WorkspaceManager:
         ``main`` or any protected branch.
         """
         if preserve_artifact and artifact_json is not None:
-            dest = Path(self.worktrees_dir) / "artifacts" / f"{worktree.name}.artifact.json"
+            dest = self._worktrees_dir / "artifacts" / f"{worktree.name}.artifact.json"
             dest.parent.mkdir(parents=True, exist_ok=True)
             dest.write_text(json.dumps(dict(artifact_json), sort_keys=True), encoding="utf-8")
         if Path(worktree).exists():
