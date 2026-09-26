@@ -41,8 +41,15 @@ export function mountDashboard(createScene) {
     costTotal: $('#cost-total'), attention: $('#attention-action'), coordinatorCurrent: $('#coordinator-current'), coordinatorNext: $('#coordinator-next'), demo: $('#demo-panel'),
     demoStates: $('#demo-states'), detail: $('#agent-detail'), backdrop: $('#drawer-backdrop'),
     canvas: $('#machine-scene'), fallback: $('#webgl-fallback'),
+    swarmKpis: $('#swarm-kpis'),
+    kpiActive: $('#kpi-active'), kpiRunning: $('#kpi-running'), kpiWaiting: $('#kpi-waiting'),
+    kpiBlocked: $('#kpi-blocked'), kpiQueue: $('#kpi-queue'), kpiSuccess: $('#kpi-success'),
+    kpiRetries: $('#kpi-retries'), kpiAvgTask: $('#kpi-avg-task'), kpiTokens: $('#kpi-tokens'),
+    kpiCost: $('#kpi-cost'),
+    dagStatus: $('#taskgraph-status'), dagNodes: $('#taskgraph-nodes'),
+    analyticsGrid: $('#swarm-analytics-grid'),
   };
-  let liveData = null, demo = false, demoState = 'idle', view = 'work', selectedAgent = null;
+  let liveData = null, demo = false, demoState = 'idle', view = 'work', selectedAgent = null, selectedTask = null;
   let reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
   let scene = null, sceneFailed = false, lastFaceState = null, lastDemoKey = '', returnFocus = null;
   let fetchPending = false, loadReason = 'Načítám skutečná data';
@@ -66,6 +73,7 @@ export function mountDashboard(createScene) {
   function queueSource() { return source('quantlab', 'queue'); }
   function queueTasks() { const value = queueSource(); return value?.status === 'available' ? value.rows : []; }
   function activeQueueTasks() { return queueTasks().filter(row => row.status !== 'done'); }
+  function taskById(taskId) { return queueTasks().find(row => row.task_id === taskId) || null; }
   const USER_ACTION_BLOCKERS = new Set(['user_action_required', 'agent_interactive_input_required', 'github_write_auth_required']);
   function userBlockedTasks() { return queueTasks().filter(row => ['blocked', 'failed'].includes(row.status) && USER_ACTION_BLOCKERS.has(row.blocker)); }
   function technicalBlockedTasks() { return queueTasks().filter(row => ['blocked', 'failed'].includes(row.status) && !USER_ACTION_BLOCKERS.has(row.blocker)); }
@@ -154,6 +162,126 @@ export function mountDashboard(createScene) {
     }
     return [...grouped.values()].sort((a, b) => b.requests - a.requests || a.model.localeCompare(b.model));
   }
+  function swarmMetrics() {
+    const queue = queueTasks();
+    const count = status => queue.filter(row => row.status === status).length;
+    const running = count('running'), waiting = count('pending'), failed = count('failed'), blockedOnly = count('blocked'), done = count('done');
+    const blocked = blockedOnly + failed;
+    const activeAgents = agents().filter(row => row.status === 'working').length;
+    const retries = queue.reduce((sum, row) => sum + (Number.isSafeInteger(row.attempts) ? row.attempts : 0), 0);
+    const terminal = done + failed;
+    const success = terminal ? Math.round(done / terminal * 100) : null;
+    const profiles = PROFILES.map(stats);
+    const routersAvailable = profiles.every(value => value.router?.status === 'available');
+    const inputTokens = routersAvailable ? profiles.reduce((sum, value) => sum + (value.inputKnown || 0), 0) : null;
+    const outputTokens = routersAvailable ? profiles.reduce((sum, value) => sum + (value.outputKnown || 0), 0) : null;
+    const tokenUnknownRequests = routersAvailable ? profiles.reduce((sum, value) => sum + (value.inputUnknownRequests || 0) + (value.outputUnknownRequests || 0), 0) : null;
+    const cost = routersAvailable ? profiles.reduce((sum, value) => sum + (value.costKnown || 0), 0) : null;
+    const costUnknownRequests = routersAvailable ? profiles.reduce((sum, value) => sum + (value.costUnknownRequests || 0), 0) : null;
+    const models = modelMetrics();
+    const durationMs = models.reduce((sum, row) => sum + row.durationMs, 0);
+    const durationRequests = models.reduce((sum, row) => sum + row.durationRequests, 0);
+    const requestLatency = durationRequests ? durationMs / durationRequests : null;
+    const fallbacks = profiles.every(value => value.fallbacks != null) ? profiles.reduce((sum, value) => sum + value.fallbacks, 0) : null;
+    return { queue, running, waiting, blocked, done, failed, activeAgents, retries, success,
+      activeQueue: running + waiting + blocked, inputTokens, outputTokens, tokenUnknownRequests, cost, costUnknownRequests,
+      requestLatency, fallbacks, models };
+  }
+
+  function renderSwarmKpis() {
+    const root = $('#swarm-kpis');
+    if (!root) return;
+    if (!liveData) { root.innerHTML = '<div class="swarm-kpi"><span>Swarm</span><b>—</b><small>telemetrie nedostupná</small></div>'; return; }
+    const m = swarmMetrics();
+    const tokenValue = m.inputTokens == null || m.outputTokens == null ? '—' : compact.format(m.inputTokens + m.outputTokens);
+    const costValue = m.cost == null ? '—' : money(m.cost);
+    const cells = [
+      ['Active', m.activeAgents, 'živí agenti', m.activeAgents ? 'running' : ''],
+      ['Running', m.running, 'běžící tasky', m.running ? 'running' : ''],
+      ['Waiting', m.waiting, 'pending', m.waiting ? 'waiting' : ''],
+      ['Blocked', m.blocked, 'blocked + failed', m.blocked ? 'blocked' : ''],
+      ['Queue', m.activeQueue, 'aktivní tasky', ''],
+      ['Success', m.success == null ? '—' : `${m.success} %`, 'snapshot terminal', ''],
+      ['Retries', m.retries, 'durable attempts', m.retries ? 'waiting' : ''],
+      ['Avg task', '—', 'duration telemetry chybí', ''],
+      ['Tokens', tokenValue, m.tokenUnknownRequests ? `${m.tokenUnknownRequests} req bez tokenů` : 'known input + output', ''],
+      ['Cost', costValue, m.costUnknownRequests ? `${m.costUnknownRequests} req bez ceny` : 'známé variabilní', ''],
+    ];
+    root.innerHTML = cells.map(([label, value, note, state]) => `<article class="swarm-kpi" data-state="${state}"><span>${escapeHTML(label)}</span><b>${escapeHTML(String(value))}</b><small>${escapeHTML(note)}</small></article>`).join('');
+  }
+
+  function taskSortKey(row) {
+    const order = { running: 0, blocked: 1, failed: 2, pending: 3, done: 4 };
+    return [order[row.status] ?? 9, -(row.updated_at || 0), row.task_id];
+  }
+  function sortedTaskNodes() {
+    return [...queueTasks()].sort((a, b) => {
+      const aa = taskSortKey(a), bb = taskSortKey(b);
+      return aa[0] - bb[0] || aa[1] - bb[1] || String(aa[2]).localeCompare(String(bb[2]));
+    });
+  }
+
+  function renderTaskGraph() {
+    const root = $('#taskgraph-nodes'), status = $('#taskgraph-status');
+    if (!root || !status) return;
+    const sourceValue = queueSource();
+    if (!sourceValue || sourceValue.status !== 'available') {
+      status.textContent = 'Task telemetry není dostupná.';
+      root.innerHTML = '<div class="obs-empty">TaskGraph nelze zobrazit bez durable queue.</div>';
+      sceneCall('setTasks', []);
+      return;
+    }
+    const rows = sortedTaskNodes();
+    status.textContent = 'Dependency telemetry není v aktuálním kontraktu · hrany se nevymýšlejí.';
+    if (!rows.length) {
+      root.innerHTML = '<div class="obs-empty">Durable queue je prázdná.</div>';
+      sceneCall('setTasks', []);
+      return;
+    }
+    const visible = rows.slice(0, 24);
+    root.innerHTML = visible.map(row => `<button type="button" class="taskgraph-node" role="option" aria-selected="${String(selectedTask === row.task_id)}" data-task-id="${escapeHTML(row.task_id)}" data-status="${escapeHTML(row.status)}"><b>${escapeHTML(issueLabel(row))} · ${escapeHTML(row.task_id)}</b><span>${escapeHTML(QUEUE_STATUS[row.status] || row.status)}</span><small>${escapeHTML(row.issue_title || row.kind)} · pokus ${escapeHTML(attemptLabel(row))}</small></button>`).join('')
+      + (rows.length > visible.length ? `<div class="taskgraph-node" data-status="pending"><b>+${rows.length - visible.length} uzlů</b><span>LOD cluster</span><small>další sanitizované tasky</small></div>` : '');
+    const buttons = [...root.querySelectorAll('[data-task-id]')];
+    buttons.forEach((button, index) => {
+      button.addEventListener('click', () => openTaskDetail(button.dataset.taskId));
+      button.addEventListener('keydown', event => {
+        if (!['ArrowRight','ArrowLeft','Home','End','Enter',' '].includes(event.key)) return;
+        if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); openTaskDetail(button.dataset.taskId); return; }
+        event.preventDefault();
+        const next = event.key === 'Home' ? 0 : event.key === 'End' ? buttons.length - 1 : Math.max(0, Math.min(buttons.length - 1, index + (event.key === 'ArrowRight' ? 1 : -1)));
+        buttons[next]?.focus();
+      });
+    });
+    sceneCall('setTasks', rows.filter(row => row.status !== 'done'));
+  }
+
+  function renderSwarmAnalytics() {
+    const root = $('#swarm-analytics-grid');
+    if (!root) return;
+    if (!liveData) { root.innerHTML = '<article class="swarm-card"><header><h3>Swarm</h3></header><strong>—</strong><p>Živá telemetrie není dostupná.</p></article>'; return; }
+    const m = swarmMetrics();
+    const queueTotal = m.queue.length || 1;
+    const mini = `<div class="swarm-mini">${['running','pending','blocked','failed','done'].map(status => { const count = m.queue.filter(row => row.status === status).length; return count ? `<i class="${status}" style="width:${(count / queueTotal * 100).toFixed(1)}%" title="${escapeHTML(QUEUE_STATUS[status] || status)}: ${count}"></i>` : ''; }).join('')}</div>`;
+    const tokens = m.inputTokens == null || m.outputTokens == null ? '—' : compact.format(m.inputTokens + m.outputTokens);
+    const cost = m.cost == null ? '—' : money(m.cost);
+    const topModels = m.models.slice(0, 4);
+    const mix = topModels.length ? topModels.map(row => `${escapeHTML(row.model)} ${fmt.format(row.requests)}`).join(' · ') : 'Model telemetry není dostupná.';
+    root.innerHTML = [
+      `<article class="swarm-card"><header><h3>Throughput</h3><span>tasks / time</span></header><strong>—</strong><p>Časová řada dokončených tasků není v autoritativním kontraktu; hodnotu neodhadujeme.</p></article>`,
+      `<article class="swarm-card"><header><h3>Queue depth</h3><span>snapshot</span></header><strong>${fmt.format(m.activeQueue)}</strong>${mini}<p>${m.running} running · ${m.waiting} waiting · ${m.blocked} blocked · ${m.done} done</p></article>`,
+      `<article class="swarm-card"><header><h3>Latency</h3><span>router request avg</span></header><strong>${escapeHTML(latency(m.requestLatency))}</strong><p>Task queue/review p50+p95 nejsou dostupné; zobrazen je pouze měřený router request průměr.</p></article>`,
+      `<article class="swarm-card"><header><h3>Tokens & cost</h3><span>known telemetry</span></header><strong>${escapeHTML(tokens)}</strong><p>${escapeHTML(cost)} · ${m.costUnknownRequests || 0} req bez ceny · ${m.tokenUnknownRequests || 0} token polí bez hodnoty.</p></article>`,
+      `<article class="swarm-card"><header><h3>Model mix</h3><span>requests</span></header><strong>${fmt.format(m.models.reduce((sum,row)=>sum+row.requests,0))}</strong><p>${mix}</p></article>`,
+      `<article class="swarm-card"><header><h3>Reliability</h3><span>snapshot</span></header><strong>${fmt.format(m.retries)}</strong><p>retry attempts · ${m.failed} failed · ${m.blocked} blocked · ${number(m.fallbacks)} model fallbacků.</p></article>`,
+    ].join('');
+  }
+
+  function renderSwarm() {
+    renderSwarmKpis();
+    renderTaskGraph();
+    renderSwarmAnalytics();
+  }
+
   function resetLabel(epoch) {
     if (!Number.isFinite(epoch)) return 'Neznámý';
     return new Date(epoch * 1000).toLocaleString('cs-CZ', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
@@ -438,7 +566,44 @@ export function mountDashboard(createScene) {
       action.addEventListener('click', () => blocked.length ? openDetail(blocked[0].agent) : queueAlerts.length ? $('#queue-title').scrollIntoView({ behavior: reduced ? 'auto' : 'smooth' }) : refresh(true)); summary.append(' ', action);
     }
   }
+  function renderTaskDetail() {
+    const task = taskById(selectedTask);
+    $('#detail-profile').textContent = 'SWARM TASK';
+    $('#detail-title').textContent = task ? `${issueLabel(task)} · ${task.task_id}` : selectedTask || 'Task';
+    $('#detail-role').textContent = 'Durable task node · read only';
+    $('#detail-status').textContent = task ? `Stav: ${QUEUE_STATUS[task.status] || task.status}` : 'Task už není v aktuálním snapshotu';
+    $('#detail-links').innerHTML = task ? [
+      detailLink(issueUrl(task), `Otevřít Issue ${issueLabel(task)}`),
+      detailLink(prUrl(task), task.pr_number ? `Otevřít PR #${task.pr_number}` : ''),
+    ].filter(Boolean).join('') : '';
+    const metrics = task ? [
+      ['Task ID', task.task_id],
+      ['Issue / název', `${issueLabel(task)} · ${task.issue_title || task.kind}`],
+      ['Stav / scheduler', `${QUEUE_STATUS[task.status] || task.status} · ${task.scheduler_state || 'nehlášeno'}`],
+      ['Pokus / maximum', attemptLabel(task)],
+      ['Agent', task.agent],
+      ['Typ', task.kind],
+      ['PR', task.pr_number ? `#${task.pr_number}` : 'Není hlášeno'],
+      ['Blocker', task.blocker || '—'],
+      ['Čas', task.status === 'pending' ? `nejdříve ${queueTime(task.not_before)}` : `změna ${queueTime(task.updated_at)}`],
+      ['Dependency edges', 'Nedostupné v telemetry kontraktu · žádná hrana nebyla odvozena'],
+      ['Runtime / queue wait', 'Nedostupné v telemetry kontraktu'],
+      ['Branch / base / result SHA', 'Nedostupné v telemetry kontraktu'],
+      ['Test / reviewer', 'Nedostupné v telemetry kontraktu'],
+    ] : [['Stav', 'Task už není v aktuálním snapshotu']];
+    $('#detail-metrics').innerHTML = metrics.map(([title, content]) => `<div><dt>${escapeHTML(title)}</dt><dd>${escapeHTML(content)}</dd></div>`).join('');
+    const events = task ? [
+      `Durable queue: ${issueLabel(task)} · ${task.task_id} · ${QUEUE_STATUS[task.status] || task.status}`,
+      `Scheduler: ${task.scheduler_state || 'nehlášeno'} · pokus ${attemptLabel(task)}`,
+      task.blocker ? `Blocker: ${task.blocker}` : 'Bez hlášeného blockeru',
+      'Dependency telemetry není součástí aktuálního snapshotu; DAG hrany nejsou odhadovány.',
+      'Prompt, interní myšlenky a raw log nejsou v dashboardu zobrazovány.',
+    ] : ['Task není v aktuálním snapshotu.'];
+    $('#detail-events').innerHTML = events.map(event => `<li>${escapeHTML(event)}</li>`).join('');
+  }
+
   function renderDetail() {
+    if (selectedTask) { renderTaskDetail(); return; }
     if (!selectedAgent) return;
     const row = agents().find(item => item.agent === selectedAgent);
     const profile = row?.profile || (selectedAgent.startsWith('majak-') ? 'majak' : 'quantlab');
@@ -502,14 +667,21 @@ export function mountDashboard(createScene) {
   }
   function openDetail(name) {
     if (!PROFILES.flatMap(displayedAgents).some(row => row.agent === name)) return;
-    returnFocus = document.activeElement; selectedAgent = name; renderDetail();
+    returnFocus = document.activeElement; selectedTask = null; selectedAgent = name; renderDetail();
     ui.detail.hidden = false; ui.backdrop.hidden = false; document.body.style.overflow = 'hidden';
-    $('#detail-close').focus(); sceneCall('focusAgent', name); if (demo) renderProjects(); renderFace();
+    $('#detail-close').focus(); sceneCall('focusTask', null); sceneCall('focusAgent', name); if (demo) renderProjects(); renderTaskGraph(); renderFace();
+  }
+  function openTaskDetail(taskId) {
+    const task = taskById(taskId); if (!task) return;
+    returnFocus = document.activeElement; selectedAgent = null; selectedTask = taskId; renderTaskDetail();
+    ui.detail.hidden = false; ui.backdrop.hidden = false; document.body.style.overflow = 'hidden';
+    $('#detail-close').focus(); sceneCall('focusAgent', null); sceneCall('focusTask', taskId); renderTaskGraph(); renderFace();
   }
   function closeDetail() {
     ui.detail.hidden = true; ui.backdrop.hidden = true; document.body.style.overflow = '';
-    sceneCall('focusAgent', null);
+    sceneCall('focusAgent', null); sceneCall('focusTask', null);
     if (returnFocus?.isConnected) returnFocus.focus();
+    else if (selectedTask) document.querySelector(`[data-task-id="${CSS.escape(selectedTask)}"]`)?.focus();
     else document.querySelector(`[data-agent="${CSS.escape(selectedAgent || '')}"]`)?.focus();
   }
   function applyView(next) {
@@ -530,7 +702,7 @@ export function mountDashboard(createScene) {
     const color = demo ? '#e49a34' : liveData ? '#6adf9a' : '#ff7159'; ui.liveDot.style.background = color; ui.liveDot.style.color = color;
   }
   function renderAll() {
-    updateHeader(); renderProjects(); renderTelemetry(); renderWork(); renderFace();
+    updateHeader(); renderProjects(); renderTelemetry(); renderSwarm(); renderWork(); renderFace();
     if (!ui.detail.hidden) renderDetail();
   }
   function validateSnapshot(value) {
@@ -618,12 +790,12 @@ export function mountDashboard(createScene) {
     button.setAttribute('aria-expanded', String(!expanded)); list.hidden = expanded; renderProjects();
   }));
   document.addEventListener('visibilitychange', () => { sceneCall('setActive', !document.hidden && view === 'film'); if (!document.hidden) refresh(true); });
-  sceneCall('onSelect', openDetail); updateMotion(); applyView(sceneFailed ? 'work' : 'film'); renderAll(); refresh(true);
+  sceneCall('onSelect', openDetail); sceneCall('onTaskSelect', openTaskDetail); updateMotion(); applyView(sceneFailed ? 'work' : 'film'); renderAll(); refresh(true);
   setInterval(refresh, 30000);
   setInterval(() => {
     if (document.hidden) return;
     if (liveData && Date.now() / 1000 - liveData.generated_at > 90) { liveData = null; loadReason = 'Snapshot je starší než 90 s · obnovte data'; renderAll(); }
     else { renderTelemetry(); updateHeader(); if (!ui.detail.hidden) renderDetail(); }
   }, 1000);
-  return Object.freeze({ diagnostics: () => ({ view, mode: demo ? 'demo' : 'live', state: effectiveState(), reduced, selectedAgent, sceneAvailable: Boolean(scene) && !sceneFailed, freshSnapshot: Boolean(liveData), agentCount: agents().length, queueActive: activeQueueTasks().length }) });
+  return Object.freeze({ diagnostics: () => ({ view, mode: demo ? 'demo' : 'live', state: effectiveState(), reduced, selectedAgent, selectedTask, sceneAvailable: Boolean(scene) && !sceneFailed, freshSnapshot: Boolean(liveData), agentCount: agents().length, queueActive: activeQueueTasks().length }) });
 }

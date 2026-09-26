@@ -25,6 +25,18 @@
       <canvas id="machine-scene" aria-label="Animované reaktivní kvantové jádro centrálního koordinátora"></canvas>
       <div class="city-vignette" aria-hidden="true"></div>
       <div id="link-layer" class="link-layer" aria-hidden="true"></div>
+      <nav id="swarm-kpis" class="swarm-kpis glass" aria-label="Swarm KPI">
+        <div class="swarm-kpi" data-state="ok"><span>Aktivní</span><b id="kpi-active">—</b></div>
+        <div class="swarm-kpi" data-state="ok"><span>Běží</span><b id="kpi-running">—</b></div>
+        <div class="swarm-kpi" data-state="ok"><span>Čeká</span><b id="kpi-waiting">—</b></div>
+        <div class="swarm-kpi" data-state="ok"><span>Blokováno</span><b id="kpi-blocked">—</b></div>
+        <div class="swarm-kpi" data-state="ok"><span>Fronta</span><b id="kpi-queue">—</b></div>
+        <div class="swarm-kpi" data-state="ok"><span>Hotovo</span><b id="kpi-success">—</b></div>
+        <div class="swarm-kpi" data-state="ok"><span>Pokusy</span><b id="kpi-retries">—</b></div>
+        <div class="swarm-kpi" data-state="ok"><span>Prům. úloha</span><b id="kpi-avg-task">—</b></div>
+        <div class="swarm-kpi" data-state="ok"><span>Tokeny</span><b id="kpi-tokens">—</b></div>
+        <div class="swarm-kpi" data-state="ok"><span>Náklady</span><b id="kpi-cost">—</b></div>
+      </nav>
 
       <aside class="telemetry-panel glass" aria-label="Provozní stav">
         <div class="eyebrow">SYSTÉM</div>
@@ -87,6 +99,14 @@
         </div>
         <div id="observability-kpis" class="observability-kpis"></div>
         <div id="observability-grid" class="observability-grid"></div>
+      </section>
+      <section class="swarm-taskgraph" aria-labelledby="taskgraph-title">
+        <div class="section-title"><div><div class="eyebrow">SWARM · TASKGRAPH</div><h2 id="taskgraph-title">TaskGraph / DAG</h2></div><span id="taskgraph-status">Dependency telemetry se ověřuje.</span></div>
+        <div id="taskgraph-nodes" class="taskgraph-nodes" role="listbox" aria-label="TaskGraph uzly"></div>
+      </section>
+      <section class="swarm-analytics" aria-labelledby="swarm-analytics-title">
+        <div class="section-title"><div><div class="eyebrow">SWARM · ANALYTICS</div><h2 id="swarm-analytics-title">Výkon a spolehlivost swarmu</h2></div><span>Jen autoritativní data; nedostupné metriky se neodhadují.</span></div>
+        <div id="swarm-analytics-grid" class="swarm-analytics-grid"></div>
       </section>
       <section class="queue-health" aria-labelledby="queue-title"><div class="section-title"><div><div class="eyebrow">HERDR · DURABLE QUEUE</div><h2 id="queue-title">Autonomní fronta QuantLab</h2></div><span>Jen bezpečná provozní metadata · bez promptů a logů.</span></div><div id="queue-summary" class="queue-summary"></div><div id="queue-list" class="queue-list"></div></section>
       <section class="search-layer" aria-labelledby="search-layer-title"><div class="section-title"><div><div class="eyebrow">WEB · SEARCH ROUTER</div><h2 id="search-layer-title">Vyhledávací vrstva</h2></div><span>Fast · Deep · Browser · telemetrie bez ukládání textu dotazů.</span></div><div id="search-grid" class="search-grid"></div></section>

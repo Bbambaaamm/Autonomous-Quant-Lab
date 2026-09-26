@@ -54,3 +54,24 @@ html[data-motion=reduced] *{scroll-behavior:auto!important;animation:none!import
 @media(max-width:800px){.observability-kpis{grid-template-columns:repeat(2,1fr)}.obs-panel,.obs-panel.wide,.obs-panel.full{grid-column:1/-1}.observability-grid{grid-template-columns:1fr}.coverage-row{grid-template-columns:100px 1fr 42px}}
 @media(max-width:480px){.observability-kpis{grid-template-columns:1fr}}
 .detail-links{display:flex;flex-wrap:wrap;gap:8px;margin:-10px 0 18px}.detail-links:empty{display:none}.detail-links a{border:1px solid #3a3126;padding:7px 9px;color:#d8b06d;text-decoration:none;font-size:10px;letter-spacing:.04em;background:#0b0907}.detail-links a:hover,.detail-links a:focus-visible{border-color:#8b6636;color:#f0c982;outline:none}.detail-metrics dd{overflow-wrap:anywhere}
+
+/* Swarm View v1: truthful live KPI, TaskGraph and analytics surfaces */
+.swarm-kpis{position:absolute;z-index:9;top:84px;left:50%;transform:translateX(-50%);width:min(1180px,72vw);display:grid;grid-template-columns:repeat(10,minmax(0,1fr));background:#060a0dd9;padding:5px}
+.swarm-kpi{min-width:0;padding:7px 9px;border-right:1px solid #ffffff12;text-align:left}.swarm-kpi:last-child{border-right:0}
+.swarm-kpi span,.swarm-kpi b,.swarm-kpi small{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.swarm-kpi span{font-size:7px;letter-spacing:.1em;text-transform:uppercase;color:var(--dim)}
+.swarm-kpi b{margin-top:3px;font-size:14px;font-weight:560;color:#eee3d1;font-variant-numeric:tabular-nums}.swarm-kpi small{margin-top:2px;font-size:7px;color:#8e887f}
+.swarm-kpi[data-state=blocked] b{color:#ffad96}.swarm-kpi[data-state=running] b{color:#9ff1df}.swarm-kpi[data-state=waiting] b{color:#e7c78e}
+.swarm-taskgraph,.swarm-analytics{margin-top:32px;border:1px solid #30281f;background:linear-gradient(135deg,#0b0907,#070605);padding:20px}
+.taskgraph-nodes{display:flex;gap:10px;overflow:auto;padding:16px 2px 8px;min-height:86px;scrollbar-width:thin}
+.taskgraph-node{position:relative;flex:0 0 158px;min-height:58px;border:1px solid #393128;background:#0b0a08;padding:9px 10px;text-align:left;color:var(--text);border-radius:3px}
+.taskgraph-node:hover,.taskgraph-node[aria-selected=true]{border-color:#d8aa62;background:#15120e}.taskgraph-node b,.taskgraph-node span,.taskgraph-node small{display:block}
+.taskgraph-node b{font-size:10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.taskgraph-node span{margin-top:4px;font-size:8px;color:#d0ab73}.taskgraph-node small{margin-top:4px;font-size:8px;color:var(--muted);line-height:1.25}
+.taskgraph-node[data-status=running]{box-shadow:inset 3px 0 #7de0d0}.taskgraph-node[data-status=pending]{box-shadow:inset 3px 0 #8f8068}.taskgraph-node[data-status=blocked],.taskgraph-node[data-status=failed]{box-shadow:inset 3px 0 #ff8069}.taskgraph-node[data-status=done]{opacity:.65;box-shadow:inset 3px 0 #64c995}
+.swarm-analytics-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin-top:16px}.swarm-card{min-height:126px;border:1px solid #2d2821;background:#090807;padding:13px 14px}
+.swarm-card header{display:flex;justify-content:space-between;gap:10px}.swarm-card h3{margin:0;font-size:11px}.swarm-card header span{font-size:8px;color:var(--dim)}
+.swarm-card strong{display:block;margin-top:14px;font-size:24px;font-weight:550;font-variant-numeric:tabular-nums}.swarm-card p{margin:7px 0 0;color:var(--muted);font-size:9px;line-height:1.4}
+.swarm-mini{display:flex;height:8px;margin-top:14px;background:#1b1915;border-radius:6px;overflow:hidden}.swarm-mini i{height:100%;min-width:2px}.swarm-mini .running{background:#71dcca}.swarm-mini .pending{background:#857761}.swarm-mini .blocked,.swarm-mini .failed{background:#ff7159}.swarm-mini .done{background:#64c995}
+
+@media(max-width:1400px){.swarm-kpis{width:min(980px,70vw)}.swarm-kpi{padding:6px}.swarm-kpi b{font-size:12px}.swarm-analytics-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:1000px){.swarm-kpis{display:none}.swarm-analytics-grid{grid-template-columns:1fr}.taskgraph-node{flex-basis:138px}}
+@media(max-width:800px){.swarm-taskgraph,.swarm-analytics{padding:14px}.taskgraph-nodes{min-height:78px}}

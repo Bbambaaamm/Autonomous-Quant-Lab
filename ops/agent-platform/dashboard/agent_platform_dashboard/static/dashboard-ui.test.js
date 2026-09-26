@@ -95,6 +95,9 @@ async function harness(t, options = {}) {
     closest(selector) { return selector === '.project' ? this.project : null; }
     replaceChildren(...children) { this.children = children; }
     append(...children) { this.children.push(...children); }
+    insertAdjacentHTML(position, html) {
+      this.innerHTML = position === 'beforeend' ? this.innerHTML + html : html + this.innerHTML;
+    }
     focus() { activeElement = this; }
   }
   function get(selector) {
@@ -118,12 +121,13 @@ async function harness(t, options = {}) {
   globalThis.setInterval = callback => { intervals.push(callback); return intervals.length; };
   let snapshot = fixture(), httpStatus = 200;
   globalThis.fetch = async () => ({ ok: httpStatus === 200, status: httpStatus, json: async () => structuredClone(snapshot) });
-  const calls = { states: [], agents: [], demo: [], reduced: [], active: [], focused: [], activity: [] };
+  const calls = { states: [], agents: [], tasks: [], demo: [], reduced: [], active: [], focused: [], focusedTasks: [], activity: [] };
   const scene = {
     setState: value => calls.states.push(value), setDemo: value => calls.demo.push(value),
-    setAgents: value => calls.agents.push(value), setReduced: value => calls.reduced.push(value), setActivity: value => calls.activity.push(value),
-    setActive: value => calls.active.push(value), focusAgent: value => calls.focused.push(value),
-    onSelect: callback => { calls.select = callback; },
+    setAgents: value => calls.agents.push(value), setTasks: value => calls.tasks.push(value),
+    setReduced: value => calls.reduced.push(value), setActivity: value => calls.activity.push(value),
+    setActive: value => calls.active.push(value), focusAgent: value => calls.focused.push(value), focusTask: value => calls.focusedTasks.push(value),
+    onSelect: callback => { calls.select = callback; }, onTaskSelect: callback => { calls.selectTask = callback; },
   };
   const { mountDashboard } = await modulePromise;
   const ui = mountDashboard(options.factory || (() => scene));
@@ -415,4 +419,52 @@ test('additional agents remain accessible without unprojected film labels or inv
   h.calls.select('majak-research-worker');
   assert.equal(h.ui.diagnostics().selectedAgent, 'majak-research-worker');
   assert.match(h.get('#detail-status').textContent, /Pracuje/);
+});
+
+test('TaskGraph is explicit when dependency telemetry is unavailable', async t => {
+  const h = await harness(t);
+  const status = h.get('#taskgraph-status').textContent;
+  assert.match(status, /Dependency telemetry/i);
+  assert.match(h.get('#taskgraph-nodes').innerHTML, /issue190-prepare-20260926/);
+  assert.doesNotMatch(h.get('#taskgraph-nodes').innerHTML, /dependency-edge|<svg/i);
+  assert.equal(h.calls.tasks.at(-1).length, 1);
+});
+
+test('TaskGraph handles an empty queue without invented nodes', async t => {
+  const h = await harness(t);
+  const queue = h.snapshot().sources.find(item => item.kind === 'queue');
+  queue.rows = [];
+  await h.refresh();
+  assert.match(h.get('#taskgraph-nodes').innerHTML, /Durable queue je prázdná/);
+  assert.deepEqual(h.calls.tasks.at(-1), []);
+});
+
+test('TaskGraph uses bounded LOD for more than twenty task records', async t => {
+  const h = await harness(t);
+  const queue = h.snapshot().sources.find(item => item.kind === 'queue');
+  const base = queue.rows[0];
+  queue.rows = Array.from({ length: 25 }, (_, index) => ({
+    ...base,
+    task_id: `task-${String(index).padStart(2, '0')}`,
+    issue: 300 + index,
+    issue_title: `Task ${index}`,
+    status: index === 0 ? 'running' : 'pending',
+    updated_at: base.updated_at + index,
+  }));
+  await h.refresh();
+  const html = h.get('#taskgraph-nodes').innerHTML;
+  assert.match(html, /\+1 uzlů/);
+  assert.match(html, /LOD cluster/);
+  assert.equal(h.calls.tasks.at(-1).length, 25);
+});
+
+test('3D task selection synchronizes with task inspector state', async t => {
+  const h = await harness(t);
+  assert.equal(typeof h.calls.selectTask, 'function');
+  h.calls.selectTask('issue190-prepare-20260926');
+  assert.equal(h.ui.diagnostics().selectedTask, 'issue190-prepare-20260926');
+  assert.equal(h.ui.diagnostics().selectedAgent, null);
+  assert.match(h.get('#detail-title').textContent, /#190/);
+  assert.match(h.get('#detail-metrics').innerHTML, /Dependency edges/);
+  assert.match(h.get('#detail-events').innerHTML, /nejsou odhadovány/i);
 });

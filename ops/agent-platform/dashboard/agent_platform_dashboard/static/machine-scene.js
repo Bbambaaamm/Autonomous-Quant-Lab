@@ -59,6 +59,71 @@ export function createMachineScene(canvas, fallback) {
     drone.group.userData.agentId=id; drone.base=vector(0,0,0);drone.id=id;drone.status='offline';
     drone.group.traverse(object=>{object.userData.agentId=id;});scene.add(drone.group);drones.set(id,drone);
   }
+  const taskRoot = new THREE.Group(); taskRoot.name = 'swarm-task-nodes'; scene.add(taskRoot);
+  const taskNodes = new Map();
+  const TASK_COLORS = { running: 0x73f2df, pending: 0xb99b6a, blocked: 0xff8c72, failed: 0xff5f52, done: 0x72c996 };
+  const taskOrder = { running: 0, blocked: 1, failed: 2, pending: 3, done: 4 };
+  let taskFocus = null, taskSelect = () => {};
+
+  function disposeTaskNode(node) {
+    taskRoot.remove(node.group);
+    node.group.traverse(object => {
+      object.geometry?.dispose();
+      if (object.material) for (const material of Array.isArray(object.material) ? object.material : [object.material]) material.dispose();
+    });
+  }
+
+  function makeTaskNode(id, status, index, clusterCount = 0) {
+    const group = new THREE.Group(); group.name = clusterCount ? 'swarm-task-cluster' : `swarm-task-${id}`;
+    const color = TASK_COLORS[status] || 0x9c9487;
+    const body = new THREE.Mesh(
+      clusterCount ? new THREE.DodecahedronGeometry(.22, 0) : new THREE.OctahedronGeometry(.16, 0),
+      new THREE.MeshStandardMaterial({ color: 0x252b2d, emissive: color, emissiveIntensity: status === 'running' ? 1.8 : .75, metalness: .72, roughness: .28 })
+    );
+    const ring = new THREE.Mesh(new THREE.TorusGeometry(clusterCount ? .30 : .23, .012, 5, 20), new THREE.MeshBasicMaterial({ color, transparent: true, opacity: .7 }));
+    ring.rotation.x = Math.PI / 2; group.add(body, ring);
+    group.userData.taskId = clusterCount ? null : id; group.userData.clusterCount = clusterCount;
+    group.traverse(object => { object.userData.taskId = clusterCount ? null : id; });
+    const node = { id, status, index, clusterCount, group, body, ring, base: new THREE.Vector3() };
+    taskRoot.add(group); return node;
+  }
+
+  function layoutTaskNodes() {
+    const nodes = [...taskNodes.values()];
+    const visibleCount = nodes.length;
+    nodes.forEach((node, index) => {
+      const ringIndex = index < 10 ? 0 : 1;
+      const indexInRing = ringIndex ? index - 10 : index;
+      const ringCount = ringIndex ? Math.max(1, visibleCount - 10) : Math.min(10, visibleCount);
+      const angle = -Math.PI * .92 + (indexInRing / Math.max(1, ringCount - 1)) * Math.PI * 1.84;
+      const rx = ringIndex ? 3.55 : 2.65, ry = ringIndex ? 2.38 : 1.82;
+      node.base.set(Math.cos(angle) * rx, .42 + Math.sin(angle) * ry, ringIndex ? 1.48 : 1.18);
+      node.group.position.copy(node.base);
+      node.group.scale.setScalar(node.clusterCount ? .9 : .72);
+    });
+  }
+
+  function setTaskRows(rows) {
+    const ordered = [...(Array.isArray(rows) ? rows : [])].filter(row => row && row.status !== 'done')
+      .sort((a, b) => (taskOrder[a.status] ?? 9) - (taskOrder[b.status] ?? 9) || (b.updated_at || 0) - (a.updated_at || 0) || String(a.task_id).localeCompare(String(b.task_id)));
+    const limit = 20, visible = ordered.slice(0, limit), wanted = new Map(visible.map((row, index) => [row.task_id, { row, index }]));
+    const overflow = Math.max(0, ordered.length - limit);
+    if (overflow) wanted.set('__cluster__', { row: { task_id: '__cluster__', status: 'pending' }, index: visible.length, clusterCount: overflow });
+    for (const [id, node] of [...taskNodes]) {
+      if (!wanted.has(id)) { disposeTaskNode(node); taskNodes.delete(id); }
+    }
+    for (const [id, data] of wanted) {
+      let node = taskNodes.get(id);
+      if (!node || node.status !== data.row.status || node.clusterCount !== (data.clusterCount || 0)) {
+        if (node) disposeTaskNode(node);
+        node = makeTaskNode(id, data.row.status, data.index, data.clusterCount || 0); taskNodes.set(id, node);
+      }
+      node.index = data.index; node.status = data.row.status;
+    }
+    if (taskFocus && !taskNodes.has(taskFocus)) taskFocus = null;
+    layoutTaskNodes(); dirty = true;
+  }
+
   // No pre-baked communication: this geometry is visible exclusively in explicit demo events.
   const linkGeometry = new THREE.BufferGeometry();linkGeometry.setAttribute('position',new THREE.BufferAttribute(new Float32Array(65*3),3));
   const link = new THREE.Line(linkGeometry,new THREE.LineBasicMaterial({color:0x89ddb0,transparent:true,opacity:.32}));link.visible=false;scene.add(link);
@@ -93,7 +158,7 @@ export function createMachineScene(canvas, fallback) {
         const centerX=camera.position.x+(z-camera.position.z)/direction.z*direction.x;
         drone.base.set(centerX+(i<2?-spread:spread),i%2===0?2.15:-1.1,z);
         drone.group.scale.setScalar(scale);drone.group.position.copy(drone.base);
-      });dirty=true;
+      });layoutTaskNodes();dirty=true;
     }catch(error){failScene(error);}
   };
   const ro=new ResizeObserver(resize);ro.observe(canvas);
@@ -104,11 +169,15 @@ export function createMachineScene(canvas, fallback) {
     const r=canvas.getBoundingClientRect();if(!r.width||!r.height)return;
     mouse.set((e.clientX-r.left)/r.width*2-1,-(e.clientY-r.top)/r.height*2+1);
     raycaster.setFromCamera(mouse,camera);
-    const hit=raycaster.intersectObjects([...drones.values()].filter(d=>d.group.visible).map(d=>d.group),true).find(intersection=>{
+    const targets=[...drones.values()].filter(d=>d.group.visible).map(d=>d.group).concat([...taskNodes.values()].map(node=>node.group));
+    const hit=raycaster.intersectObjects(targets,true).find(intersection=>{
       for(let object=intersection.object;object;object=object.parent)if(!object.visible)return false;
-      return Boolean(visibleDrone(intersection.object.userData.agentId));
+      return Boolean(intersection.object.userData.agentId||intersection.object.userData.taskId);
     });
-    if(hit)select(hit.object.userData.agentId);
+    if(hit){
+      const taskId=hit.object.userData.taskId,agentId=hit.object.userData.agentId;
+      if(taskId)taskSelect(taskId);else if(agentId)select(agentId);
+    }
   });
   canvas.addEventListener('webglcontextlost',event=>{event.preventDefault();failScene();});
   // A clean reload rebuilds GPU resources; existing data remains accessible without that reload.
@@ -147,6 +216,21 @@ export function createMachineScene(canvas, fallback) {
       drone.group.rotation.y=drone.base.x<0?.3:-.3;
       drone.update({time:t,state:droneState,reduced,delta});i++;
     }
+    let taskIndex=0;for(const node of taskNodes.values()){
+      const phase=taskIndex*.73;
+      node.group.position.copy(node.base);
+      if(!reduced){
+        node.group.position.y+=Math.sin(t*.42+phase)*.055;
+        node.group.position.z+=Math.cos(t*.31+phase)*.08;
+        node.ring.rotation.z=t*(node.status==='running'?.75:.18)+phase;
+        node.group.rotation.y=t*.08+phase*.2;
+      }else{node.ring.rotation.z=phase;node.group.rotation.y=0;}
+      const selected=taskFocus===node.id;
+      const baseScale=node.clusterCount?.9:.72;
+      node.group.scale.setScalar(selected?baseScale*1.45:baseScale);
+      node.body.material.emissiveIntensity=(node.status==='running'?1.8:.75)+(selected?.9:0);
+      taskIndex++;
+    }
     const liveTarget=activity.activeAgent?visibleDrone(activity.activeAgent):[...drones.values()].find(drone=>drone.group.visible&&['working','blocked'].includes(drone.status));
     const communicationTarget=demo.enabled?visibleDrone(demo.target):liveTarget;
     const communicationState=demo.enabled?state:((state==='waiting_user'||(activity.blocked||0)>0||communicationTarget?.status==='blocked')?'waiting_user':'working');
@@ -177,8 +261,12 @@ export function createMachineScene(canvas, fallback) {
     setActive(value){active=value;dirty=true;lastTime=0;if(value)resize();},setGaze(){},
     setActivity(value){activity={...activity,...value};core.setActivity(activity);dirty=true;},
     setAgents(rows){for(const drone of drones.values()){const row=rows.find(r=>(r.id||r.agent)===drone.id);drone.status=row?.status||'offline';drone.group.visible=Boolean(row)&&row.visible!==false;}if(!visibleDrone(focus))focus=null;if(!visibleDrone(demo.target))demo.target=null;dirty=true;},
-    focusAgent(id){focus=visibleDrone(id)?id:null;dirty=true;},setDemo(value){demo={...demo,...value};if(!visibleDrone(demo.target))demo.target=null;dirty=true;},onSelect(callback){select=callback;},
-    diagnostics(){return {geometry:'true-3d',state,reduced,active,contextLost:lost,quality:adapted?'adaptive-low':low?'low':'high',core:core.diagnostics(),drones:[...drones.values()].map(d=>({id:d.id,position:d.group.position.toArray(),...d.diagnostics()})),drawCalls:renderer.info.render.calls,triangles:renderer.info.render.triangles};},
+    setTasks(rows){setTaskRows(rows);},
+    focusAgent(id){focus=visibleDrone(id)?id:null;dirty=true;},
+    focusTask(id){taskFocus=id&&taskNodes.has(id)?id:null;dirty=true;},
+    setDemo(value){demo={...demo,...value};if(!visibleDrone(demo.target))demo.target=null;dirty=true;},
+    onSelect(callback){select=callback;},onTaskSelect(callback){taskSelect=callback;},
+    diagnostics(){return {geometry:'true-3d',state,reduced,active,contextLost:lost,quality:adapted?'adaptive-low':low?'low':'high',core:core.diagnostics(),drones:[...drones.values()].map(d=>({id:d.id,position:d.group.position.toArray(),...d.diagnostics()})),tasks:[...taskNodes.values()].map(node=>({id:node.id,status:node.status,clusterCount:node.clusterCount,position:node.group.position.toArray()})),drawCalls:renderer.info.render.calls,triangles:renderer.info.render.triangles};},
     quality:low?'Úsporná':'Vysoká',
     dispose(){cancelAnimationFrame(frame);ro.disconnect();scene.traverse(o=>{o.geometry?.dispose();if(o.material){for(const m of Array.isArray(o.material)?o.material:[o.material])m.dispose();}});envTexture.dispose();composer.dispose();renderer.dispose();}
   };
