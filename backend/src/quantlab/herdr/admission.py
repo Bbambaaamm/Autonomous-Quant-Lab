@@ -19,6 +19,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
+from math import isfinite
 from pathlib import Path
 from types import MappingProxyType
 
@@ -515,10 +516,16 @@ class AdmissionControl:
             or usage.load1 < 0.0
             or usage.elapsed_seconds < 0.0
         )
-        if invalid_counts or invalid_host or invalid_floats:
+        if invalid_host:
+            return self._deny(
+                DenyReason.RESOURCE_PRESSURE,
+                "required host resource telemetry is missing or inconsistent",
+                audit_ctx,
+            )
+        if invalid_counts or invalid_floats:
             return self._deny(
                 DenyReason.INVALID_RESOURCE_TELEMETRY,
-                "resource telemetry is missing, non-finite, out of range, or negative",
+                "resource telemetry is non-finite, out of range, or negative",
                 audit_ctx,
             )
 
