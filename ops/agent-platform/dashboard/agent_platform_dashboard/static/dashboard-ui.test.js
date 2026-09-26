@@ -585,3 +585,17 @@ test('TaskGraph state filters do not invent or reorder hidden dependencies', asy
   assert.match(h.get('#taskgraph-status').textContent, /blocked \+ failed/);
   assert.equal(blocked.attrs['aria-pressed'], 'true');
 });
+
+
+test('stale telemetry source is technical data health, not a user-intervention banner', async t => {
+  const h = await harness(t);
+  const codex = h.snapshot().sources.find(item => item.kind === 'codex');
+  codex.status = 'unavailable';
+  codex.reason = 'stale';
+  codex.rows = [];
+  await h.refresh();
+  assert.equal(h.get('#attention-summary').hidden, true);
+  assert.doesNotMatch(h.get('#attention-summary').textContent, /stale/i);
+  assert.match(h.get('#source-grid').innerHTML, /CODEX \/ ÚČET/);
+  assert.match(h.get('#source-grid').innerHTML, /unavailable · stale/);
+});

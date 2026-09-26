@@ -570,12 +570,13 @@ export function mountDashboard(createScene) {
       const label = row.kind === 'codex' ? 'CODEX / ÚČET' : `${row.profile} / ${row.kind}`;
       return `<article class="source-card" data-status="${escapeHTML(row.status)}"><b>${escapeHTML(label)}</b><span>${escapeHTML(row.status)} · ${escapeHTML(row.reason)}</span><span>${row.status === 'available' ? `${row.rows.length} záznamů` : 'bez dat'}</span></article>`;
     }).join('');
-    const problems = (liveData?.sources || []).filter(row => row.status === 'unavailable' && row.reason !== 'not_configured');
+    const sourceUserActionReasons = new Set(['user_action_required', 'auth_required', 'credentials_missing', 'permission_required']);
+    const sourceActions = (liveData?.sources || []).filter(row => row.status === 'unavailable' && sourceUserActionReasons.has(row.reason));
     const blocked = agents().filter(row => row.status === 'blocked');
     const queueAlerts = userBlockedTasks();
     const summary = $('#attention-summary');
-    summary.hidden = Boolean(liveData) && !problems.length && !blocked.length && !queueAlerts.length;
-    summary.textContent = !liveData ? loadReason : `Vyžaduje váš zásah: ${[...blocked.map(row => row.agent), ...queueAlerts.map(row => `${issueLabel(row)} ${row.task_id}`), ...problems.map(row => `${row.profile}/${row.kind} (${row.reason})`)].join(', ')}`;
+    summary.hidden = Boolean(liveData) && !sourceActions.length && !blocked.length && !queueAlerts.length;
+    summary.textContent = !liveData ? loadReason : `Vyžaduje váš zásah: ${[...blocked.map(row => row.agent), ...queueAlerts.map(row => `${issueLabel(row)} ${row.task_id}`), ...sourceActions.map(row => `${row.profile}/${row.kind} (${row.reason})`)].join(', ')}`;
     if (!summary.hidden) {
       const action = document.createElement('button'); action.type = 'button'; action.className = 'attention-action';
       action.textContent = blocked.length ? 'Otevřít blokovaného agenta' : queueAlerts.length ? 'Otevřít frontu' : 'Obnovit data';
