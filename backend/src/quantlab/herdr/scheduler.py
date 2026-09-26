@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import time
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
@@ -344,6 +345,18 @@ def _result_sha(result: str | bytes) -> str:
     m = hashlib.sha256()
     m.update(result if isinstance(result, bytes) else result.encode())
     return m.hexdigest()
+
+
+def _herdr_agent_name(task_id: str, fencing_token: int, issue: str = "") -> str:
+    """Return one deterministic, bounded Herdr-valid attempt identity."""
+    issue_slug = re.sub(r"[^a-z0-9]", "", issue.lower())[:6] or "task"
+    task_slug = re.sub(r"[^a-z0-9]", "", task_id.lower())[:8] or "task"
+    digest = hashlib.sha256(f"{task_id}|{fencing_token}|{issue}".encode()).hexdigest()[:6]
+    return f"q{issue_slug}-{task_slug}-{digest}-f{fencing_token}"[:32]
+
+
+def _is_herdr_agent_name(value: str) -> bool:
+    return bool(re.fullmatch(r"[a-z][a-z0-9_-]{0,31}", value))
 
 
 def _int_value(value: object, default: int = 0) -> int:
@@ -902,7 +915,7 @@ class DynamicChildScheduler:
             rec.blocker = None
             self._fencing_counter += 1
             fence = self._fencing_counter
-            agent_id = f"agent:{node.node_id}:f{fence}"
+            agent_id = _herdr_agent_name(node.node_id, fence, node.issue or self._issue)
             parent_agent_id = node.parent_agent_id
             if node.parent_task_id and not parent_agent_id:
                 parent = self._tasks.get(node.parent_task_id)
@@ -974,6 +987,79 @@ class DynamicChildScheduler:
     def _concurrency_cap(self) -> int:
         return self.budget.max_global_concurrency
 
+    def bind_external_parent(self, task_id: str, agent_id: str, now: float | None = None) -> _Lease:
+        """Bind a scheduler root to the already-running Herdr coordinator."""
+        rec = self._tasks.get(task_id)
+        if rec is None:
+            raise ValueError(f"unknown external parent task: {task_id}")
+        if rec.state != LifecycleState.PLANNED or task_id in self._claims:
+            raise ValueError(f"external parent task is not claimable: {task_id}")
+        if rec.node.parent_task_id or rec.node.parent_node:
+            raise ValueError("only a root task may bind an external coordinator")
+        if rec.node.paper_only is not True:
+            raise ValueError("external coordinator binding requires PAPER-only task")
+        if not _is_herdr_agent_name(agent_id):
+            raise ValueError("external coordinator agent_id is not Herdr-valid")
+        if any(claim.agent_id == agent_id for claim in self._claims.values()):
+            raise ValueError("external coordinator agent_id is already claimed")
+        if rec.node.prereqs and not self._prereqs_satisfied(rec):
+            raise ValueError("external parent prerequisites are not satisfied")
+
+        allowed, reason = self._can_dispatch(rec.node)
+        if not allowed:
+            rec.blocker = reason
+            raise ValueError(f"external parent admission denied: {reason}")
+
+        moment = now if now is not None else self._clock()
+        self._fencing_counter += 1
+        fence = self._fencing_counter
+        lease_until = moment + min(rec.node.max_seconds, self.budget.claim_ttl_seconds)
+        lease = _Lease(
+            task_id=task_id,
+            holder=agent_id,
+            agent_id=agent_id,
+            lease_until=lease_until,
+            fencing_token=fence,
+        )
+        rec.state = LifecycleState.RUNNING
+        rec.agent_id = agent_id
+        rec.fencing_token = fence
+        rec.model_used = rec.node.model
+        rec.fallback_used = rec.node.fallback_model
+        rec.updated_at = moment
+        payload = self._node_to_payload(rec.node)
+        payload["agent_id"] = agent_id
+        payload["fencing_token"] = fence
+        rec.node = self._node_from_payload(payload)
+        self._claims[task_id] = lease
+        telemetry: dict[str, object] = {
+            "event": "dispatch",
+            "agent_id": agent_id,
+            "parent_agent_id": None,
+            "parent_task_id": None,
+            "model": rec.node.model,
+            "fallback_model": rec.node.fallback_model,
+            "leased_at": moment,
+            "lease_until": lease_until,
+            "fencing_token": fence,
+            "external_parent": True,
+        }
+        rec.telemetry.append(telemetry)
+        audit = self._audit(
+            "dispatch",
+            {
+                "task_id": task_id,
+                **telemetry,
+                "role": rec.node.role,
+                "repo": rec.node.repo or self._repo,
+                "issue": rec.node.issue or self._issue,
+                "dependencies": list(rec.node.prereqs),
+            },
+        )
+        if audit is not None:
+            rec.last_event_ref = _int_value(audit.get("event_seq"), 0)
+        return lease
+
     # -- completion (idempotent via SHA + fencing, no double commit) ------- #
     def complete(
         self,
@@ -997,8 +1083,10 @@ class DynamicChildScheduler:
             return False
 
         lease = self._claims.get(task_id)
+        lease_expired = lease is not None and self._clock() > lease.lease_until
         if (
             lease is None
+            or lease_expired
             or agent_id is None
             or fencing_token is None
             or agent_id != lease.agent_id
@@ -1289,7 +1377,7 @@ class DynamicChildScheduler:
             parent_node=parent_task_id,
             parent_task_id=parent_task_id,
             parent_agent_id=parent.agent_id,
-            max_seconds=min(parent.node.max_seconds, 300),
+            max_seconds=min(parent.node.max_seconds, 1800),
             max_retries=parent.node.max_retries,
             backoff_base=parent.node.backoff_base,
             paper_only=True,
@@ -1453,10 +1541,10 @@ class DynamicChildScheduler:
         ]
         return {
             "version": 1,
+            "observed_at": self._clock(),
             "repo": self._repo,
             "issue": self._issue,
             "paper_only": True,
-            "event_seq": self._event_seq,
             "tasks": tasks,
             "agents": sorted(agents, key=lambda row: str(row["agent_id"])),
             "edges": edge_rows,
@@ -1472,7 +1560,9 @@ class DynamicChildScheduler:
             json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n",
             encoding="utf-8",
         )
+        tmp.chmod(0o640)
         tmp.replace(target)
+        target.chmod(0o640)
         return payload
 
     # -- durable cancellation (survives restart) --------------------------- #

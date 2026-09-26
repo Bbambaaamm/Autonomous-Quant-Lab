@@ -197,6 +197,23 @@ def test_lost_worker_reclaim_without_double_commit(tmp_path: Path) -> None:
     )
 
 
+def test_expired_lease_cannot_commit_before_reclaim(tmp_path: Path) -> None:
+    now = [1_000_000.0]
+    sched = _idle_scheduler(tmp_path, clock=lambda: now[0])
+    sched.submit(TaskGraph(nodes=(_node("a"),), name="expired"))
+    lease = sched.dispatch()[0]
+    now[0] = lease.lease_until + 0.001
+    assert (
+        sched.complete(
+            "a",
+            result="late",
+            agent_id=lease.agent_id,
+            fencing_token=lease.fencing_token,
+        )
+        is False
+    )
+
+
 # --- Acceptance: child cannot escalate tools / permissions beyond parent --- #
 
 
