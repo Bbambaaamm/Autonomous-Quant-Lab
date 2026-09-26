@@ -389,7 +389,9 @@ class PolicyGate:
         if child_rank < 0 or parent_rank < 0:
             return DenyDecision(
                 reason=DenyReason.NON_SPAWNABLE_ROLE,
-                detail=(f"unknown role parent={proposal.parent_role!r} child={proposal.child_role!r}"),
+                detail=(
+                    f"unknown role parent={proposal.parent_role!r} child={proposal.child_role!r}"
+                ),
             )
         if child_rank > parent_rank:
             return DenyDecision(
