@@ -10,6 +10,8 @@ await build({
   platform: 'browser',
   target: 'es2022',
   minify: true,
+  inject: ['agent_platform_dashboard/static/secure-random.js'],
+  define: { 'Math.random': 'secureRandom' },
   outfile: output,
 });
 

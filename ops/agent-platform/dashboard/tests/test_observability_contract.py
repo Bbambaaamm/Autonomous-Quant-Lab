@@ -156,7 +156,7 @@ class ObservabilityContractTests(unittest.TestCase):
             codex = root / "codex.json"
             routing = root / "routing.json"
             codex.write_text(json.dumps(codex_payload(observed_at=now)), encoding="utf-8")
-            routing.write_text(json.dumps(routing_payload(now)), encoding="utf-8")
+            routing.write_text(json.dumps(routing_payload(now - 3600)), encoding="utf-8")
             old_usage, old_routing = sources.CODEX_USAGE_PATH, sources.MODEL_ROUTING_PATH
             sources.CODEX_USAGE_PATH, sources.MODEL_ROUTING_PATH = str(codex), str(routing)
             try:
@@ -168,6 +168,7 @@ class ObservabilityContractTests(unittest.TestCase):
                 self.assertEqual(row["routing_astra_escalations"], 0)
                 self.assertEqual(row["routing_soft_limit_pct"], 70)
                 self.assertEqual(row["routing_hard_limit_pct"], 90)
+                self.assertEqual(row["routing_observed_at"], now - 3600)
                 self.assertEqual(row["last_route_model"], "gpt-6-sol")
                 self.assertEqual(row["last_route_reason"], "cheap_attempts_exhausted")
                 routing_data = routing_payload(now)
