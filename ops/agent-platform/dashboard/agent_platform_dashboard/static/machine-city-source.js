@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { secureRandom } from './secure-random.js';
 
 const STATE_META={
   idle:{label:'Čeká',copy:'Klidový režim · žádná aktivní práce',tone:'amber'},
@@ -24,7 +25,7 @@ function createFaceController(canvas,fallback){
   try{renderer=new THREE.WebGLRenderer({canvas,antialias:true,powerPreference:'high-performance',alpha:true});}
   catch(error){fallback.hidden=false;return null;}
   const low=(navigator.deviceMemory&&navigator.deviceMemory<=4)||innerWidth<760;
-  const rand=(a,b)=>a+Math.random()*(b-a),matrix=new THREE.Matrix4(),quat=new THREE.Quaternion(),scale=new THREE.Vector3();
+  const rand=(a,b)=>a+secureRandom()*(b-a),matrix=new THREE.Matrix4(),quat=new THREE.Quaternion(),scale=new THREE.Vector3();
   renderer.setPixelRatio(Math.min(devicePixelRatio,low?1.12:1.6));renderer.setSize(innerWidth,innerHeight);
   renderer.outputColorSpace=THREE.SRGBColorSpace;renderer.toneMapping=THREE.ACESFilmicToneMapping;renderer.toneMappingExposure=1.27;renderer.setClearColor(0x000000,0);
   const scene=new THREE.Scene();scene.background=null;scene.fog=new THREE.FogExp2(0x171410,.027);
@@ -44,10 +45,10 @@ function createFaceController(canvas,fallback){
   const towerGeo=new THREE.BoxGeometry(1,1,1),towerCount=low?115:230,towers=new THREE.InstancedMesh(towerGeo,towerMat,towerCount),spires=new THREE.InstancedMesh(new THREE.ConeGeometry(.5,1,5),towerMat,towerCount);
   const cityLights=[];
   for(let i=0;i<towerCount;i++){
-    const edge=Math.random()<.7?rand(4.1,17)*Math.sign(rand(-1,1)):rand(-17,17),z=rand(-15,-5.2),h=rand(1.2,8.8),w=rand(.16,.88),y=-3.2+h/2;
+    const edge=secureRandom()<.7?rand(4.1,17)*Math.sign(rand(-1,1)):rand(-17,17),z=rand(-15,-5.2),h=rand(1.2,8.8),w=rand(.16,.88),y=-3.2+h/2;
     matrix.compose(new THREE.Vector3(edge,y,z),new THREE.Quaternion(),new THREE.Vector3(w,h,w*rand(.7,1.5)));towers.setMatrixAt(i,matrix);
     matrix.compose(new THREE.Vector3(edge,-3.2+h+rand(.2,.8),z),new THREE.Quaternion(),new THREE.Vector3(w*.48,rand(.5,2.1),w*.48));spires.setMatrixAt(i,matrix);
-    const rows=Math.max(1,Math.floor(h/.42));for(let j=0;j<rows;j++)if(Math.random()>.47)cityLights.push(edge+rand(-w*.36,w*.36),-3+h*(j/rows)+rand(-.05,.05),z+.52*w);
+    const rows=Math.max(1,Math.floor(h/.42));for(let j=0;j<rows;j++)if(secureRandom()>.47)cityLights.push(edge+rand(-w*.36,w*.36),-3+h*(j/rows)+rand(-.05,.05),z+.52*w);
   }
   towers.instanceMatrix.needsUpdate=true;spires.instanceMatrix.needsUpdate=true;city.add(towers,spires);
   const cityGeo=new THREE.BufferGeometry();cityGeo.setAttribute('position',new THREE.Float32BufferAttribute(cityLights,3));city.add(new THREE.Points(cityGeo,new THREE.PointsMaterial({color:0xffae52,size:low?.025:.034,transparent:true,opacity:.8,blending:THREE.AdditiveBlending,depthWrite:false})));
@@ -66,7 +67,7 @@ function createFaceController(canvas,fallback){
     return new THREE.Vector3(x,y,z);
   }
   const rows=low?34:50,cols=low?32:46,verts=[],colors=[],indices=[],bronze=new THREE.Color(0x684d31),charcoal=new THREE.Color(0x45413a),bone=new THREE.Color(0x756f66);
-  for(let r=0;r<=rows;r++){const y=-2.8+r/rows*5.8;for(let c=0;c<=cols;c++){const nx=-1+c/cols*2,p=surface(nx,y);verts.push(p.x,p.y,p.z);const edge=Math.abs(nx),light=.72+.38*Math.max(0,1-edge)+rand(-.08,.08),base=(Math.random()<.07?bronze:Math.random()<.34?bone:charcoal).clone().multiplyScalar(light);colors.push(base.r,base.g,base.b);}}
+  for(let r=0;r<=rows;r++){const y=-2.8+r/rows*5.8;for(let c=0;c<=cols;c++){const nx=-1+c/cols*2,p=surface(nx,y);verts.push(p.x,p.y,p.z);const edge=Math.abs(nx),light=.72+.38*Math.max(0,1-edge)+rand(-.08,.08),base=(secureRandom()<.07?bronze:secureRandom()<.34?bone:charcoal).clone().multiplyScalar(light);colors.push(base.r,base.g,base.b);}}
   for(let r=0;r<rows;r++)for(let c=0;c<cols;c++){const a=r*(cols+1)+c,b=a+1,d=(r+1)*(cols+1)+c,e=d+1;indices.push(a,d,b,b,d,e);}
   const shellGeo=new THREE.BufferGeometry();shellGeo.setAttribute('position',new THREE.Float32BufferAttribute(verts,3));shellGeo.setAttribute('color',new THREE.Float32BufferAttribute(colors,3));shellGeo.setIndex(indices);shellGeo.computeVertexNormals();const shell=new THREE.Mesh(shellGeo,shellMat);face.add(shell);
 
@@ -74,7 +75,7 @@ function createFaceController(canvas,fallback){
   const normal=new THREE.Vector3(),zAxis=new THREE.Vector3(0,0,1),spin=new THREE.Quaternion();
   for(let i=0;i<panelCount;i++){
     const y=rand(-2.72,2.9),nx=rand(-.98,.98),p=surface(nx,y),x=p.x,feature=(Math.abs(y-.68)<.45&&Math.abs(Math.abs(x)-.78)<.62)||(Math.abs(y+1.02)<.28&&Math.abs(x)<.92);
-    normal.set(x*.15,y*.035,1).normalize();quat.setFromUnitVectors(zAxis,normal);spin.setFromAxisAngle(zAxis,rand(-Math.PI,Math.PI));quat.multiply(spin);const s=feature?rand(.018,.052):rand(.045,.145);scale.set(s*rand(1.2,2.8),s*rand(.42,1.15),rand(.055,.13));p.addScaledVector(normal,rand(.022,.072));matrix.compose(p,quat,scale);panels.setMatrixAt(i,matrix);const col=(Math.random()<.11?bronze:Math.random()<.38?bone:charcoal).clone().multiplyScalar(rand(.76,1.08));panels.setColorAt(i,col);
+    normal.set(x*.15,y*.035,1).normalize();quat.setFromUnitVectors(zAxis,normal);spin.setFromAxisAngle(zAxis,rand(-Math.PI,Math.PI));quat.multiply(spin);const s=feature?rand(.018,.052):rand(.045,.145);scale.set(s*rand(1.2,2.8),s*rand(.42,1.15),rand(.055,.13));p.addScaledVector(normal,rand(.022,.072));matrix.compose(p,quat,scale);panels.setMatrixAt(i,matrix);const col=(secureRandom()<.11?bronze:secureRandom()<.38?bone:charcoal).clone().multiplyScalar(rand(.76,1.08));panels.setColorAt(i,col);
   }
   panels.instanceMatrix.needsUpdate=true;panels.instanceColor.needsUpdate=true;face.add(panels);
 
@@ -107,7 +108,7 @@ function createFaceController(canvas,fallback){
   const jaw=new THREE.Group();mouth.add(jaw);jaw.add(tube([new THREE.Vector3(-.56,-.03,.08),new THREE.Vector3(-.28,-.115,.17),new THREE.Vector3(0,-.145,.21),new THREE.Vector3(.28,-.115,.17),new THREE.Vector3(.56,-.03,.08)],.05,0x514238,.07));
   const chin=new THREE.Mesh(new THREE.DodecahedronGeometry(.58,2),new THREE.MeshStandardMaterial({color:0x3d3a35,metalness:.88,roughness:.42}));chin.scale.set(1.16,.62,.38);chin.position.set(0,-.57,-.2);jaw.add(chin);
 
-  const cableField=new THREE.Group();face.add(cableField);for(let i=0;i<(low?38:70);i++){const side=i%2?1:-1,start=new THREE.Vector3(side*rand(1.35,2.18),rand(-2.45,2.8),rand(.25,1.15)),end=new THREE.Vector3(side*rand(3.1,7.4),rand(-3.2,5),rand(-4.8,-.5));cableField.add(tube([start,start.clone().lerp(end,.28).add(new THREE.Vector3(side*rand(.1,.7),rand(-.7,.7),rand(-.3,.6))),start.clone().lerp(end,.62).add(new THREE.Vector3(side*rand(.1,.5),rand(-.8,.8),rand(-.4,.4))),end],rand(.009,.035),Math.random()<.18?0x8a5b26:0x34291f,Math.random()<.18?.22:.04,20));}
+  const cableField=new THREE.Group();face.add(cableField);for(let i=0;i<(low?38:70);i++){const side=i%2?1:-1,start=new THREE.Vector3(side*rand(1.35,2.18),rand(-2.45,2.8),rand(.25,1.15)),end=new THREE.Vector3(side*rand(3.1,7.4),rand(-3.2,5),rand(-4.8,-.5));cableField.add(tube([start,start.clone().lerp(end,.28).add(new THREE.Vector3(side*rand(.1,.7),rand(-.7,.7),rand(-.3,.6))),start.clone().lerp(end,.62).add(new THREE.Vector3(side*rand(.1,.5),rand(-.8,.8),rand(-.4,.4))),end],rand(.009,.035),secureRandom()<.18?0x8a5b26:0x34291f,secureRandom()<.18?.22:.04,20));}
   const debrisCount=low?260:520,debris=new THREE.InstancedMesh(new THREE.TetrahedronGeometry(.055,0),new THREE.MeshStandardMaterial({color:0x2d2923,metalness:.94,roughness:.32,emissive:0x512b0d,emissiveIntensity:.12}),debrisCount);
   for(let i=0;i<debrisCount;i++){const angle=rand(0,Math.PI*2),radius=rand(2.25,5.8),p=new THREE.Vector3(Math.cos(angle)*radius,rand(-3.1,4.2),rand(-2.2,.7));quat.setFromEuler(new THREE.Euler(rand(0,3),rand(0,3),rand(0,3)));const s=rand(.35,2.6);matrix.compose(p,quat,new THREE.Vector3(s,s*.65,s));debris.setMatrixAt(i,matrix);}debris.instanceMatrix.needsUpdate=true;face.add(debris);
 
