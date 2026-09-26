@@ -213,5 +213,3 @@ def project(value, profiles, now):
         if not 0 <= now - source['observed_at'] <= 90:
             source.update(status='unavailable', reason='stale', rows=[], data_at=None)
     return result
-
-[executed on device: quantlab-staging-01 (efe59886-9b61-4d73-8a30-a34b95415c21)]

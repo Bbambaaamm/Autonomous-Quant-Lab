@@ -320,5 +320,3 @@ def herdr(path, profile, now):
         raise NotConfigured('profile_not_configured')
     c.need(len({r['agent'] for r in raw['agents']}) == len(raw['agents']))
     return [r for r in raw['agents'] if r['agent'].startswith(profile + '-')], raw['observed_at']
-
-[executed on device: quantlab-staging-01 (efe59886-9b61-4d73-8a30-a34b95415c21)]
