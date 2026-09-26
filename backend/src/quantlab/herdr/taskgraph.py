@@ -126,12 +126,12 @@ class TaskNode:
     type: str
     role: str
     objective: str
-    inputs: list[dict]
-    expected_outputs: list[dict]
+    inputs: list[dict[str, Any]]
+    expected_outputs: list[dict[str, Any]]
     dependencies: tuple[str, ...]
     priority: int
     resource_class: str
-    model_policy: dict
+    model_policy: dict[str, Any]
     tools: tuple[str, ...]
     permissions: tuple[str, ...]
     created_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
@@ -491,7 +491,7 @@ class PersistentTaskGraph:
 
     def __init__(self, path: str | Any):
         self._path = str(path)
-        self._events: list[dict] = []
+        self._events: list[dict[str, Any]] = []
         self._replayed = False
         self._graph: TaskGraph | None = None
         self._state: dict[str, LifecycleState] = {}
@@ -501,7 +501,7 @@ class PersistentTaskGraph:
         return datetime.now(UTC).isoformat()
 
     # --- append-only event log (immutable) ---------------------------
-    def _append(self, event: dict) -> None:
+    def _append(self, event: dict[str, Any]) -> None:
         # Append-only: we never truncate or rewrite history.  The log is the
         # source of truth; materialized state is always derived from it.
         self._events.append(event)
@@ -560,7 +560,7 @@ class PersistentTaskGraph:
             raise FileNotFoundError(f"event log not found: {self._path}")
 
         envelope: TaskGraphEnvelope | None = None
-        node_dicts: list[dict] = []
+        node_dicts: list[dict[str, Any]] = []
         state: dict[str, LifecycleState] = {}
         cancelled: set[str] = set()
 
