@@ -1,4 +1,5 @@
 """Offline tests for Herdr v1.4 reviewer gate (#233). No network, no live broker."""
+
 from __future__ import annotations
 
 from collections.abc import Mapping
@@ -28,8 +29,12 @@ def _input(worker_claim: str = "PASS", **ev: str) -> ReviewInput:
     )
 
 
-def _artifact(task_id: str = "233", attempt: int = 0, base_sha: str = "base0",
-              artifacts: Mapping[str, str] | None = None) -> ArtifactRef:
+def _artifact(
+    task_id: str = "233",
+    attempt: int = 0,
+    base_sha: str = "base0",
+    artifacts: Mapping[str, str] | None = None,
+) -> ArtifactRef:
     arts = artifacts or {"out.txt": "result"}
     return ReviewerGate().bind(task_id, attempt, base_sha, arts, ["out.txt"])
 
@@ -60,13 +65,22 @@ def test_review_bound_to_exact_task_attempt_and_sha(tmp_path: Path) -> None:
 def test_changed_artifact_invalidates_prior_review(tmp_path: Path) -> None:
     """Acceptance: new artifact invalidates stale review (fail-closed BLOCK)."""
     gate = ReviewerGate()
-    old = gate.bind("233", attempt=0, base_sha="base0",
-                    artifacts={"out.txt": "result-v1"}, changed_files=["out.txt"])
-    new = gate.bind("233", attempt=1, base_sha="base0",
-                    artifacts={"out.txt": "result-v2"}, changed_files=["out.txt"])
+    old = gate.bind(
+        "233",
+        attempt=0,
+        base_sha="base0",
+        artifacts={"out.txt": "result-v1"},
+        changed_files=["out.txt"],
+    )
+    new = gate.bind(
+        "233",
+        attempt=1,
+        base_sha="base0",
+        artifacts={"out.txt": "result-v2"},
+        changed_files=["out.txt"],
+    )
     assert old.result_sha != new.result_sha  # content changed
-    rec = gate.review(_input(tests="PASSED 3", lint="clean", build="ok"),
-                      new, prev_artifact=old)
+    rec = gate.review(_input(tests="PASSED 3", lint="clean", build="ok"), new, prev_artifact=old)
     assert rec.verdict == ReviewVerdict.BLOCK
     assert rec.reason == ReviewReason.STALE_ARTIFACT
 
@@ -102,8 +116,12 @@ def test_deterministic_validators_fail_closed(tmp_path: Path) -> None:
     gate = ReviewerGate()
     evidence = {"tests": "FAILED 2", "lint": "clean", "build": "ok"}
     rec = gate.review(
-        ReviewInput(spec="s", artifacts=MappingProxyType({"a": "b"}),
-                    evidence=MappingProxyType(evidence), worker_claim="ok"),
+        ReviewInput(
+            spec="s",
+            artifacts=MappingProxyType({"a": "b"}),
+            evidence=MappingProxyType(evidence),
+            worker_claim="ok",
+        ),
         _artifact(),
         validators=[gate.tests_pass(min_passed=1), gate.lint_clean()],
     )

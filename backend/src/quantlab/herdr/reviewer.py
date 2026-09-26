@@ -11,6 +11,7 @@ Bounded + offline + PAPER-only:
 - Bounded fix attempts -> blocked/needs-human when exhausted.
 - Exact artifact/SHA binding; a changed artifact invalidates prior review.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -197,7 +198,11 @@ class ReviewerGate:
         for v in validators:
             failed = v(inp.evidence)
             if failed is not None:
-                reason = failed if failed in ReviewReason._value2member_map_.values() else ReviewReason.VALIDATOR_FAILED  # noqa: E501
+                reason = (
+                    failed
+                    if failed in ReviewReason._value2member_map_.values()
+                    else ReviewReason.VALIDATOR_FAILED
+                )  # noqa: E501
                 return ReviewRecord(
                     ReviewVerdict.BLOCK,
                     reason,
@@ -221,6 +226,7 @@ class ReviewerGate:
     # -- built-in deterministic validators ----------------------------------- #
     def tests_pass(self, min_passed: int = 1) -> Validator:
         """EVIDENCE_INVALID when the tests evidence is present but not a PASSED line."""
+
         def _v(evidence: Mapping[str, str]) -> ReviewReason | None:
             line = (evidence.get("tests") or "").upper()
             if "PASSED" not in line:
@@ -229,10 +235,12 @@ class ReviewerGate:
             if digits and min_passed > 0 and int("".join(digits)) < min_passed:
                 return ReviewReason.EVIDENCE_INVALID
             return None
+
         return _v
 
     def lint_clean(self) -> Validator:
         def _v(evidence: Mapping[str, str]) -> ReviewReason | None:
             val = (evidence.get("lint") or "").strip().lower()
             return None if val in {"clean", "ok", "passed"} else ReviewReason.EVIDENCE_INVALID
+
         return _v
