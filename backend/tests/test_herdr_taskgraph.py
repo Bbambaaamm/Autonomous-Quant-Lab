@@ -420,3 +420,53 @@ def test_graph_edges_derived(tmp_path):
     graph = TaskGraph.from_planner_output(env, [_root_node(), _child_node()])
     edges = graph.edges()
     assert ("root", "child") in edges
+
+
+# ---------------------------------------------------------------------------
+# Remediation evidence for reviewer BLOCK (fail-closed validation/recovery)
+# ---------------------------------------------------------------------------
+
+
+def test_parent_id_cycle_fail_closed(tmp_path):
+    """Acceptance #2: a parent_id cycle (not a dependencies cycle) must be
+    rejected by _depth_of — infinite recursion / stack-overflow otherwise."""
+    env = _env(tmp_path)
+    a = _root_node()
+    a["id"] = "a"
+    a["parent_id"] = "b"
+    a["dependencies"] = []
+    b = _root_node()
+    b["id"] = "b"
+    b["parent_id"] = "a"
+    b["dependencies"] = []
+    with pytest.raises(GraphValidationError, match="parent_id cycle"):
+        TaskGraph.from_planner_output(env, [a, b])
+
+
+def test_replay_unknown_event_type_fail_closed(tmp_path):
+    """Recovery defect: unknown event types in the log must be rejected
+    (fail-closed), not silently ignored."""
+    env = _env(tmp_path)
+    graph = TaskGraph.from_planner_output(env, [_root_node(), _child_node()])
+    log = tmp_path / "events.jsonl"
+    store = PersistentTaskGraph(log)
+    store.persist_graph(graph)
+    # Append an unknown event type after valid entries
+    with open(log, "a", encoding="utf-8") as f:
+        f.write(json.dumps({"type": "bogus_event", "payload": "test"}) + "\n")
+    store2 = PersistentTaskGraph(log)
+    with pytest.raises(GraphValidationError, match="unknown event type"):
+        store2.replay()
+
+
+def test_scan_for_secrets_detects_access_key(tmp_path):
+    """Secret-handling: 'access_key' must be detected (was missing from
+    _SECRET_FRAGMENTS)."""
+    env = _env(tmp_path)
+    leaky = {
+        **_root_node(),
+        "id": "leaky",
+        "inputs": [{"access_key": "AKIAIOSFODNN7EXAMPLE"}],
+    }
+    with pytest.raises(GraphValidationError, match="secrets detected"):
+        TaskGraph.from_planner_output(env, [leaky])

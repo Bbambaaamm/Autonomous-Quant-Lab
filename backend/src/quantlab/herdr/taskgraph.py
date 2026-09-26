@@ -143,9 +143,12 @@ class TaskNode:
         "secret",
         "token",
         "password",
+        "passwd",
         "apikey",
         "api_key",
         "api-key",
+        "access_key",
+        "accesskey",
         "credential",
         "private_key",
         "privatekey",
@@ -343,15 +346,29 @@ class TaskGraph:
 
         return any(color[nid] == WHITE and visit(nid) for nid in idx)
 
-    def _depth_of(self, nid: str, idx: dict[str, TaskNode], cache: dict[str, int]) -> int:
+    def _depth_of(
+        self,
+        nid: str,
+        idx: dict[str, TaskNode],
+        cache: dict[str, int],
+        visiting: set[str] | None = None,
+    ) -> int:
+        if visiting is None:
+            visiting = set()
         if nid in cache:
             return cache[nid]
+        if nid in visiting:
+            raise GraphValidationError(f"parent_id cycle detected involving {nid!r}")
+        visiting.add(nid)
         node = idx[nid]
         if not node.parent_id or node.parent_id not in idx:
             cache[nid] = 1
+            visiting.discard(nid)
             return 1
-        cache[nid] = 1 + self._depth_of(node.parent_id, idx, cache)
-        return cache[nid]
+        depth = 1 + self._depth_of(node.parent_id, idx, cache, visiting)
+        cache[nid] = depth
+        visiting.discard(nid)
+        return depth
 
     def _validate_depth_and_fanout(self) -> None:
         idx = self._node_index()
@@ -594,6 +611,8 @@ class PersistentTaskGraph:
                     cancelled.add(ev["node_id"])
                     # durable cancellation: mark as cancelled in materialized state
                     state[ev["node_id"]] = LifecycleState.CANCELLED
+                else:
+                    raise GraphValidationError(f"unknown event type {etype!r} on line {lineno}")
 
         if envelope is None:
             raise GraphValidationError("no graph_persisted event in log")
