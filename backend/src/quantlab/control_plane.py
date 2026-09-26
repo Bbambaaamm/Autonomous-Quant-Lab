@@ -27,7 +27,60 @@ class ControlPlaneRegistryService:
     def __init__(self, sessions: Callable[[], Session]) -> None:
         self.sessions = sessions
 
-    def register_instrument(self, instrument: Instrument) -> InstrumentRecord:
+    @staticmethod
+    def _write_audit(
+        session: Session,
+        event_type: str,
+        entity_type: str,
+        entity_id: str,
+        actor: dict[str, str],
+        reason: str,
+        correlation_id: str,
+    ) -> None:
+        """Persist audit evidence within the caller's transaction so it is atomic with the mutation.
+
+        The audit record ID is the same deterministic SHA-256 of
+        (event_type, entity_type, entity_id, actor_id, reason, correlation_id) used by
+        ``_audit_control_mutation`` in the operator API, so existing idempotency holds.
+        A repeated identical mutation finds the existing audit row and writes nothing.
+        """
+        from quantlab.phase4 import AuditEventRecord
+
+        identity = hashlib.sha256(
+            json.dumps(
+                [
+                    event_type,
+                    entity_type,
+                    entity_id,
+                    actor["actor_id"],
+                    reason,
+                    correlation_id,
+                ],
+                sort_keys=True,
+            ).encode()
+        ).hexdigest()
+        if session.get(AuditEventRecord, identity) is None:
+            session.add(
+                AuditEventRecord(
+                    id=identity,
+                    timestamp=datetime.now(UTC),
+                    event_type=event_type,
+                    entity_type=entity_type,
+                    entity_id=entity_id,
+                    trading_cycle_id=None,
+                    correlation_id=correlation_id,
+                    payload_json=json.dumps({"actor": actor, "reason": reason}, sort_keys=True),
+                )
+            )
+
+    def register_instrument(
+        self,
+        instrument: Instrument,
+        *,
+        actor: dict[str, str],
+        reason: str,
+        correlation_id: str,
+    ) -> InstrumentRecord:
         if not instrument.instrument_id.strip() or not instrument.symbol.strip():
             raise ValueError("Instrument identity a symbol jsou povinné")
         if (
@@ -64,6 +117,15 @@ class ControlPlaneRegistryService:
                 )
                 if persisted != identity:
                     raise DatasetInvalid("Instrument identity koliduje s immutable metadata")
+                self._write_audit(
+                    session,
+                    "CONTROL_INSTRUMENT_REGISTERED",
+                    "instrument",
+                    existing.instrument_id,
+                    actor,
+                    reason,
+                    correlation_id,
+                )
                 session.expunge(existing)
                 return existing
             symbol_conflict = session.scalar(
@@ -91,6 +153,15 @@ class ControlPlaneRegistryService:
             )
             session.add(row)
             session.flush()
+            self._write_audit(
+                session,
+                "CONTROL_INSTRUMENT_REGISTERED",
+                "instrument",
+                row.instrument_id,
+                actor,
+                reason,
+                correlation_id,
+            )
             session.add(
                 InstrumentSymbolRecord(
                     instrument_id=instrument.instrument_id,
@@ -102,7 +173,14 @@ class ControlPlaneRegistryService:
             session.expunge(row)
             return row
 
-    def create_universe(self, definition: UniverseDefinition) -> UniverseDefinitionRecord:
+    def create_universe(
+        self,
+        definition: UniverseDefinition,
+        *,
+        actor: dict[str, str],
+        reason: str,
+        correlation_id: str,
+    ) -> UniverseDefinitionRecord:
         if definition.kind is not UniverseKind.POINT_IN_TIME_MEMBERSHIP:
             raise ValueError("Production Phase 6 bootstrap vyžaduje PIT universe")
         with self.sessions() as session, session.begin():
@@ -110,6 +188,15 @@ class ControlPlaneRegistryService:
             if existing is not None:
                 if existing.name != definition.name or existing.kind != definition.kind.value:
                     raise DatasetInvalid("Universe identity koliduje s immutable metadata")
+                self._write_audit(
+                    session,
+                    "CONTROL_UNIVERSE_CREATED",
+                    "universe",
+                    existing.universe_id,
+                    actor,
+                    reason,
+                    correlation_id,
+                )
                 session.expunge(existing)
                 return existing
             same_name = session.scalar(
@@ -127,10 +214,30 @@ class ControlPlaneRegistryService:
             )
             session.add(row)
             session.flush()
+            self._write_audit(
+                session,
+                "CONTROL_UNIVERSE_CREATED",
+                "universe",
+                row.universe_id,
+                actor,
+                reason,
+                correlation_id,
+            )
             session.expunge(row)
             return row
 
-    def add_membership(self, membership: UniverseMembership) -> UniverseMembershipRecord:
+    def add_membership(
+        self,
+        membership: UniverseMembership,
+        *,
+        actor: dict[str, str],
+        reason: str,
+        correlation_id: str,
+    ) -> UniverseMembershipRecord:
+        evidence_id = (
+            f"{membership.universe_id}:{membership.instrument_id}:"
+            f"{membership.valid_from.isoformat()}"
+        )[:64]
         with self.sessions() as session, session.begin():
             universe = session.get(UniverseDefinitionRecord, membership.universe_id)
             if universe is None or universe.kind != UniverseKind.POINT_IN_TIME_MEMBERSHIP.value:
@@ -150,6 +257,15 @@ class ControlPlaneRegistryService:
                     or existing.known_at != membership.known_at
                 ):
                     raise DatasetInvalid("Membership identity koliduje s immutable intervalem")
+                self._write_audit(
+                    session,
+                    "CONTROL_MEMBERSHIP_ADDED",
+                    "universe_membership",
+                    evidence_id,
+                    actor,
+                    reason,
+                    correlation_id,
+                )
                 session.expunge(existing)
                 return existing
             row = UniverseMembershipRecord(
@@ -161,6 +277,15 @@ class ControlPlaneRegistryService:
             )
             session.add(row)
             session.flush()
+            self._write_audit(
+                session,
+                "CONTROL_MEMBERSHIP_ADDED",
+                "universe_membership",
+                evidence_id,
+                actor,
+                reason,
+                correlation_id,
+            )
             session.expunge(row)
             return row
 
