@@ -210,3 +210,18 @@ def test_architecture_contract_remains_wired_into_required_ci_checks() -> None:
     # in two independent required contexts makes accidental removal visible.
     assert ci.count(invocation) >= 2
     assert "tests/test_market_pipeline.py" in ci
+
+
+def test_rate_limiter_and_backend_enforce_single_worker_topology() -> None:
+    """P2 guard from issue #217: ``RateLimiter`` in security.py is
+    process-local, so its token bucket is per-process. Running uvicorn with
+    multiple workers would partition that bucket and silently weaken rate
+    limiting. The architecture contract locks ``--workers 1`` in the
+    production Dockerfile CMD; this test fails if it is ever widened."""
+    rate_source, _ = _module("security.py")
+    assert "single-worker" in rate_source
+
+    dockerfile = (REPOSITORY_ROOT / "backend" / "Dockerfile").read_text()
+    assert "--workers" in dockerfile
+    # Exactly one worker; never >= 2.Quoted form mirrors the existing CMD list.
+    assert '"--workers","1"' in dockerfile
