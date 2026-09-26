@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
+from types import MappingProxyType
 
 # --------------------------------------------------------------------------- #
 # Policy primitives (PAPER-only, fail-closed). These are intentionally
@@ -85,7 +86,6 @@ def _reader_tools() -> frozenset[str]:
             "grep",
             "web_search",
             "web_extract",
-            "shell",
             "git_status",
             "git_log",
         }
@@ -108,11 +108,13 @@ def _operator_tools() -> frozenset[str]:
     return _writer_tools().union({"git_push", "deploy", "git_merge"})
 
 
-ROLE_TOOL_ALLOWLIST: Mapping[str, frozenset[str]] = {
-    "reader": _reader_tools(),
-    "writer": _writer_tools(),
-    "operator": _operator_tools(),
-}
+ROLE_TOOL_ALLOWLIST: Mapping[str, frozenset[str]] = MappingProxyType(
+    {
+        "reader": _reader_tools(),
+        "writer": _writer_tools(),
+        "operator": _operator_tools(),
+    }
+)
 
 # Operator role = manual/gated only. Never auto-spawned by the dynamic swarm.
 AUTO_SPAWNABLE_ROLES: frozenset[str] = frozenset({"reader", "writer"})
@@ -134,6 +136,7 @@ class DenyReason(StrEnum):
     DAG_NODE_LIMIT = "dag_node_limit"
     DAG_DEPTH_LIMIT = "dag_depth_limit"
     DAG_FANOUT_LIMIT = "dag_fanout_limit"
+    INVALID_GRAPH_SPEC = "invalid_graph_spec"
 
     # Agent caps.
     GLOBAL_AGENT_LIMIT = "global_agent_limit"
@@ -146,6 +149,7 @@ class DenyReason(StrEnum):
     TASK_TIME_BUDGET = "task_time_budget"
     QUEUE_BACKPRESSURE = "queue_backpressure"
     RESOURCE_PRESSURE = "resource_pressure"
+    INVALID_RESOURCE_TELEMETRY = "invalid_resource_telemetry"
 
     # Permission / tool escalation (fail-closed).
     TOOL_ESCALATION = "tool_escalation"
@@ -193,6 +197,13 @@ class PlanBudget:
         default_factory=lambda: ROLE_TOOL_ALLOWLIST
     )
 
+    def __post_init__(self) -> None:
+        frozen = {
+            str(role): frozenset(tools)
+            for role, tools in self.role_tool_allowlist.items()
+        }
+        object.__setattr__(self, "role_tool_allowlist", MappingProxyType(frozen))
+
 
 @dataclass(frozen=True)
 class TaskGraphSpec:
@@ -238,7 +249,7 @@ class ResourceUsage:
 
     active_agents: int = 0
     agents_per_repo: Mapping[str, int] = field(default_factory=dict)
-    agents_per_issue: Mapping[str, int] = field(default_factory=dict)
+    agents_per_issue: Mapping[tuple[str, str], int] = field(default_factory=dict)
     cpu: float = 0.0
     ram: float = 0.0
     queue_depth: int = 0
@@ -295,7 +306,7 @@ class AuditLog:
         }
         record.update(event)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        line = json.dumps(record, sort_keys=True, default=str)
+        line = json.dumps(record, sort_keys=True, default=str, allow_nan=False)
         with self.path.open("a", encoding="utf-8") as fh:
             fh.write(line + "\n")
         return record
@@ -331,20 +342,31 @@ class AdmissionControl:
     paper_only: bool = True
     audit_log: AuditLog | None = None
 
+    def __post_init__(self) -> None:
+        if self.audit_log is None:
+            raise ValueError("fail-closed admission requires an audit sink")
+        if self.paper_only is not True:
+            raise ValueError("dynamic swarm admission requires literal paper_only=True")
+
     # -- helpers ----------------------------------------------------------- #
     def _deny(
         self, reason: DenyReason, detail: str, audit_ctx: Mapping[str, object]
     ) -> DenyDecision:
-        decision = DenyDecision(denied=True, reason=reason, detail=detail)
-        if self.audit_log is not None:
-            self.audit_log.append(
-                {
-                    "event": "deny",
-                    "reason": reason.value,
-                    "detail": detail,
-                    **{f"admit:{k}": v for k, v in audit_ctx.items()},
-                }
-            )
+        safe_detail = detail
+        safe_ctx = dict(audit_ctx)
+        if reason is DenyReason.SECRET_ACCESS:
+            safe_detail = "tool request denied by secret-isolation policy"
+            safe_ctx.pop("denied_tool", None)
+        decision = DenyDecision(denied=True, reason=reason, detail=safe_detail)
+        assert self.audit_log is not None
+        self.audit_log.append(
+            {
+                "event": "deny",
+                "reason": reason.value,
+                "detail": safe_detail,
+                **{f"admit:{k}": v for k, v in safe_ctx.items()},
+            }
+        )
         return decision
 
     def _allow(
@@ -404,9 +426,19 @@ class AdmissionControl:
             "child_tools_count": len(child_tools),
         }
 
-        # 1. Planner/graph limits — a bigger graph output cannot bypass caps.
-        #    Runaway gate (8x) fires before the regular limit so a truly runaway
-        #    graph is reported as PLANNER_GRAPH_TOO_LARGE, not just over-limit.
+        # 1. Planner/graph limits — malformed dimensions fail closed.
+        if spec.node_count <= 0 or spec.max_depth <= 0 or spec.max_fanout < 0:
+            return self._deny(
+                DenyReason.INVALID_GRAPH_SPEC,
+                (
+                    "graph dimensions must satisfy node_count>0, "
+                    "max_depth>0 and max_fanout>=0"
+                ),
+                audit_ctx,
+            )
+
+        # Runaway gate (8x) fires before the regular limit so a truly runaway
+        # graph is reported as PLANNER_GRAPH_TOO_LARGE, not just over-limit.
         if spec.node_count > self.budget.max_dag_nodes * 8:
             return self._deny(
                 DenyReason.PLANNER_GRAPH_TOO_LARGE,
@@ -448,7 +480,8 @@ class AdmissionControl:
                 f"repo agents={repo_agents} >= per_repo limit={self.budget.max_agents_per_repo}",
                 {**audit_ctx, "budget": self.budget.max_agents_per_repo},
             )
-        issue_agents = usage.agents_per_issue.get(identity.issue, 0)
+        issue_key = (identity.repo, identity.issue)
+        issue_agents = usage.agents_per_issue.get(issue_key, 0)
         if issue_agents >= self.budget.max_agents_per_issue:
             return self._deny(
                 DenyReason.PER_ISSUE_AGENT_LIMIT,
@@ -457,11 +490,46 @@ class AdmissionControl:
                 {**audit_ctx, "budget": self.budget.max_agents_per_issue},
             )
 
-        # 3. Resource pressure — blocks a heavy spawn *before* it starts.
-        #    3a. Host-level pressure (config-backed, auditable). Fail-closed:
-        #        deny when load average exceeds 1.5x the logical CPU count, OR
-        #        free memory is below the safe threshold (2 GiB or 20% of RAM).
-        if usage.logical_cpus > 0 and usage.load1 > 1.5 * usage.logical_cpus:
+        # 3. Resource telemetry is untrusted input: malformed/non-finite
+        #    snapshots fail closed before any arithmetic or admission decision.
+        finite_values = (
+            usage.cpu,
+            usage.ram,
+            usage.swap_risk,
+            usage.load1,
+            usage.elapsed_seconds,
+        )
+        invalid_counts = (
+            usage.active_agents < 0
+            or usage.queue_depth < 0
+            or any(value < 0 for value in usage.agents_per_repo.values())
+            or any(value < 0 for value in usage.agents_per_issue.values())
+        )
+        invalid_host = (
+            usage.logical_cpus <= 0
+            or usage.total_ram_bytes <= 0
+            or usage.mem_available_bytes < 0
+            or usage.mem_available_bytes > usage.total_ram_bytes
+        )
+        invalid_floats = (
+            not all(isfinite(float(value)) for value in finite_values)
+            or not 0.0 <= usage.cpu <= 1.0
+            or not 0.0 <= usage.ram <= 1.0
+            or not 0.0 <= usage.swap_risk <= 1.0
+            or usage.load1 < 0.0
+            or usage.elapsed_seconds < 0.0
+        )
+        if invalid_counts or invalid_host or invalid_floats:
+            return self._deny(
+                DenyReason.INVALID_RESOURCE_TELEMETRY,
+                "resource telemetry is missing, non-finite, out of range, or negative",
+                audit_ctx,
+            )
+
+        # Host-level pressure (config-backed, auditable). Fail-closed:
+        # deny when load average exceeds 1.5x the logical CPU count, OR
+        # free memory is below the safe threshold (2 GiB or 20% of RAM).
+        if usage.load1 > 1.5 * usage.logical_cpus:
             return self._deny(
                 DenyReason.RESOURCE_PRESSURE,
                 f"load1={usage.load1:.2f} > 1.5 * logical_cpus={usage.logical_cpus}",
@@ -536,7 +604,7 @@ class AdmissionControl:
                 )
 
         # 6. PAPER-only invariant: swarm may never be spawned when PAPER is off.
-        if not identity.paper_only or not self.paper_only:
+        if identity.paper_only is not True or self.paper_only is not True:
             return self._deny(
                 DenyReason.LIVE_TRADING_TOOL,
                 "admission requires paper_only=True for dynamic swarm spawns",
@@ -557,13 +625,13 @@ class AdmissionControl:
         # 8. Child may never escalate tools or permissions beyond parent.
         parent_tools = identity.parent_tools_or_empty
         parent_role = identity.parent_role_or_none
-        if parent_tools:
+        if parent_role is not None:
             escalations = child_set - parent_tools
             if escalations:
                 return self._deny(
                     DenyReason.TOOL_ESCALATION,
                     f"child escalated tools beyond parent: {sorted(escalations)}",
-                    {**audit_ctx, "parent_tools": sorted(parent_tools)},
+                    {**audit_ctx, "parent_tools_count": len(parent_tools)},
                 )
         if parent_role is not None and ROLE_LEVELS.get(identity.role, -1) > ROLE_LEVELS.get(
             parent_role, -1

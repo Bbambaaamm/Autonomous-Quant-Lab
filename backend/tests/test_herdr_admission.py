@@ -236,7 +236,7 @@ def test_per_repo_agent_cap_blocks_spawn(tmp_path: Path) -> None:
 
 def test_per_issue_agent_cap_blocks_spawn(tmp_path: Path) -> None:
     ac = AdmissionControl(audit_log=_tmp_audit(tmp_path))
-    usage = replace(_idle_usage(), agents_per_issue={"187": 3})
+    usage = replace(_idle_usage(), agents_per_issue={("QuantLab", "187"): 3})
     spec = TaskGraphSpec(node_count=5, max_depth=2, max_fanout=2)
     decision = ac.check(_writer_identity(), spec, usage, ["read_file"])
     assert isinstance(decision, DenyDecision)
@@ -373,3 +373,55 @@ def test_operator_role_is_not_auto_spawnable(tmp_path: Path) -> None:
     decision = ac.check(child, spec, _idle_usage(), ["read_file"])
     assert isinstance(decision, DenyDecision)
     assert decision.reason == DenyReason.NON_SPAWNABLE_ROLE
+
+
+def test_audit_sink_is_required_fail_closed() -> None:
+    with pytest.raises(ValueError, match="audit sink"):
+        AdmissionControl()
+
+
+def test_empty_parent_toolset_denies_child_tools(tmp_path: Path) -> None:
+    ac = AdmissionControl(audit_log=_tmp_audit(tmp_path))
+    child = _writer_identity(parent_role="writer", parent_tools=frozenset())
+    decision = ac.check(
+        child,
+        TaskGraphSpec(node_count=1, max_depth=1, max_fanout=0),
+        _idle_usage(),
+        ["read_file"],
+    )
+    assert isinstance(decision, DenyDecision)
+    assert decision.reason == DenyReason.TOOL_ESCALATION
+
+
+def test_auto_spawn_allowlists_do_not_include_unrestricted_shell() -> None:
+    budget = PlanBudget()
+    assert "shell" not in budget.role_tool_allowlist["reader"]
+    assert "shell" not in budget.role_tool_allowlist["writer"]
+
+
+@pytest.mark.parametrize(
+    "spec",
+    [
+        TaskGraphSpec(node_count=0, max_depth=1, max_fanout=0),
+        TaskGraphSpec(node_count=1, max_depth=0, max_fanout=0),
+        TaskGraphSpec(node_count=1, max_depth=1, max_fanout=-1),
+    ],
+)
+def test_malformed_graph_dimensions_fail_closed(spec: TaskGraphSpec, tmp_path: Path) -> None:
+    ac = AdmissionControl(audit_log=_tmp_audit(tmp_path))
+    decision = ac.check(_writer_identity(), spec, _idle_usage(), ["read_file"])
+    assert isinstance(decision, DenyDecision)
+    assert decision.reason == DenyReason.INVALID_GRAPH_SPEC
+
+
+def test_nonfinite_resource_telemetry_fails_closed(tmp_path: Path) -> None:
+    ac = AdmissionControl(audit_log=_tmp_audit(tmp_path))
+    usage = replace(_idle_usage(), cpu=float("nan"))
+    decision = ac.check(
+        _writer_identity(),
+        TaskGraphSpec(node_count=1, max_depth=1, max_fanout=0),
+        usage,
+        ["read_file"],
+    )
+    assert isinstance(decision, DenyDecision)
+    assert decision.reason == DenyReason.INVALID_RESOURCE_TELEMETRY
