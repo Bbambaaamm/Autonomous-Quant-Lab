@@ -112,7 +112,7 @@ class DenyReason(StrEnum):
     TOOL_NOT_IN_ROLE_ALLOWLIST = "tool_not_in_role_allowlist"
     LIVE_TRADING_TOOL = "live_trading_tool"
     PROTECTED_PATH = "protected_path"
-    SECRET_ACCESS = "secret_access"
+    SECRET_ACCESS = "secret_access"  # noqa: S105 -- denial reason, not a credential
     NETWORK_POLICY = "network_policy"
     PLANNER_GRAPH_TOO_LARGE = "planner_graph_too_large"
     DAG_NODE_LIMIT = "dag_node_limit"
@@ -389,10 +389,7 @@ class PolicyGate:
         if child_rank < 0 or parent_rank < 0:
             return DenyDecision(
                 reason=DenyReason.NON_SPAWNABLE_ROLE,
-                detail=(
-                    f"unknown role parent={proposal.parent_role!r} "
-                    f"child={proposal.child_role!r}"
-                ),
+                detail=(f"unknown role parent={proposal.parent_role!r} child={proposal.child_role!r}"),
             )
         if child_rank > parent_rank:
             return DenyDecision(
@@ -682,7 +679,8 @@ class DynamicChildScheduler:
                 },
             )
         else:
-            assert isinstance(decision, DenyDecision)
+            if not isinstance(decision, DenyDecision):
+                raise TypeError("policy gate returned an invalid denial decision")
             self._audit(
                 "deny",
                 {
