@@ -1,6 +1,7 @@
 """Closed production snapshot schema; no I/O or fixture fallback."""
 import hashlib
 import json
+import math
 
 PROFILES = ('majak', 'quantlab')
 KINDS = ('herdr', 'kanban', 'router', 'search', 'git', 'tests', 'queue', 'codex')
@@ -25,6 +26,10 @@ def keys(value, names):
 
 def number(value):
     return type(value) is int and 0 <= value < 2**53
+
+
+def timestamp(value):
+    return type(value) in (int, float) and math.isfinite(value) and 0 <= value < 2**53
 
 
 def hex_id(value, lengths=(64,)):
@@ -69,9 +74,10 @@ def parse(data, limit=MAX_BYTES):
 def row(kind, value):
     fields = {'herdr': 'agent status', 'kanban': 'task_id run_id status',
               'router': ('task_id actual_model provider requests input_tokens output_tokens '
-                         'cost_microusd fallback_count successful_requests duration_ms'),
+                         'cost_microusd fallback_count successful_requests duration_ms last_used_at'),
               'search': ('route_mode provider fallback_provider searches successful_searches '
-                         'duration_ms max_duration_ms fallback_count cost_microusd result_count extract_count'),
+                         'duration_ms max_duration_ms fallback_count cost_microusd result_count '
+                         'extract_count last_used_at'),
               'git': 'commit dirty', 'tests': 'passed failed artifact_digest',
               'queue': ('task_id issue issue_title issue_open scheduler_state status attempts '
                         'max_attempts not_before updated_at agent kind blocker pr_number'),
@@ -89,13 +95,16 @@ def row(kind, value):
         need(value['status'] in ('todo', 'triage', 'ready', 'running', 'blocked', 'done', 'cancelled', 'unknown'))
     elif kind == 'router':
         need(value['task_id'] is None or hex_id(value['task_id']))
-        need(identifier(value['actual_model']) and identifier(value['provider'], 64))
+        need(type(value['actual_model']) is str and identifier(value['actual_model'])
+             and type(value['provider']) is str and identifier(value['provider'], 64))
         need(number(value['requests']))
+        need(timestamp(value['last_used_at']))
         need(all(v is None or number(v) for k, v in value.items()
-                 if k not in ('task_id', 'actual_model', 'provider', 'requests')))
+                 if k not in ('task_id', 'actual_model', 'provider', 'requests', 'last_used_at')))
     elif kind == 'search':
         need(value['route_mode'] in ('fast', 'deep', 'browser'))
-        need(identifier(value['provider']) and identifier(value['fallback_provider']))
+        need(type(value['provider']) is str and identifier(value['provider'])
+             and (value['fallback_provider'] is None or identifier(value['fallback_provider'])))
         need(number(value['searches']) and number(value['successful_searches'])
              and value['successful_searches'] <= value['searches'])
         need(number(value['duration_ms']) and number(value['max_duration_ms'])
@@ -103,6 +112,7 @@ def row(kind, value):
         need(number(value['fallback_count']) and value['fallback_count'] <= value['searches'])
         need(value['cost_microusd'] is None or number(value['cost_microusd']))
         need(number(value['result_count']) and number(value['extract_count']))
+        need(timestamp(value['last_used_at']))
     elif kind == 'git':
         need(hex_id(value['commit'], (40, 64)) and type(value['dirty']) is bool)
     elif kind == 'queue':

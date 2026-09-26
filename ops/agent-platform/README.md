@@ -33,3 +33,10 @@ Do not treat ad-hoc edits in `/opt/agent-platform/release` or `~/.local/bin/agen
 Changes should be reviewed in Git first, then copied/deployed from the reviewed revision.
 
 `DEPLOYED_MANIFEST.sha256` records the imported deployment snapshot for drift detection.
+
+## Q3 audit
+
+The current hardening, provider-recency semantics, CI evidence, preserved
+read-only/PAPER-only invariants, and remaining live gates are tracked in
+`Q3_FINAL_AUDIT.md`. A source change is not a production claim until those live
+gates and rollback checks pass on the intended host.

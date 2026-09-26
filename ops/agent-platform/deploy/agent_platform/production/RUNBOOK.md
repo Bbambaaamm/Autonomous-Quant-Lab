@@ -171,6 +171,20 @@ path read-only at the same resolved path (or leave source null). No arbitrary Gi
 config/env/remote/diff; fixed HEAD + status only, fsmonitor disabled. Repository
 owners are trusted; never point this registry at untrusted repos or config includes.
 
+
+Durable task queue: the QuantLab-only queue projection is an optional sanitized bridge
+at `/var/lib/agent-platform-herdr/queue.json`. It is produced by the external
+`agent-task-export` watchdog helper owned by `agentops`; the dashboard never reads the
+original task directories, prompts, results or logs. The bridge contains only bounded
+operational metadata: task_id, issue number, state, attempt count, schedule timestamps,
+agent, kind and a sanitized blocker code. The exporter already has read-only access to
+`/var/lib/agent-platform-herdr`, so no additional home-directory or broad source bind is
+allowed. Missing/stale/invalid bridge data must publish the queue source as unavailable,
+never fall back to task files. The fixed bridge is QuantLab-only and requires no
+`sources.json` key. During the search-source migration, the exporter accepts the legacy
+profile shape without `search` and normalizes it to `search:null`; this preserves the
+currently deployed root-owned config until its separately reviewed search rollout.
+
 Reports: explicit per-profile regular JSON file path (read-only bind). Format:
 `{"version":1,"profile":"majak","observed_at":UNIX_SECONDS,"passed":COUNT,
 "failed":COUNT,"artifact_digest":"SHA256"}`. Populate from actual verified test
@@ -334,12 +348,13 @@ host gates, not proven by unit tests.
 
 ## 7. Rollback — preserve path reservation, never fall through to QuantLab
 
-On any auth/source/isolation/root regression: FIRST install a deny-only content into
-**our** /etc/agent-platform/nginx-server.conf (preserve the one-line shared include).
-Use the reviewed Phase8 exact/prefix/named503 fragment from the same release audit,
-with all its named error handling.
+On any auth/source/isolation/root regression: FIRST atomically install the reviewed
+`nginx-maintenance.conf.in` content over **our**
+`/etc/agent-platform/nginx-server.conf` (preserve the one-line shared include).
+Keep its exact/prefix/named503 handling together; never construct a partial fragment
+at the terminal.
 
-Inherited error handlers MUST also be neutralized: use the full Phase8 fragment
+Inherited error handlers MUST also be neutralized: use the full maintenance fragment
 with its own internal @agent_platform_unavailable and fixed JSON503 response. Check
 no collision for that named location. Validate `sudo nginx -t`, then separately
 `sudo systemctl reload nginx`, confirm both paths denied and QuantLab root200.

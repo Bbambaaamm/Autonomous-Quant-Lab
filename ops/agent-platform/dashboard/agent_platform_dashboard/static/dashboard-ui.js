@@ -29,6 +29,15 @@ const issueLabel = row => Number.isFinite(row?.issue) ? `#${row.issue}` : 'bez i
 const agentKind = name => name.endsWith('-hermes') ? 'hermes' : 'codex';
 const statusLabel = status => STATUS[status] || STATUS.unknown;
 const toneColor = tone => ({ green: '#6adf9a', red: '#ff7159', muted: '#716d66', amber: '#e49a34' })[tone];
+const providerHistory = (rows, field = 'provider') => {
+  const ordered = rows
+    .filter(row => typeof row[field] === 'string' && Number.isFinite(row.last_used_at))
+    .sort((left, right) => right.last_used_at - left.last_used_at || left[field].localeCompare(right[field]));
+  const currentProvider = ordered[0]?.[field] || null;
+  const historicalProviders = [...new Set(ordered.map(row => row[field]))]
+    .filter(provider => provider !== currentProvider);
+  return { currentProvider, historicalProviders };
+};
 
 /** Bind the read-only snapshot UI to a replaceable, fully geometric 3D renderer. */
 export function mountDashboard(createScene) {
@@ -126,6 +135,7 @@ export function mountDashboard(createScene) {
       return { known, knownRequests, unknownRequests, coverage: requests === 0 ? 100 : Math.round(knownRequests / requests * 100) };
     };
     const input = partial('input_tokens'), output = partial('output_tokens'), cost = partial('cost_microusd');
+    const providerState = providerHistory(rows);
     return {
       requests, input: completeSum('input_tokens'), output: completeSum('output_tokens'), cost: completeSum('cost_microusd'),
       inputKnown: input.known, outputKnown: output.known, costKnown: cost.known,
@@ -134,7 +144,8 @@ export function mountDashboard(createScene) {
       costUnknownRequests: cost.unknownRequests, inputCoverage: input.coverage, outputCoverage: output.coverage, costCoverage: cost.coverage,
       fallbacks: completeSum('fallback_count'),
       models: [...new Set(rows.map(row => row.actual_model).filter(value => typeof value === 'string'))],
-      providers: [...new Set(rows.map(row => row.provider).filter(value => typeof value === 'string'))], rows, router,
+      providers: [...new Set(rows.map(row => row.provider).filter(value => typeof value === 'string'))],
+      ...providerState, rows, router,
     };
   }
   function searchStats(profile) {
@@ -147,6 +158,7 @@ export function mountDashboard(createScene) {
     const maximum = !available ? null : rows.length ? Math.max(...rows.map(row => row.max_duration_ms).filter(Number.isFinite)) : 0;
     const routes = Object.fromEntries(['fast', 'deep', 'browser'].map(mode => [mode,
       available ? rows.filter(row => row.route_mode === mode).reduce((total, row) => total + (Number.isFinite(row.searches) ? row.searches : 0), 0) : null]));
+    const providerState = providerHistory(rows);
     return {
       searches, successful: available ? sumKnown('successful_searches') : null,
       duration, avgLatency: searches == null || duration == null ? null : searches === 0 ? 0 : duration / searches,
@@ -155,7 +167,7 @@ export function mountDashboard(createScene) {
       results: available ? sumKnown('result_count') : null, extracts: available ? sumKnown('extract_count') : null,
       providers: [...new Set(rows.map(row => row.provider).filter(value => typeof value === 'string'))],
       fallbackProviders: [...new Set(rows.map(row => row.fallback_provider).filter(value => typeof value === 'string'))],
-      routes, search,
+      ...providerState, routes, search,
     };
   }
   function codexStats() {
@@ -579,9 +591,10 @@ export function mountDashboard(createScene) {
       }
       const success = value.searches === 0 ? '—' : value.successful == null || value.searches == null
         ? 'Nedostupné' : `${Math.round(value.successful / value.searches * 100)} %`;
-      const providers = value.providers.join(', ') || 'Zatím bez provozu';
+      const currentProvider = value.currentProvider || 'Zatím bez provozu';
+      const historicalProviders = value.historicalProviders.join(', ') || '—';
       const fallbackProviders = value.fallbackProviders.join(', ') || '—';
-      return `<article class="search-card"><header><div><span>${escapeHTML(profile.toUpperCase())}</span><b>Search Router</b></div><span class="search-health">${number(value.searches)} hledání</span></header><div class="search-metrics"><div><span>Úspěšnost</span><b>${escapeHTML(success)}</b></div><div><span>Latence avg / max</span><b>${escapeHTML(`${latency(value.avgLatency)} / ${latency(value.maxLatency)}`)}</b></div><div><span>Fallbacky</span><b>${number(value.fallbacks)}</b></div><div><span>Náklady</span><b>${escapeHTML(money(value.cost))}</b></div></div><div class="search-routes"><span>FAST <b>${number(value.routes.fast)}</b></span><span>DEEP <b>${number(value.routes.deep)}</b></span><span>BROWSER <b>${number(value.routes.browser)}</b></span></div><p><span>Provider:</span> ${escapeHTML(providers)}</p><p><span>Fallback provider:</span> ${escapeHTML(fallbackProviders)}</p><p><span>Výsledky / extrakce:</span> ${number(value.results)} / ${number(value.extracts)} · data před ${escapeHTML(age(value.search.data_at))}</p></article>`;
+      return `<article class="search-card"><header><div><span>${escapeHTML(profile.toUpperCase())}</span><b>Search Router</b></div><span class="search-health">${number(value.searches)} hledání</span></header><div class="search-metrics"><div><span>Úspěšnost</span><b>${escapeHTML(success)}</b></div><div><span>Latence avg / max</span><b>${escapeHTML(`${latency(value.avgLatency)} / ${latency(value.maxLatency)}`)}</b></div><div><span>Fallbacky</span><b>${number(value.fallbacks)}</b></div><div><span>Náklady</span><b>${escapeHTML(money(value.cost))}</b></div></div><div class="search-routes"><span>FAST <b>${number(value.routes.fast)}</b></span><span>DEEP <b>${number(value.routes.deep)}</b></span><span>BROWSER <b>${number(value.routes.browser)}</b></span></div><p><span>Aktuální provider (poslední běh):</span> ${escapeHTML(currentProvider)}</p><p><span>Historické providery:</span> ${escapeHTML(historicalProviders)}</p><p><span>Pozorované fallback providery:</span> ${escapeHTML(fallbackProviders)}</p><p><span>Výsledky / extrakce:</span> ${number(value.results)} / ${number(value.extracts)} · data před ${escapeHTML(age(value.search.data_at))}</p></article>`;
     }).join('');
   }
 
@@ -591,7 +604,7 @@ export function mountDashboard(createScene) {
       const tokenCoverage = value.inputCoverage == null || value.outputCoverage == null ? null : Math.min(value.inputCoverage, value.outputCoverage);
       const tokenText = value.inputKnown == null ? 'Nedostupné' : `${number(value.inputKnown)} / ${number(value.outputKnown)}${tokenCoverage < 100 ? ` · ${tokenCoverage} % req` : ''}`;
       const costText = value.costKnown == null ? 'Nedostupné' : `${money(value.costKnown)} známé${value.costUnknownRequests ? ` + ${fmt.format(value.costUnknownRequests)} bez ceny` : ''}`;
-      return `<article class="work-project"><h2>${profile.toUpperCase()}</h2>${rows.length ? rows.map(row => `<button class="work-agent" data-agent="${escapeHTML(row.agent)}"><b>${escapeHTML(row.agent)}</b><span>${statusLabel(row.status)}</span><small>${ROLES[agentKind(row.agent)]}</small></button>`).join('') : '<p>Živý stav agentů není dostupný.</p>'}<p class="work-models">Modely profilu: ${escapeHTML(value.models.join(', ') || 'Nedostupné')}</p><div class="work-totals"><div><span>Požadavky</span><b>${number(value.requests)}</b></div><div><span>Tokeny vstup/výstup</span><b>${escapeHTML(tokenText)}</b></div><div><span>Známé náklady / fallbacky</span><b>${escapeHTML(costText)} · ${number(value.fallbacks)}</b></div></div></article>`;
+      return `<article class="work-project"><h2>${profile.toUpperCase()}</h2>${rows.length ? rows.map(row => `<button class="work-agent" data-agent="${escapeHTML(row.agent)}"><b>${escapeHTML(row.agent)}</b><span>${statusLabel(row.status)}</span><small>${ROLES[agentKind(row.agent)]}</small></button>`).join('') : '<p>Živý stav agentů není dostupný.</p>'}<p class="work-models">Modely profilu: ${escapeHTML(value.models.join(', ') || 'Nedostupné')}</p><p class="work-models">Aktuální provider (poslední běh): ${escapeHTML(value.currentProvider || 'Nedostupné')}</p><p class="work-models">Historické providery: ${escapeHTML(value.historicalProviders.join(', ') || '—')}</p><div class="work-totals"><div><span>Požadavky</span><b>${number(value.requests)}</b></div><div><span>Tokeny vstup/výstup</span><b>${escapeHTML(tokenText)}</b></div><div><span>Známé náklady / fallbacky</span><b>${escapeHTML(costText)} · ${number(value.fallbacks)}</b></div></div></article>`;
     }).join('');
     $('#project-grid').querySelectorAll('[data-agent]').forEach(button => button.addEventListener('click', () => openDetail(button.dataset.agent)));
     renderObservability(); renderQueue(); renderSearch();
@@ -690,10 +703,12 @@ export function mountDashboard(createScene) {
       ['PR', task?.pr_number ? `#${task.pr_number}` : 'Není hlášeno'],
       ['Blocker', task?.blocker || '—'],
       ['Modely profilu', value.models.join(', ') || 'Nedostupné v aktuálním snapshotu'],
-      ['Provider / fallbacky', `${value.providers.join(', ') || 'Nedostupné'} · ${number(value.fallbacks)}`],
+      ['Aktuální model provider / fallbacky', `${value.currentProvider || 'Nedostupné'} · ${number(value.fallbacks)}`],
+      ['Historické model providery', value.historicalProviders.join(', ') || '—'],
       ['Tokeny vstup / výstup', tokens],
       ['Známé náklady profilu', costs],
-      ['Search provider / fallbacky', `${search.providers.join(', ') || 'Nedostupné'} · ${number(search.fallbacks)}`],
+      ['Aktuální search provider / fallbacky', `${search.currentProvider || 'Nedostupné'} · ${number(search.fallbacks)}`],
+      ['Historické search providery', search.historicalProviders.join(', ') || '—'],
       ['Search / avg latence', `${number(search.searches)} · ${latency(search.avgLatency)}`],
       ['Runtime / queue wait', 'Nedostupné v telemetry kontraktu'],
       ['Branch / base / result SHA', 'Nedostupné v telemetry kontraktu'],
@@ -758,6 +773,8 @@ export function mountDashboard(createScene) {
     for (const item of value.sources) {
       if (!item || !PROFILES.includes(item.profile) || typeof item.kind !== 'string' || !Array.isArray(item.rows)) throw new Error('invalid');
       if (item.kind === 'herdr' && item.rows.some(row => typeof row.agent !== 'string' || typeof row.status !== 'string')) throw new Error('invalid');
+      if (['router', 'search'].includes(item.kind)
+        && item.rows.some(row => typeof row.provider !== 'string' || !Number.isFinite(row.last_used_at))) throw new Error('invalid');
       if (item.kind === 'queue') {
         if (item.profile !== 'quantlab') throw new Error('invalid');
         if (item.rows.some(row =>

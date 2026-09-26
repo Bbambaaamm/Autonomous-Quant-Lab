@@ -170,17 +170,18 @@ def router(path, profile):
     for task, model, provider, count, inputs, outputs, cost, fallbacks, successes, duration, stamp in records:
         c.need(cost is None or type(cost) in (int, float) and 0 <= cost < 10**8)
         c.need(duration is None or type(duration) in (int, float) and 0 <= duration < 10**9)
+        c.need(type(stamp) in (int, float) and 0 <= stamp < 2**53)
+        last_used_at = stamp
         item = dict(task_id=None if task is None else c.identity(profile, task),
                     actual_model=model, provider=provider, requests=count,
                     input_tokens=inputs, output_tokens=outputs,
                     cost_microusd=None if cost is None else round(cost * 1000000),
                     fallback_count=fallbacks, successful_requests=successes,
-                    duration_ms=None if duration is None else round(duration * 1000))
+                    duration_ms=None if duration is None else round(duration * 1000),
+                    last_used_at=last_used_at)
         c.row('router', item)
         rows.append(item)
-        if stamp is not None:
-            c.need(type(stamp) in (int, float) and 0 <= stamp < 2**53)
-            timestamps.append(int(stamp))
+        timestamps.append(int(last_used_at))
     return rows, max(timestamps, default=None)
 
 
@@ -208,19 +209,19 @@ def search(path, profile):
         c.need(type(duration) in (int, float) and 0 <= duration < 10**12)
         c.need(type(maximum) in (int, float) and 0 <= maximum <= duration)
         c.need(cost is None or type(cost) in (int, float) and 0 <= cost < 10**8)
+        c.need(type(stamp) in (int, float) and 0 <= stamp < 2**53)
+        last_used_at = stamp
         item = dict(
             route_mode=mode, provider=provider, fallback_provider=fallback_provider,
             searches=count, successful_searches=successes,
             duration_ms=round(duration), max_duration_ms=round(maximum),
             fallback_count=fallbacks,
             cost_microusd=None if cost is None else round(cost * 1000000),
-            result_count=results, extract_count=extracts,
+            result_count=results, extract_count=extracts, last_used_at=last_used_at,
         )
         c.row('search', item)
         rows.append(item)
-        if stamp is not None:
-            c.need(type(stamp) in (int, float) and 0 <= stamp < 2**53)
-            timestamps.append(int(stamp))
+        timestamps.append(int(last_used_at))
     return rows, max(timestamps, default=None)
 
 

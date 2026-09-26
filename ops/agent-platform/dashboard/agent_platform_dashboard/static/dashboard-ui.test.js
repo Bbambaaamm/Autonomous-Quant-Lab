@@ -1,8 +1,11 @@
 /* Contract tests, not a visual/browser acceptance test. Run: node --test dashboard-ui.test.js */
-const test = require('node:test');
-const assert = require('node:assert/strict');
-const { readFileSync } = require('node:fs');
-const { join } = require('node:path');
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
 
 const STATES = ['idle', 'receiving', 'working', 'tool', 'delegating', 'waiting_result', 'waiting_user', 'speaking', 'complete', 'error', 'offline'];
 const source = readFileSync(join(__dirname, 'dashboard-ui.js'), 'utf8');
@@ -16,17 +19,20 @@ function fixture() {
     { profile, kind: 'router', status: 'available', reason: 'ok', data_at: now,
       rows: [{ task_id: null, requests: 1, input_tokens: null, output_tokens: 12, cost_microusd: null,
         actual_model: '<img src=x onerror=alert(1)>', provider: 'openai-codex',
-        fallback_count: 0, successful_requests: 1, duration_ms: 100 }] },
+        fallback_count: 0, successful_requests: 1, duration_ms: 100, last_used_at: now }] },
   ]);
   sources.push(
     { profile: 'majak', kind: 'search', status: 'available', reason: 'ok', observed_at: now, data_at: now,
       rows: [{ route_mode: 'fast', provider: 'exa-keyless', fallback_provider: 'exa-keyless', searches: 2,
         successful_searches: 2, duration_ms: 200, max_duration_ms: 120, fallback_count: 1,
-        cost_microusd: 0, result_count: 10, extract_count: 0 }] },
+        cost_microusd: 0, result_count: 10, extract_count: 0, last_used_at: now },
+      { route_mode: 'fast', provider: 'nous-managed', fallback_provider: null, searches: 1,
+        successful_searches: 1, duration_ms: 90, max_duration_ms: 90, fallback_count: 0,
+        cost_microusd: null, result_count: 4, extract_count: 0, last_used_at: now - 60 }] },
     { profile: 'quantlab', kind: 'search', status: 'available', reason: 'ok', observed_at: now, data_at: now,
       rows: [{ route_mode: 'deep', provider: 'nous-managed', fallback_provider: null, searches: 1,
         successful_searches: 1, duration_ms: 300, max_duration_ms: 300, fallback_count: 0,
-        cost_microusd: null, result_count: 8, extract_count: 3 }] },
+        cost_microusd: null, result_count: 8, extract_count: 3, last_used_at: now }] },
   );
   sources.push({
     profile: 'quantlab', kind: 'queue', status: 'available', reason: 'ok', observed_at: now, data_at: now,
@@ -164,16 +170,42 @@ test('partial telemetry stays explicit, Codex allowance is live, and snapshot va
 
 test('search layer shows bounded real telemetry without query text', async t => {
   const h = await harness(t);
-  assert.equal(h.get('#search-count').textContent, '3');
-  assert.equal(h.get('#search-latency').textContent, '167 ms');
+  assert.equal(h.get('#search-count').textContent, '4');
+  assert.equal(h.get('#search-latency').textContent, '148 ms');
   const html = h.get('#search-grid').innerHTML;
   assert.match(html, /MAJÁK|MAJAK/);
   assert.match(html, /exa-keyless/);
   assert.match(html, /nous-managed/);
+  assert.match(html, /Aktuální provider \(poslední běh\):<\/span> exa-keyless/);
+  assert.match(html, /Historické providery:<\/span> nous-managed/);
   assert.match(html, /FAST/);
   assert.match(html, /DEEP/);
   assert.match(html, /1 fallback|Fallbacky/);
   assert.doesNotMatch(html, /query_hash|official OpenAI|prompt/i);
+});
+
+test('model and search provider history cannot replace the most recent provider', async t => {
+  const h = await harness(t);
+  const now = Math.floor(Date.now() / 1000);
+  const router = h.snapshot().sources.find(item => item.profile === 'majak' && item.kind === 'router');
+  router.rows.push({ ...router.rows[0], provider: 'legacy-provider', actual_model: 'legacy-model', last_used_at: now - 300 });
+  await h.refresh();
+  assert.match(h.get('#project-grid').innerHTML, /Aktuální provider \(poslední běh\): openai-codex/);
+  assert.match(h.get('#project-grid').innerHTML, /Historické providery: legacy-provider/);
+  h.calls.select('majak-codex');
+  const detail = h.get('#detail-metrics').innerHTML;
+  assert.match(detail, /Aktuální model provider[^]*openai-codex/);
+  assert.match(detail, /Historické model providery[^]*legacy-provider/);
+  assert.doesNotMatch(detail, /Aktuální model provider[^]*legacy-provider[^]*Historické model providery/);
+});
+
+test('provider recency is mandatory in the browser trust boundary', async t => {
+  const h = await harness(t);
+  const router = h.snapshot().sources.find(item => item.kind === 'router');
+  delete router.rows[0].last_used_at;
+  await h.refresh();
+  assert.equal(h.ui.diagnostics().freshSnapshot, false);
+  assert.equal(h.ui.diagnostics().state, 'offline');
 });
 
 test('durable QuantLab queue renders safe metadata and drives coordinator state', async t => {

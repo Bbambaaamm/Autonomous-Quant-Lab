@@ -5,34 +5,32 @@ The deployed bundle is generated from modular sources under
 
 Pinned build toolchain:
 
-- esbuild `0.28.1`
-- three `0.180.0`
+- esbuild `0.28.2`
+- three `0.186.1`
+- Node.js `>=22`
+- npm `11.17.0`
 
 The build script refuses different versions.
 
 ## Build
 
 ```bash
-ESBUILD_BIN=/path/to/esbuild \
-THREE_ROOT=/path/to/node_modules/three \
-./ops/agent-platform/dashboard/build-machine-city.sh
+npm ci
+./build-machine-city.sh
 ```
 
-On `quantlab-staging-01` the currently verified toolchain is available under the
-Hermes installation; those host paths are operational details and are not embedded
-in the source contract.
+The lockfile is authoritative. The build does not resolve packages or use a global
+Hermes installation.
 
 ## Tests
 
-The browser contract tests do not need Three.js:
+Run the complete browser and geometry suite with the pinned dependencies:
 
 ```bash
-node --test ops/agent-platform/dashboard/agent_platform_dashboard/static/dashboard-ui.test.js
+npm test
 ```
 
-Geometry tests can be bundled with the same pinned esbuild/Three.js pair and run
-with Node. The generated production bundle should be rebuilt after every source
-change and reviewed together with the source modules.
+CI rebuilds the production bundle and rejects any diff from the committed artifact.
 
 ## Source graph
 
