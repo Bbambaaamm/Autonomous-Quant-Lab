@@ -22,7 +22,8 @@ from enum import StrEnum
 class ReviewVerdict(StrEnum):
     """Reviewer decision."""
 
-    SUCCESS = "pass"\n    PASS = SUCCESS
+    SUCCESS = "pass"
+    PASS = SUCCESS
     BLOCK = "block"
     NEEDS_REPLAN = "needs_replan"
 
