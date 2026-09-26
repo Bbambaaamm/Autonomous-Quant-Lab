@@ -209,6 +209,17 @@ export function createMachineScene(canvas, fallback) {
       button.style.setProperty('--agent-x',`${rect.left-parentRect.left+x}px`);
       button.style.setProperty('--agent-y',`${rect.top-parentRect.top+(-projected.y*.5+.5)*rect.height}px`);
     }
+    const focusedTask=taskFocus?taskNodes.get(taskFocus):null;
+    if(focusedTask){
+      focusedTask.group.getWorldPosition(projected);projected.project(camera);
+      canvas.dispatchEvent(new CustomEvent('swarm-task-focus-position',{bubbles:true,detail:{
+        taskId:focusedTask.id,
+        x:(projected.x*.5+.5)*rect.width,
+        y:(-projected.y*.5+.5)*rect.height,
+      }}));
+    }else{
+      canvas.dispatchEvent(new CustomEvent('swarm-task-focus-position',{bubbles:true,detail:{taskId:null,x:0,y:0}}));
+    }
   }
   function draw(now){
     frame=0;

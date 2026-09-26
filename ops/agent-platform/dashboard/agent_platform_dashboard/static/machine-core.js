@@ -109,7 +109,7 @@ export function createQuantumCore({ low = false } = {}) {
   const cyanParticles = makeParticles(low ? 430 : 1050, .86, 2.86, 0x9beeff, low ? .025 : .021);
   const amberParticles = makeParticles(low ? 180 : 430, .72, 2.5, 0xffb452, low ? .031 : .027);
 
-  const beamMaterial = keep(new THREE.MeshBasicMaterial({ color: 0xa6efff, opacity: .17, ...additive }));
+  const beamMaterial = keep(new THREE.MeshBasicMaterial({ color: 0xa6efff, opacity: .12, ...additive }));
   const vertical = new THREE.Mesh(keep(new THREE.CylinderGeometry(.018, .055, 7.5, 10, 1, true)), beamMaterial);
   const horizontal = vertical.clone();
   horizontal.geometry = keep(vertical.geometry.clone());
@@ -152,7 +152,7 @@ export function createQuantumCore({ low = false } = {}) {
     core.scale.setScalar(pulse * (.92 + energy * .11));
     cage.scale.setScalar(1 + (reduced ? 0 : Math.sin(time * 1.13) * .025 * energy));
     coreMat.emissive.setHex(amber);
-    coreMat.emissiveIntensity = .25 + energy * 4.6;
+    coreMat.emissiveIntensity = .2 + energy * 3.7;
     coreMat.opacity = .32 + energy * .55;
     cageMat.color.setHex(cyan);
     cageMat.opacity = .08 + energy * .34;
@@ -179,14 +179,14 @@ export function createQuantumCore({ low = false } = {}) {
     amberParticles.material.color.setHex(amber);
     amberParticles.material.opacity = .1 + energy * .64;
     beamMaterial.color.setHex(cyan);
-    beamMaterial.opacity = state === 'offline' ? .025 : .05 + energy * .19;
+    beamMaterial.opacity = state === 'offline' ? .02 : .035 + energy * .14;
     vertical.scale.set(1, .75 + energy * .32, 1);
     horizontal.scale.set(.72 + energy * .34, 1, 1);
     nodeMaterial.color.setHex(blocked ? 0xffa07f : 0xe6fbff);
     nodes.rotation.y = reduced ? 0 : time * speed * .12;
     nodes.rotation.x = reduced ? 0 : Math.sin(time * .11) * .14;
     light.color.setHex(cyan);
-    light.intensity = .5 + energy * 15;
+    light.intensity = .45 + energy * 12.5;
   }
 
   return {

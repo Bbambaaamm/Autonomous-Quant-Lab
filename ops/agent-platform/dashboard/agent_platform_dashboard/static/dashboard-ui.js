@@ -72,6 +72,14 @@ export function mountDashboard(createScene) {
     label.style.top = `${Math.max(72, detail.y + 14)}px`;
     label.hidden = false;
   });
+  ui.canvas.addEventListener('swarm-task-focus-position', event => {
+    const badge = $('#task-selected-label'), detail = event.detail || {}, task = taskById(detail.taskId);
+    if (!badge || !task || view !== 'film' || selectedTask !== task.task_id) { if (badge) badge.hidden = true; return; }
+    badge.innerHTML = `<b>${escapeHTML(issueLabel(task))}</b><span>${escapeHTML(QUEUE_STATUS[task.status] || task.status)}</span>`;
+    badge.style.left = `${Math.max(56, detail.x)}px`;
+    badge.style.top = `${Math.max(110, detail.y)}px`;
+    badge.hidden = false;
+  });
 
   function sceneCall(method, ...args) {
     if (!scene || sceneFailed || typeof scene[method] !== 'function') return;
@@ -209,7 +217,7 @@ export function mountDashboard(createScene) {
       ['Waiting', m.waiting, 'pending', m.waiting ? 'waiting' : ''],
       ['Blocked / Failed', `${m.blockedOnly} / ${m.failed}`, 'oddělené stavy', m.blocked ? 'blocked' : ''],
       ['Queue', m.activeQueue, 'aktivní tasky', ''],
-      ['Success', m.success == null ? '—' : `${m.success} %`, 'snapshot terminal', ''],
+      ['Terminal success', m.success == null ? '—' : `${m.success} %`, `${m.done} done · ${m.failed} failed`, ''],
       ['Retries', m.retries, 'opakované pokusy', m.retries ? 'waiting' : ''],
       ['Avg task', '—', 'duration telemetry chybí', ''],
       ['Tokens', tokenValue, m.tokenUnknownRequests ? `${m.tokenUnknownRequests} req bez tokenů` : 'known input + output', ''],
@@ -234,6 +242,16 @@ export function mountDashboard(createScene) {
     return row.status === taskFilter;
   }
 
+  function taskNodeHTML(row) {
+    return `<button type="button" class="taskgraph-node" role="option" aria-selected="${String(selectedTask === row.task_id)}" data-task-id="${escapeHTML(row.task_id)}" data-status="${escapeHTML(row.status)}"><b>${escapeHTML(issueLabel(row))} · ${escapeHTML(row.task_id)}</b><span>${escapeHTML(QUEUE_STATUS[row.status] || row.status)}</span><small>${escapeHTML(row.issue_title || row.kind)} · pokus ${escapeHTML(attemptLabel(row))}</small></button>`;
+  }
+  function taskLaneHTML(label, rows, limit) {
+    if (!rows.length) return '';
+    const visible = rows.slice(0, limit);
+    const overflow = rows.length - visible.length;
+    return `<div class="taskgraph-lane" role="group" aria-label="${escapeHTML(label)}"><span class="taskgraph-lane-label">${escapeHTML(label)}</span><div class="taskgraph-lane-track">${visible.map(taskNodeHTML).join('')}${overflow ? `<div class="taskgraph-node taskgraph-cluster" data-status="pending"><b>+${overflow} uzlů</b><span>LOD cluster</span><small>další sanitizované tasky</small></div>` : ''}</div></div>`;
+  }
+
   function renderTaskGraph() {
     const root = $('#taskgraph-nodes'), status = $('#taskgraph-status');
     if (!root || !status) return;
@@ -244,30 +262,41 @@ export function mountDashboard(createScene) {
       sceneCall('setTasks', []);
       return;
     }
-    const rows = sortedTaskNodes().filter(taskMatchesFilter);
+    const allRows = sortedTaskNodes();
+    const rows = allRows.filter(taskMatchesFilter);
     document.querySelectorAll('[data-task-filter]').forEach(button => button.setAttribute('aria-pressed', String(button.dataset.taskFilter === taskFilter)));
     const filterLabel = taskFilter === 'all' ? 'všechny stavy' : taskFilter === 'pending' ? 'čekající' : taskFilter === 'blocked' ? 'blocked + failed' : taskFilter;
     status.textContent = `Dependency telemetry není v aktuálním kontraktu · hrany se nevymýšlejí · filtr: ${filterLabel}.`;
-    if (!rows.length) {
+    if (!allRows.length) {
       root.innerHTML = '<div class="obs-empty">Durable queue je prázdná.</div>';
       sceneCall('setTasks', []);
       return;
     }
-    const visible = rows.slice(0, 24);
-    root.innerHTML = visible.map(row => `<button type="button" class="taskgraph-node" role="option" aria-selected="${String(selectedTask === row.task_id)}" data-task-id="${escapeHTML(row.task_id)}" data-status="${escapeHTML(row.status)}"><b>${escapeHTML(issueLabel(row))} · ${escapeHTML(row.task_id)}</b><span>${escapeHTML(QUEUE_STATUS[row.status] || row.status)}</span><small>${escapeHTML(row.issue_title || row.kind)} · pokus ${escapeHTML(attemptLabel(row))}</small></button>`).join('')
-      + (rows.length > visible.length ? `<div class="taskgraph-node" data-status="pending"><b>+${rows.length - visible.length} uzlů</b><span>LOD cluster</span><small>další sanitizované tasky</small></div>` : '');
+    if (!rows.length) {
+      root.innerHTML = '<div class="obs-empty">Pro zvolený filtr nejsou žádné tasky.</div>';
+      sceneCall('setTasks', allRows.filter(row => row.status !== 'done'));
+      return;
+    }
+    if (taskFilter === 'all') {
+      const priority = rows.filter(row => ['running', 'blocked', 'failed'].includes(row.status));
+      const rest = rows.filter(row => !['running', 'blocked', 'failed'].includes(row.status));
+      root.innerHTML = taskLaneHTML('Aktivní / problémové', priority, 10) + taskLaneHTML('Čekající / hotové', rest, 14);
+    } else {
+      root.innerHTML = taskLaneHTML(filterLabel, rows, 18);
+    }
     const buttons = [...root.querySelectorAll('[data-task-id]')];
     buttons.forEach((button, index) => {
       button.addEventListener('click', () => openTaskDetail(button.dataset.taskId));
       button.addEventListener('keydown', event => {
-        if (!['ArrowRight','ArrowLeft','Home','End','Enter',' '].includes(event.key)) return;
+        if (!['ArrowRight','ArrowLeft','ArrowDown','ArrowUp','Home','End','Enter',' '].includes(event.key)) return;
         if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); openTaskDetail(button.dataset.taskId); return; }
         event.preventDefault();
-        const next = event.key === 'Home' ? 0 : event.key === 'End' ? buttons.length - 1 : Math.max(0, Math.min(buttons.length - 1, index + (event.key === 'ArrowRight' ? 1 : -1)));
+        const step = event.key === 'ArrowDown' ? 2 : event.key === 'ArrowUp' ? -2 : event.key === 'ArrowRight' ? 1 : event.key === 'ArrowLeft' ? -1 : 0;
+        const next = event.key === 'Home' ? 0 : event.key === 'End' ? buttons.length - 1 : Math.max(0, Math.min(buttons.length - 1, index + step));
         buttons[next]?.focus();
       });
     });
-    sceneCall('setTasks', rows.filter(row => row.status !== 'done'));
+    sceneCall('setTasks', allRows.filter(row => row.status !== 'done'));
   }
 
   function renderSwarmAnalytics() {
@@ -696,7 +725,8 @@ export function mountDashboard(createScene) {
   }
   function closeDetail() {
     ui.detail.hidden = true; ui.backdrop.hidden = true; document.body.style.overflow = '';
-    sceneCall('focusAgent', null); sceneCall('focusTask', null);
+    sceneCall('focusAgent', null);
+    sceneCall('focusTask', selectedTask || null);
     if (returnFocus?.isConnected) returnFocus.focus();
     else if (selectedTask) document.querySelector(`[data-task-id="${CSS.escape(selectedTask)}"]`)?.focus();
     else document.querySelector(`[data-agent="${CSS.escape(selectedAgent || '')}"]`)?.focus();

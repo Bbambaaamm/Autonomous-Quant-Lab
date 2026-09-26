@@ -460,7 +460,7 @@ test('TaskGraph uses bounded LOD for more than twenty task records', async t => 
   }));
   await h.refresh();
   const html = h.get('#taskgraph-nodes').innerHTML;
-  assert.match(html, /\+1 uzlů/);
+  assert.match(html, /\+10 uzlů/);
   assert.match(html, /LOD cluster/);
   assert.equal(h.calls.tasks.at(-1).length, 25);
 });
@@ -485,7 +485,7 @@ test('Swarm KPI strip renders 10 cells from authoritative queue and router data'
   assert.match(html, /<span>Waiting<\/span><b>1<\/b>/);
   assert.match(html, /<span>Blocked \/ Failed<\/span><b>0 \/ 0<\/b>/);
   assert.match(html, /<span>Queue<\/span><b>1<\/b>/);
-  assert.match(html, /<span>Success<\/span><b>—<\/b>/);
+  assert.match(html, /<span>Terminal success<\/span><b>—<\/b><small>0 done · 0 failed<\/small>/);
   assert.match(html, /<span>Retries<\/span><b>0<\/b>/);
   assert.match(html, /<span>Tokens<\/span><b>24<\/b>/);
   assert.match(html, /<span>Cost known<\/span><b>0 USD<\/b><small>2 req unknown<\/small>/);
