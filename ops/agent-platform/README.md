@@ -6,6 +6,7 @@ Imported from the currently deployed runtime on 2026-09-26:
 - Machine City/dashboard source: `/opt/agent-platform/release/agent_platform_dashboard`
 - production deployment templates: `/opt/agent-platform/release/deploy/agent_platform/production`
 - Herdr/Hermes orchestration scripts: `/home/agentops/.local/bin/agent-*`
+- maintenance/off-site runtime helpers: `hermes-maintenance`, `hermes-offsite-prepare`, `hermes-offsite-sync`
 - agent profile launch wrappers: `quantlab`, `majak`
 - current systemd runtime contracts copied under `runtime/` and `agent-stack/systemd/`
 
@@ -23,6 +24,8 @@ Future binary upgrades must update the version/checksum evidence here or in a re
 
 Runtime credentials, Hermes auth/state databases, `/etc/agent-platform/*.json` secrets, private keys, queue state and logs are intentionally excluded.
 Only source, static assets, non-secret service contracts and example configuration belong in Git.
+
+The interactive Google Drive bootstrap helper is intentionally not authoritative source here: it is environment-specific setup code and may reference local Drive identifiers. Runtime maintenance depends only on the three captured maintenance/off-site helpers; `hermes` and `rclone` remain external installed binaries.
 
 ## Change rule
 
