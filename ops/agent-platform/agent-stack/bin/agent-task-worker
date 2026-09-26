@@ -3,9 +3,12 @@ import json
 import os
 import subprocess
 import sys
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+from agent_model_policy import decide as decide_model_route, record as record_model_route
 
 HOME = Path("/home/agentops")
 HERDR = HOME / ".local/bin/herdr"
@@ -58,12 +61,46 @@ def prompt_text(task: dict) -> str:
     result = result_path(task_id)
     run_token = str(task["run_token"])
     base = str(task["prompt"]).strip()
-    contract = f"""
+    profile = str(task.get("safety_profile") or "quantlab")
+    routing = task.get("routing") if isinstance(task.get("routing"), dict) else {}
+    agent = str(routing.get("selected_agent") or task.get("agent") or "quantlab-hermes")
+    tier = str(routing.get("tier") or "free")
+    model = str(routing.get("model") or "nous-adaptive-free")
+    repo = str(task.get("repo") or "Bbambaaamm/Autonomous-Quant-Lab")
+    workspace = str(task.get("workspace") or "/home/agentops/workspaces/quantlab")
+
+    if profile == "dotacni-majak":
+        contract = f"""
 
 TASK COMPLETION CONTRACT:
-- You are running as quantlab-hermes under Herdr.
+- You are running as {agent} under Herdr for GitHub repository {repo}.
+- Herdr is the parent authority and backlog/DAG orchestrator. You may delegate bounded implementation, research, testing, or independent review to available Dotační Maják subagents (including dotacni-majak-codex) when useful, but no child may gain permissions or authority beyond this parent task.
+- Work from {workspace}. Before code changes, fetch current origin/main, read docs/AGENT_HANDOFF.md and relevant ADR/spec files, and inspect current issue/PR/main plus prior durable results.
+- For code changes use an isolated clean issue worktree under {workspace}/worktrees/. Never contaminate another issue's checkout.
+- Preserve Dotační Maják invariants: official-source truth, provenance, UNKNOWN != FAIL, relevance != eligibility, deterministic eligibility/finance, RAW-first ingestion, immutable versioning, disappearance != cancellation, and fail-closed protection against destructive parser/source failures.
+- Do not buy or enable paid services, create or expose production credentials, weaken privacy/security/provenance, alter branch protection, bypass CI/review, or perform production deploys/irreversible external actions without explicit authorization.
+- Continue autonomously through ordinary technical decisions inside the issue scope.
+- Completion flow for mergeable code: builder evidence -> tests -> PR -> CI green -> independent review PASS on the exact PR head SHA -> verify head SHA did not change and no blocking review remains -> merge only if repository protection permits. Any missing/stale gate is FAIL-CLOSED: leave the PR open and report the blocker instead of merging.
+- After a successful merge, verify the issue is actually closed/satisfied. If the issue is broad, complete one bounded high-value slice and leave precise durable next_action so intake can safely schedule the next slice.
+- Before finishing, write UTF-8 JSON to {result}.
+- The JSON MUST contain exactly this task identity: task_id="{task_id}" and run_token="{run_token}".
+- Include keys: task_id, run_token, status, summary, issue, repo, evidence, blocker, next_action, completed_at. repo must be "{repo}".
+- status must be one of completed, blocked, failed.
+- If GitHub write authorization is required, set status=blocked and blocker=github_write_auth_required. Preserve exact branch/patch/evidence and do not redo implementation.
+- If user-only approval, paid-provider activation, new credential, production deploy, or another interactive authorization is required, do not guess or self-approve; report the specific blocker.
+"""
+    else:
+        route_rule = {
+            "free": "- This attempt is on the FREE tier. Use only Nous routing: Laguna -> LongCat -> Step -> Solar. Do not invoke OpenAI Codex.",
+            "sol": "- This is a budgeted SOL escalation after cheaper attempts were insufficient. Stay on the assigned gpt-6-sol model; do not self-escalate to Astra.",
+            "astra": "- This is an explicitly budgeted ASTRA escalation. Use the assigned gpt-6-astra model only for this bounded task.",
+        }.get(tier, "- Follow the assigned model route and do not self-escalate.")
+        contract = f"""
+
+TASK COMPLETION CONTRACT:
+- You are running as {agent} under Herdr with routed tier={tier} model={model}.
 - Work from the issue-specific clean worktree when code changes are needed; do not contaminate another issue's dirty checkout.
-- Use only Nous model routing for this task: Laguna -> LongCat -> Step -> Solar. Do not use OpenAI Codex.
+{route_rule}
 - Preserve PAPER-only, PIT/causality, provenance, immutable audit and runtime/resource/safety guardrails.
 - Do not bypass protected-branch, CI, deploy-hold, credential, approval, billing, or safety controls.
 - Continue autonomously through ordinary technical decisions within this bounded slice.
@@ -77,7 +114,8 @@ TASK COMPLETION CONTRACT:
     return base + contract
 
 def run_prompt(task: dict) -> tuple[int, str]:
-    agent = str(task.get("agent") or "quantlab-hermes")
+    routing = task.get("routing") if isinstance(task.get("routing"), dict) else {}
+    agent = str(routing.get("selected_agent") or task.get("agent") or "quantlab-hermes")
     timeout_seconds = int(task.get("timeout_seconds") or 1800)
     prompt = prompt_text(task)
     cmd = [
@@ -93,6 +131,27 @@ def run_prompt(task: dict) -> tuple[int, str]:
     )
     output = (proc.stdout or "") + (proc.stderr or "")
     return proc.returncode, output
+
+def wait_for_durable_result(task: dict, timeout_seconds: int) -> bool:
+    task_id = str(task["id"])
+    run_token = str(task.get("run_token") or "")
+    deadline = time.monotonic() + max(1, timeout_seconds)
+    rp = result_path(task_id)
+    while time.monotonic() < deadline:
+        if rp.exists():
+            try:
+                payload = json.loads(rp.read_text(encoding="utf-8"))
+            except Exception:
+                time.sleep(2)
+                continue
+            if (
+                str(payload.get("task_id") or "") == task_id
+                and str(payload.get("run_token") or "") == run_token
+            ):
+                return True
+        time.sleep(2)
+    return False
+
 
 def retry(task_path: Path, task: dict, reason: str) -> None:
     attempts = int(task.get("attempts") or 0) + 1
@@ -121,6 +180,7 @@ def block_task(task_path: Path, task: dict, blocker: str, summary: str) -> None:
                 "status": "blocked",
                 "summary": summary,
                 "issue": task.get("issue"),
+                "repo": task.get("repo"),
                 "evidence": [str(task.get("last_error") or summary)],
                 "blocker": blocker,
                 "next_action": "Resolve the documented blocker, then requeue the same durable task without duplicating implementation.",
@@ -183,8 +243,30 @@ def main(task_path: Path) -> int:
         archive_previous_result(task_id, attempt)
         task["run_token"] = uuid.uuid4().hex
         task["attempt_started_at"] = utcnow().isoformat()
+        decision = decide_model_route(task)
+        task["routing"] = decision
+        try:
+            record_model_route(task, decision)
+        except Exception as exc:
+            log(task_id, f"routing telemetry failed: {exc}")
+            if decision.get("tier") in {"sol", "astra"}:
+                decision = dict(
+                    decision,
+                    tier="free",
+                    selected_agent="quantlab-hermes",
+                    model="nous-adaptive-free",
+                    reason="routing_audit_unavailable",
+                    astra_escalation=False,
+                )
+                task["routing"] = decision
         write_json(task_path, task)
-        log(task_id, f"start attempt={attempt} run_token={task['run_token']}")
+        log(
+            task_id,
+            f"start attempt={attempt} tier={decision.get('tier')} "
+            f"model={decision.get('model')} agent={decision.get('selected_agent')} "
+            f"reason={decision.get('reason')} codex_used={decision.get('codex_used_percent')} "
+            f"run_token={task['run_token']}",
+        )
 
         try:
             rc, output = run_prompt(task)
@@ -201,9 +283,26 @@ def main(task_path: Path) -> int:
                 task_path,
                 task,
                 "agent_interactive_input_required",
-                "quantlab-hermes is waiting at an interactive approval/question UI",
+                f"{task.get('routing', {}).get('selected_agent', 'quantlab-hermes')} is waiting at an interactive approval/question UI",
             )
             return 0
+
+        if "agent_prompt_stalled" in lowered:
+            grace = int(task.get("stall_grace_seconds") or 600)
+            grace = max(30, min(grace, int(task.get("timeout_seconds") or 1800)))
+            log(
+                task_id,
+                f"prompt observation stalled; waiting up to {grace}s for durable result",
+            )
+            if wait_for_durable_result(task, grace):
+                finish(task_path, task, output)
+                return 0
+            retry(
+                task_path,
+                task,
+                f"agent_prompt_stalled without durable result after {grace}s: {output}",
+            )
+            return 1
 
         provider_retry = any(
             marker in lowered
@@ -213,7 +312,6 @@ def main(task_path: Path) -> int:
                 "http 429",
                 "too many requests",
                 "provider unavailable",
-                "agent_prompt_stalled",
             )
         )
         if provider_retry:

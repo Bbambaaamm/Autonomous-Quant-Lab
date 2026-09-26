@@ -181,12 +181,18 @@ export function mountDashboard(createScene) {
     const grouped = new Map();
     for (const row of routerRows()) {
       const key = row.actual_model;
-      if (!grouped.has(key)) grouped.set(key, { model: key, requests: 0, fallbacks: 0, successes: 0, durationMs: 0, durationRequests: 0 });
+      if (!grouped.has(key)) grouped.set(key, {
+        model: key, requests: 0, fallbacks: 0, successes: 0, durationMs: 0, durationRequests: 0,
+        inputTokens: 0, outputTokens: 0, tokenKnownRequests: 0, tokenUnknownRequests: 0,
+      });
       const item = grouped.get(key);
       item.requests += row.requests;
       item.fallbacks += row.fallback_count;
       item.successes += row.successful_requests;
       if (Number.isFinite(row.duration_ms)) { item.durationMs += row.duration_ms; item.durationRequests += row.requests; }
+      if (Number.isFinite(row.input_tokens) && Number.isFinite(row.output_tokens)) {
+        item.inputTokens += row.input_tokens; item.outputTokens += row.output_tokens; item.tokenKnownRequests += row.requests;
+      } else item.tokenUnknownRequests += row.requests;
     }
     return [...grouped.values()].sort((a, b) => b.requests - a.requests || a.model.localeCompare(b.model));
   }
@@ -499,6 +505,12 @@ export function mountDashboard(createScene) {
       return;
     }
     const codex = codexStats().row;
+    const routingAvailable = codex?.routing_status === 'available';
+    const routeRows = routingAvailable ? [
+      { label: 'FREE', value: codex.routing_free },
+      { label: 'Sol', value: codex.routing_sol },
+      { label: 'Astra', value: codex.routing_astra },
+    ] : [];
     const profileStats = PROFILES.map(stats);
     const routersAvailable = profileStats.every(value => value.router?.status === 'available');
     const totalRequests = routersAvailable ? profileStats.reduce((sum, value) => sum + value.requests, 0) : null;
@@ -514,7 +526,7 @@ export function mountDashboard(createScene) {
       `<article class="obs-kpi" data-severity="${severity}"><span>Codex allowance · zbývá</span><b>${remaining == null ? '—' : remaining + ' %'}</b><div class="obs-gauge"><i style="--gauge:${codex ? codex.used_percent : 0}%"></i></div><small>${codex ? (codex.ordinary_usage_allowed ? 'Běžné použití povoleno' : 'Limit vyčerpán') : 'Zdroj nedostupný'}</small></article>`,
       `<article class="obs-kpi"><span>Další reset Codex</span><b>${codex ? escapeHTML(resetLabel(codex.resets_at)) : '—'}</b><small>${codex ? escapeHTML(resetDistance(codex.resets_at)) : 'Čas resetu není dostupný'}</small></article>`,
       `<article class="obs-kpi"><span>Codex lifetime tokeny</span><b>${codex?.lifetime_tokens == null ? '—' : escapeHTML(compact.format(codex.lifetime_tokens))}</b><small>Peak/day: ${codex?.peak_daily_tokens == null ? '—' : escapeHTML(compact.format(codex.peak_daily_tokens))}</small></article>`,
-      `<article class="obs-kpi"><span>Router požadavky</span><b>${number(totalRequests)}</b><small>${routersAvailable ? `${fmt.format(profileStats.reduce((s,v)=>s+(v.fallbacks||0),0))} fallbacků` : 'část routerů nedostupná'}</small></article>`,
+      `<article class="obs-kpi"><span>Router požadavky</span><b>${number(totalRequests)}</b><small>${routersAvailable ? `${fmt.format(profileStats.reduce((s,v)=>s+(v.fallbacks||0),0))} fallbacků${routingAvailable ? ` · Astra eskalace ${fmt.format(codex.routing_astra_escalations)}` : ''}` : 'část routerů nedostupná'}</small></article>`,
       `<article class="obs-kpi"><span>Variabilní náklady</span><b>${knownCost == null ? '—' : escapeHTML(money(knownCost))}</b><small>${escapeHTML(costCopy)}</small></article>`,
       `<article class="obs-kpi" data-severity="${activeQueue ? 'warn' : 'ok'}"><span>Aktivní práce</span><b>${fmt.format(activeAgents)} agent · ${fmt.format(activeQueue)} fronta</b><small>${activeQueue ? 'Fronta má rozpracované/čekající úlohy' : 'Durable fronta bez aktivních položek'}</small></article>`,
     ].join('');
@@ -525,6 +537,9 @@ export function mountDashboard(createScene) {
       .sort((a,b) => b.rate - a.rate || b.requests - a.requests).slice(0, 8);
     const latencyRows = models.filter(row => row.durationRequests > 0).map(row => ({ ...row, avg: row.durationMs / row.durationRequests }))
       .sort((a,b) => b.avg - a.avg).slice(0, 8);
+    const tokenRows = models.filter(row => row.tokenKnownRequests > 0)
+      .map(row => ({ ...row, tokens: row.inputTokens + row.outputTokens }))
+      .sort((a,b) => b.tokens - a.tokens || b.requests - a.requests).slice(0, 8);
 
     const totalRouterRequests = profileStats.every(v => v.requests != null) ? profileStats.reduce((s,v)=>s+v.requests,0) : 0;
     const coverageMetric = (knownKey, unknownKey) => {
@@ -549,8 +564,10 @@ export function mountDashboard(createScene) {
 
     grid.innerHTML = [
       `<article class="obs-panel wide"><header><div><h3>Codex tokeny po dnech</h3><span>45 posledních měřených dní</span></div><span>${daily.length ? 'peak '+escapeHTML(compact.format(Math.max(...daily.map(r=>r.tokens)))) : 'bez dat'}</span></header>${lineChart(daily,'tokens',{id:'codexTokensArea'})}<p class="obs-note">Account-wide token activity z Codex app-serveru. Není převáděna na API cenu.</p></article>`,
-      `<article class="obs-panel"><header><div><h3>Codex allowance</h3><span>časová řada využití</span></div><span>${codex ? codex.used_percent+' % použito' : 'nedostupné'}</span></header>${lineChart(history,'used_percent',{id:'codexLimitArea',suffix:' %',maxValue:100})}<p class="obs-note">${history.length < 2 ? 'Historii jsme právě začali sbírat; graf se bude plnit automaticky.' : 'Snapshot každých přibližně 5 minut.'}</p></article>`,
-      `<article class="obs-panel"><header><div><h3>Model traffic</h3><span>počet požadavků</span></div><span>top 8</span></header>${bars(volumeRows,r=>r.requests,v=>fmt.format(v))}</article>`,
+      `<article class="obs-panel"><header><div><h3>Codex allowance</h3><span>časová řada využití</span></div><span>${codex ? codex.used_percent+' % použito' : 'nedostupné'}</span></header>${lineChart(history,'used_percent',{id:'codexLimitArea',suffix:' %',maxValue:100})}<p class="obs-note">${history.length < 2 ? 'Historii jsme právě začali sbírat; graf se bude plnit automaticky.' : 'Snapshot každých přibližně 5 minut.'}${routingAvailable ? ` · Router soft ${fmt.format(codex.routing_soft_limit_pct)} % / hard ${fmt.format(codex.routing_hard_limit_pct)} %.` : ''}</p></article>`,
+      `<article class="obs-panel"><header><div><h3>Cost-aware router</h3><span>FREE / Sol / Astra · task decisions</span></div><span>${routingAvailable ? escapeHTML(codex.routing_policy_version) : 'nedostupné'}</span></header>${bars(routeRows,r=>r.value,v=>fmt.format(v))}<div class="obs-legend"><span>Astra eskalace: ${routingAvailable ? fmt.format(codex.routing_astra_escalations) : '—'}</span><span>Premium blokováno: ${routingAvailable ? fmt.format(codex.routing_premium_denied) : '—'}</span></div><p class="obs-note">${routingAvailable ? `Poslední route: ${escapeHTML(codex.last_route_model || '—')} · ${escapeHTML(codex.last_route_reason || '—')}` : 'Routing telemetry není dostupná.'}</p></article>`,
+      `<article class="obs-panel"><header><div><h3>Model traffic</h3><span>počet skutečných provider requestů</span></div><span>top 8</span></header>${bars(volumeRows,r=>r.requests,v=>fmt.format(v))}</article>`,
+      `<article class="obs-panel"><header><div><h3>Model tokeny</h3><span>skutečně změřené router requesty</span></div><span>top 8</span></header>${bars(tokenRows,r=>r.tokens,v=>compact.format(v))}<p class="obs-note">Per-model tokeny jsou autoritativní pro Hermes router. Codex Sol/Astra zde nejsou odhadovány; jejich account-wide tokeny zůstávají v samostatném grafu.</p></article>`,
       `<article class="obs-panel"><header><div><h3>Fallback pressure</h3><span>fallbacky / požadavky</span></div><span>vyšší = horší</span></header>${bars(fallbackRows,r=>r.rate,v=>v.toFixed(1)+' %',{percent:true,alert:r=>r.rate>=25})}</article>`,
       `<article class="obs-panel"><header><div><h3>Model latency</h3><span>průměr na request</span></div><span>jen známá latence</span></header>${bars(latencyRows,r=>r.avg,v=>latency(v))}</article>`,
       `<article class="obs-panel"><header><div><h3>Data coverage</h3><span>request-weighted completeness</span></div><span>fail-closed</span></header>${coverage.map(([name,pct])=>`<div class="coverage-row"><span>${escapeHTML(name)}</span><div class="coverage-track"><i style="width:${pct}%"></i></div><strong>${pct} %</strong></div>`).join('')}<p class="obs-note">100 % znamená, že každému requestu odpovídá měřená hodnota. Chybějící hodnoty nejsou dopočítány.</p></article>`,
@@ -797,7 +814,22 @@ export function mountDashboard(createScene) {
       if (item.kind === 'codex') {
         if (item.profile !== 'majak' || (item.status === 'available' && item.rows.length !== 1)) throw new Error('invalid');
         if (item.rows.some(row => !Number.isFinite(row.used_percent) || row.used_percent < 0 || row.used_percent > 100
-          || !Array.isArray(row.daily) || !Array.isArray(row.limit_history))) throw new Error('invalid');
+          || !Array.isArray(row.daily) || !Array.isArray(row.limit_history)
+          || !['available', 'unavailable'].includes(row.routing_status))) throw new Error('invalid');
+        for (const row of item.rows) {
+          if (row.routing_status !== 'available') continue;
+          const routingNumbers = ['routing_observed_at', 'routing_soft_limit_pct', 'routing_hard_limit_pct',
+            'routing_decisions', 'routing_free', 'routing_sol', 'routing_astra', 'routing_astra_escalations', 'routing_premium_denied'];
+          if (typeof row.routing_policy_version !== 'string' || row.routing_policy_version.length > 64
+            || routingNumbers.some(key => !Number.isSafeInteger(row[key]) || row[key] < 0)
+            || row.routing_soft_limit_pct >= row.routing_hard_limit_pct || row.routing_hard_limit_pct > 100
+            || row.routing_free + row.routing_sol + row.routing_astra > row.routing_decisions
+            || row.routing_astra_escalations > row.routing_astra
+            || (row.last_route_at != null && !Number.isFinite(row.last_route_at))
+            || (row.last_route_tier != null && !['free', 'sol', 'astra'].includes(row.last_route_tier))
+            || (row.last_route_model != null && typeof row.last_route_model !== 'string')
+            || (row.last_route_reason != null && typeof row.last_route_reason !== 'string')) throw new Error('invalid');
+        }
       }
     }
     return value;
