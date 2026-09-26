@@ -290,21 +290,34 @@ def test_task_payload_secret_scan_method(tmp_path):
 def test_bounded_max_nodes_rejected(tmp_path):
     """Planner trying to emit a graph larger than max_nodes → fail-closed."""
     env = TaskGraphEnvelope(
-        issue="230", spec_hash="s", graph_version="1.1.0",
-        created_at="2026-09-26T00:00:00Z", planner="p",
-        max_nodes=2, max_depth=16, max_fanout=16,
+        issue="230",
+        spec_hash="s",
+        graph_version="1.1.0",
+        created_at="2026-09-26T00:00:00Z",
+        planner="p",
+        max_nodes=2,
+        max_depth=16,
+        max_fanout=16,
     )
     nodes = []
     for i in range(3):
-        nodes.append({
-            "id": f"n{i}",
-            "parent_id": None,
-            "type": "task", "role": "planner", "objective": "o",
-            "inputs": [], "expected_outputs": [],
-            "dependencies": [], "priority": 1,
-            "resource_class": "small", "model_policy": {"model": "m"},
-            "tools": ["t"], "permissions": ["p"],
-        })
+        nodes.append(
+            {
+                "id": f"n{i}",
+                "parent_id": None,
+                "type": "task",
+                "role": "planner",
+                "objective": "o",
+                "inputs": [],
+                "expected_outputs": [],
+                "dependencies": [],
+                "priority": 1,
+                "resource_class": "small",
+                "model_policy": {"model": "m"},
+                "tools": ["t"],
+                "permissions": ["p"],
+            }
+        )
     with pytest.raises(GraphValidationError, match="max_nodes"):
         TaskGraph.from_planner_output(env, nodes)
 
@@ -312,15 +325,27 @@ def test_bounded_max_nodes_rejected(tmp_path):
 def test_bounded_max_depth_rejected(tmp_path):
     """Depth chain exceeding max_depth → fail-closed."""
     env = TaskGraphEnvelope(
-        issue="230", spec_hash="s", graph_version="1.1.0",
-        created_at="2026-09-26T00:00:00Z", planner="p",
-        max_nodes=64, max_depth=2, max_fanout=16,
+        issue="230",
+        spec_hash="s",
+        graph_version="1.1.0",
+        created_at="2026-09-26T00:00:00Z",
+        planner="p",
+        max_nodes=64,
+        max_depth=2,
+        max_fanout=16,
     )
     base = {
-        "type": "task", "role": "worker", "objective": "o",
-        "inputs": [], "expected_outputs": [], "dependencies": [],
-        "priority": 1, "resource_class": "small",
-        "model_policy": {"model": "m"}, "tools": ["t"], "permissions": ["p"],
+        "type": "task",
+        "role": "worker",
+        "objective": "o",
+        "inputs": [],
+        "expected_outputs": [],
+        "dependencies": [],
+        "priority": 1,
+        "resource_class": "small",
+        "model_policy": {"model": "m"},
+        "tools": ["t"],
+        "permissions": ["p"],
     }
     nodes = [{**base, "id": "r", "parent_id": None}]
     nodes.append({**base, "id": "c1", "parent_id": "r"})
@@ -332,15 +357,27 @@ def test_bounded_max_depth_rejected(tmp_path):
 def test_bounded_max_fanout_rejected(tmp_path):
     """A parent with more children than max_fanout → fail-closed."""
     env = TaskGraphEnvelope(
-        issue="230", spec_hash="s", graph_version="1.1.0",
-        created_at="2026-09-26T00:00:00Z", planner="p",
-        max_nodes=64, max_depth=16, max_fanout=2,
+        issue="230",
+        spec_hash="s",
+        graph_version="1.1.0",
+        created_at="2026-09-26T00:00:00Z",
+        planner="p",
+        max_nodes=64,
+        max_depth=16,
+        max_fanout=2,
     )
     base = {
-        "type": "task", "role": "worker", "objective": "o",
-        "inputs": [], "expected_outputs": [], "dependencies": [],
-        "priority": 1, "resource_class": "small",
-        "model_policy": {"model": "m"}, "tools": ["t"], "permissions": ["p"],
+        "type": "task",
+        "role": "worker",
+        "objective": "o",
+        "inputs": [],
+        "expected_outputs": [],
+        "dependencies": [],
+        "priority": 1,
+        "resource_class": "small",
+        "model_policy": {"model": "m"},
+        "tools": ["t"],
+        "permissions": ["p"],
     }
     nodes = [{**base, "id": "root", "parent_id": None}]
     for i in range(3):
@@ -366,6 +403,7 @@ def test_graph_hash_is_deterministic_across_process(tmp_path):
     }
     canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     import hashlib
+
     expected = hashlib.sha256(canonical.encode()).hexdigest()
     assert graph.graph_hash() == expected
 

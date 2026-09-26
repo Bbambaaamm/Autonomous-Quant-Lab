@@ -134,9 +134,7 @@ class TaskNode:
     model_policy: dict
     tools: tuple[str, ...]
     permissions: tuple[str, ...]
-    created_at: str = field(
-        default_factory=lambda: datetime.now(UTC).isoformat()
-    )
+    created_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
 
     # ------------------------------------------------------------------
     # Secret-isolation guard (issue #230: "task payload neobsahuje secrets")
@@ -209,8 +207,7 @@ class TaskNode:
 
         if extra_tools:
             violations.append(
-                f"node {self.id!r}: child tool escalation "
-                f"({sorted(extra_tools)} ⊄ parent tools)"
+                f"node {self.id!r}: child tool escalation ({sorted(extra_tools)} ⊄ parent tools)"
             )
         if extra_perms:
             violations.append(
@@ -263,9 +260,7 @@ class TaskGraph:
         for nd in node_dicts:
             nid = nd["id"]
             if nid in id_set:
-                raise GraphValidationError(
-                    f"duplicate node id rejected: {nid!r}"
-                )
+                raise GraphValidationError(f"duplicate node id rejected: {nid!r}")
             id_set.add(nid)
 
             node = TaskNode(
@@ -282,10 +277,7 @@ class TaskGraph:
                 model_policy=nd.get("model_policy", {}),
                 tools=tuple(nd.get("tools", [])),
                 permissions=tuple(nd.get("permissions", [])),
-                created_at=(
-                    nd.get("created_at")
-                    or datetime.now(UTC).isoformat()
-                ),
+                created_at=(nd.get("created_at") or datetime.now(UTC).isoformat()),
             )
 
             # Secret isolation: payload must never contain secrets.
@@ -322,9 +314,7 @@ class TaskGraph:
                         f"node {n.id!r}: unknown dependency {dep!r} rejected"
                     )
                 if dep == n.id:
-                    raise GraphValidationError(
-                        f"node {n.id!r}: self-dependency rejected"
-                    )
+                    raise GraphValidationError(f"node {n.id!r}: self-dependency rejected")
 
         # root count: exactly one root (parent_id None) OR all parented —
         # we accept a single root or a forest of roots, but every dependency
@@ -371,17 +361,14 @@ class TaskGraph:
         }
         if depth_exceeded:
             raise GraphValidationError(
-                f"max_depth ({self.envelope.max_depth}) exceeded by nodes: "
-                f"{sorted(depth_exceeded)}"
+                f"max_depth ({self.envelope.max_depth}) exceeded by nodes: {sorted(depth_exceeded)}"
             )
 
         fanout: dict[str, int] = {}
         for n in self.nodes:
             if n.parent_id and n.parent_id in idx:
                 fanout[n.parent_id] = fanout.get(n.parent_id, 0) + 1
-        fanout_exceeded = {
-            pid for pid, count in fanout.items() if count > self.envelope.max_fanout
-        }
+        fanout_exceeded = {pid for pid, count in fanout.items() if count > self.envelope.max_fanout}
         if fanout_exceeded:
             raise GraphValidationError(
                 f"max_fanout ({self.envelope.max_fanout}) exceeded for parents: "
@@ -405,15 +392,13 @@ class TaskGraph:
                 )
         if violations:
             raise GraphValidationError(
-                "child permission/tool escalation detected (fail-closed): "
-                + "; ".join(violations)
+                "child permission/tool escalation detected (fail-closed): " + "; ".join(violations)
             )
 
     def _validate_bounded_limits(self) -> None:
         if len(self.nodes) > self.envelope.max_nodes:
             raise GraphValidationError(
-                f"max_nodes ({self.envelope.max_nodes}) exceeded: "
-                f"{len(self.nodes)} nodes"
+                f"max_nodes ({self.envelope.max_nodes}) exceeded: {len(self.nodes)} nodes"
             )
 
     # --- deterministic hash (issue #230 acceptance #1) ----------------
@@ -550,9 +535,7 @@ class PersistentTaskGraph:
         if state not in LifecycleState.__members__.values():
             raise ValueError(f"unknown lifecycle state: {state!r}")
         self._state[node_id] = state
-        self._append(
-            {"type": "node_state", "node_id": node_id, "state": state, "ts": self._now()}
-        )
+        self._append({"type": "node_state", "node_id": node_id, "state": state, "ts": self._now()})
 
     def cancel_node(self, node_id: str, reason: str) -> None:
         self._append(
@@ -589,9 +572,7 @@ class PersistentTaskGraph:
                 try:
                     ev = json.loads(raw)
                 except json.JSONDecodeError as e:
-                    raise GraphValidationError(
-                        f"malformed event on line {lineno}: {e}"
-                    ) from e
+                    raise GraphValidationError(f"malformed event on line {lineno}: {e}") from e
                 etype = ev.get("type")
                 if etype == "graph_persisted":
                     env = ev["envelope"]
