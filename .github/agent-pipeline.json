@@ -158,6 +158,7 @@
   ],
   "requiredCiJobs": [
     "agent-pipeline",
+    "agent-platform",
     "quality",
     "unit-research",
     "api",

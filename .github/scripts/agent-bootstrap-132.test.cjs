@@ -2,7 +2,7 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
 const b = require("./agent-bootstrap-132.cjs");
-const required = ["agent-pipeline", "quality", "unit-research", "api", "integration-postgres", "frontend", "security", "container-build", "production-smoke"];
+const required = ["agent-pipeline", "agent-platform", "quality", "unit-research", "api", "integration-postgres", "frontend", "security", "container-build", "production-smoke"];
 
 const base = () => ({ repository:b.BINDING.repository, defaultBranch:"main", trustedBaseSha:b.BINDING.trustedBaseSha, mainContainsTrustedBase:true, mainBootstrapPathsOnly:true,
   issue:{number:130,state:"open"}, issueIsImplementation:true, authorizationOk:true, specHash:b.BINDING.specHash,

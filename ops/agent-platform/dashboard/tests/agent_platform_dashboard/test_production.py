@@ -34,7 +34,7 @@ from agent_platform_dashboard.production_export import collect, configuration
 from agent_platform_dashboard.production_herdr import sanitize
 from agent_platform_dashboard.production_web import Application, provider_roles
 
-pytestmark = pytest.mark.linux_only
+pytestmark = pytest.mark.skipif(os.name != 'posix', reason='Linux production boundary tests')
 
 
 @pytest.fixture
@@ -500,7 +500,7 @@ def test_auth_wrong_and_forwarded_identity_no_bypass(tmp_path, auth):
 
 def test_production_template_boundaries():
     import configparser
-    bundle = Path(__file__).resolve().parents[2] / 'deploy/agent_platform/production'
+    bundle = Path(__file__).resolve().parents[3] / 'deploy/agent_platform/production'
     for role in ('web','export','herdr'):
         unit = configparser.ConfigParser(interpolation=None)
         unit.optionxform=str
