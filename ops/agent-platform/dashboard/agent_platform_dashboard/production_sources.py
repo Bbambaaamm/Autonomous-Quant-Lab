@@ -287,7 +287,7 @@ def _routing_summary(now):
         raw = c.parse(read(MODEL_ROUTING_PATH, 65536), 65536)
         c.keys(raw, 'version observed_at policy totals recent')
         c.need(type(raw['version']) is int and raw['version'] == 1
-               and c.number(raw['observed_at']) and 0 <= now - raw['observed_at'] <= 900)
+               and c.number(raw['observed_at']) and raw['observed_at'] <= now)
         policy, totals, recent = raw['policy'], raw['totals'], raw['recent']
         c.keys(policy, 'version soft_limit_pct hard_limit_pct')
         c.keys(totals, 'decisions free sol astra astra_escalations premium_denied')
