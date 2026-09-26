@@ -105,6 +105,9 @@ async function harness(t, options = {}) {
     return elements.get(selector);
   }
   const viewButtons = ['film', 'work'].map(view => { const node = get(`#view-${view}`); node.dataset.view = view; return node; });
+  const taskFilterButtons = ['all', 'running', 'pending', 'blocked', 'done'].map(filter => {
+    const node = get(`#task-filter-${filter}`); node.dataset.taskFilter = filter; node.attrs['aria-pressed'] = String(filter === 'all'); return node;
+  });
   const projectButtons = ['majak', 'quantlab'].map(profile => {
     const node = get(`#${profile}-title`); node.dataset.projectToggle = profile; node.attrs['aria-expanded'] = 'true';
     node.project = { querySelector: () => get(`#${profile}-agents`) }; return node;
@@ -112,7 +115,11 @@ async function harness(t, options = {}) {
   globalThis.document = {
     hidden: false, body: { style: {} }, documentElement: { dataset: {} },
     get activeElement() { return activeElement; }, querySelector: get,
-    querySelectorAll(selector) { return selector === '[data-view]' ? viewButtons : selector === '[data-project-toggle]' ? projectButtons : []; },
+    querySelectorAll(selector) {
+      return selector === '[data-view]' ? viewButtons
+        : selector === '[data-project-toggle]' ? projectButtons
+          : selector === '[data-task-filter]' ? taskFilterButtons : [];
+    },
     createElement(type) { return new Element(`${type}-${++nodeSequence}`); },
     addEventListener(type, callback) { documentEvents.set(type, callback); },
   };
@@ -133,7 +140,7 @@ async function harness(t, options = {}) {
   const ui = mountDashboard(options.factory || (() => scene));
   await new Promise(resolve => setImmediate(resolve));
   return {
-    ui, get, calls, viewButtons, projectButtons, mediaEvents,
+    ui, get, calls, viewButtons, taskFilterButtons, projectButtons, mediaEvents,
     snapshot: () => snapshot, setSnapshot: value => { snapshot = value; }, setHTTP: value => { httpStatus = value; },
     refresh: () => intervals[0](), tickAge: () => intervals[1](),
     click: selector => get(selector).emit('click'), documentEvents,
@@ -467,4 +474,114 @@ test('3D task selection synchronizes with task inspector state', async t => {
   assert.match(h.get('#detail-title').textContent, /#190/);
   assert.match(h.get('#detail-metrics').innerHTML, /Dependency edges/);
   assert.match(h.get('#detail-events').innerHTML, /nejsou odhadovány/i);
+});
+
+test('Swarm KPI strip renders 10 cells from authoritative queue and router data', async t => {
+  const h = await harness(t);
+  const html = h.get('#swarm-kpis').innerHTML;
+  assert.equal((html.match(/class="swarm-kpi"/g) || []).length, 10);
+  assert.match(html, /<span>Active<\/span><b>0<\/b>/);
+  assert.match(html, /<span>Running<\/span><b>0<\/b>/);
+  assert.match(html, /<span>Waiting<\/span><b>1<\/b>/);
+  assert.match(html, /<span>Blocked \/ Failed<\/span><b>0 \/ 0<\/b>/);
+  assert.match(html, /<span>Queue<\/span><b>1<\/b>/);
+  assert.match(html, /<span>Success<\/span><b>—<\/b>/);
+  assert.match(html, /<span>Retries<\/span><b>0<\/b>/);
+  assert.match(html, /<span>Tokens<\/span><b>24<\/b>/);
+  assert.match(html, /<span>Cost known<\/span><b>0 USD<\/b><small>2 req unknown<\/small>/);
+});
+
+test('Avg task stays explicitly unavailable when duration telemetry is missing', async t => {
+  const h = await harness(t);
+  const html = h.get('#swarm-kpis').innerHTML;
+  assert.match(html, /<span>Avg task<\/span><b>\u2014<\/b><small>duration telemetry chybí<\/small>/);
+  assert.doesNotMatch(html, /<span>Avg task<\/span><b>\d/);
+});
+
+test('Swarm analytics renders six cards with available or unavailable state', async t => {
+  const h = await harness(t);
+  const html = h.get('#swarm-analytics-grid').innerHTML;
+  assert.equal((html.match(/class="swarm-card"/g) || []).length, 6);
+  assert.match(html, /Throughput/);
+  assert.match(html, /Queue depth/);
+  assert.match(html, /Latency/);
+  assert.match(html, /Tokens &/);
+  assert.match(html, /Model mix/);
+  assert.match(html, /Reliability/);
+  assert.match(html, /100 ms/);
+});
+
+test('Stale snapshot clears swarm KPI strip and analytics to unavailable', async t => {
+  const h = await harness(t);
+  h.snapshot().generated_at = Math.floor(Date.now() / 1000) - 100;
+  await h.refresh();
+  assert.equal(h.ui.diagnostics().freshSnapshot, false);
+  assert.match(h.get('#swarm-kpis').innerHTML, /telemetrie nedostupná/i);
+  assert.match(h.get('#swarm-analytics-grid').innerHTML, /telemetrie není dostupná/i);
+  assert.match(h.get('#taskgraph-status').textContent, /není dostupná/i);
+  assert.deepEqual(h.calls.tasks.at(-1), []);
+});
+
+test('KPI Active tracks working agent count through live telemetry', async t => {
+  const h = await harness(t);
+  // Default fixture: 4 agents but none in 'working' status
+  assert.match(h.get('#swarm-kpis').innerHTML, /<span>Active<\/span><b>0<\/b>/);
+  const herdr = h.snapshot().sources.find(s => s.kind === 'herdr' && s.profile === 'quantlab');
+  herdr.rows[0].status = 'working';
+  await h.refresh();
+  assert.match(h.get('#swarm-kpis').innerHTML, /<span>Active<\/span><b>1<\/b>/);
+  assert.equal(h.calls.agents.at(-1).length, 4);
+  assert.equal(h.calls.agents.at(-1).find(a => a.agent === 'quantlab-hermes').status, 'working');
+});
+
+test('TaskGraph task nodes carry aria-selected for keyboard/select sync', async t => {
+  const h = await harness(t);
+  const before = h.get('#taskgraph-nodes').innerHTML;
+  assert.match(before, /role="option"/);
+  assert.match(before, /aria-selected="false"/);
+  assert.match(before, /data-task-id="issue190-prepare-20260926"/);
+  h.calls.selectTask('issue190-prepare-20260926');
+  const after = h.get('#taskgraph-nodes').innerHTML;
+  assert.match(after, /aria-selected="true"/);
+  assert.match(after, /data-task-id="issue190-prepare-20260926"/);
+});
+
+
+test('Retries KPI counts only attempts after the first try', async t => {
+  const h = await harness(t);
+  const queue = h.snapshot().sources.find(item => item.kind === 'queue');
+  queue.rows[0].attempts = 3;
+  await h.refresh();
+  assert.match(h.get('#swarm-kpis').innerHTML, /<span>Retries<\/span><b>2<\/b><small>opakované pokusy<\/small>/);
+});
+
+test('Blocked and failed stay semantically separate in KPI and analytics', async t => {
+  const h = await harness(t);
+  const queue = h.snapshot().sources.find(item => item.kind === 'queue');
+  const base = queue.rows[0];
+  queue.rows = [
+    { ...base, task_id: 'blocked-task', status: 'blocked', blocker: 'soak_evidence_pending' },
+    { ...base, task_id: 'failed-task', status: 'failed', blocker: null },
+  ];
+  await h.refresh();
+  assert.match(h.get('#swarm-kpis').innerHTML, /<span>Blocked \/ Failed<\/span><b>1 \/ 1<\/b>/);
+  assert.match(h.get('#swarm-analytics-grid').innerHTML, /1 blocked · 1 failed/);
+});
+
+test('TaskGraph state filters do not invent or reorder hidden dependencies', async t => {
+  const h = await harness(t);
+  const queue = h.snapshot().sources.find(item => item.kind === 'queue');
+  const base = queue.rows[0];
+  queue.rows = [
+    { ...base, task_id: 'run-1', status: 'running' },
+    { ...base, task_id: 'wait-1', status: 'pending' },
+    { ...base, task_id: 'fail-1', status: 'failed' },
+  ];
+  await h.refresh();
+  const blocked = h.taskFilterButtons.find(button => button.dataset.taskFilter === 'blocked');
+  blocked.emit('click');
+  assert.match(h.get('#taskgraph-nodes').innerHTML, /fail-1/);
+  assert.doesNotMatch(h.get('#taskgraph-nodes').innerHTML, /run-1|wait-1/);
+  assert.match(h.get('#taskgraph-status').textContent, /blocked \+ failed/);
+  assert.equal(blocked.attrs['aria-pressed'], 'true');
 });

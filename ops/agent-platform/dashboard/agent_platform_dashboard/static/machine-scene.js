@@ -34,8 +34,8 @@ export function createMachineScene(canvas, fallback) {
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
   renderer.toneMappingExposure = 1.2;
   const scene = new THREE.Scene();
-  scene.background = new THREE.Color(0x101516);
-  scene.fog = new THREE.FogExp2(0x202728, .032);
+  scene.background = new THREE.Color(0x020911);
+  scene.fog = new THREE.FogExp2(0x07131c, .041);
   const camera = new THREE.PerspectiveCamera(35, 1, .1, 90);
   camera.position.set(.35,.55,13.8);
   camera.lookAt(0,.35,0);
@@ -45,11 +45,11 @@ export function createMachineScene(canvas, fallback) {
   scene.environment = envTexture;
   scene.environmentIntensity = .72;
   environment.dispose(); pmrem.dispose();
-  scene.add(new THREE.HemisphereLight(0xbac8cf,0x271707,1.25));
-  const key = new THREE.DirectionalLight(0xd0dae0,4.5); key.position.set(-5,7,8);scene.add(key);
-  const fill = new THREE.DirectionalLight(0xd1a776,1.5);fill.position.set(5,1,6);scene.add(fill);
-  const rim = new THREE.DirectionalLight(0xffb457,6);rim.position.set(4,6,-6);scene.add(rim);
-  const bottom = new THREE.PointLight(0xf78d27,13,14,2);bottom.position.set(-1,-3,3);scene.add(bottom);
+  scene.add(new THREE.HemisphereLight(0x8fc9df,0x05090d,.82));
+  const key = new THREE.DirectionalLight(0xb8ddea,3.6); key.position.set(-5,7,8);scene.add(key);
+  const fill = new THREE.DirectionalLight(0x3f9fbe,1.35);fill.position.set(5,1,6);scene.add(fill);
+  const rim = new THREE.DirectionalLight(0x4fc7e8,4.4);rim.position.set(4,6,-6);scene.add(rim);
+  const bottom = new THREE.PointLight(0xe3a04c,7.5,13,2);bottom.position.set(-1,-3,3);scene.add(bottom);
   const core = createQuantumCore({low});
   const corePivot = new THREE.Group();corePivot.position.set(0,.42,-.35);corePivot.add(core.group);scene.add(corePivot);
   const city = createMachineCity({low});scene.add(city.group);
@@ -162,8 +162,23 @@ export function createMachineScene(canvas, fallback) {
     }catch(error){failScene(error);}
   };
   const ro=new ResizeObserver(resize);ro.observe(canvas);
-  canvas.addEventListener('pointermove',e=>{const r=canvas.getBoundingClientRect();pointerX=(e.clientX-r.left)/r.width-.5;pointerY=(e.clientY-r.top)/r.height-.5;});
-  canvas.addEventListener('pointerleave',()=>{pointerX=0;pointerY=0;});
+  function taskAtPointer(e){
+    const r=canvas.getBoundingClientRect();if(!r.width||!r.height)return null;
+    mouse.set((e.clientX-r.left)/r.width*2-1,-(e.clientY-r.top)/r.height*2+1);
+    raycaster.setFromCamera(mouse,camera);
+    const hit=raycaster.intersectObjects([...taskNodes.values()].map(node=>node.group),true)
+      .find(intersection=>Boolean(intersection.object.userData.taskId));
+    return hit?.object.userData.taskId||null;
+  }
+  canvas.addEventListener('pointermove',e=>{
+    const r=canvas.getBoundingClientRect();pointerX=(e.clientX-r.left)/r.width-.5;pointerY=(e.clientY-r.top)/r.height-.5;
+    const taskId=taskAtPointer(e);
+    canvas.dispatchEvent(new CustomEvent('swarm-task-hover',{bubbles:true,detail:{taskId,x:e.clientX-r.left,y:e.clientY-r.top}}));
+  });
+  canvas.addEventListener('pointerleave',()=>{
+    pointerX=0;pointerY=0;
+    canvas.dispatchEvent(new CustomEvent('swarm-task-hover',{bubbles:true,detail:{taskId:null,x:0,y:0}}));
+  });
   canvas.addEventListener('click',e=>{
     if(lost||!active)return;
     const r=canvas.getBoundingClientRect();if(!r.width||!r.height)return;
@@ -233,7 +248,7 @@ export function createMachineScene(canvas, fallback) {
     }
     const liveTarget=activity.activeAgent?visibleDrone(activity.activeAgent):[...drones.values()].find(drone=>drone.group.visible&&['working','blocked'].includes(drone.status));
     const communicationTarget=demo.enabled?visibleDrone(demo.target):liveTarget;
-    const communicationState=demo.enabled?state:((state==='waiting_user'||(activity.blocked||0)>0||communicationTarget?.status==='blocked')?'waiting_user':'working');
+    const communicationState=demo.enabled?state:((state==='waiting_user'||(activity.userBlocked||0)>0||communicationTarget?.status==='blocked')?'waiting_user':'working');
     const communication=Boolean(communicationTarget&&(demo.enabled?['delegating','waiting_result','complete','tool'].includes(state):['working','waiting_user'].includes(communicationState)));
     link.visible=communication;packets.visible=communication&&communicationState!=='waiting_user';
     if(communication){

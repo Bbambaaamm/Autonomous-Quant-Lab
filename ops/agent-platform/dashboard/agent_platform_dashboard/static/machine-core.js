@@ -134,7 +134,7 @@ export function createQuantumCore({ low = false } = {}) {
   group.add(light);
   let energy = .28;
   let state = 'offline';
-  let activity = { running: 0, pending: 0, blocked: 0, workingAgents: 0 };
+  let activity = { running: 0, pending: 0, blocked: 0, userBlocked: 0, workingAgents: 0 };
   function update({ time = 0, delta = 1 / 60, state: next = state, reduced = false, activity: nextActivity = activity } = {}) {
     state = STATE[next] ? next : 'offline';
     activity = { ...activity, ...nextActivity };
@@ -143,7 +143,7 @@ export function createQuantumCore({ low = false } = {}) {
     const target = clamp(profile.energy + load, .08, 1.28);
     const ease = reduced ? 1 : 1 - Math.exp(-Math.max(delta, 0) * 4.2);
     energy = THREE.MathUtils.lerp(energy, target, ease);
-    const blocked = state === 'waiting_user' || state === 'error' || (activity.blocked || 0) > 0;
+    const blocked = state === 'waiting_user' || state === 'error' || (activity.userBlocked || 0) > 0;
     const cyan = blocked ? 0xff7864 : profile.cyan;
     const amber = blocked ? 0xff5e48 : profile.amber;
     const speed = reduced ? 0 : profile.speed * (.72 + energy * .72);

@@ -49,7 +49,7 @@ export function mountDashboard(createScene) {
     dagStatus: $('#taskgraph-status'), dagNodes: $('#taskgraph-nodes'),
     analyticsGrid: $('#swarm-analytics-grid'),
   };
-  let liveData = null, demo = false, demoState = 'idle', view = 'work', selectedAgent = null, selectedTask = null;
+  let liveData = null, demo = false, demoState = 'idle', view = 'work', selectedAgent = null, selectedTask = null, taskFilter = 'all';
   let reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
   let scene = null, sceneFailed = false, lastFaceState = null, lastDemoKey = '', returnFocus = null;
   let fetchPending = false, loadReason = 'Načítám skutečná data';
@@ -64,6 +64,14 @@ export function mountDashboard(createScene) {
   catch (_) { sceneFailed = true; ui.fallback.hidden = false; }
   ui.canvas.addEventListener('webglcontextlost', event => { event.preventDefault(); failScene(); });
   ui.canvas.addEventListener('scene-unavailable', failScene);
+  ui.canvas.addEventListener('swarm-task-hover', event => {
+    const label = $('#task-hover-label'), detail = event.detail || {}, task = taskById(detail.taskId);
+    if (!label || !task || view !== 'film') { if (label) label.hidden = true; return; }
+    label.textContent = `${issueLabel(task)} · ${QUEUE_STATUS[task.status] || task.status} · ${task.issue_title || task.task_id}`;
+    label.style.left = `${Math.max(12, detail.x + 14)}px`;
+    label.style.top = `${Math.max(72, detail.y + 14)}px`;
+    label.hidden = false;
+  });
 
   function sceneCall(method, ...args) {
     if (!scene || sceneFailed || typeof scene[method] !== 'function') return;
@@ -168,7 +176,7 @@ export function mountDashboard(createScene) {
     const running = count('running'), waiting = count('pending'), failed = count('failed'), blockedOnly = count('blocked'), done = count('done');
     const blocked = blockedOnly + failed;
     const activeAgents = agents().filter(row => row.status === 'working').length;
-    const retries = queue.reduce((sum, row) => sum + (Number.isSafeInteger(row.attempts) ? row.attempts : 0), 0);
+    const retries = queue.reduce((sum, row) => sum + (Number.isSafeInteger(row.attempts) ? Math.max(0, row.attempts - 1) : 0), 0);
     const terminal = done + failed;
     const success = terminal ? Math.round(done / terminal * 100) : null;
     const profiles = PROFILES.map(stats);
@@ -183,7 +191,7 @@ export function mountDashboard(createScene) {
     const durationRequests = models.reduce((sum, row) => sum + row.durationRequests, 0);
     const requestLatency = durationRequests ? durationMs / durationRequests : null;
     const fallbacks = profiles.every(value => value.fallbacks != null) ? profiles.reduce((sum, value) => sum + value.fallbacks, 0) : null;
-    return { queue, running, waiting, blocked, done, failed, activeAgents, retries, success,
+    return { queue, running, waiting, blocked, blockedOnly, done, failed, activeAgents, retries, success,
       activeQueue: running + waiting + blocked, inputTokens, outputTokens, tokenUnknownRequests, cost, costUnknownRequests,
       requestLatency, fallbacks, models };
   }
@@ -199,13 +207,13 @@ export function mountDashboard(createScene) {
       ['Active', m.activeAgents, 'živí agenti', m.activeAgents ? 'running' : ''],
       ['Running', m.running, 'běžící tasky', m.running ? 'running' : ''],
       ['Waiting', m.waiting, 'pending', m.waiting ? 'waiting' : ''],
-      ['Blocked', m.blocked, 'blocked + failed', m.blocked ? 'blocked' : ''],
+      ['Blocked / Failed', `${m.blockedOnly} / ${m.failed}`, 'oddělené stavy', m.blocked ? 'blocked' : ''],
       ['Queue', m.activeQueue, 'aktivní tasky', ''],
       ['Success', m.success == null ? '—' : `${m.success} %`, 'snapshot terminal', ''],
-      ['Retries', m.retries, 'durable attempts', m.retries ? 'waiting' : ''],
+      ['Retries', m.retries, 'opakované pokusy', m.retries ? 'waiting' : ''],
       ['Avg task', '—', 'duration telemetry chybí', ''],
       ['Tokens', tokenValue, m.tokenUnknownRequests ? `${m.tokenUnknownRequests} req bez tokenů` : 'known input + output', ''],
-      ['Cost', costValue, m.costUnknownRequests ? `${m.costUnknownRequests} req bez ceny` : 'známé variabilní', ''],
+      ['Cost known', costValue, m.costUnknownRequests ? `${m.costUnknownRequests} req unknown` : 'všechny requesty oceněné', ''],
     ];
     root.innerHTML = cells.map(([label, value, note, state]) => `<article class="swarm-kpi" data-state="${state}"><span>${escapeHTML(label)}</span><b>${escapeHTML(String(value))}</b><small>${escapeHTML(note)}</small></article>`).join('');
   }
@@ -220,6 +228,11 @@ export function mountDashboard(createScene) {
       return aa[0] - bb[0] || aa[1] - bb[1] || String(aa[2]).localeCompare(String(bb[2]));
     });
   }
+  function taskMatchesFilter(row) {
+    if (taskFilter === 'all') return true;
+    if (taskFilter === 'blocked') return row.status === 'blocked' || row.status === 'failed';
+    return row.status === taskFilter;
+  }
 
   function renderTaskGraph() {
     const root = $('#taskgraph-nodes'), status = $('#taskgraph-status');
@@ -231,8 +244,10 @@ export function mountDashboard(createScene) {
       sceneCall('setTasks', []);
       return;
     }
-    const rows = sortedTaskNodes();
-    status.textContent = 'Dependency telemetry není v aktuálním kontraktu · hrany se nevymýšlejí.';
+    const rows = sortedTaskNodes().filter(taskMatchesFilter);
+    document.querySelectorAll('[data-task-filter]').forEach(button => button.setAttribute('aria-pressed', String(button.dataset.taskFilter === taskFilter)));
+    const filterLabel = taskFilter === 'all' ? 'všechny stavy' : taskFilter === 'pending' ? 'čekající' : taskFilter === 'blocked' ? 'blocked + failed' : taskFilter;
+    status.textContent = `Dependency telemetry není v aktuálním kontraktu · hrany se nevymýšlejí · filtr: ${filterLabel}.`;
     if (!rows.length) {
       root.innerHTML = '<div class="obs-empty">Durable queue je prázdná.</div>';
       sceneCall('setTasks', []);
@@ -268,11 +283,11 @@ export function mountDashboard(createScene) {
     const mix = topModels.length ? topModels.map(row => `${escapeHTML(row.model)} ${fmt.format(row.requests)}`).join(' · ') : 'Model telemetry není dostupná.';
     root.innerHTML = [
       `<article class="swarm-card"><header><h3>Throughput</h3><span>tasks / time</span></header><strong>—</strong><p>Časová řada dokončených tasků není v autoritativním kontraktu; hodnotu neodhadujeme.</p></article>`,
-      `<article class="swarm-card"><header><h3>Queue depth</h3><span>snapshot</span></header><strong>${fmt.format(m.activeQueue)}</strong>${mini}<p>${m.running} running · ${m.waiting} waiting · ${m.blocked} blocked · ${m.done} done</p></article>`,
+      `<article class="swarm-card"><header><h3>Queue depth</h3><span>snapshot</span></header><strong>${fmt.format(m.activeQueue)}</strong>${mini}<p>${m.running} running · ${m.waiting} waiting · ${m.blockedOnly} blocked · ${m.failed} failed · ${m.done} done</p></article>`,
       `<article class="swarm-card"><header><h3>Latency</h3><span>router request avg</span></header><strong>${escapeHTML(latency(m.requestLatency))}</strong><p>Task queue/review p50+p95 nejsou dostupné; zobrazen je pouze měřený router request průměr.</p></article>`,
-      `<article class="swarm-card"><header><h3>Tokens & cost</h3><span>known telemetry</span></header><strong>${escapeHTML(tokens)}</strong><p>${escapeHTML(cost)} · ${m.costUnknownRequests || 0} req bez ceny · ${m.tokenUnknownRequests || 0} token polí bez hodnoty.</p></article>`,
+      `<article class="swarm-card"><header><h3>Tokens & cost</h3><span>known telemetry</span></header><strong>${escapeHTML(tokens)}</strong><p>${escapeHTML(cost)} known · ${m.costUnknownRequests || 0} req unknown · ${m.tokenUnknownRequests || 0} token fields unknown.</p></article>`,
       `<article class="swarm-card"><header><h3>Model mix</h3><span>requests</span></header><strong>${fmt.format(m.models.reduce((sum,row)=>sum+row.requests,0))}</strong><p>${mix}</p></article>`,
-      `<article class="swarm-card"><header><h3>Reliability</h3><span>snapshot</span></header><strong>${fmt.format(m.retries)}</strong><p>retry attempts · ${m.failed} failed · ${m.blocked} blocked · ${number(m.fallbacks)} model fallbacků.</p></article>`,
+      `<article class="swarm-card"><header><h3>Reliability</h3><span>snapshot</span></header><strong>${fmt.format(m.retries)}</strong><p>true retries · ${m.blockedOnly} blocked · ${m.failed} failed · ${number(m.fallbacks)} model fallbacků.</p></article>`,
     ].join('');
   }
 
@@ -371,6 +386,7 @@ export function mountDashboard(createScene) {
       running: queue.filter(row => row.status === 'running').length,
       pending: queue.filter(row => row.status === 'pending').length,
       blocked: queue.filter(row => ['blocked', 'failed'].includes(row.status)).length,
+      userBlocked: userBlockedTasks().length,
       workingAgents: working.length,
       activeAgent: currentTask?.agent || working[0]?.agent || null,
     });
@@ -760,6 +776,7 @@ export function mountDashboard(createScene) {
     }); ui.demoStates.append(button);
   }
   document.querySelectorAll('[data-view]').forEach(button => button.addEventListener('click', () => applyView(button.dataset.view)));
+  document.querySelectorAll('[data-task-filter]').forEach(button => button.addEventListener('click', () => { taskFilter = button.dataset.taskFilter || 'all'; renderTaskGraph(); }));
   $('#demo-toggle').addEventListener('click', event => {
     demo = !demo; document.documentElement.dataset.mode = demo ? 'demo' : 'live';
     event.currentTarget.setAttribute('aria-pressed', String(demo)); event.currentTarget.textContent = demo ? 'Ukončit demo' : 'Demo režim'; ui.demo.hidden = !demo;
