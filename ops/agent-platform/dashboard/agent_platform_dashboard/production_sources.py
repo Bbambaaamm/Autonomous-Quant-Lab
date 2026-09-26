@@ -18,6 +18,7 @@ SAFE_ENV = {'PATH': '/usr/bin:/bin', 'LANG': 'C.UTF-8', 'LC_ALL': 'C.UTF-8',
             'GIT_OPTIONAL_LOCKS': '0', 'GIT_TERMINAL_PROMPT': '0'}
 QUEUE_PATH = '/var/lib/agent-platform-herdr/queue.json'
 CODEX_USAGE_PATH = '/var/lib/agent-platform-herdr/codex-usage.json'
+MODEL_ROUTING_PATH = '/var/lib/agent-platform-herdr/model-routing.json'
 
 
 def command(argv, *, env=None, limit=65536, timeout=3):
@@ -272,6 +273,59 @@ def queue(path, profile):
     return rows, raw['observed_at']
 
 
+def _routing_summary(now):
+    empty = {
+        'routing_status': 'unavailable', 'routing_policy_version': None,
+        'routing_observed_at': None, 'routing_soft_limit_pct': None,
+        'routing_hard_limit_pct': None, 'routing_decisions': None,
+        'routing_free': None, 'routing_sol': None, 'routing_astra': None,
+        'routing_astra_escalations': None, 'routing_premium_denied': None,
+        'last_route_at': None, 'last_route_tier': None,
+        'last_route_model': None, 'last_route_reason': None,
+    }
+    try:
+        raw = c.parse(read(MODEL_ROUTING_PATH, 65536), 65536)
+        c.keys(raw, 'version observed_at policy totals recent')
+        c.need(type(raw['version']) is int and raw['version'] == 1
+               and c.number(raw['observed_at']) and 0 <= now - raw['observed_at'] <= 900)
+        policy, totals, recent = raw['policy'], raw['totals'], raw['recent']
+        c.keys(policy, 'version soft_limit_pct hard_limit_pct')
+        c.keys(totals, 'decisions free sol astra astra_escalations premium_denied')
+        c.need(c.identifier(policy['version'], 64))
+        c.need(c.number(policy['soft_limit_pct']) and c.number(policy['hard_limit_pct'])
+               and policy['soft_limit_pct'] < policy['hard_limit_pct'] <= 100)
+        for value in totals.values():
+            c.need(c.number(value))
+        c.need(totals['free'] + totals['sol'] + totals['astra'] <= totals['decisions'])
+        c.need(type(recent) is list and len(recent) <= 200)
+        last = recent[-1] if recent else None
+        if last is not None:
+            c.keys(last, 'at task_id issue attempt tier model selected_agent reason complexity_score codex_used_percent')
+            c.need(c.number(last['at']) and c.identifier(last['task_id'])
+                   and (last['issue'] is None or c.number(last['issue']))
+                   and c.number(last['attempt']) and last['tier'] in ('free', 'sol', 'astra')
+                   and c.identifier(last['model']) and c.identifier(last['selected_agent'])
+                   and c.identifier(last['reason'])
+                   and type(last['complexity_score']) in (int, float)
+                   and 0 <= last['complexity_score'] <= 1
+                   and (last['codex_used_percent'] is None or c.number(last['codex_used_percent'])
+                        and last['codex_used_percent'] <= 100))
+        return {
+            'routing_status': 'available', 'routing_policy_version': policy['version'],
+            'routing_observed_at': raw['observed_at'], 'routing_soft_limit_pct': policy['soft_limit_pct'],
+            'routing_hard_limit_pct': policy['hard_limit_pct'], 'routing_decisions': totals['decisions'],
+            'routing_free': totals['free'], 'routing_sol': totals['sol'], 'routing_astra': totals['astra'],
+            'routing_astra_escalations': totals['astra_escalations'],
+            'routing_premium_denied': totals['premium_denied'],
+            'last_route_at': None if last is None else last['at'],
+            'last_route_tier': None if last is None else last['tier'],
+            'last_route_model': None if last is None else last['model'],
+            'last_route_reason': None if last is None else last['reason'],
+        }
+    except (FileNotFoundError, OSError, ValueError, KeyError, TypeError, UnicodeError):
+        return empty
+
+
 def codex(path, profile):
     c.need(profile == 'majak' and path == CODEX_USAGE_PATH)
     raw = c.parse(read(path, 65536), 65536)
@@ -297,6 +351,7 @@ def codex(path, profile):
         daily=usage['daily'],
         limit_history=raw['limit_history'],
     )
+    item.update(_routing_summary(int(time.time())))
     c.row('codex', item)
     return [item], raw['observed_at']
 
@@ -320,5 +375,3 @@ def herdr(path, profile, now):
         raise NotConfigured('profile_not_configured')
     c.need(len({r['agent'] for r in raw['agents']}) == len(raw['agents']))
     return [r for r in raw['agents'] if r['agent'].startswith(profile + '-')], raw['observed_at']
-
-[executed on device: quantlab-staging-01 (efe59886-9b61-4d73-8a30-a34b95415c21)]

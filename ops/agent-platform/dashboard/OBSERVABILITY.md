@@ -12,7 +12,10 @@ sources for Machine City. It is stacked on the Git source-of-truth import from P
   fallback count, results/extracts and optional cost.
 - `queue`: sanitized durable Agent Stack queue metadata, schema version 2.
 - `codex`: sanitized account allowance/token activity from
-  `/var/lib/agent-platform-herdr/codex-usage.json`.
+  `/var/lib/agent-platform-herdr/codex-usage.json`, enriched with bounded
+  cost-aware routing summary from `/var/lib/agent-platform-herdr/model-routing.json`:
+  FREE/Sol/Astra decisions, Astra escalations, premium-denial count, policy limits
+  and the last sanitized route reason/model.
 
 The `codex` source is global account telemetry and is exposed once under the `majak`
 profile to keep the existing two-profile snapshot envelope closed and deterministic.
@@ -45,5 +48,3 @@ Run:
 
 The tests also exercise queue v2 rejection, Codex redaction, search projection and
 fail-closed Codex staleness.
-
-[executed on device: quantlab-staging-01 (efe59886-9b61-4d73-8a30-a34b95415c21)]
