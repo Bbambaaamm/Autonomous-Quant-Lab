@@ -22,7 +22,7 @@ from enum import StrEnum
 class ReviewVerdict(StrEnum):
     """Reviewer decision."""
 
-    PASS = "pass"
+    SUCCESS = "pass"\n    PASS = SUCCESS
     BLOCK = "block"
     NEEDS_REPLAN = "needs_replan"
 
