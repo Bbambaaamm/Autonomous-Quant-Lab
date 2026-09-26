@@ -2,6 +2,7 @@ import json
 import sqlite3
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -64,6 +65,38 @@ def codex_payload(observed_at=100):
     }
 
 
+def routing_payload(observed_at):
+    return {
+        "version": 1,
+        "observed_at": observed_at,
+        "policy": {
+            "version": "cost-aware-v1.0",
+            "soft_limit_pct": 70,
+            "hard_limit_pct": 90,
+        },
+        "totals": {
+            "decisions": 7,
+            "free": 5,
+            "sol": 2,
+            "astra": 0,
+            "astra_escalations": 0,
+            "premium_denied": 0,
+        },
+        "recent": [{
+            "at": observed_at,
+            "task_id": "github-issue-230-test",
+            "issue": 230,
+            "attempt": 2,
+            "tier": "sol",
+            "model": "gpt-6-sol",
+            "selected_agent": "quantlab-sol",
+            "reason": "cheap_attempts_exhausted",
+            "complexity_score": 0.61,
+            "codex_used_percent": 8,
+        }],
+    }
+
+
 class ObservabilityContractTests(unittest.TestCase):
     def test_source_matrix_is_closed_and_asymmetric(self):
         self.assertEqual(len(c.SOURCE_PAIRS), 14)
@@ -116,6 +149,36 @@ class ObservabilityContractTests(unittest.TestCase):
                     sources.codex(str(path), "quantlab")
             finally:
                 sources.CODEX_USAGE_PATH = original
+    def test_codex_projection_includes_cost_aware_routing_summary(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            now = int(time.time())
+            codex = root / "codex.json"
+            routing = root / "routing.json"
+            codex.write_text(json.dumps(codex_payload(observed_at=now)), encoding="utf-8")
+            routing.write_text(json.dumps(routing_payload(now)), encoding="utf-8")
+            old_usage, old_routing = sources.CODEX_USAGE_PATH, sources.MODEL_ROUTING_PATH
+            sources.CODEX_USAGE_PATH, sources.MODEL_ROUTING_PATH = str(codex), str(routing)
+            try:
+                rows, stamp = sources.codex(str(codex), "majak")
+                row = rows[0]
+                self.assertEqual(stamp, now)
+                self.assertEqual(row["routing_status"], "available")
+                self.assertEqual((row["routing_free"], row["routing_sol"], row["routing_astra"]), (5, 2, 0))
+                self.assertEqual(row["routing_astra_escalations"], 0)
+                self.assertEqual(row["routing_soft_limit_pct"], 70)
+                self.assertEqual(row["routing_hard_limit_pct"], 90)
+                self.assertEqual(row["last_route_model"], "gpt-6-sol")
+                self.assertEqual(row["last_route_reason"], "cheap_attempts_exhausted")
+                routing_data = routing_payload(now)
+                routing_data["recent"][0]["prompt"] = "PRIVATE"
+                routing.write_text(json.dumps(routing_data), encoding="utf-8")
+                degraded, _ = sources.codex(str(codex), "majak")
+                self.assertEqual(degraded[0]["routing_status"], "unavailable")
+                self.assertNotIn("PRIVATE", json.dumps(degraded))
+            finally:
+                sources.CODEX_USAGE_PATH, sources.MODEL_ROUTING_PATH = old_usage, old_routing
+
     def test_search_projection_is_bounded_operational_only(self):
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / "search.db"

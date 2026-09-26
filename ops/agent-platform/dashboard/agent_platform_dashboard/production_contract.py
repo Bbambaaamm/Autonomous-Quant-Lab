@@ -78,7 +78,10 @@ def row(kind, value):
               'codex': ('used_percent window_minutes resets_at ordinary_usage_allowed has_credits '
                         'credits_unlimited credits_balance reset_credits_available lifetime_tokens '
                         'peak_daily_tokens longest_running_turn_sec current_streak_days '
-                        'longest_streak_days daily limit_history')}
+                        'longest_streak_days daily limit_history routing_status routing_policy_version '
+                        'routing_observed_at routing_soft_limit_pct routing_hard_limit_pct routing_decisions '
+                        'routing_free routing_sol routing_astra routing_astra_escalations routing_premium_denied '
+                        'last_route_at last_route_tier last_route_model last_route_reason')}
     keys(value, fields[kind])
     if kind == 'herdr':
         need(value['agent'] in ('majak-hermes', 'majak-codex', 'quantlab-hermes', 'quantlab-codex'))
@@ -144,6 +147,27 @@ def row(kind, value):
             need(number(item['at']) and number(item['used_percent']) and item['used_percent'] <= 100)
             need(previous_at < item['at'])
             previous_at = item['at']
+        need(value['routing_status'] in ('available', 'unavailable'))
+        routing_numbers = (
+            'routing_observed_at', 'routing_soft_limit_pct', 'routing_hard_limit_pct',
+            'routing_decisions', 'routing_free', 'routing_sol', 'routing_astra',
+            'routing_astra_escalations', 'routing_premium_denied', 'last_route_at',
+        )
+        if value['routing_status'] == 'available':
+            need(identifier(value['routing_policy_version'], 64))
+            need(all(number(value[name]) for name in routing_numbers[:-1]))
+            need(value['routing_soft_limit_pct'] < value['routing_hard_limit_pct'] <= 100)
+            need(value['routing_free'] + value['routing_sol'] + value['routing_astra']
+                 <= value['routing_decisions'])
+            need(value['routing_astra_escalations'] <= value['routing_astra'])
+            need(value['last_route_at'] is None or number(value['last_route_at']))
+            need(value['last_route_tier'] is None or value['last_route_tier'] in ('free', 'sol', 'astra'))
+            need(identifier(value['last_route_model']) and identifier(value['last_route_reason']))
+        else:
+            need(value['routing_policy_version'] is None)
+            need(all(value[name] is None for name in routing_numbers))
+            need(value['last_route_tier'] is None and value['last_route_model'] is None
+                 and value['last_route_reason'] is None)
     else:
         need(number(value['passed']) and number(value['failed']) and hex_id(value['artifact_digest']))
 
