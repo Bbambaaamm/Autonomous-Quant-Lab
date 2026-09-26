@@ -1214,15 +1214,15 @@ class DynamicChildScheduler:
             issue=parent.node.issue or self._issue,
         )
         decision = PolicyGate.evaluate(canonical)
-        if not decision:
-            assert isinstance(decision, DenyDecision)
+        if isinstance(decision, DenyDecision):
             return self._spawn_deny(
                 decision.reason,
                 decision.detail,
                 parent_task_id=parent_task_id,
                 child_task=canonical.child_task,
             )
-        assert isinstance(decision, AllowDecision)
+        if not isinstance(decision, AllowDecision):
+            raise TypeError("policy gate returned an unknown decision type")
 
         deps = tuple(dict.fromkeys(canonical.dependencies))
         unknown = sorted(set(deps) - set(self._tasks))
