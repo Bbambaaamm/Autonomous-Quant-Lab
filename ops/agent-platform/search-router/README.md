@@ -8,7 +8,7 @@ Adding PERPLEXITY_API_KEY does not make Perplexity the default.
 - BROWSER: local browser.
 
 Optional limits:
-- SEARCH_ROUTER_PERPLEXITY_DAILY_CAP_USD (default 1.00)
+- SEARCH_ROUTER_PERPLEXITY_DAILY_CAP_USD (default 1.00, shared atomically across Maják and QuantLab)
 - SEARCH_ROUTER_PERPLEXITY_FAST_COST_USD (default 0.001)
 - SEARCH_ROUTER_PERPLEXITY_WEB_COST_USD (default 0.005)
 

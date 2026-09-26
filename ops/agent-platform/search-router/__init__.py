@@ -78,6 +78,25 @@ def _db() -> sqlite3.Connection:
     con.commit()
     return con
 
+def _budget_db() -> sqlite3.Connection:
+    home = _home()
+    root = home.parent.parent if home.parent.name == "profiles" else home
+    root.mkdir(parents=True, exist_ok=True)
+    con = sqlite3.connect(root / "search-router-budget.db", timeout=15, isolation_level=None)
+    con.row_factory = sqlite3.Row
+    con.execute("PRAGMA journal_mode=WAL")
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS paid_usage (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            reserved_at REAL NOT NULL,
+            provider TEXT NOT NULL,
+            cost_usd REAL NOT NULL,
+            query_hash TEXT NOT NULL
+        )
+    """)
+    con.execute("CREATE INDEX IF NOT EXISTS idx_paid_usage_reserved ON paid_usage(reserved_at)")
+    return con
+
 def _hash_query(query: str) -> str:
     return hashlib.sha256(query.encode("utf-8", "ignore")).hexdigest()[:16]
 
@@ -177,17 +196,44 @@ def _perplexity_cost(fast: bool) -> float:
 
 def _paid_spend_today() -> float:
     day_start = (int(time.time()) // 86400) * 86400
-    with _db() as con:
+    con = _budget_db()
+    try:
         row = con.execute(
-            "SELECT COALESCE(SUM(cost_usd),0) FROM searches "
-            "WHERE started_at >= ? AND cost_usd IS NOT NULL",
+            "SELECT COALESCE(SUM(cost_usd),0) FROM paid_usage WHERE reserved_at >= ?",
             (day_start,),
         ).fetchone()
-    return float(row[0] or 0.0)
+        return float(row[0] or 0.0)
+    finally:
+        con.close()
 
-def _can_spend(cost: float) -> bool:
+def _reserve_paid(cost: float, provider: str, query: str) -> int | None:
+    cost = max(0.0, float(cost))
     cap = _perplexity_daily_cap()
-    return cap > 0 and (_paid_spend_today() + max(0.0, cost)) <= cap + 1e-12
+    if cap <= 0 or cost <= 0:
+        return None
+    now = time.time()
+    day_start = (int(now) // 86400) * 86400
+    con = _budget_db()
+    try:
+        con.execute("BEGIN IMMEDIATE")
+        spent = float(con.execute(
+            "SELECT COALESCE(SUM(cost_usd),0) FROM paid_usage WHERE reserved_at >= ?",
+            (day_start,),
+        ).fetchone()[0] or 0.0)
+        if spent + cost > cap + 1e-12:
+            con.rollback()
+            return None
+        cur = con.execute(
+            "INSERT INTO paid_usage(reserved_at,provider,cost_usd,query_hash) VALUES(?,?,?,?)",
+            (now, _safe_provider(provider), cost, _hash_query(query)),
+        )
+        con.commit()
+        return int(cur.lastrowid)
+    except Exception:
+        con.rollback()
+        raise
+    finally:
+        con.close()
 
 def _quality_requires_perplexity(query: str) -> bool:
     text = (query or "").lower()
@@ -289,7 +335,8 @@ async def _search_with_fallback(
 
     if prefer_quality:
         cost = _perplexity_cost(False)
-        if _can_spend(cost):
+        reservation = _reserve_paid(cost, "perplexity-web", query)
+        if reservation is not None:
             paid, paid_provider = await _perplexity_search(query, limit, fast=False)
             if _is_ok(paid) and _hits(paid):
                 return paid, paid_provider, False, None
@@ -300,7 +347,8 @@ async def _search_with_fallback(
 
     if not prefer_quality:
         cost = _perplexity_cost(True)
-        if _can_spend(cost):
+        reservation = _reserve_paid(cost, "perplexity-fast", query)
+        if reservation is not None:
             paid, paid_provider = await _perplexity_search(query, limit, fast=True)
             if _is_ok(paid) and _hits(paid):
                 return paid, paid_provider, True, paid_provider
