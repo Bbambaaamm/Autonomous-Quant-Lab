@@ -10,4 +10,12 @@ STATIC="$ROOT/agent_platform_dashboard/static"
 THREE_VERSION="$(node -p "require('${THREE_ROOT}/package.json').version")"
 [[ "$THREE_VERSION" == "0.180.0" ]]
 
-"$ESBUILD_BIN" "$STATIC/machine-city-source.js"   --bundle   --minify   --format=iife   --alias:three/addons="$THREE_ROOT/examples/jsm"   --alias:three="$THREE_ROOT/build/three.module.js"   --outfile="$STATIC/machine-city.js"
+"$ESBUILD_BIN" "$STATIC/machine-city-source.js" \
+  --bundle \
+  --minify \
+  --format=iife \
+  --inject:"$STATIC/secure-random.js" \
+  --define:Math.random=secureRandom \
+  --alias:three/addons="$THREE_ROOT/examples/jsm" \
+  --alias:three="$THREE_ROOT/build/three.module.js" \
+  --outfile="$STATIC/machine-city.js"
