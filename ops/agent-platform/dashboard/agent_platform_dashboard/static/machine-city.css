@@ -191,3 +191,10 @@ html[data-mode=demo] .coordinator-card{bottom:214px}
   .scene-controls{bottom:12px}
   .agent-node{min-height:52px;padding:9px 11px}
 }
+
+
+/* Responsive audit hardening for short desktop viewports. */
+.coordinator-card p{display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;overflow:hidden}
+@media(max-height:820px) and (min-width:1001px){
+  .coordinator-card{bottom:72px}
+}
