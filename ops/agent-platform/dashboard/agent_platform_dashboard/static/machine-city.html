@@ -34,7 +34,7 @@
         <div class="metric"><span>Požadavky</span><strong id="request-count">—</strong></div>
         <div class="metric"><span>Hledání</span><strong id="search-count">—</strong></div>
         <div class="metric"><span>Search latence</span><strong id="search-latency">—</strong></div>
-        <div class="metric"><span>Náklady</span><strong id="cost-total">—</strong></div>
+        <div class="metric"><span>Codex zbývá</span><strong id="cost-total">—</strong></div>
         <p id="data-caveat" class="caveat">Neznámé hodnoty zůstávají neznámé.</p>
       </aside>
 
@@ -80,6 +80,14 @@
       <header class="work-head"><div><div class="eyebrow">SKUTEČNÁ DATA</div><h1>Pracovní přehled</h1></div><p id="work-freshness">—</p></header>
       <div id="attention-summary" class="attention-summary" hidden></div>
       <div id="project-grid" class="project-grid"></div>
+      <section class="observability" aria-labelledby="observability-title">
+        <div class="section-title">
+          <div><div class="eyebrow">OBSERVABILITY · LIVE</div><h2 id="observability-title">Systémová telemetrie</h2></div>
+          <span>Codex allowance · tokeny · modely · fallbacky · latence · fronta · coverage</span>
+        </div>
+        <div id="observability-kpis" class="observability-kpis"></div>
+        <div id="observability-grid" class="observability-grid"></div>
+      </section>
       <section class="queue-health" aria-labelledby="queue-title"><div class="section-title"><div><div class="eyebrow">HERDR · DURABLE QUEUE</div><h2 id="queue-title">Autonomní fronta QuantLab</h2></div><span>Jen bezpečná provozní metadata · bez promptů a logů.</span></div><div id="queue-summary" class="queue-summary"></div><div id="queue-list" class="queue-list"></div></section>
       <section class="search-layer" aria-labelledby="search-layer-title"><div class="section-title"><div><div class="eyebrow">WEB · SEARCH ROUTER</div><h2 id="search-layer-title">Vyhledávací vrstva</h2></div><span>Fast · Deep · Browser · telemetrie bez ukládání textu dotazů.</span></div><div id="search-grid" class="search-grid"></div></section>
       <section class="source-health"><div class="section-title"><h2>Zdroje dat</h2><span>Chybějící data nejsou nahrazena odhadem.</span></div><div id="source-grid" class="source-grid"></div></section>
