@@ -225,9 +225,11 @@ artifact_files_cache: dict[str, tuple[str, ...]] = {}
 def _real_git(root: Path) -> Callable[[Sequence[str]], str]:
     import subprocess
 
+    _git = shutil.which("git") or "git"
+
     def _run(args: Sequence[str]) -> str:
-        proc = subprocess.run(
-            ["git", "-C", str(root), *args],
+        proc = subprocess.run(  # noqa: S603
+            [_git, "-C", str(root), *args],
             check=True,
             capture_output=True,
             text=True,
