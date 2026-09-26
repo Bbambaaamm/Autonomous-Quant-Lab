@@ -734,7 +734,7 @@ class DynamicChildScheduler:
                 # counts and the root reference so deny/audit invariants replay.
                 applied += 1
                 continue
-            tid = ev.get("task_id") or ev.get("root")  # type: ignore[arg-type]
+            tid = ev.get("task_id") or ev.get("root")
             if kind == "dispatch" and isinstance(tid, str):
                 rec = self._tasks.get(tid)
                 if rec is None:
