@@ -44,6 +44,11 @@ function fixture() {
       current_streak_days: 7, longest_streak_days: 9,
       daily: [{ day: '2026-09-24', tokens: 1000 }, { day: '2026-09-25', tokens: 2000 }],
       limit_history: [{ at: now - 300, used_percent: 80 }, { at: now, used_percent: 82 }],
+      routing_status: 'available', routing_policy_version: 'cost-aware-v1.0', routing_observed_at: now,
+      routing_soft_limit_pct: 70, routing_hard_limit_pct: 90, routing_decisions: 7,
+      routing_free: 5, routing_sol: 2, routing_astra: 0, routing_astra_escalations: 0,
+      routing_premium_denied: 0, last_route_at: now, last_route_tier: 'sol',
+      last_route_model: 'gpt-6-sol', last_route_reason: 'cheap_attempts_exhausted',
     }],
   });
   return { generated_at: now, sources };
@@ -155,6 +160,12 @@ test('partial telemetry stays explicit, Codex allowance is live, and snapshot va
   assert.match(h.get('#project-grid').innerHTML, /0 USD známé \+ 1 bez ceny/);
   assert.match(h.get('#observability-kpis').innerHTML, /123,5|123\.5|123/);
   assert.match(h.get('#observability-grid').innerHTML, /Codex tokeny po dnech/);
+  assert.match(h.get('#observability-grid').innerHTML, /Cost-aware router/);
+  assert.match(h.get('#observability-grid').innerHTML, /FREE/);
+  assert.match(h.get('#observability-grid').innerHTML, /Sol/);
+  assert.match(h.get('#observability-grid').innerHTML, /Astra eskalace: 0/);
+  assert.match(h.get('#observability-grid').innerHTML, /Router soft 70 % \/ hard 90 %/);
+  assert.match(h.get('#observability-grid').innerHTML, /Model tokeny/);
   assert.match(h.get('#observability-grid').innerHTML, /Fallback pressure/);
   assert.match(h.get('#project-grid').innerHTML, /&lt;img src=x onerror=alert\(1\)&gt;/);
   assert.doesNotMatch(h.get('#project-grid').innerHTML, /<img src=x/);
