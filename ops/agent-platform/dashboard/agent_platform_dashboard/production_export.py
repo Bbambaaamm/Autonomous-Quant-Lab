@@ -25,7 +25,13 @@ def configuration(raw):
     c.keys(raw['profiles'], 'majak quantlab')
     all_paths = []
     for profile, settings in raw['profiles'].items():
-        c.keys(settings, 'router kanban git tests')
+        c.need(type(settings) is dict)
+        names = set(settings)
+        legacy = {'router', 'kanban', 'git', 'tests'}
+        extended = legacy | {'search'}
+        c.need(names in (legacy, extended))
+        if names == legacy:
+            settings['search'] = None
         for kind, value in settings.items():
             if value is None:
                 continue
@@ -44,10 +50,19 @@ def collect(config, now):
     configuration(config)
     c.need(c.number(now))
     snapshot = c.unavailable(now)
-    adapters = {'router': sources.router, 'kanban': sources.kanban, 'git': sources.git, 'tests': sources.tests}
+    adapters = {'router': sources.router, 'search': sources.search,
+                'kanban': sources.kanban, 'git': sources.git,
+                'tests': sources.tests, 'queue': sources.queue, 'codex': sources.codex}
     for source in snapshot['sources']:
         profile, kind = source['profile'], source['kind']
-        setting = config['herdr'] if kind == 'herdr' else config['profiles'][profile][kind]
+        if kind == 'herdr':
+            setting = config['herdr']
+        elif kind == 'queue':
+            setting = sources.QUEUE_PATH
+        elif kind == 'codex':
+            setting = sources.CODEX_USAGE_PATH
+        else:
+            setting = config['profiles'][profile][kind]
         if setting is None:
             continue
         try:
@@ -56,8 +71,12 @@ def collect(config, now):
             else:
                 rows, data_at = adapters[kind](setting, profile)
             c.need(data_at is None or data_at <= now)
+            if kind == 'codex' and (data_at is None or not 0 <= now - data_at <= 900):
+                source.update(rows=[], data_at=None, status='unavailable', reason='stale')
+                continue
             source.update(rows=rows, data_at=data_at, status='available', reason='ok')
-            if kind == 'herdr':
+            if kind in ('herdr', 'queue', 'codex'):
+                c.need(data_at is not None)
                 source['observed_at'] = data_at
             if kind == 'tests':
                 c.need(data_at is not None and 0 <= now - data_at <= 86400)
@@ -90,3 +109,5 @@ def main(argv=None):
 
 if __name__ == '__main__':
     raise SystemExit(main())
+
+[executed on device: quantlab-staging-01 (efe59886-9b61-4d73-8a30-a34b95415c21)]
