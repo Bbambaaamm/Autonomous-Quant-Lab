@@ -169,6 +169,8 @@ def decide(task):
     }
 
 def record(task, decision):
+    if decision.get("tier") == "profile-default":
+        return
     now = int(time.time())
     empty = {
         "version": 1,
