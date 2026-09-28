@@ -1172,3 +1172,141 @@ def build_snapshot(
         "VALID" if coverage >= minimum_coverage else "INVALID",
         coverage,
     )
+
+
+class AlphaVantageProvider:
+    """REST adapter for the Alpha Vantage global free tier (5 calls/min, 500/day/key).
+
+    Non-US zero-cost provider for PAPER. Requires a user-authorized
+    ALPHAVANTAGE_API_KEY. Free-tier license permits non-commercial use and is
+    rate-limited; this adapter never initiates a paid subscription.
+
+    Coverage is intentionally bounded: only non-US exchanges with a symbol
+    suffix documented by Alpha Vantage are accepted (US layer is Alpaca).
+    Internal symbols use EXCHANGE:TICKER; resolve() converts them to the provider
+    suffix convention. Corporate actions are NOT treated as complete on this
+    free path, so ``corporate_actions`` fails closed with an empty list.
+
+    Verified provider suffixes:
+    LSE -> .LON, XETRA -> .DEX, TSX -> .TRT, Shanghai -> .SHH,
+    Shenzhen -> .SHZ.
+    """
+
+    _base_url = "https://www.alphavantage.co/query"
+    _exchange_suffixes = {
+        "LSE": "LON",
+        "XETRA": "DEX",
+        "TSX": "TRT",
+        "SH": "SHH",
+        "SZ": "SHZ",
+    }
+
+    def __init__(
+        self,
+        api_key: str,
+        transport: Transport | None = None,
+        timeout: float = 15,
+        max_attempts: int = 3,
+    ) -> None:
+        if not api_key:
+            raise ValueError("AlphaVantage API key je povinný (user-authorized free credential)")
+        self._api_key = api_key
+        self._transport = transport or self._http
+        self._timeout, self.max_attempts = timeout, max_attempts
+        self.metadata = ProviderMetadata("alphavantage", "1", False, True, "alphavantage:global")
+
+    @staticmethod
+    def _http(url: str, timeout: float) -> tuple[int, dict[str, str], bytes]:
+        try:
+            with urllib.request.urlopen(url, timeout=timeout) as response:  # noqa: S310
+                return response.status, dict(response.headers), response.read()
+        except urllib.error.HTTPError as exc:
+            return exc.code, dict(exc.headers), b""
+        except (urllib.error.URLError, TimeoutError) as exc:
+            raise ProviderUnavailable("Provider není dostupný") from exc
+
+    def resolve(self, symbol: str) -> dict[str, str]:
+        normalized = symbol.strip().upper()
+        exchange, separator, ticker = normalized.partition(":")
+        if not separator or not ticker:
+            raise InvalidSymbol("Alpha Vantage vyžaduje interní symbol EXCHANGE:TICKER")
+        suffix = self._exchange_suffixes.get(exchange)
+        if suffix is None:
+            raise InvalidSymbol(f"Exchange {exchange} není ve verifikovaném non-US allowlistu")
+        if not ticker.isascii() or any(
+            ch not in "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-" for ch in ticker
+        ):
+            raise InvalidSymbol("Ticker má neplatný formát")
+        return {"symbol": normalized, "provider_symbol": f"{ticker}.{suffix}"}
+
+    def historical_daily(self, symbol: str, start: date, end: date) -> list[ProviderBar]:
+        if start > end:
+            raise ValueError("Počáteční datum musí předcházet koncovému")
+        provider_symbol = self.resolve(symbol)["provider_symbol"]
+        query = urllib.parse.urlencode(
+            {
+                "function": "TIME_SERIES_DAILY",
+                "symbol": provider_symbol,
+                "outputsize": "compact",
+                "apikey": self._api_key,
+            }
+        )
+        url = f"{self._base_url}?{query}"
+        for attempt in range(self.max_attempts):
+            try:
+                status, headers, body = self._transport(url, self._timeout)
+                if status == 429:
+                    retry = float(headers.get("Retry-After", "0") or 0)
+                    error: ProviderError = ProviderRateLimited(retry)
+                elif status >= 500:
+                    error = ProviderUnavailable("Dočasná chyba provideru")
+                elif status != 200:
+                    raise InvalidProviderResponse("AlphaVantage požadavek nebyl úspěšný")
+                else:
+                    return self._parse_daily(body, start, end, provider_symbol)
+            except ProviderUnavailable as exc:
+                error = exc
+            if attempt + 1 == self.max_attempts:
+                raise error
+            time.sleep(min(getattr(error, "retry_after", 0) or 0.05 * 2**attempt, 1))
+        raise AssertionError("Nedosažitelný stav")
+
+    @staticmethod
+    def _parse_daily(
+        body: bytes, start: date, end: date, provider_symbol: str
+    ) -> list[ProviderBar]:
+        try:
+            payload = json.loads(body.decode("utf-8-sig"))
+            if "Error Message" in payload:
+                raise InvalidSymbol("Provider symbol odmítl")
+            series = payload.get("Time Series (Daily)", {})
+            if not series:
+                raise InvalidSymbol("Provider nevrátil data pro symbol")
+            bars = [
+                ProviderBar(
+                    date.fromisoformat(day_key),
+                    Decimal(values["1. open"]),
+                    Decimal(values["2. high"]),
+                    Decimal(values["3. low"]),
+                    Decimal(values["4. close"]),
+                    Decimal(values.get("5. volume", "0") or "0"),
+                    f"alphavantage:{provider_symbol}:{day_key}",
+                )
+                for day_key in sorted(series)
+                for values in [series[day_key]]
+            ]
+        except (InvalidOperation, KeyError, ValueError, UnicodeError) as exc:
+            raise InvalidProviderResponse("Provider vrátil neplatné JSON") from exc
+        if len({bar.session_date for bar in bars}) != len(bars):
+            raise InvalidProviderResponse("Provider vrátil duplicitní bary")
+        return sorted(
+            (bar for bar in bars if start <= bar.session_date <= end),
+            key=lambda b: b.session_date,
+        )
+
+    def corporate_actions(self, symbol: str, start: date, end: date) -> list[CorporateAction]:
+        self.resolve(symbol)
+        # Free tier AlphaVantage does not expose reliable global corporate actions;
+        # fail-closed rather than return partial/incomplete evidence.
+        actions: list[CorporateAction] = []
+        return actions

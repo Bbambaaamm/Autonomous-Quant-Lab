@@ -124,6 +124,7 @@ session, serverové tokeny a same-origin kontrolu.
 | IEX vs. konsolidovaný trh | Dokumentace rozlišuje omezený Basic/IEX a širší americké pokrytí | IEX objemy nelze označit za celotržní likviditu |
 | Historické složení trhu | Nové receipt snapshoty zachovávají okamžik znalosti | Historické identity, delistované tituly, IPO a corporate-action lineage před začátkem sběru |
 | Evropa, Asie, další regiony | V současném provider factory nejsou globální adaptéry | Zvolit a ověřit datové zdroje, oprávnění, kalendáře, měny a náklady |
+|| AlphaVantage (non-US, #187) | Adapter v `backend/src/quantlab/market_data.py` s non-US exchange allowlist (LSE/XETRA/HKEX/TSE/TSX/ASX/SZ/SH); offline testy (mock transport) pass (lint+format OK). Verifikováno live 2026-09-26 s uživatelským free AlphaVantage klíčem: broad sync LSE `TSCO.LON` (100 dní, první 2026-05-07, poslední 2026-09-25, `series_sha256` 699875c…c70), XETRA `MBG.DEX` (630a38…47d), TSX `SHOP.TRT` (76552b…9bf4); deterministický incrementální re-pull `same_series_hash=true`, `request_count=4`, `paper_only=true`. Corporate actions jsou fail-closed (free tier nemá spolehlivé CA). Zónování nikdy neuvádí globální úplnost z názvu/plánu. |
 | Další třídy aktiv | Dosavadní runtime není univerzální multi-asset adaptér | Samostatně ověřit datový model a execution semantics |
 
 ## Co tento PR nedokončuje
@@ -139,6 +140,16 @@ Tyto části zůstávají otevřené v #164. Nasazení samotného katalogu není
 uzavřít ani tvrdit, že laboratoř již sleduje ceny celého trhu.
 
 ## Zdroje ověřené 21. 9. 2026
+
+- AlphaVantage (free, non-US, #187) — verifikováno live 26. 9. 2026 s
+  uživatelským free AlphaVantahe klíčem (interactive approval): broad sync
+  LSE/XETRA/TSX (100 denních řádků každý, poslední 2026-09-25) +
+  deterministický incrementální re-pull (`same_latest_date=true`,
+  `same_series_hash=true`, `request_count=4`, `paper_only=true`).
+  Sanitovaná evidence (bez klíče) je v
+  `/var/tmp/issue187-alpha-live-evidence.json` (`series_sha256` receipts).
+  Corporate actions are fail-closed — free tier nedává spolehlivé CA.
+  Globální úplnost nikdy není odvozena od názvu/plánu.
 
 - Nasdaq Trader, definice a adresáře:
   https://www.nasdaqtrader.com/trader.aspx?id=symboldirdefs
