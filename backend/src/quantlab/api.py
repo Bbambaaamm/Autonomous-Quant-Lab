@@ -578,15 +578,10 @@ def create_instrument(body: InstrumentCreate, request: Request) -> dict[str, obj
                 body.active_from,
                 body.active_to,
                 datetime.now(UTC),
-            )
-        )
-        _audit_control_mutation(
-            "CONTROL_INSTRUMENT_REGISTERED",
-            "instrument",
-            row.instrument_id,
-            _actor(request),
-            body.reason,
-            _correlation(request),
+            ),
+            actor=_actor(request),
+            reason=body.reason,
+            correlation_id=_correlation(request),
         )
         return _row(row)
     except (ValueError, DatasetInvalid) as exc:
@@ -597,15 +592,10 @@ def create_instrument(body: InstrumentCreate, request: Request) -> dict[str, obj
 def create_universe(body: UniverseCreate, request: Request) -> dict[str, object]:
     try:
         row = control_plane_registry.create_universe(
-            UniverseDefinition(body.universe_id, body.name, body.kind, datetime.now(UTC))
-        )
-        _audit_control_mutation(
-            "CONTROL_UNIVERSE_CREATED",
-            "universe",
-            row.universe_id,
-            _actor(request),
-            body.reason,
-            _correlation(request),
+            UniverseDefinition(body.universe_id, body.name, body.kind, datetime.now(UTC)),
+            actor=_actor(request),
+            reason=body.reason,
+            correlation_id=_correlation(request),
         )
         return _row(row)
     except (ValueError, DatasetInvalid) as exc:
@@ -620,16 +610,10 @@ def add_universe_membership(
         row = control_plane_registry.add_membership(
             UniverseMembership(
                 universe_id, body.instrument_id, body.valid_from, body.valid_to, body.known_at
-            )
-        )
-        evidence_id = f"{universe_id}:{body.instrument_id}:{body.valid_from.isoformat()}"
-        _audit_control_mutation(
-            "CONTROL_MEMBERSHIP_ADDED",
-            "universe_membership",
-            evidence_id[:64],
-            _actor(request),
-            body.reason,
-            _correlation(request),
+            ),
+            actor=_actor(request),
+            reason=body.reason,
+            correlation_id=_correlation(request),
         )
         return _row(row)
     except (ValueError, DatasetInvalid) as exc:
