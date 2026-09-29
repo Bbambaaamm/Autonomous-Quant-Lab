@@ -39,7 +39,11 @@ def _constraint_names(table_name: str) -> set[str]:
 
 def _create_missing_constraints(table_name: str, definitions: dict[str, str]) -> None:
     existing = _constraint_names(table_name)
-    missing = {name: condition for name, condition in definitions.items() if name not in existing}
+    missing = {
+        name: condition
+        for name, condition in definitions.items()
+        if name not in existing
+    }
     if not missing:
         return
     with op.batch_alter_table(table_name) as batch:
