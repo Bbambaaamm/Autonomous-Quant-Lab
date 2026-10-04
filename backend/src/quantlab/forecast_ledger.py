@@ -597,6 +597,11 @@ class ForecastRecord:
                 raise InvalidForecastError(
                     "FORECAST_EMITTED vyžaduje pravděpodobnost, ne fabrikovanou hodnotu"
                 )
+            # The canonical record path must enforce the probability contract
+            # itself: finite, in [0, 1] and (multi-class) exactly normalised.
+            # A raw forecast may never carry an out-of-range or unnormalised
+            # distribution even when it bypasses the DB check constraints.
+            self.distribution.validate()
             if self.degraded_reason is not None or self.degraded_detail is not None:
                 raise InvalidForecastError("FORECAST_EMITTED nesmí nést degraded stav")
         else:

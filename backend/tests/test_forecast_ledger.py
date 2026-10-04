@@ -258,6 +258,25 @@ def test_multiclass_distribution_requires_normalisation() -> None:
         bad.validate()
 
 
+def test_canonical_record_rejects_out_of_range_probability() -> None:
+    # The canonical ForecastRecord path must enforce the probability contract,
+    # not only the standalone ProbabilityDistribution.validate() helper.
+    for bad in (Decimal("-0.1"), Decimal("1.1"), Decimal("NaN")):
+        with pytest.raises(InvalidForecastError):
+            emitted(distribution=ProbabilityDistribution(kind=OutcomeKind.BINARY, p_event=bad))
+
+
+def test_canonical_record_rejects_unnormalised_multiclass() -> None:
+    with pytest.raises(InvalidForecastError, match="normalizovaná"):
+        emitted(
+            target=target_spec(outcome_kind=OutcomeKind.MULTICLASS),
+            distribution=ProbabilityDistribution(
+                kind=OutcomeKind.MULTICLASS,
+                probabilities={"UP": Decimal("0.5"), "DOWN": Decimal("0.3")},
+            ),
+        )
+
+
 def test_raw_and_calibrated_probability_are_separate_evidence() -> None:
     record = emitted(
         calibrated=CalibratedProbability(
