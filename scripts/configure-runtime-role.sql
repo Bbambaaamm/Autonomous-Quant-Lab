@@ -36,7 +36,16 @@ REVOKE UPDATE, DELETE ON TABLE
     market_screen_items,
     market_action_receipts,
     market_action_reviews,
-    market_batch_metrics
+    market_batch_metrics,
+    statistical_trial_families,
+    statistical_split_plans,
+    statistical_trial_campaigns,
+    statistical_trials,
+    statistical_trial_partition_results,
+    statistical_holdouts,
+    statistical_holdout_assignments,
+    statistical_holdout_access_events,
+    statistical_validation_results
 FROM :"runtime_role";
 
 -- Future tables default to read + append only between role-configuration runs.

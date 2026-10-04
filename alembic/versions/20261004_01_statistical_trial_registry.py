@@ -3,6 +3,7 @@
 Revision ID: 20261004_01
 Revises: 20260924_04
 """
+
 from collections.abc import Sequence
 
 import sqlalchemy as sa
@@ -13,10 +14,14 @@ down_revision = "20260924_04"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
+# Creation order follows the foreign-key graph: every table is created only
+# after the tables it references. The campaigns table references split_plans,
+# so split_plans must be created first even though it is listed second in the
+# issue's data-model description.
 STATISTICAL_TABLES = (
     "statistical_trial_families",
-    "statistical_trial_campaigns",
     "statistical_split_plans",
+    "statistical_trial_campaigns",
     "statistical_trials",
     "statistical_trial_partition_results",
     "statistical_holdouts",
@@ -57,7 +62,30 @@ def upgrade() -> None:
         sa.Index("ix_stat_trial_families_econ_identity", "economic_identity_hash"),
     )
 
-    # 2. statistical_trial_campaigns
+    # 2. statistical_split_plans (frozen before evaluation)
+    op.create_table(
+        "statistical_split_plans",
+        sa.Column("split_plan_id", sa.String(64), primary_key=True),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column(
+            "snapshot_id",
+            sa.String(64),
+            sa.ForeignKey("dataset_snapshots.snapshot_id", ondelete="RESTRICT"),
+            nullable=False,
+        ),
+        sa.Column("method", sa.String(40), nullable=False),
+        sa.Column("target_spec_hash", sa.String(64), nullable=False),
+        sa.Column("decision_time_policy", sa.Text(), nullable=False),
+        sa.Column("label_interval_policy", sa.Text(), nullable=False),
+        sa.Column("purge_policy_json", sa.Text(), nullable=False),
+        sa.Column("embargo_policy_json", sa.Text(), nullable=False),
+        sa.Column("partitions_json", sa.Text(), nullable=False),
+        sa.Column("final_holdout_hash", sa.String(64), nullable=True),
+        sa.Column("seed", sa.Integer(), nullable=False),
+        sa.Column("integrity_hash", sa.String(64), nullable=False, unique=True),
+    )
+
+    # 3. statistical_trial_campaigns
     op.create_table(
         "statistical_trial_campaigns",
         sa.Column("campaign_id", sa.String(64), primary_key=True),
@@ -98,29 +126,6 @@ def upgrade() -> None:
             nullable=True,
         ),
         sa.Column("adaptive_reason", sa.Text(), nullable=True),
-        sa.Column("integrity_hash", sa.String(64), nullable=False, unique=True),
-    )
-
-    # 3. statistical_split_plans
-    op.create_table(
-        "statistical_split_plans",
-        sa.Column("split_plan_id", sa.String(64), primary_key=True),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
-        sa.Column(
-            "snapshot_id",
-            sa.String(64),
-            sa.ForeignKey("dataset_snapshots.snapshot_id", ondelete="RESTRICT"),
-            nullable=False,
-        ),
-        sa.Column("method", sa.String(40), nullable=False),
-        sa.Column("target_spec_hash", sa.String(64), nullable=False),
-        sa.Column("decision_time_policy", sa.Text(), nullable=False),
-        sa.Column("label_interval_policy", sa.Text(), nullable=False),
-        sa.Column("purge_policy_json", sa.Text(), nullable=False),
-        sa.Column("embargo_policy_json", sa.Text(), nullable=False),
-        sa.Column("partitions_json", sa.Text(), nullable=False),
-        sa.Column("final_holdout_hash", sa.String(64), nullable=True),
-        sa.Column("seed", sa.Integer(), nullable=False),
         sa.Column("integrity_hash", sa.String(64), nullable=False, unique=True),
     )
 
@@ -265,7 +270,7 @@ def upgrade() -> None:
         sa.UniqueConstraint("holdout_id", "family_id"),
     )
 
-    # 8. statistical_holdout_access_events
+    # 8. statistical_holdout_access_events (single-use burn ledger)
     op.create_table(
         "statistical_holdout_access_events",
         sa.Column("access_id", sa.String(64), primary_key=True),
@@ -350,7 +355,10 @@ def upgrade() -> None:
         sa.Column("integrity_hash", sa.String(64), nullable=False, unique=True),
     )
 
-    # Immutability triggers — same pattern as 20260924_04
+    # Immutability triggers — same pattern as 20260924_04. The runtime-role
+    # REVOKE for these tables lives in scripts/configure-runtime-role.sql
+    # (the #217 boundary), not here: the runtime role is created and named by
+    # deployment, so a hardcoded role name in a migration would fail closed.
     op.execute(
         """
         CREATE FUNCTION reject_statistical_evidence_mutation()
@@ -369,11 +377,6 @@ def upgrade() -> None:
             f"BEFORE UPDATE OR DELETE ON {table} "
             "FOR EACH ROW EXECUTE FUNCTION reject_statistical_evidence_mutation()"
         )
-
-    # REVOKE runtime role from statistical tables (same pattern as #217)
-    # The runtime role is expected to be 'quantlab_runtime' — revoke all DML
-    for table in STATISTICAL_TABLES:
-        op.execute(f"REVOKE ALL ON TABLE {table} FROM quantlab_runtime")
 
 
 def downgrade() -> None:
