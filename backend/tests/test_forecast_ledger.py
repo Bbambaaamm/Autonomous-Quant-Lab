@@ -277,6 +277,43 @@ def test_canonical_record_rejects_unnormalised_multiclass() -> None:
         )
 
 
+def test_multiclass_emitted_forecast_persists_and_round_trips() -> None:
+    # A valid multi-class FORECAST_EMITTED record carries its probability in the
+    # distribution, not in the scalar ``raw_probability`` column. The DB presence
+    # constraint must accept that shape instead of rejecting a legal forecast.
+    store, _ = ledger()
+    record = emitted(
+        target=target_spec(outcome_kind=OutcomeKind.MULTICLASS),
+        distribution=ProbabilityDistribution(
+            kind=OutcomeKind.MULTICLASS,
+            probabilities={"UP": Decimal("0.5"), "FLAT": Decimal("0.2"), "DOWN": Decimal("0.3")},
+        ),
+    )
+    assert record.distribution.p_event is None
+    assert store.commit(record).outcome is CommitOutcome.CREATED
+    loaded = store.read(record.forecast_id)
+    assert loaded is not None
+    assert loaded.content_hash() == record.content_hash()
+    assert loaded.distribution.probabilities == {
+        "UP": Decimal("0.5"),
+        "FLAT": Decimal("0.2"),
+        "DOWN": Decimal("0.3"),
+    }
+
+
+def test_probability_presence_constraint_is_outcome_kind_aware() -> None:
+    # Guards the fix: the presence constraint must branch on outcome_kind, or a
+    # multi-class emitted forecast becomes unpersistable and coverage collapses.
+    constraint = next(
+        c
+        for c in ForecastLedgerRecord.__table_args__
+        if getattr(c, "name", None) == "ck_forecast_ledger_probability_presence"
+    )
+    sql = str(constraint.sqltext)
+    assert "outcome_kind = 'BINARY'" in sql
+    assert "outcome_kind = 'MULTICLASS'" in sql
+
+
 def test_raw_and_calibrated_probability_are_separate_evidence() -> None:
     record = emitted(
         calibrated=CalibratedProbability(

@@ -762,8 +762,9 @@ class ForecastLedgerRecord(Base):
     __table_args__ = (
         UniqueConstraint("decision_identity", name="uq_forecast_ledger_decision_identity"),
         CheckConstraint(
-            "(status = 'FORECAST_EMITTED' AND raw_probability IS NOT NULL "
-            "AND degraded_reason IS NULL) OR "
+            "(status = 'FORECAST_EMITTED' AND degraded_reason IS NULL "
+            "AND ((outcome_kind = 'BINARY' AND raw_probability IS NOT NULL) "
+            "OR (outcome_kind = 'MULTICLASS' AND raw_probability IS NULL))) OR "
             "(status <> 'FORECAST_EMITTED' AND raw_probability IS NULL "
             "AND calibrated_probability IS NULL AND degraded_reason IS NOT NULL)",
             name="ck_forecast_ledger_probability_presence",
