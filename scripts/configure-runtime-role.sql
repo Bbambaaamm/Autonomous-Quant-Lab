@@ -36,7 +36,8 @@ REVOKE UPDATE, DELETE ON TABLE
     market_screen_items,
     market_action_receipts,
     market_action_reviews,
-    market_batch_metrics
+    market_batch_metrics,
+    forecast_ledger
 FROM :"runtime_role";
 
 -- Future tables default to read + append only between role-configuration runs.

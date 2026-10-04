@@ -42,3 +42,30 @@ sloupcích experimentu.
 
 ## Phase 6 immutable lineage
 Snapshot zapisuje identitu produkčního XNYS zdroje `XNYS:exchange-calendars:4.13.2` (`exchange-calendars` 4.13.2), observation ID, revision, source hash a kauzálně známé corporate actions. Observation revisions ani snapshot manifesty se po provider correction nemění; nová oprava vytváří novou lineage a starý replay zůstá reprodukovatelný. PIT membership určuje coverage denominator. PostgreSQL constraints a idempotency key prosazují jediný experiment a jediné autoritativní OOS i při concurrent volání.
+
+## Immutable Forecast Ledger (#266)
+
+`forecast_ledger` je append-only evidence pravděpodobnostního forecastu, který vznikl **před**
+downstream paper/risk rozhodnutím. Kontrakt (`backend/src/quantlab/forecast_ledger.py`) je leaf
+modul bez I/O a bez exekuční autority (`FORECAST_AUTHORITY = False`); forecast sám nikdy neodesílá
+order ani nemění RiskEngine limity.
+
+Klíčové invariants:
+
+- `forecast_id` je content-addressed z `decision_identity` (target spec + scope + decision time +
+  model/strategy artifact + snapshot lineage) a obsahu záznamu; zadat ho ručně nelze.
+- `raw_probability` a `calibrated_probability` jsou oddělená evidence; kalibrace nikdy nepřepisuje
+  raw forecast a nese vlastní `calibrator_id`/`calibrator_version`.
+- `created_at`/`decision_time`/`resolution_at` jsou timezone-aware UTC; snapshot i baseline musí
+  být PIT-safe (`as_of <= decision_time`).
+- Neúplná/stale evidence vytváří explicitní `ABSTAINED`/`NO_FORECAST`/`INVALID_DATA`/
+  `NOT_EVALUATED` status s `degraded_reason` a **bez** pravděpodobnosti — fail-closed, žádná
+  fabrikace. Tyto stavy zůstávají v denominatoru coverage reportu.
+- Oprava je nová verze (`prior_forecast_id`), nikdy UPDATE historického forecastu.
+
+Immutabilita je vynucena na DB úrovni: trigger `forecast_ledger_immutable` (funkce
+`reject_core_evidence_mutation()` z `20260924_04`) odmítá UPDATE/DELETE a
+`scripts/configure-runtime-role.sql` navíc revokuje UPDATE/DELETE pro runtime roli. Migrace
+`20260924_05` odmítá downgrade, pokud tabulka obsahuje jakoukoli evidenci. Všechny pravděpodobnostní
+sloupce jsou `Numeric(30, 12)` a content hash se počítá ve stejné škále, aby round-trip přes
+databázi reprodukoval původní `content_hash`.
