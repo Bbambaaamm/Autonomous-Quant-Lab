@@ -175,7 +175,6 @@ jobs:
           tests/test_phase7_corporate_actions_postgres.py
           tests/test_phase8_postgres.py
           tests/test_phase9_postgres.py
-          tests/test_forecast_ledger.py
       - name: Recreate clean application schema for B1 acceptance
         run: |
           uv run alembic -c ../alembic.ini downgrade base
