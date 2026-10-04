@@ -1007,3 +1007,282 @@ class RunRepository:
                 "parameter_runs": session.query(ParameterRunRecord).count(),
                 "eligibility_checks": session.query(EligibilityCheckRecord).count(),
             }
+
+
+# ---------------------------------------------------------------------------
+# Statistical Trial Registry ORM models (issue #272)
+# ---------------------------------------------------------------------------
+
+
+class StatisticalTrialFamilyRecord(Base):
+    __tablename__ = "statistical_trial_families"
+    family_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    schema_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    economic_identity_hash: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    economic_identity_json: Mapped[str] = mapped_column(Text, nullable=False)
+    target_spec_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    target_spec_json: Mapped[str] = mapped_column(Text, nullable=False)
+    opportunity_scope_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    opportunity_scope_json: Mapped[str] = mapped_column(Text, nullable=False)
+    benchmark_policy_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    benchmark_policy_json: Mapped[str] = mapped_column(Text, nullable=False)
+    registry_policy_id: Mapped[str] = mapped_column(String(80), nullable=False)
+    registry_policy_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    parent_family_id: Mapped[str | None] = mapped_column(
+        String(64),
+        ForeignKey("statistical_trial_families.family_id", ondelete="RESTRICT"),
+    )
+    created_by_json: Mapped[str] = mapped_column(Text, nullable=False)
+    integrity_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+
+
+class StatisticalTrialCampaignRecord(Base):
+    __tablename__ = "statistical_trial_campaigns"
+    campaign_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    family_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("statistical_trial_families.family_id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    snapshot_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("dataset_snapshots.snapshot_id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    experiment_id: Mapped[str | None] = mapped_column(
+        String(64),
+        ForeignKey("research_experiments.id", ondelete="RESTRICT"),
+    )
+    split_plan_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("statistical_split_plans.split_plan_id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    selection_policy_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    selection_policy_json: Mapped[str] = mapped_column(Text, nullable=False)
+    code_sha: Mapped[str] = mapped_column(String(64), nullable=False)
+    seed: Mapped[int] = mapped_column(Integer, nullable=False)
+    status_at_creation: Mapped[str] = mapped_column(String(30), nullable=False)
+    parent_campaign_id: Mapped[str | None] = mapped_column(
+        String(64),
+        ForeignKey("statistical_trial_campaigns.campaign_id", ondelete="RESTRICT"),
+    )
+    adaptive_reason: Mapped[str | None] = mapped_column(Text)
+    integrity_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+
+
+class StatisticalSplitPlanRecord(Base):
+    __tablename__ = "statistical_split_plans"
+    split_plan_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    snapshot_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("dataset_snapshots.snapshot_id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    method: Mapped[str] = mapped_column(String(40), nullable=False)
+    target_spec_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    decision_time_policy: Mapped[str] = mapped_column(Text, nullable=False)
+    label_interval_policy: Mapped[str] = mapped_column(Text, nullable=False)
+    purge_policy_json: Mapped[str] = mapped_column(Text, nullable=False)
+    embargo_policy_json: Mapped[str] = mapped_column(Text, nullable=False)
+    partitions_json: Mapped[str] = mapped_column(Text, nullable=False)
+    final_holdout_hash: Mapped[str | None] = mapped_column(String(64))
+    seed: Mapped[int] = mapped_column(Integer, nullable=False)
+    integrity_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+
+
+class StatisticalTrialRecord(Base):
+    __tablename__ = "statistical_trials"
+    trial_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    campaign_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("statistical_trial_campaigns.campaign_id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    family_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("statistical_trial_families.family_id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    parent_trial_id: Mapped[str | None] = mapped_column(
+        String(64),
+        ForeignKey("statistical_trials.trial_id", ondelete="RESTRICT"),
+    )
+    declared_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    trial_kind: Mapped[str] = mapped_column(String(40), nullable=False)
+    variant_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    variant_json: Mapped[str] = mapped_column(Text, nullable=False)
+    strategy_identity: Mapped[str | None] = mapped_column(
+        String(64),
+        ForeignKey("strategies.strategy_identity", ondelete="RESTRICT"),
+    )
+    model_artifact_json: Mapped[str | None] = mapped_column(Text)
+    funnel_version_hash: Mapped[str | None] = mapped_column(String(64))
+    target_spec_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    code_sha: Mapped[str] = mapped_column(String(64), nullable=False)
+    counts_policy_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    integrity_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    __table_args__ = (UniqueConstraint("campaign_id", "variant_hash"),)
+
+
+class StatisticalTrialPartitionResultRecord(Base):
+    __tablename__ = "statistical_trial_partition_results"
+    result_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    trial_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("statistical_trials.trial_id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    campaign_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("statistical_trial_campaigns.campaign_id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    partition_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    stage: Mapped[str] = mapped_column(String(30), nullable=False)
+    status: Mapped[str] = mapped_column(String(30), nullable=False)
+    evaluated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    sample_start: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    sample_end: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    n_observations: Mapped[int] = mapped_column(Integer, nullable=False)
+    n_returns: Mapped[int] = mapped_column(Integer, nullable=False)
+    mean_return: Mapped[float | None] = mapped_column(Float)
+    variance_return: Mapped[float | None] = mapped_column(Float)
+    skewness: Mapped[float | None] = mapped_column(Float)
+    excess_kurtosis: Mapped[float | None] = mapped_column(Float)
+    sharpe: Mapped[float | None] = mapped_column(Float)
+    selection_score: Mapped[float | None] = mapped_column(Float)
+    total_return: Mapped[float | None] = mapped_column(Float)
+    max_drawdown: Mapped[float | None] = mapped_column(Float)
+    returns_hash: Mapped[str | None] = mapped_column(String(64))
+    returns_json: Mapped[str | None] = mapped_column(Text)
+    metrics_json: Mapped[str] = mapped_column(Text, nullable=False)
+    failure_reason: Mapped[str | None] = mapped_column(Text)
+    integrity_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    __table_args__ = (UniqueConstraint("trial_id", "partition_id", "stage"),)
+
+
+class StatisticalHoldoutRecord(Base):
+    __tablename__ = "statistical_holdouts"
+    holdout_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    split_plan_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("statistical_split_plans.split_plan_id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    snapshot_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("dataset_snapshots.snapshot_id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    role: Mapped[str] = mapped_column(String(30), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    partition_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    partition_json: Mapped[str] = mapped_column(Text, nullable=False)
+    policy_id: Mapped[str] = mapped_column(String(80), nullable=False)
+    policy_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    integrity_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+
+
+class StatisticalHoldoutAssignmentRecord(Base):
+    __tablename__ = "statistical_holdout_assignments"
+    assignment_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    holdout_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("statistical_holdouts.holdout_id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    family_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("statistical_trial_families.family_id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    campaign_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("statistical_trial_campaigns.campaign_id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    candidate_trial_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("statistical_trials.trial_id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    assigned_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    selection_evidence_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    selection_evidence_json: Mapped[str] = mapped_column(Text, nullable=False)
+    integrity_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    __table_args__ = (UniqueConstraint("holdout_id", "family_id"),)
+
+
+class StatisticalHoldoutAccessEventRecord(Base):
+    __tablename__ = "statistical_holdout_access_events"
+    access_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    holdout_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("statistical_holdouts.holdout_id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    family_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("statistical_trial_families.family_id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    campaign_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("statistical_trial_campaigns.campaign_id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    trial_id: Mapped[str | None] = mapped_column(
+        String(64),
+        ForeignKey("statistical_trials.trial_id", ondelete="RESTRICT"),
+    )
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    event_type: Mapped[str] = mapped_column(String(40), nullable=False)
+    actor_json: Mapped[str] = mapped_column(Text, nullable=False)
+    component: Mapped[str] = mapped_column(String(100), nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    correlation_id: Mapped[str | None] = mapped_column(String(128))
+    payload_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    integrity_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+
+
+class StatisticalValidationResultRecord(Base):
+    __tablename__ = "statistical_validation_results"
+    validation_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    family_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("statistical_trial_families.family_id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    campaign_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("statistical_trial_campaigns.campaign_id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    candidate_trial_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("statistical_trials.trial_id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    holdout_assignment_id: Mapped[str | None] = mapped_column(
+        String(64),
+        ForeignKey("statistical_holdout_assignments.assignment_id", ondelete="RESTRICT"),
+    )
+    method_id: Mapped[str] = mapped_column(String(80), nullable=False)
+    method_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    evaluated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    input_trial_set_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    trial_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    effective_trial_count: Mapped[float | None] = mapped_column(Float)
+    observed_sharpe: Mapped[float | None] = mapped_column(Float)
+    psr: Mapped[float | None] = mapped_column(Float)
+    dsr: Mapped[float | None] = mapped_column(Float)
+    dsr_reference_sharpe: Mapped[float | None] = mapped_column(Float)
+    pbo: Mapped[float | None] = mapped_column(Float)
+    cscv_split_count: Mapped[int | None] = mapped_column(Integer)
+    metrics_json: Mapped[str] = mapped_column(Text, nullable=False)
+    decision_state: Mapped[str] = mapped_column(String(30), nullable=False)
+    integrity_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
