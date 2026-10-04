@@ -68,6 +68,9 @@ The engine is a pure function: `events + graph_config → scenario_output`. No I
 | max_runtime_ms | 5000 | Short-lived processing |
 | max_events_per_run | 1000 | Bounded input |
 | max_propagation_depth | 5 | Prevents infinite chains |
+| max_model_budget_tokens | 0 | No model budget (shadow engine performs no model calls; cannot be widened) |
+| max_model_calls | 0 | No model calls (cannot be widened) |
+| MAX_CONCURRENCY | 1 | In-process scenario concurrency cap; fails closed on contention |
 
 ## Next steps
 

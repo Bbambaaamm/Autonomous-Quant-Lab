@@ -210,3 +210,32 @@ def test_architecture_contract_remains_wired_into_required_ci_checks() -> None:
     # in two independent required contexts makes accidental removal visible.
     assert ci.count(invocation) >= 2
     assert "tests/test_market_pipeline.py" in ci
+
+
+def test_scenario_isolation_keeps_bounded_concurrency_and_zero_model_budget() -> None:
+    """Issue #271: scenario work stays resource-bounded and never gains a model budget.
+
+    The scenario isolation boundary must enforce the same heavy-research concurrency
+    budget as the runtime (docs/runtime-resource-budget.md: heavy research concurrency
+    = 1) and must fail closed on contention instead of queueing. The shadow engine
+    must declare a zero model budget that its configuration cannot widen.
+    """
+    isolation_source, isolation_tree = _module("scenario_graph_isolation.py")
+    engine_source, _ = _module("scenario_graph.py")
+
+    assert "MAX_CONCURRENCY = 1" in engine_source
+    assert "SCENARIO_CONCURRENCY_LIMIT" in isolation_source
+    assert "max_concurrency > MAX_CONCURRENCY" in isolation_source
+    assert "MAX_MODEL_BUDGET_TOKENS = 0" in engine_source
+    assert "MAX_MODEL_CALLS = 0" in engine_source
+    assert "max_model_budget_tokens > MAX_MODEL_BUDGET_TOKENS" in engine_source
+
+    # The isolation boundary must not import network/subprocess/execution machinery.
+    forbidden = {"socket", "subprocess", "requests", "httpx", "urllib", "os", "http"}
+    imported: set[str] = set()
+    for node in ast.walk(isolation_tree):
+        if isinstance(node, ast.Import):
+            imported.update(alias.name.split(".")[0] for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            imported.add(node.module.split(".")[0])
+    assert not (imported & forbidden)

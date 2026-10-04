@@ -55,6 +55,7 @@ __all__ = [
     "MAX_SIMULATION_REPLICATES",
     "MAX_MODEL_BUDGET_TOKENS",
     "MAX_MODEL_CALLS",
+    "MAX_CONCURRENCY",
     "TEMPORAL_KNOWLEDGE_UNCONTROLLED_FLAG",
     "CONTRACT_VERSION",
     "EntityType",
@@ -108,6 +109,13 @@ MAX_EVIDENCE_REFS = 100
 MAX_SIMULATION_REPLICATES = 20
 MAX_MODEL_BUDGET_TOKENS = 0
 MAX_MODEL_CALLS = 0
+
+#: Hard ceiling on simultaneously admitted scenario runs *inside one process*.
+#: This mirrors the runtime resource budget for heavy research concurrency
+#: (docs/runtime-resource-budget.md: heavy research concurrency = 1). Cross-process
+#: admission remains the PostgreSQL advisory slot owned by #190; this constant is the
+#: in-process leaf guard and must never be raised to make a workload fit.
+MAX_CONCURRENCY = 1
 
 #: Required label for a historical run whose model knowledge cutoff cannot be shown
 #: to be at or before the simulated decision time (issue #271 BLOCKER A).
@@ -629,6 +637,18 @@ class ScenarioGraphConfig:
             raise ScenarioGraphError("max_propagation_depth must be positive")
         if self.max_simulation_replicates <= 0:
             raise ScenarioGraphError("max_simulation_replicates must be positive")
+        # Issue #271 acceptance criteria: a hard cap on the model budget. The shadow
+        # engine performs no model calls, so the cap is zero and the configuration
+        # cannot be widened to grant one.
+        if (
+            self.max_model_budget_tokens < 0
+            or self.max_model_budget_tokens > MAX_MODEL_BUDGET_TOKENS
+        ):
+            raise ScenarioGraphError(
+                f"max_model_budget_tokens must be in [0, {MAX_MODEL_BUDGET_TOKENS}]"
+            )
+        if self.max_model_calls < 0 or self.max_model_calls > MAX_MODEL_CALLS:
+            raise ScenarioGraphError(f"max_model_calls must be in [0, {MAX_MODEL_CALLS}]")
 
 
 class ScenarioGraphEngine:

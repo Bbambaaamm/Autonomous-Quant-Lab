@@ -91,6 +91,27 @@ excludes zero.
 | **E — paired ablation + uncertainty** | The harness is paired by construction on one opportunity list; the uncertainty is a **clustered block bootstrap** over `cluster_id` with a deterministic seed, reporting `ci_low`/`ci_high` at the configured level. A test proves the CI is deterministic and that the cluster count (not the row count) drives the uncertainty. |
 | **F — scenario discovery vs probability estimation** | `ScenarioDiscovery` (coverage of candidate outcomes) and `ScenarioWeighting` (score mean/spread conditional on the set) are separate types. At the harness level, `DiscoveryReport` reports per-event-class coverage and a discovery failure is a hard blocker, so good calibration over an incomplete scenario set cannot mask a discovery failure. |
 
+## Safety / governance — isolation, concurrency and preregistered degradation
+
+`backend/src/quantlab/scenario_graph_isolation.py` is the operational boundary around the
+pure engine. It exists because the engine is deliberately clock-free and I/O-free, while the
+issue's safety clause requires timeout handling and a concurrency cap that need a clock and
+mutable operational state.
+
+| Issue requirement | Where it is enforced |
+|---|---|
+| hard cap on **concurrency** | `MAX_CONCURRENCY = 1` + `ScenarioConcurrencyGuard`; a second concurrent run fails closed with `SCENARIO_CONCURRENCY_LIMIT` (non-blocking, no queue) |
+| hard cap on **model budget** | `MAX_MODEL_BUDGET_TOKENS = 0`, `MAX_MODEL_CALLS = 0`; `ScenarioGraphConfig` rejects any widening |
+| error / timeout does not stop the core workflow | `ScenarioWorker.run` converts any engine error, over-budget runtime or rejection into a typed `ScenarioRunOutcome`; it never propagates |
+| scenario-dependent strategy fails/degrades per preregistered policy | `ScenarioDegradationPolicy` — a `CORE_INDEPENDENT` workload may only `CONTINUE_WITHOUT_SCENARIO`, a `SCENARIO_DEPENDENT` workload may only `FAIL_CLOSED`; the unsafe pair is rejected at construction |
+| no execution authority | the boundary adds no order/broker/risk surface (AST- and attribute-asserted) |
+| bounded blast radius | a circuit breaker opens after `max_consecutive_failures` consecutive failures so a permanently broken engine stops consuming the runtime budget |
+
+An over-budget or failed run returns **no partial output** (`output is None` unless the status is
+`SUCCEEDED`), so a caller can never consume a degraded scenario artifact as a complete one.
+The guard mirrors the runtime contract's heavy-research concurrency (1) and is asserted by
+`test_runtime_architecture_contract.py`.
+
 ## Hard caps
 
 | Parameter | Default | Purpose |
@@ -103,8 +124,9 @@ excludes zero.
 | `max_events_per_run` | 1000 | bounded input |
 | `max_propagation_depth` | 5 | bounded propagation chains |
 | `max_simulation_replicates` | 20 | bounded internal simulation |
-| `max_model_budget_tokens` | 0 | no model budget in the shadow engine |
-| `max_model_calls` | 0 | no model calls in the shadow engine |
+| `max_model_budget_tokens` | 0 | no model budget in the shadow engine (cannot be widened) |
+| `max_model_calls` | 0 | no model calls in the shadow engine (cannot be widened) |
+| `MAX_CONCURRENCY` | 1 | in-process scenario concurrency (fail closed on contention) |
 | `MAX_EVIDENCE_REFS` | 100 | bounded evidence payload |
 | `MAX_BOOTSTRAP_REPLICATES` | 20000 | bounded uncertainty computation |
 

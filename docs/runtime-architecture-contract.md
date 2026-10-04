@@ -57,6 +57,8 @@ The guard currently checks:
 - the required 500k-bar `Phase6ExperimentRunner` child benchmark and its 1 GiB RSS gate;
 - durable market-pipeline retry/restart/idempotence regressions through required CI;
 - production Compose CPU/RAM ceilings and absence of worker/listener host ports;
+- that the scenario isolation boundary (#271) keeps the heavy-research concurrency cap
+  (1), fails closed on contention, and cannot widen the shadow engine's zero model budget;
 - that the architecture guard stays wired into both required CI contexts.
 
 ## Architecture control-plane ownership
