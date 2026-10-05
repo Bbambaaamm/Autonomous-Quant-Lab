@@ -1057,7 +1057,35 @@ def _record_from_row(row: ForecastLedgerRecord) -> ForecastRecord:
             "persistovanou evidenci nelze rekonstruovat (immutability porušena)"
         ) from error
     _verify_persisted_identity(row, record)
+    _verify_persisted_contract(record)
     return record
+
+
+def _verify_persisted_contract(record: ForecastRecord) -> None:
+    """Fail closed when persisted evidence violates the canonical contract.
+
+    Identity verification alone is not sufficient. A privileged writer (or a
+    hand-written INSERT, or a partially applied restore) can land a row that is
+    perfectly *self-consistent* -- its ``content_hash``, ``forecast_id`` and
+    ``record_json`` all agree -- while still breaking the #266 contract:
+
+    * ``schema_version`` naming an unknown/unsupported contract version;
+    * ``FORECAST_EMITTED`` carrying a degraded marker (fail-open vs fail-closed);
+    * a look-ahead ``market_snapshot_as_of``/``baseline.as_of`` after
+      ``decision_time`` (PIT/causality).
+
+    ``_verify_persisted_identity`` recomputes the identity but never re-runs
+    ``ForecastRecord.validate()``, so such a row would be admitted and drive a
+    PAPER decision. Re-validate the reconstructed record here and surface any
+    contract violation as ``ForecastIntegrityError`` so the decision gate fails
+    closed on invalid evidence exactly as it does on mutated evidence.
+    """
+    try:
+        record.validate()
+    except InvalidForecastError as error:
+        raise ForecastIntegrityError(
+            f"persistovaná evidence neodpovídá kanonickému kontraktu: {error}"
+        ) from error
 
 
 def _verify_persisted_identity(row: ForecastLedgerRecord, record: ForecastRecord) -> None:

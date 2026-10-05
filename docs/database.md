@@ -80,3 +80,12 @@ všechny denormalizované sloupce (pravděpodobnosti, kalibrace, baseline, linea
 uncertainty, confidence, degraded detail, target spec). Nesoulad vyhazuje `ForecastIntegrityError`
 (fail-closed) místo aby mutovaná evidence řídila PAPER rozhodnutí; idempotentní re-commit navíc
 tutéž kontrolu vynucuje i nad existujícím řádkem.
+
+Samotná kontrola identity ale nestačí: privilegovaný zápis může vložit řádek, který je **vnitřně
+konzistentní** (jeho `content_hash`/`forecast_id`/`record_json` si navzájem odpovídají), a přesto
+porušuje kanonický kontrakt #266 — neznámý `schema_version`, `FORECAST_EMITTED` nesoucí degraded
+marker (fail-open místo fail-closed), nebo PIT look-ahead `market_snapshot_as_of`/`baseline.as_of`
+po `decision_time`. DB check constraints tyto případy nepokrývají. Read path proto po ověření
+identity znovu spouští kanonickou validaci rekonstruovaného záznamu a každé porušení kontraktu
+vyhazuje jako `ForecastIntegrityError` — neplatná evidence tak selže stejně uzavřeně jako evidence
+mutovaná.

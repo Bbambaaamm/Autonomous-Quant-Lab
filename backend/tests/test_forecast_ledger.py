@@ -936,6 +936,116 @@ def test_untampered_evidence_still_passes_integrity_verification() -> None:
     loaded.validate()
 
 
+def _forecast_payload() -> dict[str, object]:
+    """Raw constructor payload for a canonical emitted forecast."""
+    return {
+        "status": ForecastStatus.FORECAST_EMITTED,
+        "scope_kind": ScopeKind.ASSET,
+        "scope_id": "SPY",
+        "opportunity_id": "opp-contract-violation",
+        "preregistered": True,
+        "created_at": CREATED_AT,
+        "decision_time": DECISION_TIME,
+        "resolution_at": RESOLUTION_AT,
+        "target": target_spec(),
+        "distribution": ProbabilityDistribution(kind=OutcomeKind.BINARY, p_event=Decimal("0.62")),
+        "lineage": lineage(),
+        "baseline": BaselineProbability(
+            probability=Decimal("0.5"),
+            source="historical_frequency",
+            source_version="hf-v1",
+            as_of=DECISION_TIME - timedelta(days=1),
+        ),
+        "regime": "TRENDING_UP",
+        "source": "phase6-current",
+    }
+
+
+def _contract_violating_record(mutate: object) -> ForecastRecord:
+    """Build an *identity-consistent* record that violates the canonical contract.
+
+    The record bypasses ``ForecastRecord.create``/``validate`` and derives its
+    own ``content_hash``/``forecast_id``, so the persisted row agrees with its
+    own hashed evidence. Identity verification therefore cannot reject it; only
+    a contract re-validation can. This is the faithful simulation of a
+    privileged writer landing such a row.
+    """
+    payload = _forecast_payload()
+    mutate(payload)  # type: ignore[operator]
+    provisional = ForecastRecord(forecast_id="", **payload)  # type: ignore[arg-type]
+    forecast_id = ForecastRecord.compute_forecast_id(
+        provisional.decision_identity(), provisional.content_hash()
+    )
+    return ForecastRecord(forecast_id=forecast_id, **payload)  # type: ignore[arg-type]
+
+
+def _forged_contract_row(
+    mutate: object,
+) -> tuple[ForecastLedger, object, ForecastRecord]:
+    """Raw-insert an identity-consistent, contract-invalid row."""
+    from quantlab.forecast_ledger import _row_payload
+
+    store, engine = ledger()
+    forged = _contract_violating_record(mutate)
+    _raw_insert(engine, dict(_row_payload(forged)))
+    return store, engine, forged
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        # schema_version naming an unknown/unsupported contract version.
+        lambda payload: payload.update(schema_version=FORECAST_SCHEMA_VERSION + 98),
+        # FORECAST_EMITTED carrying a degraded marker (fail-open vs fail-closed).
+        lambda payload: payload.update(degraded_detail="synthetic degraded marker"),
+        # Look-ahead: the market snapshot was observed AFTER the decision.
+        lambda payload: payload.update(
+            lineage=lineage(market_snapshot_as_of=DECISION_TIME + timedelta(minutes=1))
+        ),
+        # Look-ahead: the baseline probability was observed AFTER the decision.
+        lambda payload: payload.update(
+            baseline=BaselineProbability(
+                probability=Decimal("0.5"),
+                source="historical_frequency",
+                source_version="hf-v1",
+                as_of=DECISION_TIME + timedelta(hours=3),
+            )
+        ),
+    ],
+)
+def test_identity_consistent_but_contract_invalid_evidence_fails_closed(
+    mutate: object,
+) -> None:
+    """A self-consistent row that breaks the #266 contract must still fail closed.
+
+    These rows reproduce their own ``content_hash``/``forecast_id``/``record_json``
+    (the DB check constraints do not cover them), so only re-running the canonical
+    contract validation on read can stop them from driving a PAPER decision.
+    """
+    from sqlalchemy import text as sql_text
+
+    store, engine, forged = _forged_contract_row(mutate)
+    # Self-proving guard: the stored row IS identity-consistent, so the
+    # rejection below cannot come from the identity check.
+    with engine.connect() as connection:  # type: ignore[attr-defined]
+        stored_hash = connection.execute(
+            sql_text("SELECT content_hash FROM forecast_ledger WHERE forecast_id = :f"),
+            {"f": forged.forecast_id},
+        ).scalar()
+    assert stored_hash == forged.content_hash()
+    with pytest.raises(ForecastIntegrityError, match="kontraktu"):
+        store.read(forged.forecast_id)
+    with pytest.raises(ForecastIntegrityError, match="kontraktu"):
+        require_forecast_reference(
+            store,
+            DecisionForecastReference(
+                forecast_id=forged.forecast_id,
+                decision_identity=forged.decision_identity(),
+                decision_time=DECISION_TIME,
+            ),
+        )
+
+
 # ---------------------------------------------------------------------------
 # Coverage accounting (STAT-BLOCKER A)
 # ---------------------------------------------------------------------------
@@ -1147,6 +1257,60 @@ def test_postgres_read_path_detects_out_of_band_tampering() -> None:
                     DecisionForecastReference(
                         forecast_id=record.forecast_id,
                         decision_identity=record.decision_identity(),
+                        decision_time=DECISION_TIME,
+                    ),
+                )
+        finally:
+            transaction.rollback()
+    engine.dispose()
+
+
+@POSTGRES
+def test_postgres_read_path_rejects_identity_consistent_contract_violation() -> None:
+    """A privileged INSERT can land a self-consistent but contract-invalid row.
+
+    The identity check cannot reject a row that reproduces its own hashed
+    evidence, and the DB check constraints do not cover ``schema_version``,
+    the fail-closed/degraded marker or PIT look-ahead. Only re-running the
+    canonical contract on read keeps such a row from driving a PAPER decision.
+    """
+    from quantlab.forecast_ledger import _row_payload
+
+    engine = create_engine(os.environ["DATABASE_URL"])
+    with engine.connect() as connection:
+        transaction = connection.begin()
+        try:
+            sessions = sessionmaker(connection, join_transaction_mode="create_savepoint")
+            store = ForecastLedger(sessions)
+            forged = _contract_violating_record(
+                lambda payload: payload.update(
+                    lineage=lineage(market_snapshot_as_of=DECISION_TIME + timedelta(minutes=1))
+                )
+            )
+            payload = _row_payload(forged)
+            for column in (
+                "raw_probability",
+                "calibrated_probability",
+                "baseline_probability",
+                "confidence",
+            ):
+                if payload.get(column) is not None:
+                    payload[column] = str(payload[column])
+            columns = ", ".join(payload)
+            placeholders = ", ".join(f":{name}" for name in payload)
+            with sessions() as session, session.begin():
+                session.execute(
+                    text(f"INSERT INTO forecast_ledger ({columns}) VALUES ({placeholders})"),
+                    payload,
+                )
+            with pytest.raises(ForecastIntegrityError, match="kontraktu"):
+                store.read(forged.forecast_id)
+            with pytest.raises(ForecastIntegrityError, match="kontraktu"):
+                require_forecast_reference(
+                    store,
+                    DecisionForecastReference(
+                        forecast_id=forged.forecast_id,
+                        decision_identity=forged.decision_identity(),
                         decision_time=DECISION_TIME,
                     ),
                 )
