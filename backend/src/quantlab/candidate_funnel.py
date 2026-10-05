@@ -532,6 +532,27 @@ class CandidateFunnel:
             rejection_details: dict[str, Any] = {}
             passed = screening["eligible"]
 
+            # The Stage A config is part of funnel_version/stage_a_config_hash, so every
+            # declared bound must be a real contract. These are *additional* tightenings
+            # on top of the canonical #164 policy — they can never loosen it.
+            if passed and screening.get("bars") is not None:
+                bars = int(screening["bars"])
+                if bars < self.stage_a_config.minimum_sessions:
+                    passed = False
+                    rejection_details["sessions_too_few"] = bars
+
+            if passed and screening.get("coverage") is not None:
+                coverage = Decimal(str(screening["coverage"]))
+                if coverage < self.stage_a_config.minimum_coverage:
+                    passed = False
+                    rejection_details["coverage_too_low"] = str(coverage)
+
+            if passed and obs:
+                last_close = obs[-1].close
+                if last_close < self.stage_a_config.minimum_price_usd:
+                    passed = False
+                    rejection_details["price_too_low"] = str(last_close)
+
             if passed and self.stage_a_config.max_price_usd is not None:
                 # Check last close price
                 if obs:

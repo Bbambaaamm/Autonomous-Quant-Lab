@@ -1530,6 +1530,101 @@ def test_evaluator_cannot_change_preregistered_ranking_config():
     assert rogue.calls == []
 
 
+# ─── Stage A config bounds are enforced, not decoration ───
+
+
+def test_stage_a_enforces_minimum_price_bound():
+    """StageAConfig.minimum_price_usd is part of the config hash and must be enforced."""
+    config = StageAConfig(minimum_price_usd=Decimal("150"))
+    funnel = CandidateFunnel(stage_a_config=config)
+    instruments = [make_instrument()]
+    observations = {"asset-1": make_observations(close=Decimal("100"))}
+    actions = {"asset-1": [make_corporate_action()]}
+
+    results = funnel.run_stage_a(
+        "snapshot-1",
+        instruments,
+        observations,
+        actions,
+        DAYS,
+        NOW,
+        readiness_ids={"asset-1": "r1"},
+    )
+
+    assert not results[0].passed
+    assert results[0].rejection_reason is RejectionReason.STAGE_A_FILTERED
+    assert "price_too_low" in results[0].rejection_details
+
+
+def test_stage_a_enforces_minimum_sessions_bound():
+    """A shorter-than-configured history is rejected even if the canonical policy passes."""
+    config = StageAConfig(minimum_sessions=200)
+    funnel = CandidateFunnel(stage_a_config=config)
+    instruments = [make_instrument()]
+    observations = {"asset-1": make_observations()}
+    actions = {"asset-1": [make_corporate_action()]}
+
+    results = funnel.run_stage_a(
+        "snapshot-1",
+        instruments,
+        observations,
+        actions,
+        DAYS,
+        NOW,
+        readiness_ids={"asset-1": "r1"},
+    )
+
+    assert not results[0].passed
+    assert "sessions_too_few" in results[0].rejection_details
+
+
+def test_stage_a_enforces_minimum_coverage_bound():
+    """A coverage bound tighter than the canonical policy is enforced."""
+    config = StageAConfig(minimum_coverage=Decimal("0.999"))
+    funnel = CandidateFunnel(stage_a_config=config)
+    instruments = [make_instrument()]
+    # Drop one mid-history session: coverage = 179/180 = 0.9944, which the canonical
+    # 0.98 policy accepts but the tighter 0.999 bound must reject.
+    sessions = DAYS[:50] + DAYS[51:]
+    observations = {"asset-1": make_observations(sessions=sessions)}
+    actions = {"asset-1": [make_corporate_action()]}
+
+    results = funnel.run_stage_a(
+        "snapshot-1",
+        instruments,
+        observations,
+        actions,
+        DAYS,
+        NOW,
+        readiness_ids={"asset-1": "r1"},
+    )
+
+    assert results[0].screening_evidence["eligible"]
+    assert not results[0].passed
+    assert "coverage_too_low" in results[0].rejection_details
+
+
+def test_stage_a_default_bounds_do_not_reject_valid_instrument():
+    """The default Stage A bounds must not reject a canonical eligible instrument."""
+    funnel = CandidateFunnel()
+    instruments = [make_instrument()]
+    observations = {"asset-1": make_observations()}
+    actions = {"asset-1": [make_corporate_action()]}
+
+    results = funnel.run_stage_a(
+        "snapshot-1",
+        instruments,
+        observations,
+        actions,
+        DAYS,
+        NOW,
+        readiness_ids={"asset-1": "r1"},
+    )
+
+    assert results[0].passed
+    assert results[0].rejection_reason is None
+
+
 # ─── Review BLOCKER C: candidate rank / selection reason / trial family in lineage ───
 
 
