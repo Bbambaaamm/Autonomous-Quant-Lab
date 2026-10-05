@@ -1441,6 +1441,146 @@ def test_emitted_before_resolution_constraint_is_declared_in_schema() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Canonical typing on the public factory (adversarial contract probes)
+# ---------------------------------------------------------------------------
+
+
+def test_factory_rejects_optional_text_fields_that_are_not_strings() -> None:
+    """A non-string free-text field must fail closed at construction.
+
+    ``regime``/``source``/``degraded_detail`` are persisted as ``String`` and
+    are part of the content hash. Before this guard the factory admitted any
+    object (``regime=123``); the column coerced it to ``"123"`` on write, so the
+    read-back record no longer reproduced its own ``content_hash`` and the
+    ledger reported a legitimate forecast as mutated -- permanently unreadable
+    evidence.
+    """
+    for field in ("regime", "source"):
+        with pytest.raises(InvalidForecastError, match=field):
+            emitted(**{field: 123})
+    with pytest.raises(InvalidForecastError, match="degraded_detail"):
+        degraded(ForecastStatus.ABSTAINED, DegradedReason.POLICY_ABSTAIN, degraded_detail=123)
+    # An empty string is not a valid free-text value either (it is not a
+    # meaningful label), while ``None`` stays admissible.
+    with pytest.raises(InvalidForecastError, match="regime"):
+        emitted(regime="")
+    assert emitted(regime=None, source=None).regime is None
+
+
+def test_factory_rejects_non_string_uncertainty_entries() -> None:
+    """``uncertainty`` is ``Mapping[str, str]``; a non-string value is a type leak."""
+    with pytest.raises(InvalidForecastError, match="uncertainty"):
+        emitted(uncertainty={"sigma": 3})
+    with pytest.raises(InvalidForecastError, match="uncertainty"):
+        emitted(uncertainty={"": "value"})
+    # The legitimate string mapping still round-trips.
+    record = emitted(uncertainty={"sample_size": "250"})
+    assert record.uncertainty == {"sample_size": "250"}
+
+
+def test_factory_requires_enum_members_not_loose_strings() -> None:
+    """``StrEnum`` equality must not let a bare string masquerade as the enum.
+
+    ``"ASSET" == ScopeKind.ASSET`` is true but ``"ASSET" is ScopeKind.ASSET`` is
+    false, so a bare string silently mislabelled the calibration view (a scope
+    reported as neither asset nor universe) and would have broken the status
+    branch that uses identity comparison.
+    """
+    with pytest.raises(InvalidForecastError, match="scope_kind"):
+        emitted(scope_kind="ASSET")
+    with pytest.raises(InvalidForecastError, match="status"):
+        emitted(status="FORECAST_EMITTED")
+    # The enum member itself is accepted and still compares equal to its value.
+    assert emitted().scope_kind is ScopeKind.ASSET
+    assert emitted().scope_kind == "ASSET"
+
+
+def test_multiclass_distribution_must_stay_normalised_at_storage_scale() -> None:
+    """Raw-sum == 1 is not enough: the persisted (quantised) sum must be 1.
+
+    Each probability is stored quantised to ``Numeric(30, 12)``. A distribution
+    whose raw ``Decimal`` sum is exactly 1 but whose rounded members sum to
+    0.999999999999 was admitted, written unnormalised, and then rejected by the
+    read-path contract re-validation -- the factory emitted evidence that could
+    never be read back.
+    """
+    raw_ok_storage_bad = ProbabilityDistribution(
+        kind=OutcomeKind.MULTICLASS,
+        probabilities={
+            "A": Decimal("0.0000000000005"),
+            "B": Decimal("0.0000000000005"),
+            "C": Decimal("0.9999999999990"),
+        },
+    )
+    assert sum(raw_ok_storage_bad.probabilities.values()) == Decimal(1)
+    with pytest.raises(InvalidForecastError, match="zaokrouhlení"):
+        emitted(
+            target=target_spec(outcome_kind=OutcomeKind.MULTICLASS),
+            distribution=raw_ok_storage_bad,
+        )
+    # A distribution that stays normalised at the storage scale persists and
+    # round-trips without being reported as mutated.
+    store, _ = ledger()
+    record = emitted(
+        target=target_spec(outcome_kind=OutcomeKind.MULTICLASS),
+        distribution=ProbabilityDistribution(
+            kind=OutcomeKind.MULTICLASS,
+            probabilities={"UP": Decimal("0.5"), "FLAT": Decimal("0.2"), "DOWN": Decimal("0.3")},
+        ),
+    )
+    store.commit(record)
+    loaded = store.read(record.forecast_id)
+    assert loaded is not None
+    assert loaded.content_hash() == record.content_hash()
+
+
+def test_preregistered_fail_closed_status_requires_a_trial_family() -> None:
+    """The multiple-testing obligation binds abstentions too, not only emissions.
+
+    A preregistered ABSTAINED/NO_FORECAST row still occupies the coverage
+    denominator (STAT-BLOCKER A), so without a trial family it is just as
+    unattributable as an emitted one -- a target/horizon switch could hide in
+    the abstentions and escape the #76 accounting.
+    """
+    for status, reason in (
+        (ForecastStatus.ABSTAINED, DegradedReason.POLICY_ABSTAIN),
+        (ForecastStatus.NO_FORECAST, DegradedReason.MODEL_UNAVAILABLE),
+        (ForecastStatus.INVALID_DATA, DegradedReason.STALE_DATA),
+        (ForecastStatus.NOT_EVALUATED, DegradedReason.NOT_EVALUATED),
+    ):
+        with pytest.raises(InvalidForecastError, match="trial_family_id"):
+            degraded(status, reason, lineage=lineage(trial_family_id=None))
+    # A non-preregistered abstention stays admissible (it is excluded from the
+    # denominator, not fabricated into it).
+    exploratory = degraded(
+        ForecastStatus.ABSTAINED,
+        DegradedReason.POLICY_ABSTAIN,
+        preregistered=False,
+        lineage=lineage(trial_family_id=None),
+    )
+    assert exploratory.lineage.trial_family_id is None
+
+
+def test_non_string_free_text_no_longer_poisons_the_ledger_round_trip() -> None:
+    """Regression: the previously admitted shapes are now rejected up front.
+
+    Before the fix, ``emitted(regime=123)`` committed successfully and the very
+    next ``read`` raised ``ForecastIntegrityError`` -- evidence written by the
+    canonical factory that the canonical reader declared corrupt.
+    """
+    store, _ = ledger()
+    for bad in ({"regime": 123}, {"source": 123}, {"uncertainty": {"sigma": 3}}):
+        with pytest.raises(InvalidForecastError):
+            emitted(**bad)
+    # The store stays empty and readable for the legitimate shape.
+    record = emitted()
+    store.commit(record)
+    loaded = store.read(record.forecast_id)
+    assert loaded is not None
+    assert loaded.content_hash() == record.content_hash()
+
+
+# ---------------------------------------------------------------------------
 # PostgreSQL: schema, immutability, runtime role, migration ownership
 # ---------------------------------------------------------------------------
 

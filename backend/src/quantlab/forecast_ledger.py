@@ -288,6 +288,50 @@ def _require_probability(value: Decimal | None, field_name: str) -> Decimal:
     return value
 
 
+def _require_optional_text(value: str | None, field_name: str) -> str | None:
+    """A nullable free-text field: either ``None`` or a non-empty string.
+
+    ``_require_text`` only runs on fields that are always present, so an
+    optional free-text field silently accepted any object (``regime=123``).
+    The persisted column is ``String``, so the value was coerced on write and
+    the round-tripped record no longer reproduced its own ``content_hash`` --
+    a legitimate-by-contract forecast became permanently unreadable. Reject
+    the non-string at construction instead of storing unreadable evidence.
+    """
+    if value is None:
+        return None
+    return _require_text(value, field_name)
+
+
+def _require_enum(value: Any, enum_type: type[StrEnum], field_name: str) -> None:
+    """The canonical contract carries enum members, never loose strings.
+
+    A ``StrEnum`` member compares *equal* to its value but is not *identical*
+    to it, so ``scope_kind="ASSET"`` passes equality checks while failing the
+    ``is ScopeKind.ASSET`` identity checks that the calibration view and the
+    status branches rely on -- silently mislabelling evidence (a universe or
+    asset reported as neither). Require the member itself so the canonical
+    contract is typed, not stringly-typed.
+    """
+    if not isinstance(value, enum_type):
+        raise InvalidForecastError(f"{field_name} musí být {enum_type.__name__}")
+
+
+def _require_text_mapping(value: Mapping[str, str], field_name: str) -> None:
+    """Every key and value of a persisted string map must be a non-empty string.
+
+    A non-string value (``uncertainty={"sigma": 3}``) is JSON-serializable and
+    was therefore admitted, but it is not what the ``Mapping[str, str]``
+    contract declares and downstream consumers of the persisted evidence would
+    read a type they did not agree to.
+    """
+    if len(value) > MAX_LINEAGE_ENTRIES:
+        raise InvalidForecastError(f"{field_name} překročil limit záznamů")
+    for key, item in value.items():
+        _require_text(key, f"{field_name}.key")
+        _require_text(item, f"{field_name}.{key}")
+
+
 def assert_forecast_only() -> None:
     """Fail closed on any attempt to treat the ledger as an execution authority."""
     if FORECAST_AUTHORITY:
@@ -415,6 +459,21 @@ class ProbabilityDistribution:
         if total != ONE:
             raise InvalidForecastError(
                 f"multi-class distribuce musí být normalizovaná na 1 (součet={total})"
+            )
+        # Normalisation must hold at the *storage* scale, not only in raw
+        # ``Decimal``. Each probability is persisted quantized to
+        # ``Numeric(30, 12)``; a distribution whose raw sum is exactly 1 but
+        # whose rounded members sum to 0.999999999999 is written unnormalised
+        # and then fails the read-path contract re-validation, so a forecast
+        # the factory accepted becomes permanently unreadable. Reject it here.
+        stored_total = sum(
+            (_storage_probability(probability) for probability in self.probabilities.values()),
+            start=ZERO,
+        )
+        if stored_total != ONE:
+            raise InvalidForecastError(
+                "multi-class distribuce musí zůstat normalizovaná i po zaokrouhlení "
+                f"na kanonické měřítko (součet={stored_total})"
             )
 
     @property
@@ -632,6 +691,12 @@ class ForecastRecord:
         assert_forecast_only()
         if self.schema_version != FORECAST_SCHEMA_VERSION:
             raise InvalidForecastError(f"schema_version musí být {FORECAST_SCHEMA_VERSION}")
+        # The canonical contract is typed: enum *members*, never loose strings.
+        # ``StrEnum`` equality hides the difference, so a bare string would pass
+        # every ``==`` check while failing the ``is`` identity checks the
+        # calibration view and the status branches depend on.
+        _require_enum(self.status, ForecastStatus, "status")
+        _require_enum(self.scope_kind, ScopeKind, "scope_kind")
         _require_text(self.scope_id, "scope_id")
         _require_text(self.opportunity_id, "opportunity_id")
         self.target.validate()
@@ -651,12 +716,26 @@ class ForecastRecord:
             self.calibrated.validate()
         if self.confidence is not None:
             _require_probability(self.confidence, "confidence")
-        if len(self.uncertainty) > MAX_LINEAGE_ENTRIES:
-            raise InvalidForecastError("uncertainty překročila limit záznamů")
+        _require_text_mapping(self.uncertainty, "uncertainty")
+        _require_optional_text(self.regime, "regime")
+        _require_optional_text(self.source, "source")
+        _require_optional_text(self.degraded_detail, "degraded_detail")
+        if self.degraded_reason is not None:
+            _require_enum(self.degraded_reason, DegradedReason, "degraded_reason")
         if self.prior_forecast_id is not None:
             _require_text(self.prior_forecast_id, "prior_forecast_id")
             if self.prior_forecast_id == self.forecast_id:
                 raise InvalidForecastError("prior_forecast_id nesmí odkazovat na sebe")
+
+        # STAT-BLOCKER B/C: a preregistered opportunity without a trial family
+        # cannot be attributed to a multiple-testing family, so a target/horizon
+        # switch would silently escape the #76 accounting. The obligation binds
+        # *every* preregistered opportunity, not only emitted ones: an
+        # abstention is a recorded statistical outcome (STAT-BLOCKER A), so a
+        # preregistered ABSTAINED/NO_FORECAST row without a family is just as
+        # unattributable -- and it still occupies the coverage denominator.
+        if self.preregistered and not (self.lineage.trial_family_id or "").strip():
+            raise InvalidForecastError("preregistered forecast vyžaduje lineage.trial_family_id")
 
         if self.status is ForecastStatus.FORECAST_EMITTED:
             if self.distribution.is_empty:
@@ -670,13 +749,6 @@ class ForecastRecord:
             if created_at >= resolution_at:
                 raise InvalidForecastError(
                     "FORECAST_EMITTED musí vzniknout před resolution_at (look-ahead)"
-                )
-            # STAT-BLOCKER B/C: a preregistered opportunity without a trial
-            # family cannot be attributed to a multiple-testing family, so a
-            # target/horizon switch would silently escape the #76 accounting.
-            if self.preregistered and not (self.lineage.trial_family_id or "").strip():
-                raise InvalidForecastError(
-                    "preregistered forecast vyžaduje lineage.trial_family_id"
                 )
             # The canonical record path must enforce the probability contract
             # itself: finite, in [0, 1] and (multi-class) exactly normalised.

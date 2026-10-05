@@ -114,3 +114,24 @@ rozhodnutí, která odchytává jen `ForecastLedgerError`, by pro tuto třídu e
 `_record_from_row()` včetně obou ověřovacích helperů) a každou takovou chybu dekódování překládá na
 `ForecastIntegrityError`. Skutečné provozní chyby (např. `DBAPIError` spojení) v této rodině
 záměrně nejsou, aby se přerušené spojení nehlásilo jako porušení imutability.
+
+Poslední vrstva je **typová disciplína veřejné factory**: `ForecastRecord.create()` přijímá jen to,
+co kanonický kontrakt deklaruje, protože každý uvolněný typ se propíše do content hashe a rozbije
+buď round-trip, nebo downstream čtení:
+
+- volitelné textové pole (`regime`, `source`, `degraded_detail`) musí být `None` nebo neprázdný
+  `str`; sloupec je `String`, takže `regime=123` se při zápisu převedlo na `"123"` a následný
+  `read()` hlásil legitimní záznam jako mutovaný (`ForecastIntegrityError`) — tedy trvale
+  nečitelnou evidenci;
+- `uncertainty` je `Mapping[str, str]` — každý klíč i hodnota musí být neprázdný `str`;
+- `status`, `scope_kind` a `degraded_reason` musí být členové příslušného `StrEnum`, ne holý string
+  (`"ASSET" == ScopeKind.ASSET` je pravda, ale `"ASSET" is ScopeKind.ASSET` ne, takže holý string
+  tiše rozbil identitní větve i `to_calibration_view()`);
+- multi-class distribuce musí zůstat normalizovaná i **po zaokrouhlení na `Numeric(30, 12)`**:
+  součet raw `Decimal` hodnot může být přesně 1 a přesto se uložené hodnoty sečtou na
+  `0.999999999999`, což read-path kontrakt odmítne — factory by vyrobila evidenci, kterou její
+  vlastní čtenář označí za neplatnou;
+- povinnost `trial_family_id` pro preregistrovanou opportunity platí pro **každý** stav, nejen
+  `FORECAST_EMITTED`: i `ABSTAINED`/`NO_FORECAST`/`INVALID_DATA`/`NOT_EVALUATED` zabírá místo
+  v coverage denominatoru (STAT-BLOCKER A), takže bez family identity je neatribuovatelná a
+  target/horizon switch by se mohl schovat právě v abstencích.
