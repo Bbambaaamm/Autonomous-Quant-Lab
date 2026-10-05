@@ -110,6 +110,10 @@ class ForecastConflictError(ForecastLedgerError):
     """Raised when a committed decision identity is re-submitted with new content."""
 
 
+class ForecastIntegrityError(ForecastLedgerError):
+    """Raised when persisted evidence does not reproduce its own content identity."""
+
+
 class ForecastGateError(ForecastLedgerError):
     """Raised when a probability-aware decision has no admissible forecast."""
 
@@ -966,6 +970,9 @@ class ForecastLedger:
                     raise ForecastConflictError(
                         "existující forecast_id má odlišný obsah (immutability porušena)"
                     )
+                # Defense in depth: an idempotent retry must not silently bless a
+                # row whose stored columns no longer reproduce its own identity.
+                _record_from_row(existing)
                 return CommitResult(
                     CommitOutcome.DUPLICATE_IDEMPOTENT, record.forecast_id, decision_identity
                 )
@@ -1011,34 +1018,114 @@ class ForecastLedger:
 
 
 def _record_from_row(row: ForecastLedgerRecord) -> ForecastRecord:
-    """Rebuild the canonical record from persisted evidence (append-only read)."""
-    record = ForecastRecord(
-        forecast_id=row.forecast_id,
-        status=ForecastStatus(row.status),
-        scope_kind=ScopeKind(row.scope_kind),
-        scope_id=row.scope_id,
-        opportunity_id=row.opportunity_id,
-        preregistered=bool(row.preregistered),
-        created_at=_utc(row.created_at),
-        decision_time=_utc(row.decision_time),
-        resolution_at=_utc(row.resolution_at),
-        target=_target_from_json(row.target_spec_json),
-        distribution=_distribution_from_json(row.distribution_json),
-        lineage=_lineage_from_json(row),
-        schema_version=row.schema_version,
-        baseline=_baseline_from_row(row),
-        calibrated=_calibrated_from_row(row),
-        confidence=row.confidence,
-        uncertainty=json.loads(row.uncertainty_json or "{}"),
-        degraded_reason=None
-        if row.degraded_reason is None
-        else DegradedReason(row.degraded_reason),
-        degraded_detail=row.degraded_detail,
-        prior_forecast_id=row.prior_forecast_id,
-        regime=row.regime,
-        source=row.source,
-    )
+    """Rebuild the canonical record from persisted evidence (append-only read).
+
+    The read path is also the immutability verifier: the reconstructed record
+    must reproduce the stored ``content_hash``, ``forecast_id`` and
+    ``record_json`` snapshot, so a row that disagrees with its own evidence
+    fails closed instead of driving a downstream decision.
+    """
+    try:
+        record = ForecastRecord(
+            forecast_id=row.forecast_id,
+            status=ForecastStatus(row.status),
+            scope_kind=ScopeKind(row.scope_kind),
+            scope_id=row.scope_id,
+            opportunity_id=row.opportunity_id,
+            preregistered=bool(row.preregistered),
+            created_at=_utc(row.created_at),
+            decision_time=_utc(row.decision_time),
+            resolution_at=_utc(row.resolution_at),
+            target=_target_from_json(row.target_spec_json),
+            distribution=_distribution_from_json(row.distribution_json),
+            lineage=_lineage_from_json(row),
+            schema_version=row.schema_version,
+            baseline=_baseline_from_row(row),
+            calibrated=_calibrated_from_row(row),
+            confidence=row.confidence,
+            uncertainty=json.loads(row.uncertainty_json or "{}"),
+            degraded_reason=None
+            if row.degraded_reason is None
+            else DegradedReason(row.degraded_reason),
+            degraded_detail=row.degraded_detail,
+            prior_forecast_id=row.prior_forecast_id,
+            regime=row.regime,
+            source=row.source,
+        )
+    except (KeyError, ValueError, TypeError, json.JSONDecodeError) as error:
+        raise ForecastIntegrityError(
+            "persistovanou evidenci nelze rekonstruovat (immutability porušena)"
+        ) from error
+    _verify_persisted_identity(row, record)
     return record
+
+
+def _verify_persisted_identity(row: ForecastLedgerRecord, record: ForecastRecord) -> None:
+    """Fail closed when persisted evidence no longer reproduces its own identity.
+
+    The PostgreSQL trigger and the runtime-role revocation stop UPDATE/DELETE,
+    but a privileged writer, a hand-written INSERT or a partially applied
+    restore can still land a row whose scalar columns disagree with the hashed
+    ``record_json`` snapshot. ``require_forecast_reference`` only compares the
+    ``decision_identity`` (target spec + scope + decision time + model artifact
+    + snapshot lineage), so any tampered field *outside* that subset -- the
+    probability columns, ``record_json``, regime, source, uncertainty,
+    confidence, calibration, baseline, degraded detail -- would otherwise be
+    admitted and drive a PAPER decision. Recompute both content-addressed
+    identities and the canonical snapshot from the read-back record and compare
+    them with the stored columns.
+    """
+    expected_content_hash = record.content_hash()
+    if expected_content_hash != row.content_hash:
+        raise ForecastIntegrityError(
+            "persistovaná evidence neodpovídá svému content_hash (immutability porušena)"
+        )
+    expected_forecast_id = ForecastRecord.compute_forecast_id(
+        record.decision_identity(), expected_content_hash
+    )
+    if expected_forecast_id != row.forecast_id:
+        raise ForecastIntegrityError(
+            "persistovaná evidence neodpovídá svému forecast_id (immutability porušena)"
+        )
+    if canonical_json(record.to_dict()) != row.record_json:
+        raise ForecastIntegrityError(
+            "persistovaná evidence neodpovídá svému record_json snapshotu (immutability porušena)"
+        )
+    # Denormalized scalar columns are read directly by downstream SQL consumers
+    # (calibration/scoring, dashboards, ad-hoc audit queries). They must agree
+    # with the hashed evidence they were derived from, otherwise the ledger
+    # reports one probability in ``record_json`` and another in the column.
+    expected_columns = _row_payload(record)
+    for column, expected in expected_columns.items():
+        if not _stored_matches(getattr(row, column, None), expected):
+            raise ForecastIntegrityError(
+                f"persistovaný sloupec {column} neodpovídá svému content hashi "
+                "(immutability porušena)"
+            )
+
+
+def _stored_matches(stored: Any, expected: Any) -> bool:
+    """Compare a persisted column against the canonical value it must hold.
+
+    Values are normalized to their authoritative storage form: probabilities to
+    the ``Numeric(30, 12)`` scale and timestamps to the canonical UTC instant,
+    so a database round-trip is not mistaken for a mutation.
+    """
+    if stored is None or expected is None:
+        return stored is None and expected is None
+    if isinstance(expected, Decimal):
+        if not isinstance(stored, Decimal):
+            return False
+        return _probability_text(stored) == _probability_text(expected)
+    if isinstance(expected, datetime):
+        if not isinstance(stored, datetime):
+            return False
+        # SQLite drops tzinfo on read; normalize both sides to the canonical
+        # UTC instant so a round-trip is not mistaken for a mutation.
+        return _utc(stored) == _canonical_utc(expected)
+    if isinstance(expected, bool):
+        return bool(stored) is expected
+    return bool(stored == expected)
 
 
 def _target_from_json(payload: str) -> CanonicalTargetSpec:

@@ -71,3 +71,12 @@ Immutabilita je vynucena na DB úrovni: trigger `forecast_ledger_immutable` (fun
 `20260924_05` odmítá downgrade, pokud tabulka obsahuje jakoukoli evidenci. Všechny pravděpodobnostní
 sloupce jsou `Numeric(30, 12)` a content hash se počítá ve stejné škále, aby round-trip přes
 databázi reprodukoval původní `content_hash`.
+
+Trigger i revokace chrání jen runtime roli. Privilegovaný zápis (migrator/superuser, ruční INSERT,
+částečně aplikovaný restore) je může obejít, proto `ForecastLedger.read()` — a tím i
+`require_forecast_reference()` a `decide_with_forecast()` — ověřuje, že přečtená evidence stále
+reprodukuje svou vlastní identitu: `content_hash`, `forecast_id`, kanonický `record_json` snapshot a
+všechny denormalizované sloupce (pravděpodobnosti, kalibrace, baseline, lineage, regime/source,
+uncertainty, confidence, degraded detail, target spec). Nesoulad vyhazuje `ForecastIntegrityError`
+(fail-closed) místo aby mutovaná evidence řídila PAPER rozhodnutí; idempotentní re-commit navíc
+tutéž kontrolu vynucuje i nad existujícím řádkem.

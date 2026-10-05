@@ -28,6 +28,7 @@ from quantlab.forecast_ledger import (
     ForecastAuthorityError,
     ForecastConflictError,
     ForecastGateError,
+    ForecastIntegrityError,
     ForecastLedger,
     ForecastLedgerError,
     ForecastLedgerRecord,
@@ -792,6 +793,150 @@ def test_read_round_trips_the_record_and_content_hash() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Persisted-evidence integrity verification on the read path
+# ---------------------------------------------------------------------------
+
+
+def _raw_insert(engine: object, row: dict[str, object]) -> None:
+    """Insert a hand-built row, bypassing the append-only commit contract.
+
+    The PostgreSQL trigger blocks UPDATE/DELETE for the runtime role, but a
+    privileged writer, a hand-written INSERT or a partially applied restore can
+    still land a row whose scalar columns disagree with the hashed
+    ``record_json`` snapshot. ``_row_payload`` reproduces exactly what
+    ``ForecastLedger.commit`` writes, so mutating it is the faithful simulation
+    of that out-of-band write.
+    """
+    from sqlalchemy import text as sql_text
+
+    payload = dict(row)
+    for column in (
+        "raw_probability",
+        "calibrated_probability",
+        "baseline_probability",
+        "confidence",
+    ):
+        if payload.get(column) is not None:
+            payload[column] = str(payload[column])
+    columns = ", ".join(payload)
+    placeholders = ", ".join(f":{name}" for name in payload)
+    with engine.connect() as connection:  # type: ignore[attr-defined]
+        with connection.begin():
+            connection.execute(
+                sql_text(f"INSERT INTO forecast_ledger ({columns}) VALUES ({placeholders})"),
+                payload,
+            )
+
+
+def _corrupted_row(record: ForecastRecord, mutate: object) -> ForecastLedger:
+    """Commit a genuine row, then land a tampered clone beside it.
+
+    Returns the ledger so the caller can attempt to read the corrupted row.
+    """
+    from quantlab.forecast_ledger import _row_payload
+
+    store, engine = ledger()
+    store.commit(record)
+    row = dict(_row_payload(record))
+    mutate(row)  # type: ignore[operator]
+    row["forecast_id"] = "5" * 64
+    row["decision_identity"] = "4" * 64
+    row["opportunity_id"] = "opp-tampered"
+    _raw_insert(engine, row)
+    return store
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        # A tampered probability column: the scalar column no longer matches the
+        # hashed distribution, so the record would otherwise report p=0.62 while
+        # the database says 0.99.
+        lambda row: row.update(raw_probability=Decimal("0.99")),
+        # A tampered distribution_json with the scalar column left intact.
+        lambda row: row.update(
+            distribution_json='{"kind":"BINARY","p_event":"0.010000000000","probabilities":{}}'
+        ),
+        # A tampered record_json snapshot only (forecast_id/decision_identity
+        # columns stay intact), i.e. silent mutation of persisted evidence.
+        lambda row: row.update(
+            record_json=str(row["record_json"]).replace('"0.620000000000"', '"0.990000000000"')
+        ),
+        # Fields that are NOT part of the decision identity but are still
+        # persisted evidence and must not be silently mutable.
+        lambda row: row.update(regime="EVIL"),
+        lambda row: row.update(source="EVIL"),
+        lambda row: row.update(uncertainty_json='{"sample_size":"99999"}'),
+        lambda row: row.update(confidence=Decimal("0.01")),
+        lambda row: row.update(preregistered=0),
+        lambda row: row.update(degraded_detail="EVIL"),
+        lambda row: row.update(calibrator_version="evil"),
+        lambda row: row.update(
+            target_spec_json=str(row["target_spec_json"]).replace(
+                '"threshold":"0.01"', '"threshold":"0.99"'
+            )
+        ),
+    ],
+)
+def test_tampered_persisted_evidence_fails_closed_on_read(mutate: object) -> None:
+    record = emitted(
+        calibrated=CalibratedProbability(
+            probability=Decimal("0.55"),
+            calibrator_id="iso",
+            calibrator_version="v1",
+            method="isotonic",
+        ),
+        uncertainty={"sample_size": "250"},
+    )
+    store = _corrupted_row(record, mutate)
+    # Reading the row must not hand back a record that disagrees with its own
+    # immutable evidence: fail closed instead of admitting a mutated forecast.
+    with pytest.raises(ForecastIntegrityError):
+        store.read("5" * 64)
+
+
+def test_tampered_evidence_is_never_admitted_by_the_decision_gate() -> None:
+    record = emitted()
+    store, engine = ledger()
+    store.commit(record)
+    from quantlab.forecast_ledger import _row_payload
+
+    row = dict(_row_payload(record))
+    row["raw_probability"] = Decimal("0.99")
+    row["forecast_id"] = "6" * 64
+    row["decision_identity"] = "7" * 64
+    row["opportunity_id"] = "opp-gate"
+    _raw_insert(engine, row)
+    store.commit(record)  # keep the genuine row too: only the clone is corrupt
+    with pytest.raises(ForecastIntegrityError):
+        require_forecast_reference(
+            store,
+            DecisionForecastReference(
+                forecast_id="6" * 64, decision_identity="7" * 64, decision_time=DECISION_TIME
+            ),
+        )
+
+
+def test_untampered_evidence_still_passes_integrity_verification() -> None:
+    """Control: every legitimate shape must reproduce its own identity."""
+    store, _ = ledger()
+    record = emitted(
+        calibrated=CalibratedProbability(
+            probability=Decimal("0.55"),
+            calibrator_id="iso",
+            calibrator_version="v1",
+            method="isotonic",
+        ),
+        uncertainty={"sample_size": "250"},
+    )
+    store.commit(record)
+    loaded = store.read(record.forecast_id)
+    assert loaded is not None
+    assert loaded.content_hash() == record.content_hash()
+    loaded.validate()
+
+
+# ---------------------------------------------------------------------------
 # Coverage accounting (STAT-BLOCKER A)
 # ---------------------------------------------------------------------------
 
@@ -943,6 +1088,68 @@ def test_postgres_trigger_rejects_update_and_delete() -> None:
                 with pytest.raises(DBAPIError, match="immutable"):
                     with sessions() as session, session.begin():
                         session.execute(text(statement), {"id": record.forecast_id})
+        finally:
+            transaction.rollback()
+    engine.dispose()
+
+
+@POSTGRES
+def test_postgres_read_path_detects_out_of_band_tampering() -> None:
+    """The trigger blocks runtime UPDATE, but a privileged writer bypasses it.
+
+    PostgreSQL immutability is enforced by a BEFORE UPDATE/DELETE trigger plus
+    runtime-role revocation; a superuser / migrator connection, a hand-written
+    INSERT or a partially applied restore is NOT covered by either. The read
+    path must therefore verify that the row still reproduces its own identity
+    and fail closed instead of admitting mutated evidence.
+    """
+    from sqlalchemy import text as sql_text
+
+    engine = create_engine(os.environ["DATABASE_URL"])
+    with engine.connect() as connection:
+        transaction = connection.begin()
+        try:
+            sessions = sessionmaker(connection, join_transaction_mode="create_savepoint")
+            store = ForecastLedger(sessions)
+            record = emitted(opportunity_id=f"pg-tamper-{identity(os.getpid())}")
+            store.commit(record)
+
+            # The BEFORE UPDATE trigger correctly rejects an in-place mutation.
+            with pytest.raises(DBAPIError, match="immutable"):
+                with sessions() as session, session.begin():
+                    session.execute(
+                        sql_text(
+                            "UPDATE forecast_ledger SET raw_probability = 0.99 "
+                            "WHERE forecast_id = :id"
+                        ),
+                        {"id": record.forecast_id},
+                    )
+
+            # A privileged writer can still disable the trigger (or restore a
+            # dump), so the read path must not trust the row's own columns.
+            with sessions() as session, session.begin():
+                session.execute(
+                    sql_text(
+                        "ALTER TABLE forecast_ledger DISABLE TRIGGER forecast_ledger_immutable"
+                    )
+                )
+                session.execute(
+                    sql_text(
+                        "UPDATE forecast_ledger SET raw_probability = 0.99 WHERE forecast_id = :id"
+                    ),
+                    {"id": record.forecast_id},
+                )
+            with pytest.raises(ForecastIntegrityError):
+                store.read(record.forecast_id)
+            with pytest.raises(ForecastIntegrityError):
+                require_forecast_reference(
+                    store,
+                    DecisionForecastReference(
+                        forecast_id=record.forecast_id,
+                        decision_identity=record.decision_identity(),
+                        decision_time=DECISION_TIME,
+                    ),
+                )
         finally:
             transaction.rollback()
     engine.dispose()
