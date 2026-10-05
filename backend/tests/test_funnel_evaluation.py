@@ -382,6 +382,62 @@ def test_rank_buckets_score_aggregation():
     assert buckets[0].mean_score > buckets[1].mean_score
 
 
+def test_rank_buckets_exclude_not_evaluated_from_pass_rate():
+    """A budget-skipped candidate must not dilute a rank bucket's pass rate (BLOCKER A).
+
+    ``compute_rank_buckets`` counted every ``stage_b_results`` row, so with ``max_candidates``
+    below the Stage A candidate count the not-evaluated rows drove the bucket pass rate down
+    and made a budget shortfall look like a rank-dependent performance collapse. The judged
+    pass rate is 1.0 here (both judged candidates passed); the raw count-based rate was 0.4.
+    """
+    instruments, observations, actions, readiness = _funnel_universe(5)
+    config = StageBConfig(max_candidates=2)
+    run = CandidateFunnel(stage_b_config=config).run(
+        "snapshot-1",
+        instruments,
+        observations,
+        actions,
+        DAYS,
+        NOW,
+        RecordingStageBEvaluator(config),
+        readiness_ids=readiness,
+    )
+
+    buckets = compute_rank_buckets(run, bucket_size=10)
+    assert len(buckets) == 1
+    bucket = buckets[0]
+    # Bucket occupancy still reports all five ranked candidates ...
+    assert bucket.count == 5
+    # ... but the three budget skips are split out and kept out of the pass rate.
+    assert bucket.not_evaluated_count == 3
+    assert bucket.pass_rate == pytest.approx(1.0)
+
+
+def test_rank_buckets_all_not_evaluated_has_zero_pass_rate():
+    """A bucket with no judged candidate reports a zero pass rate, not a divide-by-zero."""
+    instruments, observations, actions, readiness = _funnel_universe(3)
+    config = StageBConfig(max_candidates=1)
+    run = CandidateFunnel(stage_b_config=config).run(
+        "snapshot-1",
+        instruments,
+        observations,
+        actions,
+        DAYS,
+        NOW,
+        RecordingStageBEvaluator(config),
+        readiness_ids=readiness,
+    )
+
+    buckets = compute_rank_buckets(run, bucket_size=1)
+    # Rank 1 was judged; ranks 2 and 3 were skipped for budget.
+    assert buckets[0].not_evaluated_count == 0
+    assert buckets[0].pass_rate == pytest.approx(1.0)
+    assert buckets[1].not_evaluated_count == 1
+    assert buckets[1].pass_rate == 0.0
+    assert buckets[2].not_evaluated_count == 1
+    assert buckets[2].pass_rate == 0.0
+
+
 # ---------------------------------------------------------------------------
 # Threshold sensitivity (STAT-BLOCKER D)
 # ---------------------------------------------------------------------------

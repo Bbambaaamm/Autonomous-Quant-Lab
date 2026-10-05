@@ -87,6 +87,10 @@ class RankBucketPerformance:
     count: int
     mean_score: float | None
     pass_rate: float
+    #: Candidates in the bucket that were never judged because Stage B ran out of
+    #: budget/time/resources. They are excluded from ``pass_rate`` (review BLOCKER A) but
+    #: reported so bucket occupancy stays interpretable.
+    not_evaluated_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -245,7 +249,15 @@ def compute_concentration(runs: Sequence[FunnelRun]) -> ConcentrationMetrics:
 def compute_rank_buckets(
     run: FunnelRun, bucket_size: int = 10
 ) -> tuple[RankBucketPerformance, ...]:
-    """Compute performance by candidate rank bucket (STAT-BLOCKER D)."""
+    """Compute performance by candidate rank bucket (STAT-BLOCKER D).
+
+    Only candidates that Stage B actually judged enter a bucket. A NOT_EVALUATED_*
+    candidate (budget, timeout, resource pressure) was never judged, so counting it would
+    drive the bucket's ``pass_rate`` toward zero and make a budget shortfall look like a
+    rank-dependent performance collapse — exactly the over-claim review BLOCKER A forbids.
+    Such candidates are reported in ``count`` (bucket occupancy) and ``not_evaluated_count``
+    but are excluded from ``pass_rate``.
+    """
     if not run.stage_b_results:
         return ()
 
@@ -262,9 +274,11 @@ def compute_rank_buckets(
     for bucket_name in sorted(buckets.keys()):
         bucket_results = buckets[bucket_name]
         count = len(bucket_results)
-        scores = [float(r.score) for r in bucket_results if r.score is not None]
+        judged = [r for r in bucket_results if _is_actually_evaluated(r)]
+        not_evaluated_count = count - len(judged)
+        scores = [float(r.score) for r in judged if r.score is not None]
         mean_score = sum(scores) / len(scores) if scores else None
-        pass_rate = sum(1 for r in bucket_results if r.passed) / count if count > 0 else 0.0
+        pass_rate = sum(1 for r in judged if r.passed) / len(judged) if judged else 0.0
 
         results.append(
             RankBucketPerformance(
@@ -272,6 +286,7 @@ def compute_rank_buckets(
                 count=count,
                 mean_score=mean_score,
                 pass_rate=pass_rate,
+                not_evaluated_count=not_evaluated_count,
             )
         )
 

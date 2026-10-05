@@ -489,6 +489,25 @@ def test_not_evaluated_is_not_counted_as_rejected():
     assert snapshot.rejection_counts() == {"NOT_IN_UNIVERSE": 1}
 
 
+def test_pit_not_evaluated_categories_are_split_from_rejections():
+    """The PIT summary keeps NOT_EVALUATED_* out of ``rejection_categories`` (BLOCKER A).
+
+    ``rejection_categories`` is the dashboard's rejection-category read model, so a
+    NOT_EVALUATED_* reason folded into it would report a budget shortfall as filter
+    selectivity. The split keeps the categories dict rejection-only and reports the
+    never-judged candidates under their own key.
+    """
+    instruments = [make_instrument("asset-1", "A1")]
+    observations: dict[str, list[Observation]] = {}
+    actions: dict[str, list[CorporateAction]] = {}
+
+    snapshot = recompute_stage_a_at(folds(179)[0], instruments, observations, actions)
+    summary = snapshot.to_summary()
+    assert summary["rejection_categories"] == {"NOT_IN_UNIVERSE": 1}
+    assert summary["not_evaluated_categories"] == {}
+    assert not any(key.startswith("NOT_EVALUATED") for key in summary["rejection_categories"])
+
+
 # ---------------------------------------------------------------------------
 # Module purity / no execution authority
 # ---------------------------------------------------------------------------

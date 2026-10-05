@@ -283,7 +283,22 @@ class PITDecisionSnapshot:
                 "candidates": len(self.ordered_candidate_ids),
             },
             "rejection_categories": self.rejection_counts(),
+            "not_evaluated_categories": self.not_evaluated_counts(),
         }
+
+    def not_evaluated_counts(self) -> dict[str, int]:
+        """Category counts for candidates that were never judged (review BLOCKER A).
+
+        Derived from the immutable snapshot; ``rejection_counts()`` holds only judged
+        rejections, so a NOT_EVALUATED_* candidate is reported here instead — never as a
+        rejection.
+        """
+        counts: dict[str, int] = {}
+        for result in self.stage_a_results:
+            reason = result.rejection_reason
+            if not result.passed and _is_not_evaluated(reason) and reason is not None:
+                counts[reason.value] = counts.get(reason.value, 0) + 1
+        return counts
 
     def rejection_counts(self) -> dict[str, int]:
         counts: dict[str, int] = {}

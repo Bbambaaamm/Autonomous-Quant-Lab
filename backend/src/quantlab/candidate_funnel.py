@@ -30,7 +30,11 @@ RANKING_KEY_VERSION = "ranking-v1"
 #: Version of the Stage A rejection classification (review BLOCKER A). Bumped when the
 #: data-quality/economic split changes, because it changes what a stored ``rejection_reason``
 #: means and therefore the interpretation of any persisted funnel evidence.
-REJECTION_CLASSIFICATION_VERSION = "rejection-classification-v1"
+#: v2: the NOT_EVALUATED_* statuses are no longer aggregated into ``rejection_counts`` /
+#: ``rejection_categories`` at all — a budget/timeout/resource-pressure candidate was never
+#: judged, so it is a non-event rather than a rejection. That changes the meaning of a stored
+#: rejection-category dict, so it must be part of the funnel identity (review BLOCKER C).
+REJECTION_CLASSIFICATION_VERSION = "rejection-classification-v2"
 
 
 class RankingKey(StrEnum):
@@ -400,6 +404,10 @@ class FunnelRun:
     stage_a_results: tuple[StageAResult, ...]
     stage_b_results: tuple[StageBResult, ...]
     final_candidates: tuple[str, ...]
+    #: Economic/data rejection categories ONLY. A NOT_EVALUATED_* candidate (budget,
+    #: timeout, resource pressure) was never judged, so it is excluded here and reported
+    #: separately in ``to_summary()['not_evaluated_categories']``. Aggregating it as a
+    #: rejection would let a budget shortfall be read as filter selectivity (BLOCKER A).
     rejection_counts: dict[str, int]
     content_hash: str
     ranking_key: str = ""
@@ -436,7 +444,10 @@ class FunnelRun:
         Budget/timeout/resource-pressure candidates are reported in their own
         ``stage_b_not_evaluated`` bucket and are excluded from ``stage_b_rejected`` and from
         ``stage_b_candidates_evaluated`` (review BLOCKER A): an instrument skipped for budget
-        was never judged and must not be read as an economic rejection.
+        was never judged and must not be read as an economic rejection. The same split applies
+        to ``rejection_categories``: the NOT_EVALUATED_* statuses live in
+        ``not_evaluated_categories`` instead, so no consumer of the rejection-category dict can
+        read a budget shortfall as filter selectivity.
         """
         stage_a_accepted = sum(1 for r in self.stage_a_results if r.passed)
         stage_a_rejected = sum(1 for r in self.stage_a_results if not r.passed)
@@ -483,7 +494,26 @@ class FunnelRun:
                 "final_candidates": len(self.final_candidates),
             },
             "rejection_categories": dict(self.rejection_counts),
+            "not_evaluated_categories": self._not_evaluated_counts(),
         }
+
+    def _not_evaluated_counts(self) -> dict[str, int]:
+        """Category counts for candidates that were never judged (review BLOCKER A).
+
+        Derived from the immutable lineage rather than from ``rejection_counts``, which by
+        construction holds only judged rejections. Kept separate so no consumer can read a
+        budget/timeout/resource-pressure skip as an economic rejection.
+        """
+        counts: dict[str, int] = {}
+        for result in self.stage_a_results:
+            reason = result.rejection_reason
+            if not result.passed and is_not_evaluated(reason) and reason is not None:
+                counts[reason.value] = counts.get(reason.value, 0) + 1
+        for stage_b_result in self.stage_b_results:
+            reason = stage_b_result.rejection_reason
+            if not stage_b_result.passed and is_not_evaluated(reason) and reason is not None:
+                counts[reason.value] = counts.get(reason.value, 0) + 1
+        return counts
 
     def candidate_lineage(self) -> list[dict[str, Any]]:
         """Per-candidate downstream lineage: rank, selection reason, completeness.
@@ -1032,13 +1062,17 @@ class CandidateFunnel:
             }
         )
 
+        # Rejection categories hold only *judged* non-passes. A NOT_EVALUATED_* candidate
+        # (budget/timeout/resource pressure) was never judged, so folding it into the
+        # rejection-category dict would let a budget shortfall be read as filter selectivity
+        # (review BLOCKER A). Those statuses are reported separately by ``to_summary()``.
         rejection_counts: dict[str, int] = {}
         for r in stage_a_results:
-            if not r.passed and r.rejection_reason:
+            if not r.passed and r.rejection_reason and not is_not_evaluated(r.rejection_reason):
                 key = r.rejection_reason.value
                 rejection_counts[key] = rejection_counts.get(key, 0) + 1
         for br in stage_b_results:
-            if not br.passed and br.rejection_reason:
+            if not br.passed and br.rejection_reason and not is_not_evaluated(br.rejection_reason):
                 key = br.rejection_reason.value
                 rejection_counts[key] = rejection_counts.get(key, 0) + 1
 

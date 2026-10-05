@@ -2194,7 +2194,7 @@ def test_rejection_classification_version_is_in_funnel_version():
         RecordingStageBEvaluator(StageBConfig()),
         readiness_ids={"asset-1": "r1"},
     )
-    assert REJECTION_CLASSIFICATION_VERSION == "rejection-classification-v1"
+    assert REJECTION_CLASSIFICATION_VERSION == "rejection-classification-v2"
     assert run.funnel_version != identity(
         {
             "module_version": FUNNEL_VERSION,
@@ -2204,6 +2204,63 @@ def test_rejection_classification_version_is_in_funnel_version():
             "stage_b_config": StageBConfig().config_hash,
         }
     )
+
+
+def test_rejection_categories_exclude_not_evaluated():
+    """A budget-skipped candidate is not reported under ``rejection_categories``.
+
+    Review BLOCKER A: ``NOT_EVALUATED_*`` is a non-event, not a rejection. The funnel run
+    used to fold a Stage B budget skip into the same ``rejection_counts`` dict that
+    ``to_summary()`` exposes as ``rejection_categories``, so a consumer reading rejection
+    categories saw three budget skips as three rejections and would overstate selectivity.
+    """
+    n = 5
+    instruments = [make_instrument(f"asset-{i}", f"A{i}") for i in range(n)]
+    observations = {f"asset-{i}": make_observations(f"asset-{i}", f"A{i}") for i in range(n)}
+    actions = {f"asset-{i}": [make_corporate_action(f"asset-{i}")] for i in range(n)}
+    config = StageBConfig(max_candidates=2)
+    run = CandidateFunnel(stage_b_config=config).run(
+        "snapshot-1",
+        instruments,
+        observations,
+        actions,
+        DAYS,
+        NOW,
+        RecordingStageBEvaluator(config),
+        readiness_ids={f"asset-{i}": f"r{i}" for i in range(n)},
+    )
+
+    summary = run.to_summary()
+    categories = summary["rejection_categories"]
+    assert not any(key.startswith("NOT_EVALUATED") for key in categories)
+    assert categories == {}
+    # The budget skips are still fully reported — in their own bucket, never as rejections.
+    assert summary["not_evaluated_categories"] == {"NOT_EVALUATED_BUDGET": 3}
+    assert run.rejection_counts == {}
+
+
+def test_rejection_categories_still_count_economic_rejections():
+    """The split must not silence real economic rejections."""
+    n = 3
+    instruments = [make_instrument(f"asset-{i}", f"A{i}") for i in range(n)]
+    observations = {f"asset-{i}": make_observations(f"asset-{i}", f"A{i}") for i in range(n)}
+    actions = {f"asset-{i}": [make_corporate_action(f"asset-{i}")] for i in range(n)}
+    config = StageBConfig(max_candidates=3, min_score_threshold=Decimal("0.90"))
+    score_map = {"asset-0": Decimal("0.95"), "asset-1": Decimal("0.10"), "asset-2": Decimal("0.20")}
+    run = CandidateFunnel(stage_b_config=config).run(
+        "snapshot-1",
+        instruments,
+        observations,
+        actions,
+        DAYS,
+        NOW,
+        RecordingStageBEvaluator(config, score_map),
+        readiness_ids={f"asset-{i}": f"r{i}" for i in range(n)},
+    )
+
+    summary = run.to_summary()
+    assert summary["rejection_categories"] == {RejectionReason.REJECTED_RULE.value: 2}
+    assert summary["not_evaluated_categories"] == {}
 
 
 #: The funnel test modules that must be wired into a required CI job. A funnel regression
