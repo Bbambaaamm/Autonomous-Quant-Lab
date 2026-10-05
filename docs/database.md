@@ -89,3 +89,15 @@ po `decision_time`. DB check constraints tyto případy nepokrývají. Read path
 identity znovu spouští kanonickou validaci rekonstruovaného záznamu a každé porušení kontraktu
 vyhazuje jako `ForecastIntegrityError` — neplatná evidence tak selže stejně uzavřeně jako evidence
 mutovaná.
+
+Třetí případ je evidence, kterou **nelze vůbec dekódovat** na kanonický záznam: nečitelný
+pravděpodobnostní literál (`Infinity`, `not-a-number`), neparsovatelný `target.threshold`, JSON
+dokument jiného tvaru než objekt, nebo datetime sloupec, který není ISO-8601. `Decimal.quantize` a
+`Decimal(...)` přitom vyhazují `decimal.InvalidOperation`, což je `ArithmeticError` a **nikoli**
+`ValueError`; ORM navíc umí selhat už při převodu datetime sloupce. Bez tohoto guardu by surová
+výjimka unikla mimo `ForecastLedgerError` — tedy mimo dokumentovaný fail-closed signál — a brána
+rozhodnutí, která odchytává jen `ForecastLedgerError`, by pro tuto třídu evidence selhala
+*otevřeně*. Read path proto obaluje celé čtení (`read()`, `for_decision_identity()`,
+`_record_from_row()` včetně obou ověřovacích helperů) a každou takovou chybu dekódování překládá na
+`ForecastIntegrityError`. Skutečné provozní chyby (např. `DBAPIError` spojení) v této rodině
+záměrně nejsou, aby se přerušené spojení nehlásilo jako porušení imutability.

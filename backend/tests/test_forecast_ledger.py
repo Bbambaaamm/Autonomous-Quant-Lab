@@ -40,6 +40,7 @@ from quantlab.forecast_ledger import (
     ProbabilityDistribution,
     ScopeKind,
     TargetDirection,
+    _row_payload,
     assert_forecast_only,
     coverage_report,
     decide_with_forecast,
@@ -1047,6 +1048,156 @@ def test_identity_consistent_but_contract_invalid_evidence_fails_closed(
 
 
 # ---------------------------------------------------------------------------
+# Undecodable persisted evidence must stay inside the ledger error contract
+# ---------------------------------------------------------------------------
+
+#: Every ``ForecastRecord`` field that is stored as canonical JSON or as a
+#: typed scalar, paired with the minimal shape that *cannot* be decoded into
+#: canonical evidence. ``NaN`` is deliberately absent: ``Decimal("NaN")``
+#: parses, is rejected by ``validate()`` as non-finite, and already fails
+#: closed as a contract violation.
+UNDECODABLE_EVIDENCE = [
+    # A probability literal that is not a finite number. ``Decimal.quantize``
+    # raises ``decimal.InvalidOperation`` (an ``ArithmeticError``, not a
+    # ``ValueError``) while the record is being content-addressed.
+    (
+        "distribution.p_event = Infinity",
+        lambda row: row.update(
+            distribution_json='{"kind":"BINARY","p_event":"Infinity","probabilities":{}}',
+            record_json=str(row["record_json"]).replace('"0.620000000000"', '"Infinity"'),
+        ),
+    ),
+    (
+        "distribution.p_event = not-a-number",
+        lambda row: row.update(
+            distribution_json='{"kind":"BINARY","p_event":"not-a-number","probabilities":{}}',
+            record_json=str(row["record_json"]).replace('"0.620000000000"', '"not-a-number"'),
+        ),
+    ),
+    # A JSON document whose top level is not the expected object.
+    (
+        "distribution_json is not an object",
+        lambda row: row.update(distribution_json="[]"),
+    ),
+    # An unparseable canonical target threshold.
+    (
+        "target.threshold = not-a-number",
+        lambda row: row.update(
+            target_spec_json=str(row["target_spec_json"]).replace(
+                '"threshold":"0.01"', '"threshold":"x"'
+            )
+        ),
+    ),
+    # A datetime column whose stored value is not ISO-8601.
+    (
+        "market_snapshot_as_of is not a datetime",
+        lambda row: row.update(market_snapshot_as_of="not-a-date"),
+    ),
+    (
+        "created_at is not a datetime",
+        lambda row: row.update(created_at="not-a-date"),
+    ),
+    (
+        "baseline_as_of is not a datetime",
+        lambda row: row.update(baseline_as_of="not-a-date"),
+    ),
+]
+
+
+def test_decodable_evidence_control_is_not_falsely_rejected() -> None:
+    """Control: a legitimate row still passes, so the checks below are specific.
+
+    Also proves the raw-insert helper used by these tests lands a row that
+    really is readable, i.e. the rejections cannot come from a broken fixture.
+    """
+    store, _ = ledger()
+    record = emitted()
+    store.commit(record)
+    loaded = store.read(record.forecast_id)
+    assert loaded is not None
+    assert loaded.content_hash() == record.content_hash()
+
+
+@pytest.mark.parametrize(
+    "label,mutate", UNDECODABLE_EVIDENCE, ids=[case[0] for case in UNDECODABLE_EVIDENCE]
+)
+def test_undecodable_persisted_evidence_fails_closed_as_integrity_error(
+    label: str, mutate: object
+) -> None:
+    """Undecodable evidence must fail closed inside the ledger error contract.
+
+    A privileged writer (or a hand-written INSERT, or a partially applied
+    restore) can land a row whose stored value cannot be decoded at all. Before
+    this guard, ``Decimal.quantize``/``Decimal(...)`` raised
+    ``decimal.InvalidOperation`` and a non-ISO datetime raised ``ValueError``
+    *outside* ``ForecastLedgerError`` -- the ledger's documented fail-closed
+    signal. A decision gate that only catches ``ForecastLedgerError`` would then
+    propagate an unexpected exception instead of failing closed, and the
+    integrity boundary would be unenforced for this evidence class.
+    """
+    store, engine = ledger()
+    record = emitted()
+    store.commit(record)
+    row = dict(_row_payload(record))
+    mutate(row)  # type: ignore[operator]
+    # A distinct primary key/identity so the forged row lands beside the genuine
+    # one instead of colliding with it.
+    row["forecast_id"] = "d" * 64
+    row["decision_identity"] = "e" * 64
+    row["opportunity_id"] = "opp-undecodable"
+    _raw_insert(engine, row)
+
+    # The stored row really is present (so the rejection is a decode failure,
+    # not a missing row).
+    with engine.connect() as connection:  # type: ignore[attr-defined]
+        present = connection.execute(
+            text("SELECT 1 FROM forecast_ledger WHERE forecast_id = :f"), {"f": "d" * 64}
+        ).first()
+    assert present is not None
+
+    with pytest.raises(ForecastIntegrityError):
+        store.read("d" * 64)
+    # The decision gate must fail closed for the same reason, never invoke the
+    # downstream decision and never let a non-ledger exception escape.
+    called: list[str] = []
+    with pytest.raises(ForecastIntegrityError):
+        require_forecast_reference(
+            store,
+            DecisionForecastReference(
+                forecast_id="d" * 64,
+                decision_identity="e" * 64,
+                decision_time=DECISION_TIME,
+            ),
+        )
+    with pytest.raises(ForecastIntegrityError):
+        decide_with_forecast(
+            store,
+            DecisionForecastReference(
+                forecast_id="d" * 64,
+                decision_identity="e" * 64,
+                decision_time=DECISION_TIME,
+            ),
+            lambda f: called.append(f.forecast_id),
+        )
+    assert called == []
+
+
+def test_undecodable_evidence_for_decision_identity_lookup_fails_closed() -> None:
+    """The identity lookup path must fail closed on the same evidence class."""
+    store, engine = ledger()
+    record = emitted()
+    store.commit(record)
+    row = dict(_row_payload(record))
+    row["market_snapshot_as_of"] = "not-a-date"
+    row["forecast_id"] = "f" * 64
+    row["decision_identity"] = "0" * 64
+    row["opportunity_id"] = "opp-undecodable-lookup"
+    _raw_insert(engine, row)
+    with pytest.raises(ForecastIntegrityError):
+        store.for_decision_identity("0" * 64)
+
+
+# ---------------------------------------------------------------------------
 # Coverage accounting (STAT-BLOCKER A)
 # ---------------------------------------------------------------------------
 
@@ -1311,6 +1462,69 @@ def test_postgres_read_path_rejects_identity_consistent_contract_violation() -> 
                     DecisionForecastReference(
                         forecast_id=forged.forecast_id,
                         decision_identity=forged.decision_identity(),
+                        decision_time=DECISION_TIME,
+                    ),
+                )
+        finally:
+            transaction.rollback()
+    engine.dispose()
+
+
+@POSTGRES
+def test_postgres_read_path_rejects_undecodable_evidence() -> None:
+    """A privileged INSERT can land a row whose stored value cannot be decoded.
+
+    PostgreSQL stores the canonical JSON / typed columns verbatim, so a raw
+    INSERT (or a partially applied restore) can hold a probability literal that
+    ``Decimal`` cannot parse or a datetime column that is not ISO-8601. The
+    read path must fail closed as ``ForecastIntegrityError`` -- the ledger's
+    documented signal -- instead of letting ``decimal.InvalidOperation`` or
+    ``ValueError`` escape to a decision gate that only handles
+    ``ForecastLedgerError``.
+    """
+    from quantlab.forecast_ledger import _row_payload
+
+    engine = create_engine(os.environ["DATABASE_URL"])
+    with engine.connect() as connection:
+        transaction = connection.begin()
+        try:
+            sessions = sessionmaker(connection, join_transaction_mode="create_savepoint")
+            store = ForecastLedger(sessions)
+            genuine = emitted(opportunity_id=f"pg-decode-{identity(os.getpid())}")
+            store.commit(genuine)
+            payload = dict(_row_payload(genuine))
+            payload["distribution_json"] = (
+                '{"kind":"BINARY","p_event":"Infinity","probabilities":{}}'
+            )
+            payload["record_json"] = str(payload["record_json"]).replace(
+                '"0.620000000000"', '"Infinity"'
+            )
+            payload["forecast_id"] = "d" * 64
+            payload["decision_identity"] = "e" * 64
+            payload["opportunity_id"] = f"pg-undecodable-{identity(os.getpid())}"
+            for column in (
+                "raw_probability",
+                "calibrated_probability",
+                "baseline_probability",
+                "confidence",
+            ):
+                if payload.get(column) is not None:
+                    payload[column] = str(payload[column])
+            columns = ", ".join(payload)
+            placeholders = ", ".join(f":{name}" for name in payload)
+            with sessions() as session, session.begin():
+                session.execute(
+                    text(f"INSERT INTO forecast_ledger ({columns}) VALUES ({placeholders})"),
+                    payload,
+                )
+            with pytest.raises(ForecastIntegrityError):
+                store.read("d" * 64)
+            with pytest.raises(ForecastIntegrityError):
+                require_forecast_reference(
+                    store,
+                    DecisionForecastReference(
+                        forecast_id="d" * 64,
+                        decision_identity="e" * 64,
                         decision_time=DECISION_TIME,
                     ),
                 )

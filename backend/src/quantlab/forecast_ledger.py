@@ -213,6 +213,24 @@ def _canonical_utc(value: datetime) -> datetime:
 #: Storage scale of every probability column (``Numeric(30, 12)``).
 PROBABILITY_SCALE = Decimal("0.000000000001")
 
+#: Exception family that means "this persisted evidence cannot be faithfully
+#: decoded into canonical evidence". ``decimal.InvalidOperation`` (raised by
+#: ``Decimal(...)`` on non-numeric text and by ``Decimal.quantize`` on
+#: ``Infinity``/``sNaN``) is an ``ArithmeticError``, **not** a ``ValueError``, so
+#: the ``decimal`` family must be listed explicitly. ``json.JSONDecodeError`` is
+#: a ``ValueError`` and is kept for documentation. A missing/None row is not an
+#: error here, and driver/connection failures (``DBAPIError``) are deliberately
+#: *not* in this tuple so genuine operational errors are never reported as
+#: tampering.
+EVIDENCE_DECODE_ERRORS = (
+    KeyError,
+    ValueError,
+    TypeError,
+    ArithmeticError,
+    AttributeError,
+    json.JSONDecodeError,
+)
+
 
 def _probability_text(value: Decimal) -> str:
     """Render a probability at the ledger's authoritative storage scale.
@@ -995,19 +1013,31 @@ class ForecastLedger:
         return CommitResult(CommitOutcome.CREATED, record.forecast_id, decision_identity)
 
     def read(self, forecast_id: str) -> ForecastRecord | None:
-        with self.sessions() as session:
-            row = session.get(ForecastLedgerRecord, forecast_id)
+        try:
+            with self.sessions() as session:
+                row = session.get(ForecastLedgerRecord, forecast_id)
+        except EVIDENCE_DECODE_ERRORS as error:
+            # The ORM result processor (e.g. DateTime) can fail while decoding a
+            # malformed stored value *before* ``_record_from_row`` runs.
+            raise ForecastIntegrityError(
+                "persistovanou evidenci nelze přečíst (immutability porušena)"
+            ) from error
         if row is None:
             return None
         return _record_from_row(row)
 
     def for_decision_identity(self, decision_identity: str) -> ForecastRecord | None:
-        with self.sessions() as session:
-            row = session.scalar(
-                select(ForecastLedgerRecord).where(
-                    ForecastLedgerRecord.decision_identity == decision_identity
+        try:
+            with self.sessions() as session:
+                row = session.scalar(
+                    select(ForecastLedgerRecord).where(
+                        ForecastLedgerRecord.decision_identity == decision_identity
+                    )
                 )
-            )
+        except EVIDENCE_DECODE_ERRORS as error:
+            raise ForecastIntegrityError(
+                "persistovanou evidenci nelze přečíst (immutability porušena)"
+            ) from error
         if row is None:
             return None
         return _record_from_row(row)
@@ -1024,6 +1054,13 @@ def _record_from_row(row: ForecastLedgerRecord) -> ForecastRecord:
     must reproduce the stored ``content_hash``, ``forecast_id`` and
     ``record_json`` snapshot, so a row that disagrees with its own evidence
     fails closed instead of driving a downstream decision.
+
+    A row that cannot even be decoded into canonical evidence -- an unparseable
+    probability/threshold (``decimal.InvalidOperation``), a non-ISO datetime, a
+    non-string label, a JSON document of the wrong shape -- fails closed the
+    same way. Otherwise the raw decoder exception would escape the ledger's
+    error contract and the decision gate could fail *open* for a caller that
+    only handles ``ForecastLedgerError``.
     """
     try:
         record = ForecastRecord(
@@ -1052,12 +1089,16 @@ def _record_from_row(row: ForecastLedgerRecord) -> ForecastRecord:
             regime=row.regime,
             source=row.source,
         )
-    except (KeyError, ValueError, TypeError, json.JSONDecodeError) as error:
+        # Both verification helpers re-derive the content-addressed identity, so
+        # they decode the same evidence a second time (``quantize`` on a stored
+        # ``Infinity`` fails here). The guard therefore wraps the whole read-back
+        # path, not just the record construction.
+        _verify_persisted_identity(row, record)
+        _verify_persisted_contract(record)
+    except EVIDENCE_DECODE_ERRORS as error:
         raise ForecastIntegrityError(
             "persistovanou evidenci nelze rekonstruovat (immutability porušena)"
         ) from error
-    _verify_persisted_identity(row, record)
-    _verify_persisted_contract(record)
     return record
 
 
