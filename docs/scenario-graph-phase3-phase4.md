@@ -129,6 +129,54 @@ The guard mirrors the runtime contract's heavy-research concurrency (1) and is a
 | `MAX_CONCURRENCY` | 1 | in-process scenario concurrency (fail closed on contention) |
 | `MAX_EVIDENCE_REFS` | 100 | bounded evidence payload |
 | `MAX_BOOTSTRAP_REPLICATES` | 20000 | bounded uncertainty computation |
+| `MAX_REPLAY_EVENTS` | 1000 | bounded replay input (mirrors `MAX_EVENTS_PER_RUN`) |
+| `MAX_STOCHASTIC_REPEATS` | 20 | bounded replay repeats (mirrors `MAX_SIMULATION_REPLICATES`) |
+| `MIN_STOCHASTIC_REPEATS` | 2 | floor for explicit stochastic-run evidence |
+
+## Deterministic replay / reproducibility evidence
+
+`backend/src/quantlab/scenario_graph_replay.py` closes the last acceptance criterion:
+
+```text
+deterministic/reproducible replay v rozsahu, který použitý model umožňuje,
+nebo explicitní stochastic-run evidence
+```
+
+`ScenarioReplayVerifier.replay(ReplayBundle(...))` re-executes a *recorded* run from its exact
+recorded inputs and compares a **replay-comparable content hash** of the output. The hash covers
+the whole canonical contract except `scenario_run_id` (a `uuid4` run identifier) and the
+wall-clock `runtime_ms` / `cost.compute_ms`, which are not functions of the inputs.
+
+| Verdict | Meaning |
+|---|---|
+| `DETERMINISTIC_MATCH` | Deterministic inference; the replayed content hash equals the recorded one. |
+| `DETERMINISTIC_MISMATCH` | Deterministic inference; the content differs and the drifted `RunFingerprint` components are named. |
+| `STOCHASTIC_EVIDENCE_RECORDED` | Non-deterministic inference; explicit repeat evidence was recorded instead (`stable_under_repeat`, distinct content hashes). |
+| `NOT_REPLAYABLE` | The engine did not reproduce, or the bundle cannot support any verdict. Carries **no** replayed hash. |
+
+Rules the verifier enforces:
+
+- **No fabricated agreement.** An engine error, an over-budget run or a concurrency rejection
+  becomes `NOT_REPLAYABLE` with `replayed_content_hash is None`; `ReplayResult.__post_init__`
+  rejects a `NOT_REPLAYABLE` result that carries a hash, and rejects a `DETERMINISTIC_MATCH`
+  whose hashes differ.
+- **Determinism is a property of the declared inference.** `temperature == 0` **and**
+  `sampling_policy == "deterministic"`; a seeded stochastic sampler is still stochastic. A
+  non-deterministic bundle with fewer than `MIN_STOCHASTIC_REPEATS` repeats is `NOT_REPLAYABLE` —
+  a single stochastic execution is not evidence of anything.
+- **Repeats are not observations** (STAT-BLOCKER B). `StochasticRunEvidence.repeats` is a
+  simulation repeat count; `contributes_real_world_opportunities` is always `False`.
+- **Replay never upgrades a run.** `promotion_grade_replay` requires reproduced content **and**
+  a fully reproducible fingerprint **and** the recorded run's own `is_promotion_grade` — so a
+  `MODEL_TEMPORAL_KNOWLEDGE_UNCONTROLLED` run cannot become promotion-grade by replaying cleanly.
+- **The runtime envelope is unchanged.** The verifier shares the live worker's concurrency guard
+  and degradation policy (`ScenarioReplayVerifier.for_worker`), so `MAX_CONCURRENCY = 1` stays
+  process-wide; replay input and repeats are capped (`MAX_REPLAY_EVENTS`, `MAX_STOCHASTIC_REPEATS`).
+- **A bundle is contract-bound.** A bundle recorded under a different `contract_version` is
+  rejected instead of being replayed as if it were equivalent.
+
+Replay remains shadow research evidence: it produces no order, no promotion recommendation and
+no independent real-world sample.
 
 ## How to run the experiment (future slice, once dependencies are on `main`)
 
@@ -139,6 +187,9 @@ The guard mirrors the runtime contract's heavy-research concurrency (1) and is a
 4. Resolve outcomes and score through #269 (→ `calibration_report_ref`).
 5. Feed the paired opportunity list into `ScenarioAblationHarness.evaluate(...)`.
 6. Declare the variant in a `TrialFamilyLedger` **before** looking at the holdout.
+7. Re-verify reproducibility with `ScenarioReplayVerifier.for_worker(worker).replay(bundle)`:
+   only a `DETERMINISTIC_MATCH` (or `STOCHASTIC_EVIDENCE_RECORDED` for a declared stochastic
+   inference) may accompany a promotion recommendation.
 
 ## Not in scope for this slice
 

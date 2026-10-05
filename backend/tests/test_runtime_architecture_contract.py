@@ -239,3 +239,42 @@ def test_scenario_isolation_keeps_bounded_concurrency_and_zero_model_budget() ->
         elif isinstance(node, ast.ImportFrom) and node.module:
             imported.add(node.module.split(".")[0])
     assert not (imported & forbidden)
+
+
+def test_scenario_replay_reuses_the_isolation_guard_and_stays_bounded() -> None:
+    """Issue #271: replay verification must not widen the runtime envelope.
+
+    The replay verifier is an operational boundary too, so it must reuse the *same*
+    in-process concurrency guard as the live scenario worker (otherwise a second
+    admission slot appears and ``MAX_CONCURRENCY`` stops being process-wide), stay
+    bounded by explicit caps, and fail closed rather than fabricate a replayed hash.
+    """
+    replay_source, replay_tree = _module("scenario_graph_replay.py")
+    isolation_source, _ = _module("scenario_graph_isolation.py")
+    engine_source, _ = _module("scenario_graph.py")
+
+    # Shared guard: the verifier is built from the live worker, not from a fresh guard.
+    assert "for_worker" in replay_source
+    assert "guard=worker.guard" in replay_source
+    assert "policy=worker.policy" in replay_source
+    assert "ScenarioConcurrencyGuard" in isolation_source
+
+    # Bounded: event and repeat caps are derived from the engine's own caps.
+    assert "MAX_REPLAY_EVENTS = MAX_EVENTS_PER_RUN" in replay_source
+    assert "MAX_STOCHASTIC_REPEATS = MAX_SIMULATION_REPLICATES" in replay_source
+    assert "MAX_EVENTS_PER_RUN = 1000" in engine_source
+    assert "MAX_SIMULATION_REPLICATES = 20" in engine_source
+
+    # Fail closed: an unreplayable run must not carry a replayed hash.
+    assert "NOT_REPLAYABLE" in replay_source
+    assert "replayed_content_hash is not None" in replay_source
+
+    # No network/subprocess/execution machinery in the replay boundary either.
+    forbidden = {"socket", "subprocess", "requests", "httpx", "urllib", "shutil", "os", "http"}
+    imported: set[str] = set()
+    for node in ast.walk(replay_tree):
+        if isinstance(node, ast.Import):
+            imported.update(alias.name.split(".")[0] for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            imported.add(node.module.split(".")[0])
+    assert not (imported & forbidden)
