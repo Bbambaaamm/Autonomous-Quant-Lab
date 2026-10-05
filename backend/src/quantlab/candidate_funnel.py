@@ -70,6 +70,19 @@ class FunnelConfigMismatch(RuntimeError):
     """Raised when a Stage B evaluator would alter the preregistered Stage A ranking."""
 
 
+class FunnelUnenforceableBound(RuntimeError):
+    """Raised when a preregistered config declares a bound the runner cannot apply.
+
+    Every declared Stage A/B bound is part of ``stage_a_config_hash`` /
+    ``stage_b_config_hash`` and therefore of ``funnel_version`` and of the downstream
+    trial-family identity. A bound that is hashed but never applied makes the lineage
+    claim a filter that never ran, which is a false preregistration: two runs would look
+    like two materially different funnels while producing identical candidate sets, and a
+    promotion-grade claim could rest on a filter that was inert. The runner therefore
+    fails closed instead of silently emitting lineage for such a config.
+    """
+
+
 class RejectionReason(StrEnum):
     # Canonical status values (review BLOCKER A)
     ELIGIBLE = "ELIGIBLE"
@@ -133,6 +146,10 @@ class StageAConfig:
             raise ValueError("minimum_price_usd must be positive")
         if self.minimum_feed_dollar_volume_20 < 0:
             raise ValueError("minimum_feed_dollar_volume_20 must be non-negative")
+        if self.max_price_usd is not None and self.max_price_usd <= 0:
+            raise ValueError("max_price_usd must be positive when set")
+        if self.max_price_usd is not None and self.max_price_usd < self.minimum_price_usd:
+            raise ValueError("max_price_usd must not be below minimum_price_usd")
 
     @property
     def config_hash(self) -> str:
@@ -175,10 +192,43 @@ class StageBConfig:
             raise ValueError("ranking_key_version must be non-empty")
         if self.max_rank_variants < 1:
             raise ValueError("max_rank_variants must be positive")
+        if self.min_score_threshold is not None and not self.min_score_threshold.is_finite():
+            raise ValueError("min_score_threshold must be finite")
 
     @property
     def config_hash(self) -> str:
         return identity(self.__dict__)
+
+    def apply_score_threshold(self, result: StageBResult) -> StageBResult:
+        """Apply the preregistered ``min_score_threshold`` to one Stage B result.
+
+        The threshold is part of ``stage_b_config_hash``, so it must actually gate
+        promotion: a candidate that the evaluator passed but that scores below the
+        preregistered threshold is rejected by rule, not promoted. A passed candidate
+        without a score fails closed when a threshold is declared, because an unscored
+        result cannot be shown to satisfy it.
+        """
+        if self.min_score_threshold is None or not result.passed:
+            return result
+        if result.score is None:
+            return replace(
+                result,
+                passed=False,
+                rejection_reason=RejectionReason.REJECTED_RULE,
+                evidence={**result.evidence, "score_threshold_unscored": True},
+            )
+        if result.score < self.min_score_threshold:
+            return replace(
+                result,
+                passed=False,
+                rejection_reason=RejectionReason.REJECTED_RULE,
+                evidence={
+                    **result.evidence,
+                    "score_below_threshold": str(result.score),
+                    "min_score_threshold": str(self.min_score_threshold),
+                },
+            )
+        return result
 
     def order_candidates(self, candidates: Sequence[StageAResult]) -> list[StageAResult]:
         """Return Stage A candidates in the preregistered deterministic order.
@@ -476,6 +526,28 @@ class CandidateFunnel:
     ) -> None:
         self.stage_a_config = stage_a_config or StageAConfig()
         self.stage_b_config = stage_b_config or StageBConfig()
+        self._assert_config_is_enforceable()
+
+    def _assert_config_is_enforceable(self) -> None:
+        """Fail closed when a preregistered bound cannot actually be applied.
+
+        A bound that is hashed into ``funnel_version`` but never applied is a false
+        preregistration: the lineage would claim a filter that never ran, and a
+        promotion-grade decision could rest on it. Two such configs would even look like
+        two materially different funnel variants while producing identical candidates.
+        The runner refuses to run instead of emitting that lineage.
+        """
+        unenforceable: list[str] = []
+        if self.stage_b_config.max_concurrency != 1:
+            unenforceable.append(
+                "stage_b_config.max_concurrency: the funnel runs Stage B sequentially and "
+                "has no concurrent executor to bound"
+            )
+        if unenforceable:
+            raise FunnelUnenforceableBound(
+                "preregistered bounds cannot be enforced by this runner, so their "
+                "lineage would be false: " + "; ".join(unenforceable)
+            )
 
     def run_stage_a(
         self,
@@ -595,6 +667,16 @@ class CandidateFunnel:
                         passed = False
                         rejection_details["price_too_high"] = str(last_close)
 
+            # The declared liquidity bound is part of stage_a_config_hash, so it must be
+            # enforced rather than merely recorded. The canonical #164 policy already
+            # applies its own floor; this bound can only tighten it further, never loosen
+            # it, so it is only applied when it is genuinely stricter.
+            if passed and screening.get("feed_dollar_volume_20") is not None:
+                turnover = Decimal(str(screening["feed_dollar_volume_20"]))
+                if turnover < self.stage_a_config.minimum_feed_dollar_volume_20:
+                    passed = False
+                    rejection_details["feed_dollar_volume_20_too_low"] = str(turnover)
+
             if passed and self.stage_a_config.min_momentum is not None:
                 momentum = screening.get("momentum")
                 if momentum is not None and Decimal(momentum) < self.stage_a_config.min_momentum:
@@ -701,6 +783,9 @@ class CandidateFunnel:
                     ar.symbol,
                     ar.screening_evidence,
                 )
+                # The preregistered score threshold is part of stage_b_config_hash, so it
+                # must gate promotion here rather than be recorded and ignored.
+                result = self.stage_b_config.apply_score_threshold(result)
                 results.append(
                     replace(
                         result,

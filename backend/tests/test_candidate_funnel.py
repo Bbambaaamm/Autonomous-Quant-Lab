@@ -25,6 +25,7 @@ from quantlab.candidate_funnel import (
     CompletionState,
     FunnelConfigMismatch,
     FunnelRankingError,
+    FunnelUnenforceableBound,
     RankingKey,
     RejectionReason,
     SelectionReason,
@@ -1744,3 +1745,207 @@ def test_replay_check_covers_ranking_and_candidate_ranks():
     # A tampered ranking key on one run breaks replay equality.
     tampered = replace(run2, ranking_key=RankingKey.INSTRUMENT_ID_ASC.value)
     assert not deterministic_replay_check(run1, tampered)
+
+
+# ─── Every hashed bound must be a real, enforced contract ───
+
+
+def test_declared_liquidity_bound_is_enforced_not_merely_hashed():
+    """StageAConfig.minimum_feed_dollar_volume_20 must actually reject.
+
+    The bound is part of stage_a_config_hash, so a run that hashed it but never
+    applied it would claim a liquidity filter that never ran. The canonical #164
+    policy floor (1M) is looser than the declared 10M bound here, so only the
+    declared bound can produce the rejection.
+    """
+    config = StageAConfig(minimum_feed_dollar_volume_20=Decimal("10000000"))
+    funnel = CandidateFunnel(stage_a_config=config)
+    instruments = [make_instrument()]
+    observations = {"asset-1": make_observations()}
+    actions = {"asset-1": [make_corporate_action()]}
+
+    results = funnel.run_stage_a(
+        "snapshot-1",
+        instruments,
+        observations,
+        actions,
+        DAYS,
+        NOW,
+        readiness_ids={"asset-1": "r1"},
+    )
+
+    assert Decimal(results[0].screening_evidence["feed_dollar_volume_20"]) < Decimal("10000000")
+    assert not results[0].passed
+    assert results[0].rejection_reason is RejectionReason.STAGE_A_FILTERED
+    assert "feed_dollar_volume_20_too_low" in results[0].rejection_details
+
+
+def test_liquidity_bound_never_loosens_the_canonical_164_policy():
+    """A declared liquidity bound below the #164 floor must not re-admit an instrument.
+
+    The Stage A bounds may only tighten the canonical policy. An illiquid instrument
+    the canonical screen already rejected stays rejected even when the funnel config
+    declares a looser floor.
+    """
+    config = StageAConfig(minimum_feed_dollar_volume_20=Decimal("0"))
+    funnel = CandidateFunnel(stage_a_config=config)
+    instruments = [make_instrument()]
+    observations = {"asset-1": make_observations(volume=Decimal("1"))}
+    actions = {"asset-1": [make_corporate_action()]}
+
+    results = funnel.run_stage_a(
+        "snapshot-1",
+        instruments,
+        observations,
+        actions,
+        DAYS,
+        NOW,
+        readiness_ids={"asset-1": "r1"},
+    )
+
+    assert not results[0].screening_evidence["eligible"]
+    assert not results[0].passed
+
+
+def test_declared_score_threshold_gates_promotion():
+    """StageBConfig.min_score_threshold must actually reject a low-scoring candidate."""
+    config = StageBConfig(max_candidates=5, min_score_threshold=Decimal("0.90"))
+    funnel = CandidateFunnel(stage_b_config=config)
+    instruments = [make_instrument()]
+    observations = {"asset-1": make_observations()}
+    actions = {"asset-1": [make_corporate_action()]}
+
+    run = funnel.run(
+        "snapshot-1",
+        instruments,
+        observations,
+        actions,
+        DAYS,
+        NOW,
+        RecordingStageBEvaluator(config, score_map={"asset-1": Decimal("0.10")}),
+        readiness_ids={"asset-1": "r1"},
+    )
+
+    assert run.stage_b_results[0].score == Decimal("0.10")
+    assert not run.stage_b_results[0].passed
+    assert run.stage_b_results[0].rejection_reason is RejectionReason.REJECTED_RULE
+    assert run.final_candidates == ()
+    # A budget/score rejection is an economic rule rejection, never a NOT_EVALUATED one.
+    assert run.completion_state is CompletionState.COMPLETE
+
+
+def test_score_threshold_promotes_candidate_at_or_above_bound():
+    """A candidate exactly at the preregistered threshold is promoted (>= semantics)."""
+    config = StageBConfig(max_candidates=5, min_score_threshold=Decimal("0.50"))
+    funnel = CandidateFunnel(stage_b_config=config)
+    instruments = [make_instrument()]
+    observations = {"asset-1": make_observations()}
+    actions = {"asset-1": [make_corporate_action()]}
+
+    run = funnel.run(
+        "snapshot-1",
+        instruments,
+        observations,
+        actions,
+        DAYS,
+        NOW,
+        RecordingStageBEvaluator(config, score_map={"asset-1": Decimal("0.50")}),
+        readiness_ids={"asset-1": "r1"},
+    )
+
+    assert run.final_candidates == ("asset-1",)
+
+
+def test_score_threshold_fails_closed_on_unscored_candidate():
+    """A passed but unscored candidate cannot satisfy a declared threshold."""
+
+    class UnscoredStageBEvaluator(StageBEvaluator):
+        def evaluate_one(self, instrument_id, symbol, stage_a_evidence):
+            return StageBResult(
+                instrument_id=instrument_id,
+                symbol=symbol,
+                passed=True,
+                rejection_reason=None,
+                score=None,
+            )
+
+    config = StageBConfig(max_candidates=5, min_score_threshold=Decimal("0.10"))
+    funnel = CandidateFunnel(stage_b_config=config)
+    instruments = [make_instrument()]
+    observations = {"asset-1": make_observations()}
+    actions = {"asset-1": [make_corporate_action()]}
+
+    run = funnel.run(
+        "snapshot-1",
+        instruments,
+        observations,
+        actions,
+        DAYS,
+        NOW,
+        UnscoredStageBEvaluator(config),
+        readiness_ids={"asset-1": "r1"},
+    )
+
+    assert run.final_candidates == ()
+    assert run.stage_b_results[0].rejection_reason is RejectionReason.REJECTED_RULE
+
+
+def test_inert_bound_would_change_funnel_version_but_not_candidates():
+    """A hashed bound that never applied would silently break funnel identity.
+
+    This is the failure the enforcement closes: two configs differing only in the
+    declared liquidity bound produce different stage_a_config_hash / funnel_version
+    values, so downstream lineage would treat them as materially different funnels.
+    The bound must therefore be a real contract, and the default bound (equal to the
+    canonical #164 floor) must not reject a canonical eligible instrument.
+    """
+    default = StageAConfig()
+    tighter = StageAConfig(minimum_feed_dollar_volume_20=Decimal("10000000"))
+    assert default.config_hash != tighter.config_hash
+
+    # Default bound equals the canonical policy floor, so a canonical eligible
+    # instrument passes under the default and is rejected only under the tighter bound.
+    observations = {"asset-1": make_observations()}
+    actions = {"asset-1": [make_corporate_action()]}
+    instruments = [make_instrument()]
+
+    default_result = CandidateFunnel(stage_a_config=default).run_stage_a(
+        "snapshot-1",
+        instruments,
+        observations,
+        actions,
+        DAYS,
+        NOW,
+        readiness_ids={"asset-1": "r1"},
+    )
+    tighter_result = CandidateFunnel(stage_a_config=tighter).run_stage_a(
+        "snapshot-1",
+        instruments,
+        observations,
+        actions,
+        DAYS,
+        NOW,
+        readiness_ids={"asset-1": "r1"},
+    )
+
+    assert default_result[0].passed
+    assert not tighter_result[0].passed
+    assert "feed_dollar_volume_20_too_low" in tighter_result[0].rejection_details
+
+
+def test_unenforceable_concurrency_bound_fails_closed():
+    """A declared concurrency bound the runner cannot apply must fail closed."""
+    with pytest.raises(FunnelUnenforceableBound, match="max_concurrency"):
+        CandidateFunnel(stage_b_config=StageBConfig(max_concurrency=4))
+    # The default sequential runner is enforceable and must remain usable.
+    CandidateFunnel(stage_b_config=StageBConfig(max_concurrency=1))
+
+
+def test_price_bounds_are_self_consistent():
+    """An impossible price band is refused instead of producing an inert config hash."""
+    with pytest.raises(ValueError, match="max_price_usd must be positive"):
+        StageAConfig(max_price_usd=Decimal("0"))
+    with pytest.raises(ValueError, match="must not be below"):
+        StageAConfig(minimum_price_usd=Decimal("10"), max_price_usd=Decimal("5"))
+    with pytest.raises(ValueError, match="min_score_threshold must be finite"):
+        StageBConfig(min_score_threshold=Decimal("NaN"))
