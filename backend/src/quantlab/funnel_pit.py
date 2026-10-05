@@ -41,6 +41,14 @@ from quantlab.candidate_funnel import (
     StageBConfig,
 )
 from quantlab.domain import require_utc
+from quantlab.funnel_completeness import (
+    PartialModePolicy,
+    PromotionGradeError,
+    UniverseCompletion,
+    UniverseCompletionState,
+    assess_universe_completion,
+    require_promotion_grade,
+)
 from quantlab.market_data import CorporateAction, Observation, XNYSCalendar
 from quantlab.market_screening import identity
 
@@ -228,11 +236,24 @@ class PITDecisionSnapshot:
     rejected_count: int
     not_evaluated_count: int
     content_hash: str
+    universe_completion: UniverseCompletion | None = None
 
     @property
     def candidate_ids(self) -> tuple[str, ...]:
         """Stage A candidate set in the preregistered deterministic order."""
         return self.ordered_candidate_ids
+
+    @property
+    def universe_completion_state(self) -> str:
+        """Explicit full-universe completion state at this decision time (BLOCKER A)."""
+        if self.universe_completion is None:
+            return UniverseCompletionState.UNKNOWN.value
+        return self.universe_completion.state.value
+
+    @property
+    def is_promotion_grade(self) -> bool:
+        """Promotion-grade requires an explicitly COMPLETE PIT universe at this decision."""
+        return self.universe_completion is not None and self.universe_completion.is_promotion_grade
 
     def to_summary(self) -> dict[str, Any]:
         """Funnel counts and rejection categories for one decision time.
@@ -246,6 +267,13 @@ class PITDecisionSnapshot:
             "funnel_version": self.funnel_version,
             "ranking_key": self.ranking_key,
             "ranking_key_version": self.ranking_key_version,
+            "universe_completion_state": self.universe_completion_state,
+            "universe_completion": (
+                self.universe_completion.to_summary()
+                if self.universe_completion is not None
+                else None
+            ),
+            "is_promotion_grade": self.is_promotion_grade,
             "funnel_counts": {
                 "universe_size": len(self.stage_a_results),
                 "stage_a_accepted": self.eligible_count,
@@ -295,6 +323,7 @@ class PITDecisionSnapshot:
                     "ranking_key": self.ranking_key,
                     "ranking_key_version": self.ranking_key_version,
                     "universe_snapshot_id": self.universe_snapshot_id,
+                    "universe_completion_state": self.universe_completion_state,
                 }
             )
         return lineage
@@ -321,6 +350,18 @@ class PITFunnelReplay:
         """The per-decision-time candidate sets in fold order."""
         return tuple(snapshot.candidate_ids for snapshot in self.decision_snapshots)
 
+    @property
+    def universe_completion_states(self) -> tuple[str, ...]:
+        """Explicit full-universe completion state per decision time (review BLOCKER A)."""
+        return tuple(snapshot.universe_completion_state for snapshot in self.decision_snapshots)
+
+    @property
+    def is_promotion_grade(self) -> bool:
+        """Promotion-grade only when EVERY decision time saw an explicitly COMPLETE universe."""
+        return bool(self.decision_snapshots) and all(
+            snapshot.is_promotion_grade for snapshot in self.decision_snapshots
+        )
+
     def to_summary(self) -> dict[str, Any]:
         """PIT funnel counts per decision time for dashboard/report."""
         return {
@@ -330,6 +371,8 @@ class PITFunnelReplay:
             "ranking_key_version": self.ranking_key_version,
             "decision_count": len(self.decision_snapshots),
             "total_candidates": sum(len(s.candidate_ids) for s in self.decision_snapshots),
+            "universe_completion_states": list(self.universe_completion_states),
+            "is_promotion_grade": self.is_promotion_grade,
             "decision_snapshots": [s.to_summary() for s in self.decision_snapshots],
         }
 
@@ -395,6 +438,26 @@ def assert_same_opportunity_set(
             raise BaselineComparisonError(
                 f"baseline candidate set at decision index {index} differs from Stage B"
             )
+
+
+def require_pit_promotion_grade(
+    replay: PITFunnelReplay,
+    policy: PartialModePolicy | None = None,
+) -> None:
+    """Fail closed unless every decision time is promotion-grade (review BLOCKER A).
+
+    A promotion-grade PIT run requires an explicitly COMPLETE Stage A universe at every
+    decision time, unless partial mode was preregistered for the use case. A fold whose
+    universe is UNKNOWN (no declared membership) never passes.
+    """
+    for snapshot in replay.decision_snapshots:
+        if snapshot.universe_completion is None:
+            raise PromotionGradeError(
+                f"PIT decision {snapshot.decision_time.isoformat()} declares no universe "
+                "membership, so completeness is UNKNOWN; an undeclared universe cannot be "
+                "promotion-grade"
+            )
+        require_promotion_grade(snapshot.universe_completion, policy)
 
 
 @dataclass(frozen=True)
@@ -513,6 +576,7 @@ def recompute_stage_a_at(
     readiness_ids: Mapping[str, str | None] | None = None,
     inventory_ids: Mapping[str, str | None] | None = None,
     inventory_received_at: Mapping[str, datetime | None] | None = None,
+    expected_universe_members: Sequence[str] | None = None,
 ) -> PITDecisionSnapshot:
     """Recompute the Stage A candidate set at one decision time, PIT only.
 
@@ -561,6 +625,17 @@ def recompute_stage_a_at(
 
     funnel_version = _pit_funnel_version(config_a, config_b)
 
+    # Explicit full-universe completion state at this decision time (BLOCKER A). The
+    # expected membership must already be PIT-sliced by the caller; an undeclared
+    # universe yields UNKNOWN and is never promotion-grade.
+    universe_completion: UniverseCompletion | None = None
+    if expected_universe_members is not None:
+        universe_completion = assess_universe_completion(
+            fold.universe_snapshot_id,
+            expected_universe_members,
+            [r.instrument_id for r in stage_a_results],
+        )
+
     content = {
         "fold_index": fold.fold_index,
         "decision_time": fold.decision_time.isoformat(),
@@ -582,6 +657,9 @@ def recompute_stage_a_at(
             for r in stage_a_results
         ],
         "ordered_candidate_ids": list(ordered_candidate_ids),
+        "universe_completion": (
+            universe_completion.content_hash if universe_completion is not None else None
+        ),
     }
 
     return PITDecisionSnapshot(
@@ -601,6 +679,7 @@ def recompute_stage_a_at(
         rejected_count=rejected,
         not_evaluated_count=not_evaluated,
         content_hash=identity(content),
+        universe_completion=universe_completion,
     )
 
 
@@ -615,18 +694,26 @@ def recompute_pit_replay(
     readiness_ids: Mapping[str, str | None] | None = None,
     inventory_ids: Mapping[str, str | None] | None = None,
     inventory_received_at: Mapping[str, datetime | None] | None = None,
+    expected_universe_members_by_fold: Mapping[int, Sequence[str]] | None = None,
 ) -> PITFunnelReplay:
     """Rebuild the Stage A candidate set independently for every decision time.
 
     Nothing is carried over between folds: each snapshot is computed from the same
     immutable PIT inputs and its own session slice, so a later fold can never inherit an
     earlier fold's selection (STAT-BLOCKER A).
+
+    ``expected_universe_members_by_fold`` maps ``fold_index`` to the canonical universe
+    membership known at that fold's decision time. A fold without an entry is UNKNOWN and
+    is never promotion-grade (review BLOCKER A).
     """
     if not folds:
         raise PITScopeError("at least one PIT decision time is required")
 
     config_a = stage_a_config or StageAConfig()
     config_b = stage_b_config or StageBConfig()
+    expected_by_fold = (
+        expected_universe_members_by_fold if expected_universe_members_by_fold is not None else {}
+    )
 
     snapshots = tuple(
         recompute_stage_a_at(
@@ -639,6 +726,7 @@ def recompute_pit_replay(
             readiness_ids=readiness_ids,
             inventory_ids=inventory_ids,
             inventory_received_at=inventory_received_at,
+            expected_universe_members=expected_by_fold.get(fold.fold_index),
         )
         for fold in folds
     )
@@ -651,6 +739,10 @@ def recompute_pit_replay(
             "stage_a_config_hash": config_a.config_hash,
             "stage_b_config_hash": config_b.config_hash,
             "snapshot_hashes": [s.content_hash for s in snapshots],
+            "universe_completion_hashes": [
+                s.universe_completion.content_hash if s.universe_completion is not None else None
+                for s in snapshots
+            ],
         }
     )
 
@@ -685,6 +777,7 @@ def deterministic_pit_replay_check(
         and replay1.ranking_key_version == replay2.ranking_key_version
         and replay1.candidate_sets() == replay2.candidate_sets()
         and replay1.decision_times == replay2.decision_times
+        and replay1.universe_completion_states == replay2.universe_completion_states
         and [s.content_hash for s in replay1.decision_snapshots]
         == [s.content_hash for s in replay2.decision_snapshots]
     )

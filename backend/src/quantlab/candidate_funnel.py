@@ -17,6 +17,11 @@ from decimal import Decimal
 from enum import StrEnum
 from typing import Any
 
+from quantlab.funnel_completeness import (
+    UniverseCompletion,
+    UniverseCompletionState,
+    assess_universe_completion,
+)
 from quantlab.market_data import CorporateAction, Observation
 from quantlab.market_screening import evaluate_screen, identity
 
@@ -254,6 +259,26 @@ class FunnelRun:
     ranking_key_version: str = RANKING_KEY_VERSION
     rank_variants: int = 1
     stage_a_candidate_ranks: tuple[str, ...] = ()
+    #: Full-universe completion evidence for the Stage A input (review BLOCKER A). When
+    #: no expected membership was declared this is ``UNKNOWN`` and the run is not
+    #: promotion-grade, so an incomplete universe can never masquerade as a complete one.
+    universe_completion: UniverseCompletion | None = None
+
+    @property
+    def universe_completion_state(self) -> str:
+        """Explicit full-universe completion state (review BLOCKER A)."""
+        if self.universe_completion is None:
+            return UniverseCompletionState.UNKNOWN.value
+        return self.universe_completion.state.value
+
+    @property
+    def is_promotion_grade(self) -> bool:
+        """Promotion-grade requires an explicitly COMPLETE Stage A universe and completion."""
+        return (
+            self.completion_state is CompletionState.COMPLETE
+            and self.universe_completion is not None
+            and self.universe_completion.is_promotion_grade
+        )
 
     def to_summary(self) -> dict[str, Any]:
         """Return funnel counts and rejection categories for dashboard/report.
@@ -276,6 +301,13 @@ class FunnelRun:
             "ranking_key": self.ranking_key,
             "ranking_key_version": self.ranking_key_version,
             "rank_variants": self.rank_variants,
+            "universe_completion_state": self.universe_completion_state,
+            "universe_completion": (
+                self.universe_completion.to_summary()
+                if self.universe_completion is not None
+                else None
+            ),
+            "is_promotion_grade": self.is_promotion_grade,
             "funnel_counts": {
                 "universe_size": len(self.stage_a_results),
                 "stage_a_accepted": stage_a_accepted,
@@ -324,6 +356,8 @@ class FunnelRun:
                     "ranking_key": self.ranking_key,
                     "ranking_key_version": self.ranking_key_version,
                     "rank_variants": self.rank_variants,
+                    "universe_snapshot_id": self.universe_snapshot_id,
+                    "universe_completion_state": self.universe_completion_state,
                 }
             )
         return lineage
@@ -705,8 +739,16 @@ class CandidateFunnel:
         readiness_ids: dict[str, str | None] | None = None,
         inventory_ids: dict[str, str | None] | None = None,
         inventory_received_at: dict[str, datetime | None] | None = None,
+        expected_universe_members: Sequence[str] | None = None,
     ) -> FunnelRun:
-        """Run complete two-stage funnel and return immutable lineage record."""
+        """Run complete two-stage funnel and return immutable lineage record.
+
+        ``expected_universe_members`` is the canonical universe membership known at
+        ``as_of`` (e.g. ``PointInTimeUniverse.eligible``). When supplied, the run carries
+        explicit full-universe completion evidence and a promotion-grade claim is only
+        possible for a COMPLETE universe (review BLOCKER A). When omitted, the completion
+        state is UNKNOWN and the run is never promotion-grade.
+        """
         stage_a_results = self.run_stage_a(
             universe_snapshot_id,
             instruments,
@@ -726,6 +768,17 @@ class CandidateFunnel:
             [r for r in stage_a_results if r.passed]
         )
         stage_a_candidate_ranks = tuple(r.instrument_id for r in ordered_candidates)
+
+        # Explicit full-universe completion state (review BLOCKER A). Only the canonical
+        # universe membership the caller declared at `as_of` can make the run
+        # promotion-grade; omitting it yields UNKNOWN, never an implicit COMPLETE.
+        universe_completion: UniverseCompletion | None = None
+        if expected_universe_members is not None:
+            universe_completion = assess_universe_completion(
+                universe_snapshot_id,
+                expected_universe_members,
+                [r.instrument_id for r in stage_a_results],
+            )
 
         stage_b_results = self.run_stage_b(stage_a_results, stage_b_evaluator)
 
@@ -796,6 +849,9 @@ class CandidateFunnel:
             ],
             "final_candidates": list(final_candidates),
             "rejection_counts": rejection_counts,
+            "universe_completion": (
+                universe_completion.content_hash if universe_completion is not None else None
+            ),
         }
         content_hash = identity(content)
         run_id = identity(
@@ -825,6 +881,7 @@ class CandidateFunnel:
             ranking_key_version=self.stage_b_config.ranking_key_version,
             rank_variants=self.stage_b_config.max_rank_variants,
             stage_a_candidate_ranks=stage_a_candidate_ranks,
+            universe_completion=universe_completion,
         )
 
 
@@ -848,4 +905,5 @@ def deterministic_replay_check(
         and run1.ranking_key == run2.ranking_key
         and run1.ranking_key_version == run2.ranking_key_version
         and run1.stage_a_candidate_ranks == run2.stage_a_candidate_ranks
+        and run1.universe_completion_state == run2.universe_completion_state
     )
