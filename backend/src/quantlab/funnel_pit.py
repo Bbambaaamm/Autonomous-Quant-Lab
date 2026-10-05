@@ -33,6 +33,7 @@ from functools import lru_cache
 from typing import Any
 
 from quantlab.candidate_funnel import (
+    REJECTION_CLASSIFICATION_VERSION,
     CandidateFunnel,
     RejectionReason,
     SelectionReason,
@@ -557,6 +558,7 @@ def _pit_funnel_version(
         {
             "module_version": PIT_FUNNEL_VERSION,
             "pit_version": PIT_SEMANTICS_VERSION,
+            "rejection_classification_version": REJECTION_CLASSIFICATION_VERSION,
             "ranking_key": stage_b_config.ranking_key.value,
             "ranking_key_version": stage_b_config.ranking_key_version,
             "stage_a_config": stage_a_config.config_hash,

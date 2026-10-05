@@ -38,7 +38,7 @@ from quantlab.funnel_trial_family import (
 
 @dataclass(frozen=True)
 class CoverageMetrics:
-    """Candidate coverage metrics (STAT-BLOCKER D)."""
+    """Coverage metrics for a single funnel run (STAT-BLOCKER D)."""
 
     universe_size: int
     stage_a_accepted: int
@@ -47,6 +47,13 @@ class CoverageMetrics:
     coverage_rate: float
     stage_a_pass_rate: float
     stage_b_pass_rate: float
+    #: Candidates that were never judged because Stage B ran out of budget/time/resources.
+    #: Kept separate so a coverage/pass-rate number is never computed over instruments that
+    #: were not actually evaluated (review BLOCKER A).
+    stage_b_not_evaluated: int = 0
+    #: Economic rejections only (a judged candidate that did not pass). A data-quality or
+    #: not-evaluated candidate is never counted here.
+    stage_b_rejected: int = 0
 
 
 @dataclass(frozen=True)
@@ -149,6 +156,10 @@ def compute_coverage(run: FunnelRun) -> CoverageMetrics:
     universe_size = len(run.stage_a_results)
     stage_a_accepted = sum(1 for r in run.stage_a_results if r.passed)
     stage_b_evaluated = sum(1 for r in run.stage_b_results if _is_actually_evaluated(r))
+    stage_b_not_evaluated = len(run.stage_b_results) - stage_b_evaluated
+    stage_b_rejected = sum(
+        1 for r in run.stage_b_results if _is_actually_evaluated(r) and not r.passed
+    )
     final_candidates = len(run.final_candidates)
 
     coverage_rate = final_candidates / universe_size if universe_size > 0 else 0.0
@@ -163,6 +174,8 @@ def compute_coverage(run: FunnelRun) -> CoverageMetrics:
         coverage_rate=coverage_rate,
         stage_a_pass_rate=stage_a_pass_rate,
         stage_b_pass_rate=stage_b_pass_rate,
+        stage_b_not_evaluated=stage_b_not_evaluated,
+        stage_b_rejected=stage_b_rejected,
     )
 
 
@@ -313,14 +326,20 @@ def compare_baseline(
     stage_b_mean = sum(stage_b_scores) / len(stage_b_scores) if stage_b_scores else None
     baseline_mean = sum(baseline_scores) / len(baseline_scores) if baseline_scores else None
 
+    # Pass rate is computed over candidates that were actually judged: a budget/timeout/
+    # resource-pressure candidate was never evaluated and must not dilute the rate
+    # (review BLOCKER A).
+    stage_b_evaluated = sum(1 for r in stage_b_run.stage_b_results if _is_actually_evaluated(r))
+    baseline_evaluated = sum(1 for r in baseline_run.stage_b_results if _is_actually_evaluated(r))
+
     stage_b_pass_rate = (
-        sum(1 for r in stage_b_run.stage_b_results if r.passed) / len(stage_b_run.stage_b_results)
-        if stage_b_run.stage_b_results
+        sum(1 for r in stage_b_run.stage_b_results if r.passed) / stage_b_evaluated
+        if stage_b_evaluated
         else 0.0
     )
     baseline_pass_rate = (
-        sum(1 for r in baseline_run.stage_b_results if r.passed) / len(baseline_run.stage_b_results)
-        if baseline_run.stage_b_results
+        sum(1 for r in baseline_run.stage_b_results if r.passed) / baseline_evaluated
+        if baseline_evaluated
         else 0.0
     )
 

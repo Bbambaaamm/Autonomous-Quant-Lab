@@ -73,6 +73,11 @@ jobs:
           uv run pytest -q
           tests/test_research.py
           tests/test_research_engine.py
+          tests/test_candidate_funnel.py
+          tests/test_funnel_pit.py
+          tests/test_funnel_completeness.py
+          tests/test_funnel_evaluation.py
+          tests/test_funnel_trial_family.py
           tests/test_phase6.py
           tests/test_alpaca_corporate_actions.py
           tests/test_xnys_calendar.py

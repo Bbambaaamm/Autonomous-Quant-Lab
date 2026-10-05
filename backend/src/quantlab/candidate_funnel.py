@@ -10,7 +10,7 @@ adds explicit multi-level computation budgeting.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -27,6 +27,10 @@ from quantlab.market_screening import evaluate_screen, identity
 
 FUNNEL_VERSION = "funnel-v1"
 RANKING_KEY_VERSION = "ranking-v1"
+#: Version of the Stage A rejection classification (review BLOCKER A). Bumped when the
+#: data-quality/economic split changes, because it changes what a stored ``rejection_reason``
+#: means and therefore the interpretation of any persisted funnel evidence.
+REJECTION_CLASSIFICATION_VERSION = "rejection-classification-v1"
 
 
 class RankingKey(StrEnum):
@@ -91,7 +95,10 @@ class RejectionReason(StrEnum):
     NOT_EVALUATED_BUDGET = "NOT_EVALUATED_BUDGET"
     NOT_EVALUATED_TIMEOUT = "NOT_EVALUATED_TIMEOUT"
     NOT_EVALUATED_RESOURCE_PRESSURE = "NOT_EVALUATED_RESOURCE_PRESSURE"
-    # Backward-compatible aliases (deprecated, map to canonical values)
+    # Backward-compatible aliases (deprecated, map to canonical values). NOTE: because these
+    # are enum *aliases*, ``RejectionReason.STAGE_A_FILTERED is RejectionReason.REJECTED_RULE``
+    # — code that assumed the generic Stage A rejection was always an economic one must now use
+    # ``INVALID_DATA`` explicitly for a data-quality non-pass.
     NOT_IN_UNIVERSE = "NOT_IN_UNIVERSE"
     STAGE_A_FILTERED = "REJECTED_RULE"
     STAGE_B_BUDGET_EXHAUSTED = "NOT_EVALUATED_BUDGET"
@@ -112,6 +119,96 @@ class CompletionState(StrEnum):
 class FunnelStage(StrEnum):
     STAGE_A = "STAGE_A"
     STAGE_B = "STAGE_B"
+
+
+#: Canonical #164 screening reasons that describe a *data* failure rather than an economic
+#: judgement about the instrument (review BLOCKER A). An instrument whose history is too
+#: short, gapped, whose adjusted prices are unusable, or whose corporate-action evidence is
+#: unverified cannot support an economic rejection claim: the data needed to judge it is not
+#: there. Reporting such an instrument as economically rejected would overstate the filter's
+#: selectivity and corrupt every downstream rejection-category/selection-quality accounting.
+_CANONICAL_DATA_QUALITY_REASONS: frozenset[str] = frozenset(
+    {
+        "ACTIONS_NOT_VERIFIED",
+        "SHORT_HISTORY",
+        "LOW_COVERAGE",
+        "RECENT_GAPS",
+        "INVALID_ADJUSTED_PRICE",
+    }
+)
+
+#: Canonical #164 screening reasons that describe an actual economic property of the market.
+_CANONICAL_ECONOMIC_REASONS: frozenset[str] = frozenset({"LOW_PRICE", "LOW_FEED_LIQUIDITY"})
+
+#: Declared Stage A bound rejections that are a data/completeness failure.
+_DECLARED_DATA_QUALITY_DETAILS: frozenset[str] = frozenset(
+    {"sessions_too_few", "coverage_too_low", "corporate_actions_not_verified"}
+)
+
+#: Declared Stage A bound rejections that are an economic rule rejection.
+_DECLARED_ECONOMIC_DETAILS: frozenset[str] = frozenset(
+    {
+        "price_too_low",
+        "price_too_high",
+        "feed_dollar_volume_20_too_low",
+        "momentum_too_low",
+        "momentum_too_high",
+        "trend_too_low",
+        "trend_too_high",
+        "mean_reversion_too_low",
+        "mean_reversion_too_high",
+        "exchange_not_allowed",
+    }
+)
+
+#: The statuses a funnel snapshot must be able to distinguish (review BLOCKER A).
+#: ``NOT_IN_UNIVERSE`` is carried in addition, because the lineage must also explain why an
+#: instrument was never in the universe at all.
+CANONICAL_STATUSES: tuple[str, ...] = (
+    RejectionReason.ELIGIBLE.value,
+    RejectionReason.REJECTED_RULE.value,
+    RejectionReason.INVALID_DATA.value,
+    RejectionReason.NOT_EVALUATED_BUDGET.value,
+    RejectionReason.NOT_EVALUATED_TIMEOUT.value,
+    RejectionReason.NOT_EVALUATED_RESOURCE_PRESSURE.value,
+)
+
+
+def is_not_evaluated(reason: RejectionReason | None) -> bool:
+    """True when ``reason`` is a *non-event*, not an economic rejection.
+
+    Budget exhaustion, timeout and resource pressure mean the candidate was never judged
+    (review BLOCKER A). They must never be counted, reported or aggregated as a rejection.
+    """
+    return reason is not None and reason.value.startswith("NOT_EVALUATED")
+
+
+def classify_stage_a_rejection(
+    canonical_reasons: Sequence[str],
+    rejection_details: Mapping[str, Any],
+) -> RejectionReason:
+    """Classify a Stage A non-pass as ``INVALID_DATA`` or ``REJECTED_RULE`` (BLOCKER A).
+
+    Fail-closed and deterministic:
+
+    * a data-quality reason (canonical or declared) always wins, because an instrument that
+      cannot be judged on complete data must not be reported as economically rejected — the
+      review requires exactly this distinction and a fail-closed posture on incomplete data;
+    * an economic reason is reported as ``REJECTED_RULE`` only when no data-quality reason is
+      present;
+    * an unrecognised or absent reason is ``INVALID_DATA``, never ``REJECTED_RULE``: the
+      funnel must not claim an economic rejection it cannot justify.
+
+    ``rejection_details`` records the *other* reasons as well, so the underlying evidence is
+    never lost — only the summary status is de-overclaimed.
+    """
+    reasons = set(canonical_reasons)
+    details = set(rejection_details)
+    if reasons & _CANONICAL_DATA_QUALITY_REASONS or details & _DECLARED_DATA_QUALITY_DETAILS:
+        return RejectionReason.INVALID_DATA
+    if reasons & _CANONICAL_ECONOMIC_REASONS or details & _DECLARED_ECONOMIC_DETAILS:
+        return RejectionReason.REJECTED_RULE
+    return RejectionReason.INVALID_DATA
 
 
 @dataclass(frozen=True)
@@ -335,11 +432,27 @@ class FunnelRun:
 
         Reads only from the immutable FunnelRun lineage — no expensive
         full-market HTTP computation is performed.
+
+        Budget/timeout/resource-pressure candidates are reported in their own
+        ``stage_b_not_evaluated`` bucket and are excluded from ``stage_b_rejected`` and from
+        ``stage_b_candidates_evaluated`` (review BLOCKER A): an instrument skipped for budget
+        was never judged and must not be read as an economic rejection.
         """
         stage_a_accepted = sum(1 for r in self.stage_a_results if r.passed)
         stage_a_rejected = sum(1 for r in self.stage_a_results if not r.passed)
+        stage_b_evaluated = sum(
+            1 for r in self.stage_b_results if not is_not_evaluated(r.rejection_reason)
+        )
+        stage_b_not_evaluated = sum(
+            1 for r in self.stage_b_results if is_not_evaluated(r.rejection_reason)
+        )
         stage_b_accepted = sum(1 for r in self.stage_b_results if r.passed)
-        stage_b_rejected = sum(1 for r in self.stage_b_results if not r.passed)
+        # Only an instrument that was actually judged and did not pass is an economic rejection.
+        stage_b_rejected = sum(
+            1
+            for r in self.stage_b_results
+            if not r.passed and not is_not_evaluated(r.rejection_reason)
+        )
         return {
             "run_id": self.run_id,
             "universe_snapshot_id": self.universe_snapshot_id,
@@ -362,7 +475,9 @@ class FunnelRun:
                 "universe_size": len(self.stage_a_results),
                 "stage_a_accepted": stage_a_accepted,
                 "stage_a_rejected": stage_a_rejected,
-                "stage_b_candidates_evaluated": len(self.stage_b_results),
+                "stage_b_candidates": len(self.stage_b_results),
+                "stage_b_candidates_evaluated": stage_b_evaluated,
+                "stage_b_not_evaluated": stage_b_not_evaluated,
                 "stage_b_accepted": stage_b_accepted,
                 "stage_b_rejected": stage_b_rejected,
                 "final_candidates": len(self.final_candidates),
@@ -720,12 +835,27 @@ class CandidateFunnel:
                     passed = False
                     rejection_details["corporate_actions_not_verified"] = True
 
+            # Distinguish a data-quality non-pass from an economic one (review BLOCKER A).
+            # A short/gapped/unusable history or unverified corporate actions is INVALID_DATA,
+            # never an economic rejection: the instrument could not be judged, it was not
+            # judged to be bad. Reporting it as REJECTED_RULE would overstate the filter's
+            # selectivity in every downstream rejection-category and selection-quality number.
+            rejection_reason: RejectionReason | None = None
+            if not passed:
+                canonical_reasons = list(screening.get("reasons") or [])
+                rejection_reason = classify_stage_a_rejection(canonical_reasons, rejection_details)
+                # Preserve the canonical reasons in the lineage; the declared bounds are
+                # *additional* tightenings on top of the canonical policy, so the caller can
+                # always see why the canonical screen would have decided.
+                if canonical_reasons:
+                    rejection_details.setdefault("canonical_reasons", canonical_reasons)
+
             results.append(
                 StageAResult(
                     instrument_id=inst_id,
                     symbol=symbol,
                     passed=passed,
-                    rejection_reason=None if passed else RejectionReason.STAGE_A_FILTERED,
+                    rejection_reason=rejection_reason,
                     rejection_details=rejection_details,
                     screening_evidence=screening,
                     selection_reason=SelectionReason.STAGE_A_SELECTED if passed else None,
@@ -798,13 +928,21 @@ class CandidateFunnel:
                     )
                 )
             except Exception as exc:
+                # An evaluator exception is a data/computation failure, not an economic
+                # judgement about the instrument (review BLOCKER A). Reporting it as
+                # REJECTED_RULE would let a provider outage or an evaluator bug be read as a
+                # legitimate economic rejection. The concrete error is preserved in evidence.
                 results.append(
                     StageBResult(
                         instrument_id=ar.instrument_id,
                         symbol=ar.symbol,
                         passed=False,
-                        rejection_reason=RejectionReason.STAGE_B_REJECTED,
-                        evidence={"error": type(exc).__name__, "message": str(exc)[:500]},
+                        rejection_reason=RejectionReason.INVALID_DATA,
+                        evidence={
+                            "error": type(exc).__name__,
+                            "message": str(exc)[:500],
+                            "evaluation_failed": True,
+                        },
                         candidate_rank=rank,
                         selection_reason=SelectionReason.STAGE_A_SELECTED,
                     )
@@ -886,6 +1024,7 @@ class CandidateFunnel:
         funnel_version = identity(
             {
                 "module_version": FUNNEL_VERSION,
+                "rejection_classification_version": REJECTION_CLASSIFICATION_VERSION,
                 "ranking_key_version": self.stage_b_config.ranking_key_version,
                 "ranking_key": self.stage_b_config.ranking_key.value,
                 "stage_a_config": self.stage_a_config.config_hash,

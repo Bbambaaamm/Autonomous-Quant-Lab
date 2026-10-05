@@ -17,10 +17,14 @@ Covers acceptance criteria:
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
 
 from quantlab.candidate_funnel import (
+    CANONICAL_STATUSES,
+    FUNNEL_VERSION,
+    REJECTION_CLASSIFICATION_VERSION,
     CandidateFunnel,
     CompletionState,
     FunnelConfigMismatch,
@@ -33,9 +37,13 @@ from quantlab.candidate_funnel import (
     StageBConfig,
     StageBEvaluator,
     StageBResult,
+    classify_stage_a_rejection,
     deterministic_replay_check,
+    is_not_evaluated,
 )
+from quantlab.funnel_evaluation import compute_coverage
 from quantlab.market_data import CorporateAction, CorporateActionKind, Observation, XNYSCalendar
+from quantlab.market_screening import identity
 
 NOW = datetime(2026, 9, 21, 22, tzinfo=UTC)
 DAYS = XNYSCalendar().sessions_between(date(2026, 1, 2), date(2026, 9, 21))
@@ -290,7 +298,11 @@ def test_stage_a_rejects_disallowed_exchange():
 
 
 def test_stage_a_rejects_unverified_corporate_actions():
-    """Missing corporate action evidence gets STAGE_A_FILTERED rejection."""
+    """Missing corporate action evidence is a DATA failure, not an economic rejection.
+
+    The instrument is not judged to be economically unattractive; the evidence needed to
+    judge it is absent, so the status must be INVALID_DATA (review BLOCKER A).
+    """
     config = StageAConfig(require_corporate_actions_verified=True)
     funnel = CandidateFunnel(stage_a_config=config)
     instruments = [make_instrument()]
@@ -309,7 +321,7 @@ def test_stage_a_rejects_unverified_corporate_actions():
 
     assert len(results) == 1
     assert not results[0].passed
-    assert results[0].rejection_reason is RejectionReason.STAGE_A_FILTERED
+    assert results[0].rejection_reason is RejectionReason.INVALID_DATA
 
 
 def test_stage_b_never_expands_beyond_stage_a_candidates():
@@ -403,7 +415,11 @@ def test_stage_b_hard_provider_request_budget():
 
 
 def test_stage_b_evaluation_failure_is_captured():
-    """Stage B evaluation failures produce STAGE_B_REJECTED, not crashes."""
+    """A Stage B evaluator exception is a data failure, not an economic rejection.
+
+    A provider outage or evaluator bug must never be read as a legitimate economic
+    rejection of the candidate (review BLOCKER A): the instrument was not judged.
+    """
     config = StageBConfig()
     funnel = CandidateFunnel(stage_b_config=config)
     instruments = [make_instrument("fail-1", "FAIL1")]
@@ -425,7 +441,8 @@ def test_stage_b_evaluation_failure_is_captured():
 
     assert len(stage_b_results) == 1
     assert not stage_b_results[0].passed
-    assert stage_b_results[0].rejection_reason is RejectionReason.STAGE_B_REJECTED
+    assert stage_b_results[0].rejection_reason is RejectionReason.INVALID_DATA
+    assert stage_b_results[0].evidence["evaluation_failed"] is True
     assert "error" in stage_b_results[0].evidence
 
 
@@ -502,7 +519,10 @@ def test_broad_universe_candidate_count_drives_stage_b_complexity():
     # Stage B only evaluated the 5 that passed Stage A
     assert len(evaluator.calls) == 5
     assert len(run.final_candidates) == 5
-    assert run.rejection_counts.get(RejectionReason.STAGE_A_FILTERED.value, 0) == 95
+    # The 95 low-price instruments are a data failure under the canonical screen (the
+    # adjusted price is unusable), so they are INVALID_DATA, not economic rejections.
+    assert run.rejection_counts.get(RejectionReason.INVALID_DATA.value, 0) == 95
+    assert run.rejection_counts.get(RejectionReason.REJECTED_RULE.value, 0) == 0
 
 
 def test_funnel_run_has_immutable_lineage():
@@ -625,7 +645,8 @@ def test_rejection_reason_stored_for_every_evaluated_instrument():
     assert len(results) == 3
     by_id = {r.instrument_id: r for r in results}
     assert by_id["pass-1"].rejection_reason is None
-    assert by_id["fail-1"].rejection_reason is RejectionReason.STAGE_A_FILTERED
+    # A canonical rejection is classified data vs economic, never as a blanket alias.
+    assert by_id["fail-1"].rejection_reason is RejectionReason.INVALID_DATA
     assert by_id["missing-1"].rejection_reason is RejectionReason.NOT_IN_UNIVERSE
 
 
@@ -1949,3 +1970,263 @@ def test_price_bounds_are_self_consistent():
         StageAConfig(minimum_price_usd=Decimal("10"), max_price_usd=Decimal("5"))
     with pytest.raises(ValueError, match="min_score_threshold must be finite"):
         StageBConfig(min_score_threshold=Decimal("NaN"))
+
+
+# ─── Review BLOCKER A: data-quality vs economic rejection, and NOT_EVALUATED ≠ rejected ───
+
+
+def test_canonical_data_rejection_is_invalid_data_not_economic():
+    """A canonical data-quality non-pass is INVALID_DATA, never an economic rejection.
+
+    SHORT_HISTORY / LOW_COVERAGE / RECENT_GAPS / INVALID_ADJUSTED_PRICE mean the instrument
+    could not be judged, not that it was judged to be economically unattractive. Reporting
+    it as REJECTED_RULE would overstate the filter's selectivity in every downstream number
+    (review BLOCKER A).
+    """
+    # 60 sessions: too short for the canonical 127-session policy.
+    short = DAYS[-60:]
+    results = CandidateFunnel().run_stage_a(
+        "snapshot-1",
+        [make_instrument()],
+        {"asset-1": make_observations(sessions=short)},
+        {"asset-1": [make_corporate_action()]},
+        DAYS,
+        NOW,
+        readiness_ids={"asset-1": "r1"},
+    )
+    assert not results[0].screening_evidence["eligible"]
+    assert "SHORT_HISTORY" in results[0].screening_evidence["reasons"]
+    assert results[0].rejection_reason is RejectionReason.INVALID_DATA
+    assert results[0].rejection_reason is not RejectionReason.REJECTED_RULE
+    # The canonical evidence is preserved, not discarded.
+    assert "SHORT_HISTORY" in results[0].rejection_details["canonical_reasons"]
+
+
+def test_canonical_economic_rejection_is_rejected_rule():
+    """A canonical economic non-pass stays REJECTED_RULE.
+
+    An instrument with sufficient, complete history that is simply too illiquid is an
+    economic rejection and must not be diluted into INVALID_DATA.
+    """
+    observations = {
+        "asset-1": make_observations(volume=Decimal("1")),
+    }
+    results = CandidateFunnel().run_stage_a(
+        "snapshot-1",
+        [make_instrument()],
+        observations,
+        {"asset-1": [make_corporate_action()]},
+        DAYS,
+        NOW,
+        readiness_ids={"asset-1": "r1"},
+    )
+    assert not results[0].screening_evidence["eligible"]
+    assert "LOW_FEED_LIQUIDITY" in results[0].screening_evidence["reasons"]
+    assert results[0].rejection_reason is RejectionReason.REJECTED_RULE
+
+
+def test_declared_data_bound_rejection_is_invalid_data():
+    """A declared completeness bound (sessions) rejects as INVALID_DATA, not by rule.
+
+    minimum_sessions is a data-completeness bound: failing it means the instrument cannot
+    support the canonical 127-session evidence, so it is INVALID_DATA.
+    """
+    config = StageAConfig(minimum_sessions=200)
+    results = CandidateFunnel(stage_a_config=config).run_stage_a(
+        "snapshot-1",
+        [make_instrument()],
+        {"asset-1": make_observations()},
+        {"asset-1": [make_corporate_action()]},
+        DAYS,
+        NOW,
+        readiness_ids={"asset-1": "r1"},
+    )
+    assert not results[0].passed
+    assert "sessions_too_few" in results[0].rejection_details
+    assert results[0].rejection_reason is RejectionReason.INVALID_DATA
+
+
+def test_declared_economic_bound_rejection_is_rejected_rule():
+    """A declared economic bound rejects as REJECTED_RULE.
+
+    The instrument has complete data; the preregistered economic filter simply excludes it.
+    """
+    config = StageAConfig(minimum_price_usd=Decimal("150"))
+    results = CandidateFunnel(stage_a_config=config).run_stage_a(
+        "snapshot-1",
+        [make_instrument()],
+        {"asset-1": make_observations(close=Decimal("100"))},
+        {"asset-1": [make_corporate_action()]},
+        DAYS,
+        NOW,
+        readiness_ids={"asset-1": "r1"},
+    )
+    assert not results[0].passed
+    assert "price_too_low" in results[0].rejection_details
+    assert results[0].rejection_reason is RejectionReason.REJECTED_RULE
+
+
+def test_data_failure_wins_over_co_occurring_economic_reason():
+    """When data and economic reasons co-occur, the data status wins (fail-closed).
+
+    An unusable adjusted price (INVALID_ADJUSTED_PRICE) makes the economic metrics
+    meaningless, so the instrument must not be reported as economically rejected even
+    though the canonical screen also flagged LOW_PRICE.
+    """
+    config = StageAConfig(minimum_price_usd=Decimal("50"))
+    results = CandidateFunnel(stage_a_config=config).run_stage_a(
+        "snapshot-1",
+        [make_instrument()],
+        # A non-positive close is an unusable adjusted price AND a low price.
+        {"asset-1": make_observations(close=Decimal("0"))},
+        {"asset-1": [make_corporate_action()]},
+        DAYS,
+        NOW,
+        readiness_ids={"asset-1": "r1"},
+    )
+    reasons = results[0].screening_evidence["reasons"]
+    assert "INVALID_ADJUSTED_PRICE" in reasons
+    assert "LOW_PRICE" in reasons
+    assert results[0].rejection_reason is RejectionReason.INVALID_DATA
+    assert results[0].rejection_reason is not RejectionReason.REJECTED_RULE
+
+
+def test_classify_stage_a_rejection_fails_closed_on_unknown_reason():
+    """An unrecognised reason is INVALID_DATA, never an unjustified economic rejection."""
+    assert (
+        classify_stage_a_rejection(["SOME_FUTURE_CANONICAL_REASON"], {})
+        is RejectionReason.INVALID_DATA
+    )
+    assert classify_stage_a_rejection([], {}) is RejectionReason.INVALID_DATA
+
+
+def test_canonical_statuses_are_distinguishable():
+    """The funnel must be able to express every status the review requires (BLOCKER A)."""
+    assert CANONICAL_STATUSES == (
+        "ELIGIBLE",
+        "REJECTED_RULE",
+        "INVALID_DATA",
+        "NOT_EVALUATED_BUDGET",
+        "NOT_EVALUATED_TIMEOUT",
+        "NOT_EVALUATED_RESOURCE_PRESSURE",
+    )
+    for status in CANONICAL_STATUSES:
+        assert RejectionReason(status) is not None
+
+
+def test_summary_does_not_report_budget_skipped_as_rejected():
+    """A budget-skipped instrument is NOT reported as rejected or as evaluated.
+
+    Review acceptance: 'instrument vynechaný kvůli budgetu není reportován jako rejected'.
+    """
+    n = 5
+    instruments = [make_instrument(f"asset-{i}", f"A{i}") for i in range(n)]
+    observations = {f"asset-{i}": make_observations(f"asset-{i}", f"A{i}") for i in range(n)}
+    actions = {f"asset-{i}": [make_corporate_action(f"asset-{i}")] for i in range(n)}
+    config = StageBConfig(max_candidates=2)
+    run = CandidateFunnel(stage_b_config=config).run(
+        "snapshot-1",
+        instruments,
+        observations,
+        actions,
+        DAYS,
+        NOW,
+        RecordingStageBEvaluator(config),
+        readiness_ids={f"asset-{i}": f"r{i}" for i in range(n)},
+    )
+
+    counts = run.to_summary()["funnel_counts"]
+    assert counts["stage_a_accepted"] == 5
+    assert counts["stage_b_candidates"] == 5
+    assert counts["stage_b_candidates_evaluated"] == 2
+    assert counts["stage_b_not_evaluated"] == 3
+    # The three budget-skipped candidates are NOT economic rejections.
+    assert counts["stage_b_rejected"] == 0
+    assert counts["stage_b_accepted"] == 2
+    assert counts["final_candidates"] == 2
+
+
+def test_coverage_metrics_exclude_not_evaluated_from_pass_rate():
+    """CoverageMetrics keeps not-evaluated candidates out of the Stage B pass rate."""
+    n = 4
+    instruments = [make_instrument(f"asset-{i}", f"A{i}") for i in range(n)]
+    observations = {f"asset-{i}": make_observations(f"asset-{i}", f"A{i}") for i in range(n)}
+    actions = {f"asset-{i}": [make_corporate_action(f"asset-{i}")] for i in range(n)}
+    config = StageBConfig(max_candidates=1)
+    run = CandidateFunnel(stage_b_config=config).run(
+        "snapshot-1",
+        instruments,
+        observations,
+        actions,
+        DAYS,
+        NOW,
+        RecordingStageBEvaluator(config),
+        readiness_ids={f"asset-{i}": f"r{i}" for i in range(n)},
+    )
+
+    coverage = compute_coverage(run)
+    assert coverage.stage_b_evaluated == 1
+    assert coverage.stage_b_not_evaluated == 3
+    assert coverage.stage_b_rejected == 0
+    assert coverage.stage_b_pass_rate == 1.0  # 1 of 1 judged candidate passed
+
+
+def test_not_evaluated_helper_matches_every_not_evaluated_status():
+    """is_not_evaluated() is true for exactly the three NOT_EVALUATED_* statuses."""
+    assert is_not_evaluated(RejectionReason.NOT_EVALUATED_BUDGET)
+    assert is_not_evaluated(RejectionReason.NOT_EVALUATED_TIMEOUT)
+    assert is_not_evaluated(RejectionReason.NOT_EVALUATED_RESOURCE_PRESSURE)
+    assert not is_not_evaluated(RejectionReason.REJECTED_RULE)
+    assert not is_not_evaluated(RejectionReason.INVALID_DATA)
+    assert not is_not_evaluated(None)
+
+
+def test_rejection_classification_version_is_in_funnel_version():
+    """The rejection-classification version is part of the downstream funnel identity."""
+    funnel = CandidateFunnel()
+    run = funnel.run(
+        "snapshot-1",
+        [make_instrument()],
+        {"asset-1": make_observations()},
+        {"asset-1": [make_corporate_action()]},
+        DAYS,
+        NOW,
+        RecordingStageBEvaluator(StageBConfig()),
+        readiness_ids={"asset-1": "r1"},
+    )
+    assert REJECTION_CLASSIFICATION_VERSION == "rejection-classification-v1"
+    assert run.funnel_version != identity(
+        {
+            "module_version": FUNNEL_VERSION,
+            "ranking_key_version": StageBConfig().ranking_key_version,
+            "ranking_key": StageBConfig().ranking_key.value,
+            "stage_a_config": StageAConfig().config_hash,
+            "stage_b_config": StageBConfig().config_hash,
+        }
+    )
+
+
+#: The funnel test modules that must be wired into a required CI job. A funnel regression
+#: that no workflow runs is invisible to the merge gate, so the funnel contract would only
+#: be enforced by whoever happens to run it locally.
+FUNNEL_TEST_MODULES: tuple[str, ...] = (
+    "tests/test_candidate_funnel.py",
+    "tests/test_funnel_pit.py",
+    "tests/test_funnel_completeness.py",
+    "tests/test_funnel_evaluation.py",
+    "tests/test_funnel_trial_family.py",
+)
+
+
+def test_funnel_tests_are_wired_into_a_required_ci_job():
+    """The candidate-funnel suite must run in the required ``unit-research`` CI job.
+
+    These modules enforce review BLOCKER A/B/C and STAT-BLOCKER A-D for #268. If they are
+    not listed in ``ci.yml`` they are never executed by the merge gate, so the whole funnel
+    contract can silently regress. This test fails closed if the wiring is removed.
+    """
+    repository_root = Path(__file__).resolve().parents[2]
+    ci = (repository_root / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    unit_research = ci.split("  unit-research:", 1)[1].split("\n  api:", 1)[0]
+    for module in FUNNEL_TEST_MODULES:
+        assert module in unit_research, f"{module} is not run by the required unit-research job"

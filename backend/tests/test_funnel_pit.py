@@ -246,7 +246,11 @@ def test_recompute_stage_a_at_is_pit_per_decision_time():
 
     assert early.candidate_ids == ()
     assert late.candidate_ids == ("late-1",)
-    assert early.rejection_counts()["REJECTED_RULE"] == 1
+    # At mid-history the instrument has too little history to be judged at all
+    # (SHORT_HISTORY), so it is INVALID_DATA, not an economic rejection — the data needed
+    # to judge it does not exist yet (review BLOCKER A, fail-closed).
+    assert early.rejection_counts()["INVALID_DATA"] == 1
+    assert early.rejection_counts().get("REJECTED_RULE") is None
 
 
 def test_recompute_pit_replay_rebuilds_each_fold_independently():
