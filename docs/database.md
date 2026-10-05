@@ -42,3 +42,96 @@ sloupcích experimentu.
 
 ## Phase 6 immutable lineage
 Snapshot zapisuje identitu produkčního XNYS zdroje `XNYS:exchange-calendars:4.13.2` (`exchange-calendars` 4.13.2), observation ID, revision, source hash a kauzálně známé corporate actions. Observation revisions ani snapshot manifesty se po provider correction nemění; nová oprava vytváří novou lineage a starý replay zůstá reprodukovatelný. PIT membership určuje coverage denominator. PostgreSQL constraints a idempotency key prosazují jediný experiment a jediné autoritativní OOS i při concurrent volání.
+
+## Immutable Forecast Ledger (#266)
+
+`forecast_ledger` je append-only evidence pravděpodobnostního forecastu, který vznikl **před**
+downstream paper/risk rozhodnutím. Kontrakt (`backend/src/quantlab/forecast_ledger.py`) je leaf
+modul bez I/O a bez exekuční autority (`FORECAST_AUTHORITY = False`); forecast sám nikdy neodesílá
+order ani nemění RiskEngine limity.
+
+Klíčové invariants:
+
+- `forecast_id` je content-addressed z `decision_identity` (target spec + scope + decision time +
+  model/strategy artifact + snapshot lineage) a obsahu záznamu; zadat ho ručně nelze.
+- `raw_probability` a `calibrated_probability` jsou oddělená evidence; kalibrace nikdy nepřepisuje
+  raw forecast a nese vlastní `calibrator_id`/`calibrator_version`.
+- `created_at`/`decision_time`/`resolution_at` jsou timezone-aware UTC a před zápisem i před
+  content-addressing se normalizují na kanonický UTC instant: dvě různé reprezentace téhož okamžiku
+  (`14:30+00:00` vs `16:30+02:00`) sdílejí jeden `decision_identity`, `content_hash` i řádek ledgeru.
+  Naivní (bez tz) čas je odmítnut; snapshot i baseline musí být PIT-safe (`as_of <= decision_time`).
+- Neúplná/stale evidence vytváří explicitní `ABSTAINED`/`NO_FORECAST`/`INVALID_DATA`/
+  `NOT_EVALUATED` status s `degraded_reason` a **bez** pravděpodobnosti — fail-closed, žádná
+  fabrikace. Tyto stavy zůstávají v denominatoru coverage reportu.
+- Emitovaný forecast musí vzniknout **před** vlastním rozřešením (`created_at < resolution_at`);
+  jinak by šlo zapsat řádek, který už zná výsledek. Preregistrovaná opportunity navíc vyžaduje
+  `lineage.trial_family_id`, aby žádný target/horizon switch neunikl multiple-testing accountingu
+  (#76). Obě podmínky jsou i DB check constraints.
+- Decision brána ověřuje strukturálně, že evidence existovala v čase rozhodnutí
+  (`record.created_at <= reference.decision_time`), nejen že `decision_time` není v budoucnosti.
+- Coverage denominator tvoří **pouze preregistrované** opportunity; exploratory/ad-hoc forecasty
+  jsou legitimní evidence, ale reportují se odděleně (`excluded_non_preregistered`), aby jimi nešlo
+  nafouknout coverage.
+- Oprava je nová verze (`prior_forecast_id`), nikdy UPDATE historického forecastu; `prior_forecast_id`
+  musí na existující commitnutou evidenci odkazovat.
+- Numericky shodné decimální hodnoty (např. `threshold` `0.01` vs `0.010`) se serializují na
+  kanonickou škálu, takže stejný ekonomický target má jednu `spec_hash`/`decision_identity` a
+  nevzniká duplicitní řádek.
+
+Immutabilita je vynucena na DB úrovni: trigger `forecast_ledger_immutable` (funkce
+`reject_core_evidence_mutation()` z `20260924_04`) odmítá UPDATE/DELETE a
+`scripts/configure-runtime-role.sql` navíc revokuje UPDATE/DELETE pro runtime roli. Migrace
+`20260924_05` odmítá downgrade, pokud tabulka obsahuje jakoukoli evidenci. Všechny pravděpodobnostní
+sloupce jsou `Numeric(30, 12)` a content hash se počítá ve stejné škále, aby round-trip přes
+databázi reprodukoval původní `content_hash`.
+
+Trigger i revokace chrání jen runtime roli. Privilegovaný zápis (migrator/superuser, ruční INSERT,
+částečně aplikovaný restore) je může obejít, proto `ForecastLedger.read()` — a tím i
+`require_forecast_reference()` a `decide_with_forecast()` — ověřuje, že přečtená evidence stále
+reprodukuje svou vlastní identitu: `content_hash`, `forecast_id`, kanonický `record_json` snapshot a
+všechny denormalizované sloupce (pravděpodobnosti, kalibrace, baseline, lineage, regime/source,
+uncertainty, confidence, degraded detail, target spec). Nesoulad vyhazuje `ForecastIntegrityError`
+(fail-closed) místo aby mutovaná evidence řídila PAPER rozhodnutí; idempotentní re-commit navíc
+tutéž kontrolu vynucuje i nad existujícím řádkem.
+
+Samotná kontrola identity ale nestačí: privilegovaný zápis může vložit řádek, který je **vnitřně
+konzistentní** (jeho `content_hash`/`forecast_id`/`record_json` si navzájem odpovídají), a přesto
+porušuje kanonický kontrakt #266 — neznámý `schema_version`, `FORECAST_EMITTED` nesoucí degraded
+marker (fail-open místo fail-closed), nebo PIT look-ahead `market_snapshot_as_of`/`baseline.as_of`
+po `decision_time`. DB check constraints tyto případy nepokrývají. Read path proto po ověření
+identity znovu spouští kanonickou validaci rekonstruovaného záznamu a každé porušení kontraktu
+vyhazuje jako `ForecastIntegrityError` — neplatná evidence tak selže stejně uzavřeně jako evidence
+mutovaná.
+
+Třetí případ je evidence, kterou **nelze vůbec dekódovat** na kanonický záznam: nečitelný
+pravděpodobnostní literál (`Infinity`, `not-a-number`), neparsovatelný `target.threshold`, JSON
+dokument jiného tvaru než objekt, nebo datetime sloupec, který není ISO-8601. `Decimal.quantize` a
+`Decimal(...)` přitom vyhazují `decimal.InvalidOperation`, což je `ArithmeticError` a **nikoli**
+`ValueError`; ORM navíc umí selhat už při převodu datetime sloupce. Bez tohoto guardu by surová
+výjimka unikla mimo `ForecastLedgerError` — tedy mimo dokumentovaný fail-closed signál — a brána
+rozhodnutí, která odchytává jen `ForecastLedgerError`, by pro tuto třídu evidence selhala
+*otevřeně*. Read path proto obaluje celé čtení (`read()`, `for_decision_identity()`,
+`_record_from_row()` včetně obou ověřovacích helperů) a každou takovou chybu dekódování překládá na
+`ForecastIntegrityError`. Skutečné provozní chyby (např. `DBAPIError` spojení) v této rodině
+záměrně nejsou, aby se přerušené spojení nehlásilo jako porušení imutability.
+
+Poslední vrstva je **typová disciplína veřejné factory**: `ForecastRecord.create()` přijímá jen to,
+co kanonický kontrakt deklaruje, protože každý uvolněný typ se propíše do content hashe a rozbije
+buď round-trip, nebo downstream čtení:
+
+- volitelné textové pole (`regime`, `source`, `degraded_detail`) musí být `None` nebo neprázdný
+  `str`; sloupec je `String`, takže `regime=123` se při zápisu převedlo na `"123"` a následný
+  `read()` hlásil legitimní záznam jako mutovaný (`ForecastIntegrityError`) — tedy trvale
+  nečitelnou evidenci;
+- `uncertainty` je `Mapping[str, str]` — každý klíč i hodnota musí být neprázdný `str`;
+- `status`, `scope_kind` a `degraded_reason` musí být členové příslušného `StrEnum`, ne holý string
+  (`"ASSET" == ScopeKind.ASSET` je pravda, ale `"ASSET" is ScopeKind.ASSET` ne, takže holý string
+  tiše rozbil identitní větve i `to_calibration_view()`);
+- multi-class distribuce musí zůstat normalizovaná i **po zaokrouhlení na `Numeric(30, 12)`**:
+  součet raw `Decimal` hodnot může být přesně 1 a přesto se uložené hodnoty sečtou na
+  `0.999999999999`, což read-path kontrakt odmítne — factory by vyrobila evidenci, kterou její
+  vlastní čtenář označí za neplatnou;
+- povinnost `trial_family_id` pro preregistrovanou opportunity platí pro **každý** stav, nejen
+  `FORECAST_EMITTED`: i `ABSTAINED`/`NO_FORECAST`/`INVALID_DATA`/`NOT_EVALUATED` zabírá místo
+  v coverage denominatoru (STAT-BLOCKER A), takže bez family identity je neatribuovatelná a
+  target/horizon switch by se mohl schovat právě v abstencích.

@@ -4,6 +4,7 @@ from logging.config import fileConfig
 
 import quantlab.asset_directory
 import quantlab.automation
+import quantlab.forecast_ledger
 import quantlab.market_catalog
 import quantlab.market_pipeline
 import quantlab.market_screening
