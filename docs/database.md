@@ -56,8 +56,10 @@ Klíčové invariants:
   model/strategy artifact + snapshot lineage) a obsahu záznamu; zadat ho ručně nelze.
 - `raw_probability` a `calibrated_probability` jsou oddělená evidence; kalibrace nikdy nepřepisuje
   raw forecast a nese vlastní `calibrator_id`/`calibrator_version`.
-- `created_at`/`decision_time`/`resolution_at` jsou timezone-aware UTC; snapshot i baseline musí
-  být PIT-safe (`as_of <= decision_time`).
+- `created_at`/`decision_time`/`resolution_at` jsou timezone-aware UTC a před zápisem i před
+  content-addressing se normalizují na kanonický UTC instant: dvě různé reprezentace téhož okamžiku
+  (`14:30+00:00` vs `16:30+02:00`) sdílejí jeden `decision_identity`, `content_hash` i řádek ledgeru.
+  Naivní (bez tz) čas je odmítnut; snapshot i baseline musí být PIT-safe (`as_of <= decision_time`).
 - Neúplná/stale evidence vytváří explicitní `ABSTAINED`/`NO_FORECAST`/`INVALID_DATA`/
   `NOT_EVALUATED` status s `degraded_reason` a **bez** pravděpodobnosti — fail-closed, žádná
   fabrikace. Tyto stavy zůstávají v denominatoru coverage reportu.

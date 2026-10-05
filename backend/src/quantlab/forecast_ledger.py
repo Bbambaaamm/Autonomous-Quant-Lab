@@ -192,6 +192,20 @@ def _utc(value: datetime) -> datetime:
     return value.astimezone(UTC)
 
 
+def _canonical_utc(value: datetime) -> datetime:
+    """Canonical UTC rendering used for every content-addressed identity.
+
+    Timezone safety requires more than rejecting naive datetimes: two aware
+    representations of the *same instant* (``14:30+00:00`` and ``16:30+02:00``)
+    are the same canonical decision and must produce the same
+    ``decision_identity``, ``content_hash`` and persisted instant. Without this
+    normalization the same opportunity could be logged twice (breaking
+    append-only idempotency and inflating the coverage denominator) and a
+    round-tripped record could appear mutated. Naive datetimes stay rejected.
+    """
+    return require_utc(value)
+
+
 #: Storage scale of every probability column (``Numeric(30, 12)``).
 PROBABILITY_SCALE = Decimal("0.000000000001")
 
@@ -388,7 +402,7 @@ class BaselineProbability:
             "probability": _probability_text(self.probability),
             "source": self.source,
             "source_version": self.source_version,
-            "as_of": self.as_of.isoformat(),
+            "as_of": _canonical_utc(self.as_of).isoformat(),
         }
 
 
@@ -484,7 +498,7 @@ class ForecastLineage:
             "feature_extractor_version": self.feature_extractor_version,
             "market_snapshot_id": self.market_snapshot_id,
             "market_snapshot_hash": self.market_snapshot_hash,
-            "market_snapshot_as_of": self.market_snapshot_as_of.isoformat(),
+            "market_snapshot_as_of": _canonical_utc(self.market_snapshot_as_of).isoformat(),
             "data_lineage": dict(sorted(self.data_lineage.items())),
             "deployment_id": self.deployment_id,
             "research_experiment_id": self.research_experiment_id,
@@ -546,7 +560,7 @@ class ForecastRecord:
                 "scope_kind": str(self.scope_kind),
                 "scope_id": self.scope_id,
                 "opportunity_id": self.opportunity_id,
-                "decision_time": self.decision_time.isoformat(),
+                "decision_time": _canonical_utc(self.decision_time).isoformat(),
                 "target_spec_hash": self.target.spec_hash,
                 "model_artifact_hash": self.lineage.artifact_hash,
                 "market_snapshot_hash": self.lineage.market_snapshot_hash,
@@ -631,9 +645,9 @@ class ForecastRecord:
             "scope_id": self.scope_id,
             "opportunity_id": self.opportunity_id,
             "preregistered": self.preregistered,
-            "created_at": self.created_at.isoformat(),
-            "decision_time": self.decision_time.isoformat(),
-            "resolution_at": self.resolution_at.isoformat(),
+            "created_at": _canonical_utc(self.created_at).isoformat(),
+            "decision_time": _canonical_utc(self.decision_time).isoformat(),
+            "resolution_at": _canonical_utc(self.resolution_at).isoformat(),
             "target": self.target.to_dict(),
             "distribution": self.distribution.to_dict(),
             "lineage": self.lineage.to_dict(),
@@ -666,7 +680,7 @@ class ForecastRecord:
                 None if self.calibrated is None else _probability_text(self.calibrated.probability)
             ),
             "horizon_sessions": self.target.horizon_sessions,
-            "decision_at": self.decision_time.isoformat(),
+            "decision_at": _canonical_utc(self.decision_time).isoformat(),
             "model_version": self.lineage.model_version,
             "asset": self.scope_id,
             "regime": self.regime,
@@ -878,9 +892,9 @@ def _row_payload(record: ForecastRecord) -> dict[str, Any]:
         "status": str(record.status),
         "degraded_reason": None if record.degraded_reason is None else str(record.degraded_reason),
         "degraded_detail": record.degraded_detail,
-        "created_at": record.created_at,
-        "decision_time": record.decision_time,
-        "resolution_at": record.resolution_at,
+        "created_at": _canonical_utc(record.created_at),
+        "decision_time": _canonical_utc(record.decision_time),
+        "resolution_at": _canonical_utc(record.resolution_at),
         "scope_kind": str(record.scope_kind),
         "scope_id": record.scope_id,
         "opportunity_id": record.opportunity_id,
@@ -897,7 +911,7 @@ def _row_payload(record: ForecastRecord) -> dict[str, Any]:
         "baseline_probability": None if baseline is None else baseline.probability,
         "baseline_source": None if baseline is None else baseline.source,
         "baseline_source_version": None if baseline is None else baseline.source_version,
-        "baseline_as_of": None if baseline is None else baseline.as_of,
+        "baseline_as_of": None if baseline is None else _canonical_utc(baseline.as_of),
         "confidence": record.confidence,
         "uncertainty_json": canonical_json(dict(record.uncertainty)),
         "model_name": record.lineage.model_name,
@@ -907,7 +921,7 @@ def _row_payload(record: ForecastRecord) -> dict[str, Any]:
         "feature_extractor_version": record.lineage.feature_extractor_version,
         "market_snapshot_id": record.lineage.market_snapshot_id,
         "market_snapshot_hash": record.lineage.market_snapshot_hash,
-        "market_snapshot_as_of": record.lineage.market_snapshot_as_of,
+        "market_snapshot_as_of": _canonical_utc(record.lineage.market_snapshot_as_of),
         "deployment_id": record.lineage.deployment_id,
         "research_experiment_id": record.lineage.research_experiment_id,
         "calibration_version": record.lineage.calibration_version,
@@ -1129,7 +1143,7 @@ class DecisionForecastReference:
         return {
             "forecast_id": self.forecast_id,
             "decision_identity": self.decision_identity,
-            "decision_time": self.decision_time.isoformat(),
+            "decision_time": _canonical_utc(self.decision_time).isoformat(),
         }
 
 

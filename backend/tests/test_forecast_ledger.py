@@ -7,7 +7,7 @@ architecture/statistical review blockers A–C of both reviews.
 from __future__ import annotations
 
 import os
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from decimal import Decimal
 
 import pytest
@@ -384,6 +384,75 @@ def test_resolution_must_be_after_decision_time() -> None:
 def test_naive_timestamps_are_rejected() -> None:
     with pytest.raises(ValueError):
         emitted(decision_time=datetime(2026, 9, 24, 14, 30))
+
+
+# Same instant expressed with a non-UTC offset. ``14:30+00:00`` and
+# ``16:30+02:00`` are one canonical UTC decision, so the content-addressed
+# identity must not depend on the representation's offset.
+PRAGUE = timezone(timedelta(hours=2))
+
+
+def _offset(dt: datetime) -> datetime:
+    return dt.astimezone(PRAGUE)
+
+
+def test_equivalent_utc_instants_share_one_canonical_identity() -> None:
+    base = emitted()
+    shifted = emitted(
+        created_at=_offset(CREATED_AT),
+        decision_time=_offset(DECISION_TIME),
+        resolution_at=_offset(RESOLUTION_AT),
+    )
+    assert base.decision_time == shifted.decision_time
+    assert base.decision_identity() == shifted.decision_identity()
+    assert base.content_hash() == shifted.content_hash()
+    assert base.forecast_id == shifted.forecast_id
+
+
+def test_offset_aware_lineage_and_baseline_are_canonical() -> None:
+    base = emitted()
+    shifted = emitted(
+        lineage=lineage(market_snapshot_as_of=_offset(DECISION_TIME - timedelta(minutes=5))),
+        baseline=BaselineProbability(
+            probability=Decimal("0.5"),
+            source="historical_frequency",
+            source_version="hf-v1",
+            as_of=_offset(DECISION_TIME - timedelta(days=1)),
+        ),
+    )
+    assert base.decision_identity() == shifted.decision_identity()
+    assert base.content_hash() == shifted.content_hash()
+
+
+def test_equivalent_utc_instants_do_not_duplicate_a_forecast() -> None:
+    store, _ = ledger()
+    base = emitted()
+    shifted = emitted(
+        created_at=_offset(CREATED_AT),
+        decision_time=_offset(DECISION_TIME),
+        resolution_at=_offset(RESOLUTION_AT),
+    )
+    assert store.commit(base).outcome is CommitOutcome.CREATED
+    assert store.commit(shifted).outcome is CommitOutcome.DUPLICATE_IDEMPOTENT
+    assert store.count() == 1
+
+
+def test_offset_aware_timestamp_round_trips_and_revalidates() -> None:
+    # Regression: an offset-shifted aware record used to persist its wall-clock
+    # digits, so the read-back content hash differed from the original and the
+    # re-read record failed immutability validation.
+    store, _ = ledger()
+    record = emitted(
+        created_at=_offset(CREATED_AT),
+        decision_time=_offset(DECISION_TIME),
+        resolution_at=_offset(RESOLUTION_AT),
+    )
+    store.commit(record)
+    loaded = store.read(record.forecast_id)
+    assert loaded is not None
+    assert loaded.decision_time == DECISION_TIME
+    assert loaded.content_hash() == record.content_hash()
+    loaded.validate()
 
 
 # ---------------------------------------------------------------------------
