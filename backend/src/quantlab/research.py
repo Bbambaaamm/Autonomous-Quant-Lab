@@ -3,7 +3,7 @@ import itertools
 import json
 import random
 from collections.abc import Callable, Mapping
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime
 from decimal import Decimal
 from enum import StrEnum
@@ -114,11 +114,34 @@ class ExperimentIdentity:
     slippage_model: dict[str, object]
     random_seed: int
     engine_version: str = "2.0.0"
+    #: Candidate-funnel selection lineage for this experiment (#268, review BLOCKER C).
+    #: A funnel is part of the economic identity: performance is conditional on the
+    #: Stage A selection, so the funnel version, Stage A config hash and candidate
+    #: rank/selection reason must travel with the experiment identity. Empty means the
+    #: experiment was not produced by a candidate funnel.
+    funnel_lineage: dict[str, object] | None = None
 
     @property
     def experiment_id(self) -> str:
-        payload = json.dumps(asdict(self), sort_keys=True, separators=(",", ":"), default=str)
-        return hashlib.sha256(payload.encode()).hexdigest()
+        payload = asdict(self)
+        # Backward compatibility: an experiment that was not produced by a candidate
+        # funnel must keep the identity it had before funnel lineage existed, so the
+        # field is omitted from the hash when unset rather than hashed as ``None``.
+        if payload.get("funnel_lineage") is None:
+            payload.pop("funnel_lineage", None)
+        encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+        return hashlib.sha256(encoded.encode()).hexdigest()
+
+    def with_funnel_lineage(self, lineage: dict[str, object]) -> "ExperimentIdentity":
+        """Return a copy of this identity carrying candidate-funnel selection lineage.
+
+        ``lineage`` is the structure produced by
+        ``quantlab.funnel_pit.PITFunnelReplay.candidate_lineage()`` (or a single
+        ``FunnelRun.candidate_lineage()`` record). Two experiments over materially
+        different funnel versions therefore get different experiment ids and cannot be
+        pooled without explicit stratification/revalidation.
+        """
+        return replace(self, funnel_lineage=dict(lineage))
 
 
 @dataclass(frozen=True)
