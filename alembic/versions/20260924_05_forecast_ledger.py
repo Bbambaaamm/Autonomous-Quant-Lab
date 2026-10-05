@@ -106,6 +106,14 @@ def upgrade() -> None:
             "prior_forecast_id IS NULL OR prior_forecast_id <> forecast_id",
             name="ck_forecast_ledger_prior_not_self",
         ),
+        sa.CheckConstraint(
+            "status <> 'FORECAST_EMITTED' OR created_at < resolution_at",
+            name="ck_forecast_ledger_emitted_before_resolution",
+        ),
+        sa.CheckConstraint(
+            "preregistered = 0 OR trial_family_id IS NOT NULL",
+            name="ck_forecast_ledger_preregistered_trial_family",
+        ),
     )
     for index_name, columns in (
         ("ix_forecast_ledger_scope", ["scope_kind", "scope_id", "decision_time"]),

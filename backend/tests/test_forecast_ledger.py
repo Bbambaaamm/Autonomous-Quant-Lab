@@ -51,6 +51,11 @@ from quantlab.forecast_ledger import (
 DECISION_TIME = datetime(2026, 9, 24, 14, 30, tzinfo=UTC)
 CREATED_AT = datetime(2026, 9, 24, 14, 31, tzinfo=UTC)
 RESOLUTION_AT = datetime(2026, 9, 25, 20, 0, tzinfo=UTC)
+#: Wall-clock time at which the downstream decision is taken. The forecast
+#: evidence must already exist by then, so it is strictly after ``CREATED_AT``.
+#: A ``DecisionForecastReference.decision_time`` carries this decision time, not
+#: the forecast's own market anchor.
+DECISION_EVIDENCE_TIME = CREATED_AT + timedelta(minutes=1)
 
 
 # ---------------------------------------------------------------------------
@@ -642,7 +647,7 @@ def test_decision_is_blocked_by_degraded_forecast() -> None:
             DecisionForecastReference(
                 forecast_id=record.forecast_id,
                 decision_identity=record.decision_identity(),
-                decision_time=DECISION_TIME,
+                decision_time=DECISION_EVIDENCE_TIME,
             ),
         )
 
@@ -662,7 +667,7 @@ def test_decision_callable_runs_only_after_the_gate_passes() -> None:
         DecisionForecastReference(
             forecast_id=record.forecast_id,
             decision_identity=record.decision_identity(),
-            decision_time=DECISION_TIME,
+            decision_time=DECISION_EVIDENCE_TIME,
         ),
         decide,
     )
@@ -680,7 +685,7 @@ def test_decision_callable_runs_only_after_the_gate_passes() -> None:
             DecisionForecastReference(
                 forecast_id=blocked.forecast_id,
                 decision_identity=blocked.decision_identity(),
-                decision_time=DECISION_TIME,
+                decision_time=DECISION_EVIDENCE_TIME,
             ),
             decide,
         )
@@ -1095,7 +1100,19 @@ UNDECODABLE_EVIDENCE = [
     ),
     (
         "created_at is not a datetime",
-        lambda row: row.update(created_at="not-a-date"),
+        # A corrupt timestamp on a fail-closed row: the emitted-before-resolution
+        # check constraint does not apply to non-emitted statuses, so the row
+        # lands and the read path must still fail closed on the decode.
+        lambda row: row.update(
+            status="NO_FORECAST",
+            degraded_reason="MISSING_DATA",
+            raw_probability=None,
+            calibrated_probability=None,
+            calibrator_id=None,
+            calibrator_version=None,
+            distribution_json='{"kind":"BINARY","p_event":null,"probabilities":{}}',
+            created_at="not-a-date",
+        ),
     ),
     (
         "baseline_as_of is not a datetime",
@@ -1285,6 +1302,142 @@ def test_coverage_report_limit_fails_closed() -> None:
             coverage_report([emitted(opportunity_id="o1"), emitted(opportunity_id="o2")])
     finally:
         module.MAX_COVERAGE_OPPORTUNITIES = original
+
+
+# ---------------------------------------------------------------------------
+# Independent-review remediation (Codex findings on the delivered head)
+# ---------------------------------------------------------------------------
+
+
+def test_emitted_forecast_cannot_be_created_after_resolution() -> None:
+    """A real forecast must exist before its own outcome is resolved."""
+    with pytest.raises(InvalidForecastError, match="look-ahead"):
+        emitted(created_at=RESOLUTION_AT + timedelta(hours=1))
+    # Boundary: created exactly at resolution is still look-ahead.
+    with pytest.raises(InvalidForecastError, match="look-ahead"):
+        emitted(created_at=RESOLUTION_AT)
+    # One second before resolution is admissible.
+    emitted(created_at=RESOLUTION_AT - timedelta(seconds=1))
+
+
+def test_preregistered_forecast_requires_a_trial_family() -> None:
+    """STAT-BLOCKER B/C: no preregistered row without multiple-testing identity."""
+    with pytest.raises(InvalidForecastError, match="trial_family_id"):
+        emitted(lineage=lineage(trial_family_id=None))
+    with pytest.raises(InvalidForecastError, match="trial_family_id"):
+        emitted(lineage=lineage(trial_family_id="   "))
+    # Non-preregistered exploratory rows stay admissible (they are excluded
+    # from the coverage denominator, not fabricated into it).
+    exploratory = emitted(
+        preregistered=False, lineage=lineage(trial_family_id=None), opportunity_id="explore-1"
+    )
+    assert exploratory.lineage.trial_family_id is None
+
+
+def test_equivalent_decimal_thresholds_share_one_target_identity() -> None:
+    """Numerically equal thresholds must not fork the target/decision identity."""
+    hashes = {
+        target_spec(threshold=Decimal(text)).spec_hash
+        for text in ("0.01", "0.010", "0.0100", "0.010000000000")
+    }
+    assert len(hashes) == 1
+    ids = {
+        emitted(target=target_spec(threshold=Decimal(text))).decision_identity()
+        for text in ("0.01", "0.010", "0.0100")
+    }
+    assert len(ids) == 1
+    # A genuinely different threshold still changes the identity.
+    assert target_spec(threshold=Decimal("0.02")).spec_hash not in hashes
+
+
+def test_probability_is_quantized_before_persisting() -> None:
+    """The stored column must hold exactly the content-addressed value."""
+    store, _ = ledger()
+    record = emitted(
+        distribution=ProbabilityDistribution(
+            kind=OutcomeKind.BINARY, p_event=Decimal("0.123456789012345")
+        )
+    )
+    store.commit(record)
+    loaded = store.read(record.forecast_id)
+    assert loaded is not None
+    assert loaded.distribution.p_event == Decimal("0.123456789012")
+    assert loaded.content_hash() == record.content_hash()
+
+
+def test_coverage_excludes_non_preregistered_opportunities() -> None:
+    """Only preregistered opportunities form the statistical denominator."""
+    report = coverage_report(
+        [
+            emitted(opportunity_id="o1"),
+            emitted(preregistered=False, opportunity_id="o2"),
+            emitted(preregistered=False, opportunity_id="o3"),
+        ]
+    )
+    assert report.eligible == 1
+    assert report.emitted == 1
+    assert report.excluded_non_preregistered == 2
+    assert report.coverage == Decimal("1.000000")
+
+
+def test_calibration_view_does_not_label_a_universe_as_an_asset() -> None:
+    universe = emitted(scope_kind=ScopeKind.UNIVERSE, scope_id="SP500-CORE")
+    view = universe.to_calibration_view()
+    assert view["scope_kind"] == "UNIVERSE"
+    assert view["scope_id"] == "SP500-CORE"
+    assert view["asset"] is None
+    asset_view = emitted().to_calibration_view()
+    assert asset_view["scope_kind"] == "ASSET"
+    assert asset_view["asset"] == "SPY"
+
+
+def test_gate_rejects_evidence_created_after_the_decision() -> None:
+    """Structural ordering: the evidence must have existed at decision time."""
+    store, _ = ledger()
+    backfilled = emitted(created_at=DECISION_TIME + timedelta(hours=2))
+    store.commit(backfilled)
+    with pytest.raises(ForecastGateError, match="vytvořen po rozhodnutí"):
+        require_forecast_reference(
+            store,
+            DecisionForecastReference(
+                forecast_id=backfilled.forecast_id,
+                decision_identity=backfilled.decision_identity(),
+                # After the market decision_time but BEFORE created_at, i.e. the
+                # evidence did not exist yet when the decision was taken.
+                decision_time=DECISION_TIME + timedelta(hours=1),
+            ),
+        )
+
+
+def test_correction_requires_the_prior_forecast_to_exist() -> None:
+    store, _ = ledger()
+    original = emitted()
+    store.commit(original)
+    dangling = emitted(
+        distribution=ProbabilityDistribution(kind=OutcomeKind.BINARY, p_event=Decimal("0.60")),
+        prior_forecast_id="deadbeef" * 8,
+        # A distinct model artifact gives this correction its own decision
+        # identity, so the prior-existence check (not the conflict guard) is
+        # what must reject it.
+        lineage=lineage(model_version="2.0.0"),
+        created_at=CREATED_AT + timedelta(minutes=1),
+    )
+    with pytest.raises(ForecastConflictError, match="prior_forecast_id"):
+        store.commit(dangling)
+    # A correction that references a committed forecast is accepted.
+    linked = emitted(
+        distribution=ProbabilityDistribution(kind=OutcomeKind.BINARY, p_event=Decimal("0.60")),
+        prior_forecast_id=original.forecast_id,
+        lineage=lineage(model_version="2.0.0"),
+        created_at=CREATED_AT + timedelta(minutes=1),
+    )
+    assert store.commit(linked).outcome is CommitOutcome.CREATED
+
+
+def test_emitted_before_resolution_constraint_is_declared_in_schema() -> None:
+    names = {getattr(c, "name", None) for c in ForecastLedgerRecord.__table_args__}
+    assert "ck_forecast_ledger_emitted_before_resolution" in names
+    assert "ck_forecast_ledger_preregistered_trial_family" in names
 
 
 # ---------------------------------------------------------------------------
@@ -1528,6 +1681,42 @@ def test_postgres_read_path_rejects_undecodable_evidence() -> None:
                         decision_time=DECISION_TIME,
                     ),
                 )
+        finally:
+            transaction.rollback()
+    engine.dispose()
+
+
+@POSTGRES
+def test_postgres_probability_column_holds_the_content_addressed_value() -> None:
+    """The stored ``Numeric(30, 12)`` value must equal the hashed probability.
+
+    PostgreSQL rounds a sub-scale literal with a different mode than Python's
+    ``Decimal.quantize``, so writing the raw ``Decimal`` lets the column and the
+    content hash disagree and a legitimate round-trip is reported as a mutation.
+    """
+    engine = create_engine(os.environ["DATABASE_URL"])
+    with engine.connect() as connection:
+        transaction = connection.begin()
+        try:
+            sessions = sessionmaker(connection, join_transaction_mode="create_savepoint")
+            store = ForecastLedger(sessions)
+            record = emitted(
+                opportunity_id=f"pg-quant-{identity(os.getpid())}",
+                distribution=ProbabilityDistribution(
+                    kind=OutcomeKind.BINARY, p_event=Decimal("0.1234567890125")
+                ),
+            )
+            assert store.commit(record).outcome is CommitOutcome.CREATED
+            loaded = store.read(record.forecast_id)
+            assert loaded is not None
+            assert loaded.content_hash() == record.content_hash()
+            assert loaded.distribution.p_event == Decimal("0.123456789012")
+            with sessions() as session:
+                column = session.scalar(
+                    text("SELECT raw_probability FROM forecast_ledger WHERE forecast_id = :f"),
+                    {"f": record.forecast_id},
+                )
+            assert column == Decimal("0.123456789012")
         finally:
             transaction.rollback()
     engine.dispose()

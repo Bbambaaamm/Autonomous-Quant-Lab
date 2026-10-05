@@ -63,7 +63,20 @@ Klíčové invariants:
 - Neúplná/stale evidence vytváří explicitní `ABSTAINED`/`NO_FORECAST`/`INVALID_DATA`/
   `NOT_EVALUATED` status s `degraded_reason` a **bez** pravděpodobnosti — fail-closed, žádná
   fabrikace. Tyto stavy zůstávají v denominatoru coverage reportu.
-- Oprava je nová verze (`prior_forecast_id`), nikdy UPDATE historického forecastu.
+- Emitovaný forecast musí vzniknout **před** vlastním rozřešením (`created_at < resolution_at`);
+  jinak by šlo zapsat řádek, který už zná výsledek. Preregistrovaná opportunity navíc vyžaduje
+  `lineage.trial_family_id`, aby žádný target/horizon switch neunikl multiple-testing accountingu
+  (#76). Obě podmínky jsou i DB check constraints.
+- Decision brána ověřuje strukturálně, že evidence existovala v čase rozhodnutí
+  (`record.created_at <= reference.decision_time`), nejen že `decision_time` není v budoucnosti.
+- Coverage denominator tvoří **pouze preregistrované** opportunity; exploratory/ad-hoc forecasty
+  jsou legitimní evidence, ale reportují se odděleně (`excluded_non_preregistered`), aby jimi nešlo
+  nafouknout coverage.
+- Oprava je nová verze (`prior_forecast_id`), nikdy UPDATE historického forecastu; `prior_forecast_id`
+  musí na existující commitnutou evidenci odkazovat.
+- Numericky shodné decimální hodnoty (např. `threshold` `0.01` vs `0.010`) se serializují na
+  kanonickou škálu, takže stejný ekonomický target má jednu `spec_hash`/`decision_identity` a
+  nevzniká duplicitní řádek.
 
 Immutabilita je vynucena na DB úrovni: trigger `forecast_ledger_immutable` (funkce
 `reject_core_evidence_mutation()` z `20260924_04`) odmítá UPDATE/DELETE a

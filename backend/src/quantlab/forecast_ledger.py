@@ -210,8 +210,15 @@ def _canonical_utc(value: datetime) -> datetime:
     return require_utc(value)
 
 
+#: Canonical scale for every decimal that participates in a content-addressed
+#: identity. Numerically equal values must serialize identically, otherwise
+#: ``Decimal("0.01")`` and ``Decimal("0.010")`` produce different target/decision
+#: identities for the same economic target and the same opportunity is logged
+#: twice (inflating the coverage denominator).
+CANONICAL_DECIMAL_SCALE = Decimal("0.000000000001")
+
 #: Storage scale of every probability column (``Numeric(30, 12)``).
-PROBABILITY_SCALE = Decimal("0.000000000001")
+PROBABILITY_SCALE = CANONICAL_DECIMAL_SCALE
 
 #: Exception family that means "this persisted evidence cannot be faithfully
 #: decoded into canonical evidence". ``decimal.InvalidOperation`` (raised by
@@ -240,6 +247,29 @@ def _probability_text(value: Decimal) -> str:
     appearing mutated merely because ``Numeric(30, 12)`` re-scaled the value.
     """
     return str(value.quantize(PROBABILITY_SCALE))
+
+
+def _storage_probability(value: Decimal) -> Decimal:
+    """Round a probability to the authoritative storage scale *before* writing.
+
+    The persisted column must hold exactly the value that was content-addressed:
+    writing an unquantized ``Decimal`` lets ``Numeric(30, 12)`` round it (with a
+    different rounding mode than ``Decimal.quantize``), so a >12-decimal input
+    could store a value that no longer reproduces the hashed evidence.
+    """
+    return value.quantize(PROBABILITY_SCALE)
+
+
+def _decimal_text(value: Decimal) -> str:
+    """Canonical text for a content-addressed decimal.
+
+    ``Decimal("0.01")``, ``Decimal("0.010")`` and ``Decimal("0.0100")`` are the
+    same number and must serialize to one string, otherwise the target spec hash
+    -- and therefore the whole decision identity -- depends on the input's
+    trailing zeros and a target/horizon "switch" is indistinguishable from a
+    formatting difference.
+    """
+    return str(value.quantize(CANONICAL_DECIMAL_SCALE))
 
 
 def _require_text(value: str | None, field_name: str) -> str:
@@ -326,7 +356,7 @@ class CanonicalTargetSpec:
             "reference_field": self.reference_field,
             "reference_price_basis": self.reference_price_basis,
             "direction": str(self.direction),
-            "threshold": str(self.threshold),
+            "threshold": _decimal_text(self.threshold),
             "horizon_sessions": self.horizon_sessions,
             "resolution_policy": self.resolution_policy,
             "resolution_policy_version": self.resolution_policy_version,
@@ -345,7 +375,7 @@ class CanonicalTargetSpec:
         """Human/machine readable canonical target definition string."""
         return (
             f"{self.target_id}:{self.reference_source}.{self.reference_field}"
-            f"[{self.reference_price_basis}] {self.direction} {self.threshold} "
+            f"[{self.reference_price_basis}] {self.direction} {_decimal_text(self.threshold)} "
             f"over {self.horizon_sessions} sessions "
             f"({self.exchange_calendar}/{self.session_semantics}/{self.timezone})"
             f" policy={self.resolution_policy}@{self.resolution_policy_version}"
@@ -633,6 +663,21 @@ class ForecastRecord:
                 raise InvalidForecastError(
                     "FORECAST_EMITTED vyžaduje pravděpodobnost, ne fabrikovanou hodnotu"
                 )
+            # A real forecast must exist strictly before its own outcome is
+            # resolved. Otherwise a privileged writer (or a back-filled research
+            # job) can land a row that already knows the answer -- the exact
+            # look-ahead this ledger exists to make impossible.
+            if created_at >= resolution_at:
+                raise InvalidForecastError(
+                    "FORECAST_EMITTED musí vzniknout před resolution_at (look-ahead)"
+                )
+            # STAT-BLOCKER B/C: a preregistered opportunity without a trial
+            # family cannot be attributed to a multiple-testing family, so a
+            # target/horizon switch would silently escape the #76 accounting.
+            if self.preregistered and not (self.lineage.trial_family_id or "").strip():
+                raise InvalidForecastError(
+                    "preregistered forecast vyžaduje lineage.trial_family_id"
+                )
             # The canonical record path must enforce the probability contract
             # itself: finite, in [0, 1] and (multi-class) exactly normalised.
             # A raw forecast may never carry an out-of-range or unnormalised
@@ -704,7 +749,12 @@ class ForecastRecord:
             "horizon_sessions": self.target.horizon_sessions,
             "decision_at": _canonical_utc(self.decision_time).isoformat(),
             "model_version": self.lineage.model_version,
-            "asset": self.scope_id,
+            # ``scope_id`` may name an asset *or* a universe. The calibration
+            # engine must not silently treat a universe as a single asset, so
+            # both the identity and its kind travel together.
+            "scope_kind": str(self.scope_kind),
+            "scope_id": self.scope_id,
+            "asset": self.scope_id if self.scope_kind is ScopeKind.ASSET else None,
             "regime": self.regime,
             "source": self.source,
             "target_definition": self.target.canonical_definition(),
@@ -748,6 +798,7 @@ class CoverageReport:
     no_forecast: int
     invalid_data: int
     not_evaluated: int
+    excluded_non_preregistered: int = 0
 
     @property
     def coverage(self) -> Decimal:
@@ -763,15 +814,28 @@ class CoverageReport:
             "no_forecast": self.no_forecast,
             "invalid_data": self.invalid_data,
             "not_evaluated": self.not_evaluated,
+            "excluded_non_preregistered": self.excluded_non_preregistered,
             "coverage": str(self.coverage),
         }
 
 
 def coverage_report(records: Iterable[ForecastRecord]) -> CoverageReport:
-    """Count every preregistered opportunity exactly once."""
+    """Count every preregistered opportunity exactly once.
+
+    Only *preregistered* opportunities form the statistical denominator
+    (STAT-BLOCKER A/B). Exploratory or ad-hoc forecasts are legitimate evidence
+    but were never part of a preregistered opportunity scope, so counting them
+    would let an agent inflate the denominator -- and its apparent coverage --
+    with rows that carry no preregistration obligation. They are reported
+    separately and never silently dropped.
+    """
     counts = {status: 0 for status in ForecastStatus}
     eligible = 0
+    excluded = 0
     for record in records:
+        if not record.preregistered:
+            excluded += 1
+            continue
         eligible += 1
         counts[record.status] += 1
         if eligible > MAX_COVERAGE_OPPORTUNITIES:
@@ -783,6 +847,7 @@ def coverage_report(records: Iterable[ForecastRecord]) -> CoverageReport:
         no_forecast=counts[ForecastStatus.NO_FORECAST],
         invalid_data=counts[ForecastStatus.INVALID_DATA],
         not_evaluated=counts[ForecastStatus.NOT_EVALUATED],
+        excluded_non_preregistered=excluded,
     )
 
 
@@ -837,6 +902,14 @@ class ForecastLedgerRecord(Base):
         CheckConstraint(
             "prior_forecast_id IS NULL OR prior_forecast_id <> forecast_id",
             name="ck_forecast_ledger_prior_not_self",
+        ),
+        CheckConstraint(
+            "status <> 'FORECAST_EMITTED' OR created_at < resolution_at",
+            name="ck_forecast_ledger_emitted_before_resolution",
+        ),
+        CheckConstraint(
+            "preregistered = 0 OR trial_family_id IS NOT NULL",
+            name="ck_forecast_ledger_preregistered_trial_family",
         ),
         Index("ix_forecast_ledger_scope", "scope_kind", "scope_id", "decision_time"),
         Index("ix_forecast_ledger_opportunity", "opportunity_id"),
@@ -925,16 +998,22 @@ def _row_payload(record: ForecastRecord) -> dict[str, Any]:
         "target_spec_hash": record.target.spec_hash,
         "target_definition": record.target.canonical_definition(),
         "outcome_kind": str(record.target.outcome_kind),
-        "raw_probability": raw,
-        "calibrated_probability": None if calibrated is None else calibrated.probability,
+        "raw_probability": None if raw is None else _storage_probability(raw),
+        "calibrated_probability": (
+            None if calibrated is None else _storage_probability(calibrated.probability)
+        ),
         "calibrator_id": None if calibrated is None else calibrated.calibrator_id,
         "calibrator_version": None if calibrated is None else calibrated.calibrator_version,
         "distribution_json": canonical_json(record.distribution.to_dict()),
-        "baseline_probability": None if baseline is None else baseline.probability,
+        "baseline_probability": (
+            None if baseline is None else _storage_probability(baseline.probability)
+        ),
         "baseline_source": None if baseline is None else baseline.source,
         "baseline_source_version": None if baseline is None else baseline.source_version,
         "baseline_as_of": None if baseline is None else _canonical_utc(baseline.as_of),
-        "confidence": record.confidence,
+        "confidence": None
+        if record.confidence is None
+        else _storage_probability(record.confidence),
         "uncertainty_json": canonical_json(dict(record.uncertainty)),
         "model_name": record.lineage.model_name,
         "model_version": record.lineage.model_version,
@@ -1003,6 +1082,16 @@ class ForecastLedger:
                 raise ForecastConflictError(
                     "rozhodovací identita už má commitnutý forecast s jiným obsahem"
                 )
+            # A correction must reference evidence that actually exists. Without
+            # this, any non-empty ``prior_forecast_id`` is accepted, so the
+            # "corrections are a new version of an existing forecast" contract
+            # is unenforceable and a correction chain can dangle.
+            if record.prior_forecast_id is not None:
+                referenced = session.get(ForecastLedgerRecord, record.prior_forecast_id)
+                if referenced is None:
+                    raise ForecastConflictError(
+                        "prior_forecast_id neodkazuje na existující forecast evidence"
+                    )
             session.add(ForecastLedgerRecord(**_row_payload(record)))
             try:
                 session.flush()
@@ -1319,6 +1408,14 @@ def require_forecast_reference(
         raise ForecastGateError("rozhodovací identita neodpovídá forecastu")
     if require_utc(record.decision_time) > require_utc(reference.decision_time):
         raise ForecastGateError("forecast vznikl po rozhodnutí (causality porušena)")
+    # ``decision_time`` is the market timestamp the forecast refers to. The
+    # evidence itself must also have existed when the decision was taken: a
+    # forecast *created* after the decision could only have been back-filled
+    # from knowledge of the outcome.
+    if require_utc(record.created_at) > require_utc(reference.decision_time):
+        raise ForecastGateError(
+            "forecast byl vytvořen po rozhodnutí (evidence neexistovala v čase rozhodnutí)"
+        )
     if record.status is not ForecastStatus.FORECAST_EMITTED:
         raise ForecastGateError(
             f"probability-aware rozhodnutí vyžaduje FORECAST_EMITTED (stav={record.status})"
