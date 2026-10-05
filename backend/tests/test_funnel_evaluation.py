@@ -25,6 +25,7 @@ from quantlab.candidate_funnel import (
     StageBResult,
 )
 from quantlab.funnel_evaluation import (
+    account_runs_against_declaration,
     compare_baseline,
     compute_concentration,
     compute_coverage,
@@ -32,6 +33,12 @@ from quantlab.funnel_evaluation import (
     compute_threshold_sensitivity,
     compute_turnover,
     generate_report,
+)
+from quantlab.funnel_trial_family import (
+    FullHistorySelectionError,
+    FunnelVariant,
+    SelectionBasis,
+    UnpreregisteredWinnerError,
 )
 from quantlab.market_data import CorporateAction, CorporateActionKind, Observation, XNYSCalendar
 
@@ -548,3 +555,109 @@ def test_generate_report_trial_family_key():
     report = generate_report([run])
 
     assert report.trial_family_key == run.trial_family_key()
+
+
+# ---------------------------------------------------------------------------
+# Trial-family accounting wiring (STAT-BLOCKER B)
+# ---------------------------------------------------------------------------
+
+
+def _declaration_for(*runs, primary_index: int | None = None):
+    """Declare one variant per run, using the run's realized candidate count as the cap."""
+    from quantlab.funnel_trial_family import declaration_from_variants
+
+    variants = [
+        FunnelVariant.from_run(run, max_candidates=len(run.stage_a_candidate_ranks) or 1)
+        for run in runs
+    ]
+    primary = variants[primary_index].variant_id if primary_index is not None else None
+    declaration = declaration_from_variants(
+        "family-eval",
+        "paper-promotion",
+        "preregistered-primary-then-out-of-sample",
+        variants,
+        primary_variant_id=primary,
+    )
+    return declaration
+
+
+def _variant_id_of(run):
+    return FunnelVariant.from_run(
+        run, max_candidates=len(run.stage_a_candidate_ranks) or 1
+    ).variant_id
+
+
+def test_generate_report_without_declaration_has_no_family_lineage():
+    """Backward compatible: a report without a declaration carries no family accounting."""
+    report = generate_report([_run_funnel(n=5, max_candidates=3)])
+    assert report.trial_family is None
+
+
+def test_generate_report_carries_family_size_and_hash():
+    run = _run_funnel(n=5, max_candidates=3)
+    declaration = _declaration_for(run)
+    report = generate_report([run], trial_family=declaration)
+    assert report.trial_family is not None
+    assert report.trial_family["trial_family_size"] == 1
+    assert report.trial_family["trial_family_hash"] == declaration.config_hash
+    assert report.trial_family["trial_family_selection_policy"]
+
+
+def test_generate_report_fails_closed_on_undeclared_selected_variant():
+    run = _run_funnel(n=5, max_candidates=3)
+    declaration = _declaration_for(run)
+    with pytest.raises(UnpreregisteredWinnerError):
+        generate_report([run], trial_family=declaration, selected_variant_id="not-a-variant")
+
+
+def test_generate_report_fails_closed_on_post_hoc_full_history_winner():
+    run_a = _run_funnel(n=6, max_candidates=3)
+    run_b = _run_funnel(n=6, max_candidates=4)
+    declaration = _declaration_for(run_a, run_b, primary_index=0)
+    with pytest.raises(FullHistorySelectionError):
+        generate_report(
+            [run_a, run_b],
+            trial_family=declaration,
+            selected_variant_id=_variant_id_of(run_b),
+            selection_basis=SelectionBasis.BEST_FULL_HISTORY_METRIC,
+        )
+
+
+def test_generate_report_accepts_preregistered_primary_winner():
+    run_a = _run_funnel(n=6, max_candidates=3)
+    run_b = _run_funnel(n=6, max_candidates=4)
+    declaration = _declaration_for(run_a, run_b, primary_index=0)
+    report = generate_report(
+        [run_a, run_b],
+        trial_family=declaration,
+        selected_variant_id=_variant_id_of(run_a),
+        selection_basis=SelectionBasis.BEST_FULL_HISTORY_METRIC,
+    )
+    assert report.trial_family is not None
+    assert report.trial_family["trial_family_selected_variant_id"] == _variant_id_of(run_a)
+
+
+def test_account_runs_against_declaration_records_each_variant():
+    run_a = _run_funnel(n=6, max_candidates=3)
+    run_b = _run_funnel(n=6, max_candidates=4)
+    declaration = _declaration_for(run_a, run_b)
+    va, vb = _variant_id_of(run_a), _variant_id_of(run_b)
+    accounting = account_runs_against_declaration({va: run_a, vb: run_b}, declaration)
+    assert set(accounting.observed_variant_ids) == {va, vb}
+    assert accounting.is_fully_accounted
+
+
+def test_account_runs_against_declaration_rejects_undeclared_variant():
+    run_a = _run_funnel(n=6, max_candidates=3)
+    declaration = _declaration_for(run_a)
+    with pytest.raises(UnpreregisteredWinnerError):
+        account_runs_against_declaration({"undeclared": run_a}, declaration)
+
+
+def test_account_runs_against_declaration_rejects_funnel_version_mismatch():
+    run_a = _run_funnel(n=6, max_candidates=3)
+    run_b = _run_funnel(n=6, max_candidates=4)
+    declaration = _declaration_for(run_a, run_b)
+    # run_a carries run_a's funnel version, which cannot match run_b's declared variant
+    with pytest.raises(UnpreregisteredWinnerError):
+        account_runs_against_declaration({_variant_id_of(run_b): run_a}, declaration)

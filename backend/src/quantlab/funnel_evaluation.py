@@ -16,11 +16,20 @@ lineage records produced by CandidateFunnel.
 from __future__ import annotations
 
 from collections import Counter, defaultdict
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
 from quantlab.candidate_funnel import FunnelRun
+from quantlab.funnel_trial_family import (
+    SelectionBasis,
+    TrialFamilyAccounting,
+    TrialFamilyDeclaration,
+    UnpreregisteredWinnerError,
+    VariantObservation,
+    assert_selection_is_not_full_history,
+    trial_family_lineage,
+)
 
 # ---------------------------------------------------------------------------
 # Metric dataclasses
@@ -113,6 +122,10 @@ class FunnelEvaluationReport:
     rank_buckets: tuple[RankBucketPerformance, ...]
     threshold_sensitivity: tuple[ThresholdSensitivity, ...]
     baseline_comparison: BaselineComparison | None
+    #: Trial-family accounting lineage (STAT-BLOCKER B). Present only when the report was
+    #: generated against a preregistered family declaration; without it the report cannot
+    #: say how many funnel variants were tried, so its winner is not family-corrected.
+    trial_family: dict[str, Any] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -338,8 +351,18 @@ def generate_report(
     baseline_run: FunnelRun | None = None,
     threshold_perturbed_run: FunnelRun | None = None,
     threshold_parameter: str = "max_candidates",
+    trial_family: TrialFamilyDeclaration | None = None,
+    selected_variant_id: str | None = None,
+    selection_basis: SelectionBasis | None = None,
 ) -> FunnelEvaluationReport:
-    """Generate a complete evaluation report for a funnel variant."""
+    """Generate a complete evaluation report for a funnel variant.
+
+    When a preregistered ``trial_family`` declaration is supplied, the report also carries
+    the multiple-testing accounting lineage (STAT-BLOCKER B): the family size the winner
+    was selected from, the selection policy, and — when ``selected_variant_id`` and
+    ``selection_basis`` are given — a fail-closed check that the winner was not chosen
+    post-hoc from the best full-history metric.
+    """
     if not runs:
         raise ValueError("At least one FunnelRun is required")
 
@@ -362,6 +385,28 @@ def generate_report(
     if baseline_run is not None:
         baseline_comparison = compare_baseline(primary_run, baseline_run)
 
+    trial_family_lineage_payload: dict[str, Any] | None = None
+    if trial_family is not None:
+        if selected_variant_id is not None:
+            # Fail closed on a post-hoc winner before the report is emitted. The full
+            # per-variant accounting (which variant was observed/excluded) is supplied
+            # separately through account_runs_against_declaration(); the report itself
+            # carries the family size/hash/policy, which is the fact that makes the
+            # winner's significance interpretable.
+            trial_family.variant(selected_variant_id)
+            if selection_basis is SelectionBasis.BEST_FULL_HISTORY_METRIC and (
+                trial_family.primary_variant_id != selected_variant_id
+            ):
+                assert_selection_is_not_full_history(
+                    TrialFamilyAccounting(trial_family),
+                    selected_variant_id,
+                    SelectionBasis.BEST_FULL_HISTORY_METRIC,
+                    require_fully_accounted=False,
+                )
+        trial_family_lineage_payload = trial_family_lineage(
+            trial_family, selected_variant_id=selected_variant_id
+        )
+
     return FunnelEvaluationReport(
         funnel_version=primary_run.funnel_version,
         ranking_key=primary_run.ranking_key,
@@ -373,4 +418,36 @@ def generate_report(
         rank_buckets=rank_buckets,
         threshold_sensitivity=threshold_sensitivity,
         baseline_comparison=baseline_comparison,
+        trial_family=trial_family_lineage_payload,
     )
+
+
+def account_runs_against_declaration(
+    runs_by_variant_id: Mapping[str, FunnelRun],
+    declaration: TrialFamilyDeclaration,
+    *,
+    observed_at: str = "",
+) -> TrialFamilyAccounting:
+    """Account real ``FunnelRun`` objects against a preregistered family.
+
+    The mapping is explicit (variant id -> run) rather than inferred, because a run does
+    not retain the preregistered ``max_candidates`` and inferring it could match two
+    declared caps. A key that is not a declared variant fails closed — a run whose variant
+    was not preregistered is a post-hoc variant, not a new family member.
+    """
+    accounting = TrialFamilyAccounting(declaration)
+    for variant_id, run in runs_by_variant_id.items():
+        declaration.variant(variant_id)  # fails closed on an undeclared variant
+        if run.funnel_version != declaration.variant(variant_id).funnel_version:
+            raise UnpreregisteredWinnerError(
+                f"run {run.run_id} has funnel_version {run.funnel_version}, which does not "
+                f"match declared variant {variant_id}"
+            )
+        accounting = accounting.observe(
+            VariantObservation(
+                variant_id,
+                observed_at or run.created_at.isoformat(),
+                SelectionBasis.BEST_OUT_OF_SAMPLE_METRIC,
+            )
+        )
+    return accounting
